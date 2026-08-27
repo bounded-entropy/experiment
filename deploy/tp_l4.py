@@ -258,11 +258,22 @@ def tp_probe(tp: int = 2) -> dict:
     return run_probe(BASE, tp, gpu_memory_utilization=0.60)
 
 
-@app.function(image=image, gpu="L4:2", timeout=5400)
+@app.function(image=image, gpu="L4:2", timeout=5400, cpu=8.0, memory=32768)
 def tp_probe_8b(tp: int = 2) -> dict:
     """The same probes on a model that DOES NOT FIT one L4 in bf16 (8B ≈ 16GB
     of weights against 24GB, before KV): tp=2 is not an optimization here, it
-    is the only way this base serves at all."""
+    is the only way this base serves at all.
+
+    Container facts learned here, deployment (I5) and not semantics: vLLM's
+    TP workers segfault inside libgomp (`gomp_team_start`) on their FIRST
+    OpenMP-parallel CPU op in this image — which 0.6B never reaches (its
+    buffers stay under torch's parallel grain size) and 8B hits during model
+    runner setup. Spawned workers with single-threaded CPU ops never form the
+    thread team; a bigger model also wants a bigger container (cpu/memory)."""
+    import os
+
+    os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
+    os.environ["OMP_NUM_THREADS"] = "1"
     return run_probe(BIG, tp, gpu_memory_utilization=0.85)
 
 
