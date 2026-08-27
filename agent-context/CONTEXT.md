@@ -507,6 +507,56 @@ specs; backends (local/modal/skypilot) and GPU topology are semantics-neutral.
     unsealed record IS a rollout; the name states the treaty). 327 green;
     examples/arith_fake.py e2e on fakes.
 
+30. L4 STRESS MATRIX GREEN (2026-08-27, deploy/stress_l4.py, Samarth-directed
+    "stress test heavily ... until you're confident"). Five stages, two
+    containers, one engine per container; 34 checks, all properties held.
+    WHAT WAS ADDED (extension points, not abstraction changes): six
+    registered losses in training/losses.py — ppo (value-free clip, pairs
+    with new post center_reward = mean-baseline), gspo (SEQUENCE-level
+    length-normalized IS ratio per doc, via batch.doc_starts), sft (behavior
+    cloning), sdft (reward-weighted BC on own samples, requires "reward"),
+    opd (squared matching of RECORDED teacher logprobs, replay data), opsd
+    (same objective on live data under lag — the lagged self as teacher);
+    shared helpers _tensors/_rails. SPEC DELTA: the SPEC.md §3 Example-2
+    loss "ppo" (critic + GAE, still a stub) RENAMED ppo_critic — the
+    runnable value-free clip owns the name "ppo" now. ONE abstraction
+    change, justified: runner/loop._run made PUBLIC as run_experiment_async
+    (run_experiment wraps it) — the multi-tenancy invariant is only
+    expressible with N experiments gathered in ONE event loop around one
+    engine; the sync wrapper couldn't say it, and Phase C needs the async
+    form anyway.
+    RESULTS (Qwen3-0.6B + LoRA r=16, one L4, vllm 0.28.0):
+    - solo grpo 30 updates: gap ceiling 0.0300, reward .50→.88, 6/6 evals;
+    - SIX CONCURRENT TENANTS on one engine, joins staggered 30s: sft (static
+      cas:// of the grpo run's 449 correct rows), opd (replay
+      store://grpo-run), ppo, gspo, sdft, opsd — 24/24 ledgers and 4/4
+      evals each; IS-family gaps at the kernel floor (.027-.034) = NO
+      cross-adapter contamination; opd's update-1 gap 0.030 (teacher v0 ==
+      fresh student) is the direct no-contamination proof, then its squared
+      loss pulls .166→.09 (the objective visibly working);
+    - GAP SEMANTICS BY FAMILY (calibrated, now encoded in the harness):
+      IS-corrected losses alarm at 0.15 over the ~0.03 bf16 kernel floor;
+      sft/opd gaps MEASURE teacher-student distance (growth = training, a
+      mixup would read ~5+), so their alarms are loose (1.0/0.5);
+    - POLICY LAG: opsd with max_policy_lag=2 + epochs_per_wave=2 realized
+      lag histogram {0: 16, 1: 368} turns — generator genuinely ran ahead,
+      bound respected, recorded per turn (I6); B=0 tenants verified
+      strictly on-policy from the sealed record;
+    - RESUME: in-process cancel at ~u17 under sharing="sleep"
+      (ExclusiveLease) → re-attach → 40/40, gap unchanged (.031);
+      CROSS-CONTAINER cancel at u12 → cold process attach → 24/24 — Phase 1
+      recompiled the tail bundle to the IDENTICAL content-addressed id from
+      emit/load-roundtripped blobs (generation dies loudly otherwise);
+      a second full harness pass attached every completed run and no-oped
+      (idempotent resubmit on real metal);
+    - evals: every tenant every 5 updates, evaluator backfill after both
+      resumes.
+    KNOWN LIMITS RECONFIRMED (not new, not blocking): ppo_critic
+    (values/GAE) and any Ref/Teacher-requiring loss can't run on v0 —
+    PolicyOutputs carries logprobs only and planned passes are unbuilt;
+    vLLM lora LRU beyond max_loras=8 concurrent was exercised only lightly
+    (≤7 tenants+eval pins in flight).
+
 ## Open threads (do NOT treat as settled; flag when your answer touches them)
 
 - Identity rings: should GpuConfig (and EvalSpec) leave the run_id hash and become

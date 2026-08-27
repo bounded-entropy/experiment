@@ -322,9 +322,11 @@ def run_stress() -> dict:
         rep = await run_experiment_async(spec, schema, store, engine, lrn)
         del lrn
         _free()
-        check("stage4: resumed from a committed middle",
-              rep.resumed_from is not None and 0 < rep.resumed_from < 40,
-              f"resumed_from={rep.resumed_from}")
+        check("stage4: attached to committed state",
+              rep.resumed_from is not None and 0 < rep.resumed_from <= 40,
+              f"resumed_from={rep.resumed_from} "
+              + ("(mid-run resume)" if (rep.resumed_from or 40) < 40
+                 else "(already complete: idempotent no-op)"))
         out["resume_inproc"] = report_run(store, rep.run_id, "resume-inproc", 40)
 
         # ---- stage 5a: kill mid-run; a FRESH CONTAINER resumes it -----------
