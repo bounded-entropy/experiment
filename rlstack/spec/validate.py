@@ -350,6 +350,37 @@ def check_pools_serve_their_base(spec: ExperimentSpec, engine_map) -> list[Valid
     return issues
 
 
+def check_members_match_their_shape(spec: ExperimentSpec, engine_map,
+                                    learner) -> list[ValidationIssue]:
+    """Sharding is a BUILD fact, not a request (#43): each mapped pool's
+    engine must be BUILT at the pool's declared tensor-parallel width, and
+    the learner at the LearnerMember's declared fsdp width. Switching shards
+    means handing different metal, never a spec that quietly runs unsharded.
+    Like check_pools_serve_their_base, this consults live metal, so the loop
+    runs it at submit."""
+    declared_tp: dict[str, int] = {}
+    for group in spec.gpu_config.groups:
+        for member in group.members:
+            if isinstance(member, PoolMember):
+                declared_tp[member.name] = member.tp
+    issues = []
+    for name, engine in sorted(engine_map.items()):
+        expected = declared_tp.get(name)
+        if expected is not None and engine.tp != expected:
+            issues.append(_issue(
+                "pool-shape-mismatch", f"gpu_config({name})",
+                f"pool {name!r} declares tp={expected} but the engine handed "
+                f"for it is built tp={engine.tp}"))
+    for group in spec.gpu_config.groups:
+        for member in group.members:
+            if isinstance(member, LearnerMember) and learner.fsdp != member.fsdp:
+                issues.append(_issue(
+                    "learner-shape-mismatch", "gpu_config(learner)",
+                    f"the spec declares fsdp={member.fsdp} but the learner "
+                    f"handed is built fsdp={learner.fsdp}"))
+    return issues
+
+
 def check_post_pools_are_declared(spec: ExperimentSpec, schema: SiteSchema) -> list[ValidationIssue]:
     """Every pool a pipeline processor samples from (PostDef.pools) must be a
     declared engine pool — a judge's traffic is vetted at submit, never

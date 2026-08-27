@@ -228,8 +228,29 @@ class Store(ABC):
     def read_host_log(self, host: str) -> list[dict[str, Any]]:
         """Every parseable event for one host; a torn tail is tolerated —
         this is observability, not a commit record."""
+        return self._read_log(f"hosts/{host}/log.jsonl")
+
+    def list_hosts(self) -> list[str]:
+        """Host names that have ever journaled to this store."""
+        return sorted({key.split("/")[1] for key in self._list("hosts/")
+                       if key.endswith("/log.jsonl")})
+
+    # ---- fleet journal (observability ONLY; correctness never reads it) -----
+
+    def append_fleet_event(self, entry: dict[str, Any]) -> None:
+        """One event line in fleet/log.jsonl (place / carve). The fleet's
+        decision record: carving is automatic BECAUSE it is journaled (#43) —
+        legibility by record, not by approval. Outside every run directory,
+        outside identity, outside recovery."""
+        self._append_line("fleet/log.jsonl", _canonical(entry))
+
+    def read_fleet_log(self) -> list[dict[str, Any]]:
+        """Every parseable fleet event; a torn tail is tolerated."""
+        return self._read_log("fleet/log.jsonl")
+
+    def _read_log(self, key: str) -> list[dict[str, Any]]:
         try:
-            text = self._read(f"hosts/{host}/log.jsonl").decode("utf-8")
+            text = self._read(key).decode("utf-8")
         except FileNotFoundError:
             return []
         out = []
@@ -240,11 +261,6 @@ class Store(ABC):
                 except json.JSONDecodeError:
                     pass
         return out
-
-    def list_hosts(self) -> list[str]:
-        """Host names that have ever journaled to this store."""
-        return sorted({key.split("/")[1] for key in self._list("hosts/")
-                       if key.endswith("/log.jsonl")})
 
 
 

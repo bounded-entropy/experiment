@@ -85,7 +85,13 @@ class GpuArbiter:
                fraction: float | None = None, wake: Hook | None = None,
                evict: Hook | None = None) -> None:
         """Register a resident (idempotent by object; first label wins, hooks
-        and fraction may be supplied by any attacher)."""
+        and fraction may be supplied by any attacher).
+
+        Group `None` is "no alternation demanded", not "must be free": it
+        DEFERS to whatever group the resident already carries — a regime-host
+        declares alternation at birth (#43) and later tenants join without an
+        opinion. Two CONFLICTING group names still raise: an experiment may
+        not re-legislate the metal's physical truth."""
         entry = self._residents.get(id(obj))
         if entry is None:
             self._residents[id(obj)] = _Resident(label, group, fraction,
@@ -94,7 +100,7 @@ class GpuArbiter:
             if group is not None:
                 self._groups.setdefault(group, _Group())
             return
-        if entry.group != group:
+        if group is not None and entry.group != group:
             raise ValueError(
                 f"resident {entry.label!r} attached with exclusive group "
                 f"{entry.group!r}, re-attached with {group!r}")
@@ -119,6 +125,13 @@ class GpuArbiter:
         """Whether this object is already a resident here (its fraction is
         already counted — the host's capacity check asks)."""
         return id(obj) in self._residents
+
+    def attached_group(self, obj: object) -> str | None:
+        """The exclusive group this resident already carries (None: free, or
+        never attached) — the metal's physical truth, which a later
+        tenant's declaration defers to (attach_residents asks)."""
+        entry = self._residents.get(id(obj))
+        return entry.group if entry is not None else None
 
     def residency(self) -> dict[str, str | None]:
         """Per exclusive group: the resident's label (None: nothing yet).

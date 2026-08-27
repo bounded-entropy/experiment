@@ -43,8 +43,9 @@ class FakeEngine:
 
     def __init__(self, p_correct: float = 0.5, record_draws: bool = False,
                  plugins: frozenset[Mechanism] = frozenset(),
-                 base: str | None = None) -> None:
+                 base: str | None = None, tp: int = 1) -> None:
         self.base = base            # None: fake metal serves any base
+        self.tp = tp                # build fact: a fake TP-2 engine is tp=2
         self.p_correct = p_correct
         self.record_draws = record_draws
         self.plugins = plugins
@@ -157,7 +158,8 @@ class FakeLearner:
     invariant, testable). Frozen deltas emit a constant init-derived payload.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, fsdp: int = 1) -> None:
+        self.fsdp = fsdp            # build fact: a fake 2-shard learner is fsdp=2
         self._tenants: dict[str, _FakeTenant] = {}
 
     def _tenant(self, tenant: str) -> _FakeTenant:

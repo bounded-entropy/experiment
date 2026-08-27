@@ -68,7 +68,15 @@ from rlstack.runner.sources import (
     LiveFeed, ReplayFeed, StaticFeed, WaveFeed, feed_for,
 )
 from rlstack.runner.daemons import Daemon, Evaluator, Generator, Trainer
-from rlstack.runner.host import Host, HostError, Tenancy
+from rlstack.runner.host import (
+    Host, HostError, Partition, Regime, Tenancy,
+)
+from rlstack.runner.remote import (
+    HostService, LocalTransport, RemotePool, Transport,
+)
+from rlstack.runner.fleet import (
+    Acquire, Carve, Demand, Fleet, FleetError, Join, Metal, Plan, demands_of,
+)
 from rlstack.runner.loop import (
     RunReport, experiment_identity, plan_daemons, run_experiment,
 )

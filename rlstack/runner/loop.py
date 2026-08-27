@@ -34,9 +34,10 @@ from rlstack.runner.sources import feed_for
 from rlstack.spec.canonical import canonical_json, run_id
 from rlstack.spec.flow import flow_graph
 from rlstack.spec.specs import ExperimentSpec, PoolMember, WarmStart
+from rlstack.runner.remote import RemotePool
 from rlstack.spec.validate import (
-    SpecError, check_pools_serve_their_base, check_sites_reachable_on,
-    site_space, traffic_pools, validate_or_raise,
+    SpecError, check_members_match_their_shape, check_pools_serve_their_base,
+    check_sites_reachable_on, site_space, traffic_pools, validate_or_raise,
 )
 
 
@@ -112,7 +113,8 @@ async def run_experiment_async(
     binding_issues = (
         check_sites_reachable_on(
             spec, schema, "main", engine_map["main"].reachability(space))
-        + check_pools_serve_their_base(spec, engine_map))
+        + check_pools_serve_their_base(spec, engine_map)
+        + check_members_match_their_shape(spec, engine_map, learner))
     if binding_issues:
         raise SpecError(binding_issues)
     hashes = code_hashes(spec)
@@ -245,6 +247,18 @@ def attach_residents(spec: ExperimentSpec, engine_map, learner,
     Exclusive groups come from GpuGroup.sharing="sleep" — alternation exists
     only there. Fractions are declared, reported, not yet enforced (until the
     learner is multi-tenant, per-experiment fractions are overlapping views).
+
+    A REMOTE pool attaches as a zero-footprint free resident: its metal is
+    another host's partition, so local admission is bookkeeping (the real
+    admission happens host-side, in HostService, at the serving partition)
+    and its declared fraction is a carve hint that never counts here (#43).
+    A remote pool in a sleep group is refused: alternation is an
+    intra-partition fact — a sleep group's members must all live on one host.
+
+    A sleep demand on metal the host ALREADY holds in an alternation group
+    (a multi-regime host attached it at birth) is satisfied, not conflicting:
+    the demand defers to the metal's own group. Only a sleep demand on
+    always-resident metal still raises — that metal cannot alternate.
     """
     pool_group: dict[str, str | None] = {}
     pool_fraction: dict[str, float | None] = {}
@@ -260,11 +274,27 @@ def attach_residents(spec: ExperimentSpec, engine_map, learner,
                 learner_group = f"sleep:{gi}" if sleeping else None
                 learner_fraction = member.fraction
 
+    def deferred(obj: object, group: str | None) -> str | None:
+        """The metal's own alternation group satisfies (and overrides) a
+        sleep demand — the physical owner declared it at birth."""
+        if arbiter.is_attached(obj) and arbiter.attached_group(obj) is not None:
+            return None
+        return group
+
     for name in sorted(engine_map):
+        if isinstance(engine_map[name], RemotePool):
+            if pool_group.get(name) is not None:
+                raise ValueError(
+                    f"pool {name!r} is served by another host but declared "
+                    f"in a sleep group — alternation is an intra-partition "
+                    f"fact; a sleep group's members must all live on one host")
+            arbiter.attach(engine_map[name], label=f"remote:{name}")
+            continue
         arbiter.attach(engine_map[name], label=f"engine:{name}",
-                       group=pool_group.get(name),
+                       group=deferred(engine_map[name], pool_group.get(name)),
                        fraction=pool_fraction.get(name))
-    arbiter.attach(learner, label="learner", group=learner_group,
+    arbiter.attach(learner, label="learner",
+                   group=deferred(learner, learner_group),
                    fraction=learner_fraction)
 
 
