@@ -1,0 +1,4 @@
+modal>=1.5.4
+
+[dev]
+pytest>=8

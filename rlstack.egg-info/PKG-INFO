@@ -1,0 +1,8 @@
+Metadata-Version: 2.4
+Name: rlstack
+Version: 0.0.1
+Summary: Thin RL wrapper - Phase A: specs, registries, validation, data objects, store
+Requires-Python: >=3.11
+Requires-Dist: modal>=1.5.4
+Provides-Extra: dev
+Requires-Dist: pytest>=8; extra == "dev"
