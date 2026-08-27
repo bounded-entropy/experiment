@@ -919,6 +919,34 @@ specs; backends (local/modal/skypilot) and GPU topology are semantics-neutral.
     Next UI features (named, not built): postdata distributions, token
     drill-down (waves peeks), gpu/host pages, run compare.
 
+42. CUSTOM PANELS (settled, Samarth-directed: "graphing of custom things,
+    functions of what dictionary.json already logs; validation = every
+    argument is in the pipeline"). Landed as EXPRESSIONS-AS-DATA:
+    - observe/panels.py: ast-whitelisted arithmetic (+ - * / ** %, unary,
+      log/exp/sqrt/abs) over column names; nothing else parses — panels
+      can never smuggle code into the observer.
+    - VALIDATION AT THE RIGHT DOOR: the rule is enforced against each
+      run's own dictionary.json (the same flow-graph oracle the submit
+      gate queries), NOT at submit — panels in the hashed spec would make
+      adding a graph fork the run_id. A panel whose argument a run lacks
+      renders "missing from this run's pipeline: X" (and older runs
+      honestly reject args their dictionaries predate — seen live with
+      `tokens` against a pre-#42 run).
+    - One expression, both series: the held-out overlay computes from the
+      same expr when its args exist in the eval means.
+    - Declarations live in panels.json at the STORE ROOT — written by the
+      user (cp locally / `modal volume put rlstack-store panels.json
+      panels.json`), only ever READ by the observer (Store.read_panels;
+      the never-writes rule holds); `rlstack ui --panels` overrides
+      locally, re-read per refresh.
+    - Flow graph gained TRAIN_STATS (tokens, microbatches) as declared
+      train-phase stat nodes so the dictionary fully describes the ledger
+      (they were logged but undeclared — the panel validation caught it).
+    Verified on the deployed UI against the live 30-step GRPO run:
+    excess_reward 30 pts + 15 eval-overlay pts; log_grad showing the
+    grad-collapse at saturation; gap_per_ktok correctly refused by the
+    older run's dictionary. 382 tests green.
+
 ## Open threads (do NOT treat as settled; flag when your answer touches them)
 
 - Identity rings: should GpuConfig (and EvalSpec) leave the run_id hash and become
