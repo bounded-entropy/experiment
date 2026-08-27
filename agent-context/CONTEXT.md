@@ -557,6 +557,38 @@ specs; backends (local/modal/skypilot) and GPU topology are semantics-neutral.
     vLLM lora LRU beyond max_loras=8 concurrent was exercised only lightly
     (≤7 tenants+eval pins in flight).
 
+31. TIDYING PASS (settled, Samarth-directed). Identity-stable throughout
+    (source_hash hashes each registered function's own source; the fake
+    example's bundle ids are byte-identical pre/post):
+    - training/losses.py SPLIT into training/losses/ mirroring post/: base.py
+      (PolicyOutputs, LossResult, token_tensors, rails — the loss contract)
+      + one file per registered loss; package __init__ registers builtins.
+    - runner/client.py + runner/waves.py MERGED into runner/sampling.py
+      ("token stream → Turn → episode seal → sealed wave") — kills the
+      rlstack/client.py vs runner/client.py name collision and the waves.py
+      grab-bag; tests/test_waves.py renamed test_sampling.py.
+    - runner/__init__.py docstring is now the package MAP (one line per
+      module, by responsibility, in reading order); runner/post.py states
+      it is EXECUTION only (declarations in training/post/).
+    - _to_delete/ (the #24 leftovers) finally deleted; git history keeps it.
+    Q&A settled alongside (no code change): (a) fakes are deliberately two
+    homes — runner/fakes.py (metal stand-ins, rule-8-sanctioned) and
+    fake_qwen_schema BESIDE hf_schema in siteschema.py (a compiler next to
+    its real sibling) — nothing else exists; (b) native-vs-plugin mechanism
+    ownership stands as designed (#16/#25): punica/prompt_embeds/logits are
+    the ENGINE's own levers, so their add_bundle consumers live in the
+    Engine adapter (runner/engines/); rlstack_engine owns only code that
+    must SHIP IN THE IMAGE (plugin mechanisms — side_attention);
+    (c) lora.py/lora_torch.py is the rule-7 declaration/compute split (the
+    same pattern as engines/learners: heavy deps at module scope, imported
+    lazily); PEFT-format knowledge (emit/merge_fragments/peft_config) stays
+    in the adapter's compute half so ONE file owns the wire format both
+    sides read; (d) PARITY STATUS made explicit: Adapter.parity and
+    rlstack_engine/certificates.py are designed (#25) but UNWIRED — nothing
+    calls them; the only parity mechanism actually running is the per-update
+    logprob_gap rail. Wiring boot-time certificates into Phase 1 is open
+    Phase-C work.
+
 ## Open threads (do NOT treat as settled; flag when your answer touches them)
 
 - Identity rings: should GpuConfig (and EvalSpec) leave the run_id hash and become

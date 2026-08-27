@@ -36,8 +36,8 @@ The one reader is Samarth, six months from now, mid-experiment. Optimize for
    inference/      the sampling world: Rollout + environments/ (an episode is
                    everything needed to complete and seal a rollout — scoring
                    is NOT here) — never imports training/
-   training/       the gradient world: post/ (the pipeline — rewards, judges,
-                   advantages are all PostProcessors, one file each) + losses
+   training/       the gradient world: post/ and losses/ (one file per processor
+                   or loss; rewards, judges, advantages are all PostProcessors)
                    — never imports inference/
    data/           the membrane (trajectory→group→wave, flatten+pack, stores/
                    — Store ABC + one backend per file)

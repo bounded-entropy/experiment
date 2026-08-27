@@ -25,13 +25,12 @@ from rlstack.data.stores.base import Store
 from rlstack.policy.compile import Bundle, compile_bundle
 from rlstack.policy.siteschema import SiteSchema, resolve
 from rlstack.registry import ADAPTERS, code_hashes
-from rlstack.runner.client import Pools
+from rlstack.runner.daemons import Daemon, Evaluator, Generator, Trainer
 from rlstack.runner.interfaces import Engine, Learner
 from rlstack.runner.lease import LeaseMap, leases_for
-from rlstack.runner.daemons import Daemon, Evaluator, Generator, Trainer
+from rlstack.runner.sampling import Pools, load_tasks
 from rlstack.runner.signals import RunSignals
 from rlstack.runner.sources import feed_for
-from rlstack.runner.waves import load_tasks
 from rlstack.spec.canonical import canonical_json, run_id
 from rlstack.spec.specs import ExperimentSpec, WarmStart
 from rlstack.spec.validate import (

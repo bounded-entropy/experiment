@@ -1,4 +1,6 @@
-"""Running the postprocessing pipeline: per group, after the seal, before the loss.
+"""EXECUTION of the post pipeline: per group, after the seal, before the loss.
+The processors themselves are DECLARED in training/post/ (one class per file);
+this module only runs a declared pipeline in order.
 
 For each group, the declared processors run in pipeline order; each sees the
 columns its predecessors produced for that group and a SampleClient (judges
@@ -18,7 +20,7 @@ from collections.abc import Sequence
 
 from rlstack.data.trajectory import Group, Wave
 from rlstack.registry import POST
-from rlstack.runner.client import EngineSampleClient, Pools
+from rlstack.runner.sampling import EngineSampleClient, Pools
 from rlstack.runner.seeds import derive
 from rlstack.spec.specs import SamplingSpec
 
