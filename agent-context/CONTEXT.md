@@ -589,6 +589,37 @@ specs; backends (local/modal/skypilot) and GPU topology are semantics-neutral.
     logprob_gap rail. Wiring boot-time certificates into Phase 1 is open
     Phase-C work.
 
+32. POST POOL TREATY COMPLETED (settled, Samarth-directed: "post can access
+    any gpu inference group" — the ACCESS existed since #24 (llm.pool(name)
+    on every processor's SampleClient); what was missing was the DECLARATION
+    layer, now landed):
+    - PostProcessor gains two class-attr declarations beside produces/
+      consumes: `pools` (the engine pools this processor SAMPLES from —
+      "main" needs no declaring, the runner requires it unconditionally) and
+      `sampling` (SamplingSpec | None — a judge's OWN budget/temperature,
+      None inherits the run's gen sampling). Both live in class source, so
+      they hash into run identity through code_hashes with zero new spec
+      surface. PostDef carries pools; run_pipeline builds each processor's
+      client with its declared sampling.
+    - NEW CHECK post-pool-missing (CHECKS, after traffic_routes): every pool
+      named by algo.post ∪ eval.post processors must be a declared
+      EnginesMember. NEW validate.traffic_pools(spec) = {"main"} ∪ eval.pool
+      ∪ pipeline pools; the loop refuses at submit when the handed engine
+      map does not cover it (no more mid-update KeyError).
+    - BUILTIN training/post/llm_judge.py: reference-free llm-as-a-judge —
+      the judge pool solves each trajectory's task greedily (its own
+      SamplingSpec, temperature 0) and reward = last-number agreement with
+      the policy. The SPEC.md §3 illustrative llm_judge stub in
+      test_examples is superseded by it (produces "reward", not "judge").
+    - Multi-tenancy makes a judge pool FREE on one GPU: engines map
+      {"main": engine, "judge": engine} — same resident vLLM, two pool
+      names; the judge pool serves its base bundle. Stress stage 3 gained a
+      seventh tenant (grpo trained on llm_judge rewards) proving the path
+      on real metal. 339 fakes tests green.
+    Open symmetry, deliberately NOT done: Environments can also call
+    llm.pool(name) and have no `pools` declaration — same gap, same fix
+    shape (EnvDef.pools), when a multi-pool env first exists.
+
 ## Open threads (do NOT treat as settled; flag when your answer touches them)
 
 - Identity rings: should GpuConfig (and EvalSpec) leave the run_id hash and become
