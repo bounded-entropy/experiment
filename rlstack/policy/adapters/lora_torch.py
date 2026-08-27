@@ -49,8 +49,8 @@ class LoraSite(torch.nn.Module):
 
     One wrapper serves every state installed at this site, and whose delta a
     row gets is a property of the batch (the row plan), not of the module
-    tree. `installed` is that set: it is what makes install additive and what
-    tells uninstall when the last tenant has left and the Linear goes back.
+    tree. `installed` is that roster: it is what makes install additive and
+    what tells uninstall when the last tenant has left and the Linear returns.
 
     The per-tenant deltas deliberately do NOT register as parameters of the
     base: the base is shared and frozen, a delta is one tenant's state, and
@@ -82,8 +82,10 @@ class LoraSite(torch.nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         rows = self.plan.rows
         one = rows.uniform()
-        delta = (_whole_batch_delta(x, one[self.path], self.path) if one is not None
-                 else _per_row_delta(x, rows, self.path))
+        if one is not None:
+            delta = _whole_batch_delta(x, one[self.path], self.path)
+        else:
+            delta = _per_row_delta(x, rows, self.path)
         return self.inner(x) + delta.to(x.dtype)
 
 
