@@ -56,6 +56,9 @@ The one reader is Samarth, six months from now, mid-experiment. Optimize for
    runner/learners/ real training metal (torch_learner) — both import their
                    heavy deps at module scope and are therefore imported
                    LAZILY, never from the package root (rule 7)
+   observe/        the observer: read-only derivations over stores and
+                   journals (views, store locators) — never attaches, never
+                   writes; imports the data layer and nothing else
    deploy/         deployment only (I5): images, volumes, venue wiring —
                    nothing semantics-bearing lives here
    rlstack_engine/ (sibling package) code that ships in the ENGINE image:

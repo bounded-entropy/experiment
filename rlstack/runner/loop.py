@@ -32,6 +32,7 @@ from rlstack.runner.sampling import Routes, load_tasks
 from rlstack.runner.signals import RunSignals
 from rlstack.runner.sources import feed_for
 from rlstack.spec.canonical import canonical_json, run_id
+from rlstack.spec.flow import flow_graph
 from rlstack.spec.specs import ExperimentSpec, PoolMember, WarmStart
 from rlstack.spec.validate import (
     SpecError, check_pools_serve_their_base, check_sites_reachable_on,
@@ -126,6 +127,9 @@ async def run_experiment_async(
         "schema": schema.fingerprint(),   # same base name, different schema → loud
         "parent": spec.init.policy if spec.init is not None else None,
     })
+    # the run describes its own observability: a UI reads THIS, never the
+    # registries (spec/flow.py — same walk the submit gate validated with)
+    run.write_dictionary(flow_graph(spec).to_json())
 
     # ---- Phase 1: idempotent setup ------------------------------------------
     bank = spec.policy.bank

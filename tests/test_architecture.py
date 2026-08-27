@@ -48,6 +48,16 @@ class TestMembrane(unittest.TestCase):
     def test_inference_never_imports_training(self) -> None:
         self.assert_never_imports("inference", "rlstack.training")
 
+    def test_observe_reads_the_membrane_only(self) -> None:
+        """The observer derives views from store bytes alone: it may import
+        the data layer (stores) and nothing else — no specs, no registries,
+        no runner. Its dictionary comes from the run dir, never re-derived."""
+        for file, imports in imports_by_region("observe").items():
+            bad = {i for i in imports
+                   if not i.startswith(("rlstack.data", "rlstack.observe"))}
+            self.assertFalse(bad, f"{file} imports {sorted(bad)} — the "
+                                  f"observer reads committed bytes only")
+
     def test_data_imports_no_other_rlstack_package(self) -> None:
         """The membrane is dumb: no specs, no registries, no worlds."""
         for file, imports in imports_by_region("data").items():

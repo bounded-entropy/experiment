@@ -769,6 +769,47 @@ specs; backends (local/modal/skypilot) and GPU topology are semantics-neutral.
     measurement stall was diagnosed — report_run/measure_lag re-read every
     wave over the volume mount; fix deferred with the harness.)
 
+37. FLOW GRAPH + OBSERVER REGION + STORE OWNERSHIP (settled, Samarth-
+    directed, the UI-design arc). Three principles, three mechanisms:
+    - THE FLOW GRAPH (spec/flow.py): flow_graph(spec) is THE canonical walk
+      over the data declarations — nodes are every artifact a run contains
+      (pipeline columns, records, provided tensors, rails; phase-tagged:
+      post/eval/wave/forward/train; stored flag), edges are produces/
+      consumes/requires verbatim; feeds_loss is TRANSITIVE reachability
+      into the loss's requires ("advantage consumes reward ⇒ plot reward",
+      as a graph fact). FIRST-PARTY by construction: validate's pipeline
+      rules (post-unwired, post-collision, unsatisfied-requires) are now
+      QUERIES on this graph — the metric derivation cannot drift from the
+      semantics without the submit gate failing with it. BASE_PROVIDES/
+      BASE_RECORDS moved here (validate re-exports).
+    - RUNS SELF-DESCRIBE: loop writes dictionary.json (= the graph's
+      to_json) beside the manifest at run creation — derived, NOT identity,
+      deterministic (attach rewrites identical bytes; resume-equivalence
+      unaffected). A UI reads the run's own dictionary — no rlstack import,
+      no registry, no version skew. Store verbs: write_dictionary /
+      peek_dictionary.
+    - STORE OWNERSHIP INVARIANT: the run store is a PER-EXPERIMENT binding
+      (one experiment, one store, for life) — run_id is global (I3) but
+      existence is store-scoped, so the same spec against two stores forks
+      history silently. Host now separates its JOURNAL store from the run
+      store: submit(spec, schema, store=None) takes the experiment's store
+      explicitly (defaults to the host's); attach events journal its
+      locator. Full global enforcement is impossible (no registry of all
+      stores); the observer's runs view detects violations instead — the
+      same run_id in two given stores renders "⚠FORK".
+    - OBSERVE/ is a new architecture region (STYLE tree + arch test): read-
+      only derivations over stores and journals — never attaches, never
+      writes, imports the data layer ONLY. locate.py store_for(locator)
+      (path/file:// resolve where mounted; s3:// reserved; modal:// refuses
+      locally with guidance — THE PRINCIPLE: a store is named by a locator
+      and the reader runs where it resolves). views.py: hosts/runs/gpu each
+      as *_data (structured, the UI's JSON layer) + render_* (CLI text).
+      __main__.py is thin argparse over observe. ModalVolumeStore gained
+      `locator` so describe() journals modal://rlstack-store, not /store.
+    368 tests green. UI stack from here: an ASGI wrapper over the *_data
+    functions + per-run dictionary/postdata/ledger series endpoints,
+    deployed beside whichever store backend.
+
 ## Open threads (do NOT treat as settled; flag when your answer touches them)
 
 - Identity rings: should GpuConfig (and EvalSpec) leave the run_id hash and become

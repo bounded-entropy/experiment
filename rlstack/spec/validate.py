@@ -31,11 +31,10 @@ from rlstack.registry import (
 )
 from rlstack.spec.specs import PoolMember, ExperimentSpec, LearnerMember
 
-# PolicyOutputs fields the training forward can always produce, with no bank help.
-BASE_PROVIDES = frozenset({"ref_logprobs", "entropies", "hidden_states"})
-
-# Rollout facts every trajectory records regardless of the bank (I6).
-BASE_RECORDS = frozenset({"behavior_logprobs", "finish"})
+# The base provides/records sets live with the flow graph (spec/flow.py),
+# the one canonical walk over the data declarations; re-exported here because
+# they are part of the validation vocabulary.
+from rlstack.spec.flow import BASE_PROVIDES, BASE_RECORDS, flow_graph  # noqa: E402,F401
 
 # Loss requirements that name a planned pass (satisfied by the runner, not the bank).
 PLANNED_PASSES = (Ref, Teacher, Probe)
@@ -116,62 +115,44 @@ def check_names_are_registered(spec: ExperimentSpec, schema: SiteSchema) -> list
 def check_loss_requires_are_provided(spec: ExperimentSpec, schema: SiteSchema) -> list[ValidationIssue]:
     """Every string the loss requires is either PROVIDED (a training-forward
     field: from the base forward or a kind's replay lowering) or RECORDED (a
-    sampling-time fact: a base column or a kind's `records`). Planned passes
-    (Ref/Teacher/Probe) are the runner's job."""
+    sampling-time fact: a base column or a kind's `records`) or PRODUCED by
+    the post pipeline. A query on the flow graph (spec/flow.py) — planned
+    passes (Ref/Teacher/Probe) are the runner's job, not graph nodes."""
     if spec.algo is None or spec.algo.loss not in LOSSES:
         return []
-    available = set(BASE_PROVIDES) | set(BASE_RECORDS)
-    for adapter in spec.policy.bank.values():
-        if adapter.kind in ADAPTERS:
-            kind = ADAPTERS.get(adapter.kind).instance
-            available |= set(kind.provides)
-            available |= set(kind.records)
-    for name in spec.algo.post:            # the pipeline's postdata columns
-        if name in POST:
-            available |= set(POST.get(name).produces)
-    issues = []
-    for req in LOSSES.get(spec.algo.loss).requires:
-        if isinstance(req, PLANNED_PASSES):
-            continue
-        if req not in available:
-            issues.append(_issue(
-                "unsatisfied-requires", "algo.loss",
-                f"loss {spec.algo.loss!r} requires {req!r}, which nothing in the "
-                f"bank provides or records; available: {', '.join(sorted(available))}"))
-    return issues
+    graph = flow_graph(spec)
+    available = graph.available_to_loss()
+    return [_issue(
+        "unsatisfied-requires", "algo.loss",
+        f"loss {spec.algo.loss!r} requires {req!r}, which nothing in the "
+        f"bank provides or records; available: {', '.join(sorted(available))}")
+        for req in graph.unsatisfied_requires()]
 
 
 def check_post_pipelines_are_wired(spec: ExperimentSpec, schema: SiteSchema) -> list[ValidationIssue]:
     """Each post pipeline is internally consistent, in order: every processor's
     `consumes` is produced EARLIER in the same pipeline, and every column has
-    exactly one producer."""
+    exactly one producer. Both rules are queries on the flow graph
+    (spec/flow.py) — the same walk the run's dictionary.json serializes."""
+    graph = flow_graph(spec)
     issues = []
-    pipelines = []
+    phases = []
     if spec.algo is not None:
-        pipelines.append(("algo.post", spec.algo.post))
+        phases.append(("algo.post", "post"))
     if spec.eval is not None:
-        pipelines.append(("eval.post", spec.eval.post))
-    for path, pipeline in pipelines:
-        owner: dict[str, str] = {}  # column -> processor that produces it
-        for i, name in enumerate(pipeline):
-            if name not in POST:
-                continue  # unknown-post already reported
-            pdef = POST.get(name)
-            for want in pdef.consumes:
-                if want not in owner:
-                    issues.append(_issue(
-                        "post-unwired", f"{path}[{i}]",
-                        f"postprocessor {name!r} consumes {want!r}, which nothing "
-                        f"earlier in the pipeline produces; produced so far: "
-                        f"{', '.join(sorted(owner)) or '(none)'}"))
-            for column in pdef.produces:
-                if column in owner:
-                    issues.append(_issue(
-                        "post-collision", f"{path}[{i}]",
-                        f"postprocessor {name!r} produces {column!r}, already "
-                        f"produced by {owner[column]!r} — one owner per column"))
-                else:
-                    owner[column] = name
+        phases.append(("eval.post", "eval"))
+    for path, phase in phases:
+        for i, name, want, produced in graph.missing_consumes(phase):
+            issues.append(_issue(
+                "post-unwired", f"{path}[{i}]",
+                f"postprocessor {name!r} consumes {want!r}, which nothing "
+                f"earlier in the pipeline produces; produced so far: "
+                f"{', '.join(produced) or '(none)'}"))
+        for i, name, column, prior in graph.column_collisions(phase):
+            issues.append(_issue(
+                "post-collision", f"{path}[{i}]",
+                f"postprocessor {name!r} produces {column!r}, already "
+                f"produced by {prior!r} — one owner per column"))
     return issues
 
 

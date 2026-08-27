@@ -243,7 +243,8 @@ def run_stress() -> dict:
 
     print(f"[pins] vllm={vllm.__version__} torch={torch.__version__} "
           f"transformers={transformers.__version__}")
-    store = ModalVolumeStore("/store", volume=store_volume)
+    store = ModalVolumeStore("/store", volume=store_volume,
+                             locator="modal://rlstack-store")
     schema = hf_schema(BASE)
     engine = VllmEngine(BASE, gpu_memory_utilization=0.30, max_model_len=512,
                         max_loras=8, max_lora_rank=16)
@@ -385,7 +386,8 @@ def resume_cross_container() -> dict:
     from rlstack.runner.learners.torch_learner import TorchLearner
 
 
-    store = ModalVolumeStore("/store", volume=store_volume)
+    store = ModalVolumeStore("/store", volume=store_volume,
+                             locator="modal://rlstack-store")
     spec = make_spec(store, loss="grpo", post=("verifier", "grpo_advantage"),
                      master=301, n_updates=24)
     engine = VllmEngine(BASE, gpu_memory_utilization=0.30, max_model_len=512,

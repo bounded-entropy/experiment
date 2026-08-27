@@ -71,7 +71,8 @@ def run_arith(n_updates: int = 4, trajectories_per_wave: int = 16,
     print(f"[pins] vllm={vllm.__version__} torch={torch.__version__} "
           f"transformers={transformers.__version__}")
 
-    store = ModalVolumeStore("/store", volume=store_volume)
+    store = ModalVolumeStore("/store", volume=store_volume,
+                             locator="modal://rlstack-store")
     train = store.cas_put(arith_tasks(64, seed=0))
     heldout = store.cas_put(arith_tasks(16, seed=1))
 
@@ -126,9 +127,10 @@ def run_arith(n_updates: int = 4, trajectories_per_wave: int = 16,
 def hosts():
     """The hosts CLI against the volume:  modal run deploy/modal_app.py::hosts"""
     from rlstack import ModalVolumeStore
-    from rlstack.__main__ import render_gpu, render_hosts, render_runs
+    from rlstack.observe import render_gpu, render_hosts, render_runs
 
-    store = ModalVolumeStore("/store", volume=store_volume)
+    store = ModalVolumeStore("/store", volume=store_volume,
+                             locator="modal://rlstack-store")
     for view in (render_hosts, render_runs, render_gpu):
         print(view([store]), end="")
         print("-" * 72)

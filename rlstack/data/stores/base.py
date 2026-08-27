@@ -7,6 +7,8 @@ subclasses Store and implements only the verbs (data/stores/local.py is the
 reference). Every backend stores the same key tree:
 
     runs/<run_id>/manifest.json                identity (I3), written once
+                  dictionary.json              the run's self-description
+                                               (derived, spec/flow.py)
                   ledger.jsonl                 the commit record, append-only
                   waves/<update>.jsonl.gz      sealed waves (trajectory rows)
                   postdata/<update>.json       the pipeline's columns per wave
@@ -155,6 +157,15 @@ class Store(ABC):
 
     # ---- read-only peeks (for observers: never attach, never mutate) --------
 
+    def peek_dictionary(self, run_id: str) -> dict[str, Any] | None:
+        """The run's self-description (dictionary.json) WITHOUT attaching:
+        what its store contains and why — a UI renders from this."""
+        try:
+            return json.loads(
+                self._read(f"runs/{run_id}/dictionary.json").decode("utf-8"))
+        except FileNotFoundError:
+            return None
+
     def peek_manifest(self, run_id: str) -> dict[str, Any] | None:
         """A run's manifest WITHOUT attaching (open_run sweeps unsealed
         work — an observer must never do that to a live run)."""
@@ -225,6 +236,14 @@ class RunHandle:
     def manifest(self) -> dict[str, Any]:
         """The run's manifest (a fresh copy; the stored one is immutable)."""
         return json.loads(self._manifest_json)
+
+    def write_dictionary(self, dictionary: dict[str, Any]) -> None:
+        """The run's self-description, beside the manifest. DERIVED from the
+        spec (never part of identity), deterministic (resume rewrites the
+        same bytes), and the store neither reads nor validates it — the
+        membrane stays dumb; the runner supplies the content."""
+        self.store._write(self._key("dictionary.json"),
+                          _canonical(dictionary).encode("utf-8"))
 
     # ---- ledger (append-only, strictly increasing update) -------------------
 

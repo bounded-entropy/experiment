@@ -21,9 +21,16 @@ from rlstack.data.stores.local import LocalStore
 class ModalVolumeStore(LocalStore):
     """LocalStore over the volume mount + commit at the durable points."""
 
-    def __init__(self, root, volume=None) -> None:
+    def __init__(self, root, volume=None, locator: str | None = None) -> None:
         super().__init__(root)
         self._volume = volume
+        self._locator = locator
+
+    def describe(self) -> str:
+        """The volume's LOCATOR (modal://<name>), not the mount path — a
+        mount path only resolves inside this container; journals must name
+        something an outside reader can act on."""
+        return self._locator or str(self.root)
 
     def _persist(self) -> None:
         if self._volume is not None:

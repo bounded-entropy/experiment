@@ -11,10 +11,19 @@ experiment reaches it:
               would push the GpuSet past capacity — honest now, because the
               host sees every tenant on this metal
     attest    roster the tenancy in memory (the admission-relevant truth,
-              dies with the host's process) and journal it to the store
-              (hosts/<name>/log.jsonl — observability the CLI reads,
-              correctness never consults)
-    run       run_experiment_async under the host's shared arbiter
+              dies with the host's process) and journal it to the host's
+              JOURNAL store (hosts/<name>/log.jsonl — observability the CLI
+              reads, correctness never consults)
+    run       run_experiment_async under the host's shared arbiter, against
+              the experiment's OWN run store
+
+    STORE OWNERSHIP INVARIANT (Samarth, #37): the run store is a
+    PER-EXPERIMENT binding — one experiment, one store, for life — because
+    run_id is global (I3) but existence is store-scoped: the same spec run
+    against two stores forks history silently. submit() takes the run store
+    explicitly (defaulting to the host's own for convenience); the journal
+    records it per attach; the observer's runs view flags the same run_id
+    seen in two stores as a fork.
 
 Deploy scripts shrink to "build one Host, submit N specs"; the Phase-C
 resident daemon is a Host kept alive behind a submission queue. The CLI over
@@ -49,6 +58,7 @@ class Tenancy:
 
     run_id: str
     pools: dict[str, str]           # pool name -> base the bound engine serves
+    store: str = ""                 # locator of the run's OWN store
     status: str = "running"         # running | done | failed
     updates_completed: int | None = None
     attached_at: float = field(default_factory=time.time)
@@ -121,20 +131,23 @@ class Host:
     # ---- submit -------------------------------------------------------------
 
     async def submit(self, spec: ExperimentSpec, schema: SiteSchema,
+                     store: Store | None = None,
                      max_inflight: int = 64) -> RunReport:
+        run_store = store if store is not None else self.store
         binding = self.bind_pools(spec)
         self.check_fit(spec, binding)
         rid = experiment_identity(spec, schema)
         self.roster[rid] = Tenancy(rid, pools={
-            name: (engine.base or "*") for name, engine in sorted(binding.items())})
+            name: (engine.base or "*") for name, engine in sorted(binding.items())},
+            store=run_store.describe())
         self.store.append_host_event(self.name, {
             "event": "attach", "t": time.time(), "run_id": rid,
             "pools": sorted(binding),
             "n_updates": spec.algo.schedule.n_updates if spec.algo else None,
-            "store": self.store.describe()})
+            "store": run_store.describe()})
         try:
             report = await run_experiment_async(
-                spec, schema, self.store, binding, self.learner,
+                spec, schema, run_store, binding, self.learner,
                 max_inflight, arbiter=self.arbiter)
         except BaseException:
             self.roster[rid].status = "failed"

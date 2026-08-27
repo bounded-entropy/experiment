@@ -19,7 +19,7 @@ from rlstack import (
     FakeEngine, FakeLearner, GpuConfig, GpuGroup, Host, HostError, Seeds,
     fake_qwen_schema, gpus, learner, pool, run_experiment,
 )
-from rlstack.__main__ import render_gpu, render_hosts, render_runs
+from rlstack.observe import render_gpu, render_hosts, render_runs, store_for
 
 SCHEMA = fake_qwen_schema(4, base="Qwen/Qwen3-0.6B")
 
@@ -183,3 +183,63 @@ class HostTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class StoreOwnershipTest(unittest.TestCase):
+    """The invariant (#37): one experiment, one store, for life — the run
+    store is a per-experiment binding, journaled, and forks are detected
+    where all stores are visible."""
+
+    def setUp(self) -> None:
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.journal_store, self.train, _ = arith_store(tmp.name)
+
+    def test_submit_takes_the_experiment_store(self) -> None:
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        run_store, train, _ = arith_store(tmp.name)
+
+        host = Host("test-host", engines=(FakeEngine(),), learner=FakeLearner(),
+                    store=self.journal_store)
+        report = go(host.submit(arith_spec(train), SCHEMA, store=run_store))
+
+        # the run lives in ITS store; the journal lives in the host's — and
+        # records where the run went
+        self.assertIsNotNone(run_store.peek_manifest(report.run_id))
+        self.assertIsNone(self.journal_store.peek_manifest(report.run_id))
+        attach = [e for e in self.journal_store.read_host_log("test-host")
+                  if e["event"] == "attach"][-1]
+        self.assertEqual(attach["store"], run_store.describe())
+
+    def test_runs_view_flags_a_forked_experiment(self) -> None:
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        other_store, other_train, _ = arith_store(tmp.name)
+
+        host = Host("test-host", engines=(FakeEngine(),), learner=FakeLearner(),
+                    store=self.journal_store)
+        report = go(host.submit(arith_spec(self.train), SCHEMA))
+        # the SAME identity run against a different store: a silent fork
+        run_experiment(arith_spec(other_train), SCHEMA, other_store,
+                       FakeEngine(), FakeLearner())
+
+        text = render_runs([self.journal_store, other_store])
+        self.assertIn(report.run_id, text)
+        self.assertIn("FORK", text)
+
+        clean = render_runs([self.journal_store])
+        self.assertNotIn("FORK", clean)
+
+
+class StoreForTest(unittest.TestCase):
+    def test_paths_and_schemes(self) -> None:
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.assertEqual(store_for(tmp.name).describe(), tmp.name)
+        self.assertEqual(store_for(f"file://{tmp.name}").describe(), tmp.name)
+        with self.assertRaises(NotImplementedError):
+            store_for("s3://bucket/prefix")
+        with self.assertRaises(NotImplementedError) as caught:
+            store_for("modal://rlstack-store")
+        self.assertIn("beside the volume", str(caught.exception))
