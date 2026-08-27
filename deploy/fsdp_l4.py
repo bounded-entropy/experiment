@@ -129,21 +129,21 @@ def width_is_attested(store, learner, base: str, width: int) -> None:
 # ---------------------------------------------------------------------------
 
 def base_is_sharded(learner, width: int) -> None:
-    """DTensors and a memory reading: the wrap must show up in both."""
+    """DTensors and a memory reading: the wrap must show up in both — and the
+    tenant's deltas must NOT, because they are meant to stay whole."""
     import torch
-    from torch.distributed.tensor import DTensor
 
-    params = list(learner._model.parameters())
-    sharded = [p for p in params if isinstance(p, DTensor)]
+    report = learner.shard_report()
     check(f"every base parameter is sharded at fsdp={width}",
-          len(sharded) == len(params), f"{len(sharded)}/{len(params)}")
-    whole = sum(p.numel() for p in params)
-    local = sum(p.to_local().numel() if isinstance(p, DTensor) else p.numel()
-                for p in params)
-    check("this rank holds about its share of the base",
+          report["sharded"] == report["parameters"],
+          f"{report['sharded']}/{report['parameters']}")
+    whole, local = report["whole"], report["local"]
+    check("this rank holds exactly its share of the base",
           abs(local * width - whole) / whole < 0.02,
-          f"rank 0 holds {local/1e6:.1f}M of {whole/1e6:.1f}M params "
+          f"rank 0 holds {local/1e6:.1f}M of {whole/1e6:.1f}M base params "
           f"({local/whole:.1%})")
+    check("the tenant's deltas stayed whole", report["deltas"] > 0,
+          f"{report['deltas']/1e6:.2f}M delta params, replicated per rank")
     print(f"    cuda:0 allocated {torch.cuda.memory_allocated(0)/2**30:.2f} GiB, "
           f"cuda:1 {torch.cuda.memory_allocated(1)/2**30:.2f} GiB")
 
@@ -265,8 +265,12 @@ def run_fsdp(base: str, width: int, n_updates: int, kill_after: float,
             base_is_sharded(learner, width)     # mid-run: the model is built
             print("\n== claim 4a: kill mid-run ================================")
             await cancel_after(task, 0.0)
-            learner.stop()
-            del task
+            # the old chorus goes away COMPLETELY before the new one starts:
+            # its children hold a shard of the base on every device, and a
+            # resume that overlapped two builds would need twice the metal
+            killed, learner = learner, None
+            killed.stop()
+            del killed, task
             free()
 
             print("  cancelled; re-attaching behind a FRESH chorus")
@@ -304,16 +308,18 @@ def run_fsdp(base: str, width: int, n_updates: int, kill_after: float,
               f"max {max(gaps):.4f}" if gaps else "no updates")
 
         print("\n== claim 4b: the sealed bytes do not know the width =========")
+        # the chorus goes down FIRST: what follows must be able to read the
+        # store's bytes with no sharded learner anywhere in the process
         learner.stop()
-        del learner
+        learner = None
         free()
         sealed_bytes_are_width_free(store, out["run_id"], spec, schema)
         store_volume.commit()
     finally:
-        try:
+        # a run that crashed and a run that finished both leave children
+        # holding a shard of the base on every device
+        if learner is not None:
             learner.stop()
-        except Exception as failure:            # already stopped, or never up
-            print(f"[chorus] stop: {failure!r}")
 
     failed = [(n, d) for n, ok, d in CHECKS if not ok]
     print(f"\n[fsdp={width} checks] {sum(ok for _, ok, _ in CHECKS)} passed, "
@@ -322,14 +328,16 @@ def run_fsdp(base: str, width: int, n_updates: int, kill_after: float,
             "passed": sum(ok for _, ok, _ in CHECKS), "failed": failed}
 
 
-@app.function(image=image, gpu="L4:2", timeout=5400, cpu=8.0, memory=32768)
-def fsdp_run(width: int = 2, n_updates: int = 6,
-             kill_after: float = 150.0) -> dict:
+@app.function(image=image, gpu="L4:2", volumes={"/store": store_volume},
+              timeout=5400, cpu=8.0, memory=32768)
+def fsdp_run(width: int = 2, n_updates: int = 10,
+             kill_after: float = 100.0) -> dict:
     return run_fsdp(BASE, width, n_updates, kill_after,
                     gpu_memory_utilization=0.30)
 
 
-@app.function(image=image, gpu="L4:2", timeout=7200, cpu=8.0, memory=65536)
+@app.function(image=image, gpu="L4:2", volumes={"/store": store_volume},
+              timeout=7200, cpu=8.0, memory=65536)
 def fsdp_8b(width: int = 2, n_updates: int = 4,
             kill_after: float = 600.0) -> dict:
     """8B at fsdp=2: the base is 16 GiB in bf16, so ONE L4 cannot hold it

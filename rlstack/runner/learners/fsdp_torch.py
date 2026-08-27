@@ -138,6 +138,19 @@ class FsdpTorchLearner(TorchLearner):
         the tree in the schema's own vocabulary."""
         return list(self._model.model.layers)
 
+    def base_parameters(self) -> list[torch.nn.Parameter]:
+        """The frozen base's own parameters — the module tree MINUS every
+        installed tenant's deltas, excluded by identity.
+
+        After an install the tree carries both, and their shapes are the
+        whole design: the base sharded, the deltas whole on every rank. Any
+        statement about "the base" has to make that cut first, or it counts
+        a LoRA matrix as a parameter fully_shard forgot."""
+        delta_ids = {id(param) for tenant in self._tenants.values()
+                     for params in tenant.params.values()
+                     for param in params.parameters()}
+        return [p for p in self._model.parameters() if id(p) not in delta_ids]
+
     def attest_base_is_sharded(self) -> None:
         """Loud proof that the wrap took: above width 1, every base parameter
         is a DTensor. A silent no-op here would surface as an out-of-memory
@@ -147,13 +160,31 @@ class FsdpTorchLearner(TorchLearner):
             return
         from torch.distributed.tensor import DTensor
 
-        whole = [name for name, p in self._model.named_parameters()
+        whole = [p for p in self.base_parameters()
                  if not isinstance(p, DTensor)]
         if whole:
             raise RuntimeError(
                 f"fully_shard left {len(whole)} base parameters unsharded at "
-                f"fsdp={self.fsdp} (e.g. {whole[:3]}) — this build is not the "
-                f"width it reports")
+                f"fsdp={self.fsdp} — this build is not the width it reports")
+
+    def shard_report(self) -> dict:
+        """What this rank actually holds — the measurement that makes the
+        sharding visible in a log, and keeps callers out of the module tree.
+        `local` is this rank's share of the base; at width w it should be
+        about `whole / w`. `deltas` is what stays whole, on purpose."""
+        from torch.distributed.tensor import DTensor
+
+        base = self.base_parameters()
+        return {
+            "parameters": len(base),
+            "sharded": sum(isinstance(p, DTensor) for p in base),
+            "whole": sum(p.numel() for p in base),
+            "local": sum(p.to_local().numel() if isinstance(p, DTensor)
+                         else p.numel() for p in base),
+            "deltas": sum(p.numel() for tenant in self._tenants.values()
+                          for params in tenant.params.values()
+                          for p in params.parameters()),
+        }
 
     def attest_emit_is_width_free(self, tenant: str) -> None:
         """THE invariant (#45): what emit writes may not depend on `fsdp`.
