@@ -640,6 +640,57 @@ specs; backends (local/modal/skypilot) and GPU topology are semantics-neutral.
       The canonical sentence: a request is TRAFFIC, addressed to a POOL,
       served by whichever ENGINE backs that name, under a pinned BUNDLE.
 
+34. THE METAL OWNS ADMISSION (settled, Samarth-directed; supersedes the
+    lease half of #27). Three moves:
+    (a) GpuArbiter (runner/arbiter.py; lease.py DELETED): one arbiter per
+    GpuSet, constructed by the metal's owner (deploy today, the resident
+    daemon in Phase C) and SHARED by every attached experiment — the
+    per-experiment leases died because two tenants' private mutexes
+    coordinate nothing. Residents are OBJECT-keyed (ten pools on one engine
+    = ONE resident; a learner is one resident): attach(obj, label, group,
+    fraction, wake/evict) idempotent; admit(obj) the one verb; admit_all
+    for pipelines (sorted acquisition; refuses two members of one group).
+    Alternation exists ONLY inside an exclusive group (sharing="sleep");
+    same-resident work OVERLAPS (the old ExclusiveLease serialized it —
+    alternation is about memory, never a mutex on work). Policy: sticky
+    drain-until-blocked + quantum (hysteresis) + max_wait (aging handoff),
+    injectable clock (deterministic tests); scheduling stays OUTSIDE run
+    identity (I5). Fractions declared and reported (declared_load), not
+    enforced — until learner tenancy they are overlapping views. A regime
+    change is refused loudly: attaching an already-attached object under a
+    different group raises (stress stage 4 keeps a private arbiter for its
+    sleep spec for exactly this reason).
+    (b) THE LEARNER IS MULTI-TENANT (the Engine/Learner asymmetry closed):
+    every Learner verb pins tenant=run_id; interfaces.py states the
+    invariant as the Engine's mirror (installation additive, verbs pin,
+    tenants never disturb each other). TorchLearner: ONE frozen base shared
+    by all tenants ("one learner, one base"), per-tenant params/optimizers,
+    activation by SWAP-INSTALL — new Adapter.uninstall_replay is
+    install_replay's exact inverse (lora unwraps LoraLinear; module rebinds
+    only, params objects survive → numerics exact, microseconds per swap).
+    Batched multi-tenant forwards (grouped-GEMM, prime-rl MultiLoRALinear)
+    are a later kernel upgrade behind the same surface. FakeLearner keeps
+    per-tenant digests with the tenant key OUTSIDE the hashes, so
+    single-tenant bytes are unchanged — resume-equivalence suite untouched;
+    shared-vs-private-learner byte-equality pinned by
+    test_two_experiments_share_one_learner.
+    (c) POST ADMITS WHAT IT DECLARED: the trainer's post phase admits
+    exactly the engines of the pipeline's declared pools — a pipeline with
+    no sampling processors touches NO engine (post is CPU work unless
+    judges sample); the evaluator admits eval.pool plus its pipeline's
+    pools under one admission. Treaty tightened (amends #32):
+    PostProcessor.pools declares EVERY pool sampled, "main" included
+    (existence checking still exempts main). New check post-pools-conflict
+    refuses a pipeline needing two pools of one sleep group co-resident —
+    at submit, not as a runtime deadlock. Stress stage 3 now runs seven
+    tenants on ONE engine + ONE learner + one arbiter (was seven base
+    copies); 349 tests green on fakes.
+    Known consequences, logged not fixed: vLLM sleep/wake and learner
+    offload hooks are still no-ops (wire into attach when sleep-sharing
+    goes real); async post daemon ("scorer") remains deferred until a slow
+    judge or second GpuSet exists; self-judge bundle-version recording gap
+    unchanged from #32.
+
 ## Open threads (do NOT treat as settled; flag when your answer touches them)
 
 - Identity rings: should GpuConfig (and EvalSpec) leave the run_id hash and become

@@ -34,8 +34,8 @@ from rlstack.runner.sources import feed_for
 from rlstack.spec.canonical import canonical_json, run_id
 from rlstack.spec.specs import ExperimentSpec, PoolMember, WarmStart
 from rlstack.spec.validate import (
-    SpecError, check_sites_reachable_on, site_space, traffic_pools,
-    validate_or_raise,
+    SpecError, check_pools_serve_their_base, check_sites_reachable_on,
+    site_space, traffic_pools, validate_or_raise,
 )
 
 
@@ -97,10 +97,12 @@ async def run_experiment_async(
     # reachability is a build fact, not a spec fact: ask the serving pool's
     # engine for its inventory and hold every served adapter against it
     space = site_space(spec, schema)
-    reachability_issues = check_sites_reachable_on(
-        spec, schema, "main", engine_map["main"].reachability(space))
-    if reachability_issues:
-        raise SpecError(reachability_issues)
+    binding_issues = (
+        check_sites_reachable_on(
+            spec, schema, "main", engine_map["main"].reachability(space))
+        + check_pools_serve_their_base(spec, engine_map))
+    if binding_issues:
+        raise SpecError(binding_issues)
     hashes = code_hashes(spec)
     # both forms are content-addressed: live → the task file, else the source
     data_fingerprint = spec.gen.tasks if spec.gen is not None else spec.trajectories.source

@@ -42,7 +42,9 @@ class FakeEngine:
     """
 
     def __init__(self, p_correct: float = 0.5, record_draws: bool = False,
-                 plugins: frozenset[Mechanism] = frozenset()) -> None:
+                 plugins: frozenset[Mechanism] = frozenset(),
+                 base: str | None = None) -> None:
+        self.base = base            # None: fake metal serves any base
         self.p_correct = p_correct
         self.record_draws = record_draws
         self.plugins = plugins

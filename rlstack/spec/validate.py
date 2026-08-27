@@ -352,6 +352,30 @@ def check_traffic_routes_to_declared_pools(spec: ExperimentSpec, schema: SiteSch
     return issues
 
 
+def check_pools_serve_their_base(spec: ExperimentSpec, engine_map) -> list[ValidationIssue]:
+    """The deploy hands metal; nothing else guarantees it hands the RIGHT
+    metal. Each mapped pool's engine must serve that pool's declared base
+    (PoolMember.base, defaulting to the policy base). Engines with base None
+    (fake metal) serve anything. Outside CHECKS like
+    check_sites_reachable_on: it consults live engine objects, so the loop
+    runs it at submit."""
+    declared_base: dict[str, str] = {}
+    for group in spec.gpu_config.groups:
+        for member in group.members:
+            if isinstance(member, PoolMember):
+                declared_base[member.name] = member.base or spec.policy.base
+    issues = []
+    for name, engine in sorted(engine_map.items()):
+        expected = declared_base.get(name)
+        served = getattr(engine, "base", None)
+        if expected is not None and served is not None and served != expected:
+            issues.append(_issue(
+                "pool-base-mismatch", f"gpu_config({name})",
+                f"pool {name!r} declares base {expected!r} but the engine "
+                f"handed for it serves {served!r}"))
+    return issues
+
+
 def check_post_pools_are_declared(spec: ExperimentSpec, schema: SiteSchema) -> list[ValidationIssue]:
     """Every pool a pipeline processor samples from (PostDef.pools) must be a
     declared engine pool — a judge's traffic is vetted at submit, never

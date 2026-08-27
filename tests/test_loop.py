@@ -251,3 +251,28 @@ class JudgePoolTest(unittest.TestCase):
         # the judge pool served ONLY its base bundle; policy bundles stayed
         # on the main engine
         self.assertEqual(engines_map["judge"].bundle_log, ["bundle:base:judge"])
+
+
+class BaseBindingTest(unittest.TestCase):
+    """The deploy hands metal; pool-base-mismatch is the check that it handed
+    the RIGHT metal (Engine.base vs each pool's declared base)."""
+
+    def setUp(self) -> None:
+        import tempfile
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        from common import arith_store
+        self.store, self.train, _ = arith_store(tmp.name)
+
+    def test_wrong_base_engine_is_refused_at_submit(self) -> None:
+        from rlstack.spec.validate import SpecError
+        with self.assertRaises(SpecError) as caught:
+            run_experiment(arith_spec(self.train), SCHEMA, self.store,
+                           FakeEngine(base="some/other-model"), FakeLearner())
+        self.assertIn("pool-base-mismatch", str(caught.exception))
+
+    def test_matching_and_wildcard_bases_pass(self) -> None:
+        report = run_experiment(
+            arith_spec(self.train), SCHEMA, self.store,
+            FakeEngine(base="Qwen/Qwen3-0.6B"), FakeLearner())
+        self.assertEqual(report.updates_completed, 4)

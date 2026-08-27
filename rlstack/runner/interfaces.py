@@ -100,6 +100,10 @@ class Engine(Protocol):
     numerical proof, per build fingerprint.
     """
 
+    base: str | None
+    """The model this metal serves — checked against each pool's declared
+    base at submit (pool-base-mismatch). None is the fake-metal wildcard."""
+
     def sample_tokens(
         self,
         messages: Sequence[Message],
