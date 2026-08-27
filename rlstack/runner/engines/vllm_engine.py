@@ -125,6 +125,38 @@ class VllmEngine:
             final = completion
         yield _finish_event(final)
 
+    async def score_tokens(self, messages: Sequence[Message],
+                           token_ids: Sequence[int],
+                           bundle_id: str) -> tuple[float, ...]:
+        """ONE prefill over context + tokens with prompt_logprobs: vLLM
+        returns each prompt position's logprob under the pinned bundle; we
+        read off the scored suffix. max_tokens=1 because vLLM must generate
+        something — the one decoded token is discarded. Scoring is prefill-
+        shaped traffic: the natural tenant of a prefill-disaggregated pool."""
+        if bundle_id not in self._lora:
+            raise RuntimeError(f"bundle {bundle_id!r} was never registered")
+        if not token_ids:
+            return ()
+        from vllm import SamplingParams, TokensPrompt
+
+        context_ids = [tid for m in messages for tid in self.tokenize(m.content)]
+        full_ids = context_ids + [int(t) for t in token_ids]
+        params = SamplingParams(max_tokens=1, temperature=0.0,
+                                prompt_logprobs=0)
+        self._request_count += 1
+        request_id = f"rlstack-score-{self._request_count}"
+
+        final = None
+        async for output in self._ensure_llm().generate(
+                TokensPrompt(prompt_token_ids=full_ids), params, request_id,
+                lora_request=self._lora[bundle_id]):
+            final = output
+        assert final is not None and final.prompt_logprobs is not None
+        start = len(context_ids)
+        return tuple(
+            float(final.prompt_logprobs[start + j][int(tok)].logprob)
+            for j, tok in enumerate(token_ids))
+
     # ---- the punica consumer ------------------------------------------------
 
     def _register_lora(self, bundle_id: str, payloads: dict[str, bytes]):

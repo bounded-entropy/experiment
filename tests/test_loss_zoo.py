@@ -20,6 +20,7 @@ ZOO = {
     "gspo": ("verifier", "grpo_advantage"),
     "sdft": ("verifier",),
     "self_anchor": ("verifier",),
+    "opsd": ("verifier", "hinted_logprobs"),
     "sft": (),
     "opd": (),
 }

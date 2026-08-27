@@ -21,7 +21,7 @@ from rlstack.data.stores.base import RunHandle, Store
 from rlstack.data.trajectory import Group, Wave
 from rlstack.policy.compile import Bundle, compile_bundle
 from rlstack.registry import ADAPTERS
-from rlstack.runner.sampling import EngineSampleClient, Routes
+from rlstack.runner.sampling import EnginePoolClient, Routes
 from rlstack.runner.interfaces import Engine
 from rlstack.runner.arbiter import GpuArbiter
 from rlstack.runner.post import run_pipeline
@@ -112,7 +112,7 @@ class Evaluator(Daemon):
         async def one(task, sample_index: int):
             async with limiter:
                 seed = derive(self.master, "eval", update, task.id, sample_index)
-                client = EngineSampleClient(routes, self.sampling, seed)
+                client = EnginePoolClient(routes, self.sampling, seed)
                 return await run_episode(self.env_name, task, client)
 
         groups = []

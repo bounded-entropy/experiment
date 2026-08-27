@@ -12,7 +12,7 @@ from __future__ import annotations
 import re
 from collections.abc import Mapping, Sequence
 
-from rlstack.client import SampleClient
+from rlstack.client import PoolClient
 from rlstack.data.trajectory import Group, Message, Role
 from rlstack.spec.specs import SamplingSpec
 from rlstack.training.post.base import PostProcessor, postprocessor
@@ -32,7 +32,7 @@ class LlmJudge(PostProcessor):
     sampling = SamplingSpec(temperature=0.0, top_p=1.0, max_tokens=16)
 
     async def process(self, group: Group, data: Mapping[str, Sequence[float]],
-                      llm: SampleClient) -> Mapping[str, Sequence[float]]:
+                      llm: PoolClient) -> Mapping[str, Sequence[float]]:
         judge = llm.pool("judge")
         rewards = []
         for traj in group.trajectories:

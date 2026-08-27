@@ -14,7 +14,7 @@ The map, by responsibility — read top to bottom:
     arbiter.py      the PHYSICAL half: the GpuArbiter owns admission to the
                     metal — object-keyed residents, exclusive groups from
                     GpuGroup.sharing="sleep", sticky drain-until-blocked
-    sampling.py     token stream → Turn (EngineSampleClient) → episode seal
+    sampling.py     token stream → Turn (EnginePoolClient) → episode seal
                     (run_episode) → sealed wave (collect_wave)
     post.py         EXECUTES the declared post pipeline per group (the
                     processors themselves are declared in training/post/)

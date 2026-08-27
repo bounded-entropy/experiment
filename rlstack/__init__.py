@@ -28,7 +28,7 @@ from rlstack.registry import (
     LossDef, Registry,
     code_hashes, loss, source_hash,
 )
-from rlstack.client import SampleClient
+from rlstack.client import PoolClient
 from rlstack.policy.siteschema import SiteMeta, SiteSchema, fake_qwen_schema, resolve
 from rlstack.policy.adapters import Adapter, AdapterDef, Mechanism, adapter
 from rlstack.inference.rollout import Rollout
@@ -59,7 +59,7 @@ from rlstack.runner.interfaces import (
 )
 from rlstack.runner.seeds import derive
 from rlstack.runner.sampling import (
-    EngineSampleClient, Routes, collect_wave, load_tasks,
+    EnginePoolClient, Routes, collect_wave, load_tasks,
 )
 from rlstack.runner.post import run_pipeline
 from rlstack.runner.signals import RunSignals

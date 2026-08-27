@@ -7,7 +7,7 @@ from __future__ import annotations
 import math
 from collections.abc import Mapping, Sequence
 
-from rlstack.client import SampleClient
+from rlstack.client import PoolClient
 from rlstack.data.trajectory import Group
 from rlstack.training.post.base import PostProcessor, postprocessor
 
@@ -18,7 +18,7 @@ class CenterReward(PostProcessor):
     produces = ("advantage",)
 
     async def process(self, group: Group, data: Mapping[str, Sequence[float]],
-                      llm: SampleClient) -> Mapping[str, Sequence[float]]:
+                      llm: PoolClient) -> Mapping[str, Sequence[float]]:
         rewards = data["reward"]
         mean = math.fsum(rewards) / len(rewards)
         return {"advantage": [r - mean for r in rewards]}

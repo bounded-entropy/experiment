@@ -1,10 +1,10 @@
-"""The sampling interface: what anything that talks to engines sees.
+"""The inference interface: what anything that talks to pools sees.
 
 Consumer-defined Protocols, deliberately neutral ground (like registry.py):
 environments (inference world) sample during rollouts, and postprocessors
-(training world) may sample after the seal (LLM judges) — both type against
-these without either world importing the other. The concrete implementation
-lives in runner/client.py.
+(training world) sample or SCORE after the seal (LLM judges, hinted/teacher
+rescoring) — both type against these without either world importing the
+other. The concrete implementation is EnginePoolClient (runner/sampling.py).
 
 The pool principle: nothing is limited to the one policy pool. `pool(name)`
 returns a client for any named engine pool in the experiment's GpuConfig —
@@ -21,7 +21,7 @@ from typing import Protocol
 from rlstack.data.trajectory import Message, Turn
 
 
-class SampleClient(Protocol):
+class PoolClient(Protocol):
     """One awaitable against one engine pool, plus a door to the others.
 
     `sample` returns a complete Turn — the engine's token ids, behavior
@@ -33,4 +33,14 @@ class SampleClient(Protocol):
     async def sample(self, messages: Sequence[Message],
                      stop: tuple[str, ...] = ()) -> Turn: ...
 
-    def pool(self, name: str) -> "SampleClient": ...
+    async def score(self, messages: Sequence[Message],
+                    token_ids: Sequence[int]) -> tuple[float, ...]:
+        """Logprobs of ALREADY-CHOSEN tokens continuing `messages`, under this
+        pool's serving stack — one prefill pass, no decode, no randomness.
+        The teacher/hinted channel (I9): post processors score sealed tokens
+        under privileged conditioning and emit token_level columns. Scoring
+        traffic is prefill-shaped — the natural tenant of a future
+        prefill-disaggregated pool."""
+        ...
+
+    def pool(self, name: str) -> "PoolClient": ...

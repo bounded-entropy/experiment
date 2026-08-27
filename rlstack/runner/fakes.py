@@ -81,6 +81,20 @@ class FakeEngine:
         self.bundle_log.append(bundle.bundle_id)
         self._known.add(bundle.bundle_id)
 
+    async def score_tokens(self, messages: Sequence[Message],
+                           token_ids: Sequence[int],
+                           bundle_id: str) -> tuple[float, ...]:
+        """Deterministic scoring: a pure function of (bundle, context, token,
+        position) — no RNG state, so scoring never perturbs sampling."""
+        if bundle_id not in self._known:
+            raise RuntimeError(f"bundle {bundle_id!r} was never registered")
+        context = "".join(m.content for m in messages)
+        return tuple(
+            -0.2 - 0.5 * (int(content_hash({
+                "bundle": bundle_id, "ctx": context,
+                "tok": int(tok), "pos": pos})[:6], 16) / 16 ** 6)
+            for pos, tok in enumerate(token_ids))
+
     async def sample_tokens(
         self,
         messages: Sequence[Message],

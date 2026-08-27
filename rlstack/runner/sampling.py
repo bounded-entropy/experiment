@@ -1,7 +1,7 @@
 """The runner's sampling side: everything between an engine's token stream
 and a sealed wave.
 
-Bottom-up: EngineSampleClient is the concrete SampleClient (rlstack/client.py
+Bottom-up: EnginePoolClient is the concrete PoolClient (rlstack/client.py
 protocol) — it drives one engine pool for one episode, assembling TokenEvents
 into Turns, and `pool(name)` hands environments and postprocessors a sibling
 for any other pool under ONE shared seed sequence. `run_episode` is the seal
@@ -32,7 +32,7 @@ from rlstack.spec.specs import SamplingSpec
 Routes = Mapping[str, tuple[Engine, Bundle]]
 
 
-class EngineSampleClient:
+class EnginePoolClient:
     """One instance per episode per pool; all siblings share ONE seed
     sequence, so multi-pool traffic is deterministic regardless of which
     pools an episode touches."""
@@ -49,10 +49,18 @@ class EngineSampleClient:
         self._engine, self._bundle = routes[pool_name]
         self._counter = _counter if _counter is not None else [0]
 
-    def pool(self, name: str) -> "EngineSampleClient":
+    def pool(self, name: str) -> "EnginePoolClient":
         """A sibling client for another pool, sharing this episode's seeds."""
-        return EngineSampleClient(self._routes, self._sampling, self._episode_seed,
+        return EnginePoolClient(self._routes, self._sampling, self._episode_seed,
                                   name, self._counter)
+
+    async def score(self, messages: Sequence[Message],
+                    token_ids: Sequence[int]) -> tuple[float, ...]:
+        """Score given tokens under this pool's pinned bundle. Deterministic:
+        consumes NO seed from the episode's sequence (scoring draws nothing),
+        so adding a scoring processor never shifts sampling seeds."""
+        return await self._engine.score_tokens(
+            messages, tuple(token_ids), self._bundle.bundle_id)
 
     async def sample(self, messages: Sequence[Message],
                      stop: tuple[str, ...] = ()) -> Turn:
@@ -105,7 +113,7 @@ def load_tasks(store: Store, uri: str) -> list[Task]:
 
 
 async def run_episode(env_name: str, task: Task,
-                      client: EngineSampleClient) -> Trajectory:
+                      client: EnginePoolClient) -> Trajectory:
     """One episode across the membrane: the Environment produces the Rollout,
     the seal turns it into a Trajectory (I1)."""
     rollout = await ENVS.get(env_name).instance.run(client, task)
@@ -153,7 +161,7 @@ async def collect_wave(
     async def one(task: Task, sample_index: int) -> Trajectory:
         async with limiter:
             episode_seed = derive(master, phase, update, task.id, sample_index)
-            client = EngineSampleClient(routes, sampling, episode_seed)
+            client = EnginePoolClient(routes, sampling, episode_seed)
             return await run_episode(env_name, task, client)
 
     jobs = [one(task, s) for task in chosen for s in range(group_size)]

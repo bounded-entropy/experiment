@@ -33,12 +33,15 @@ continue is in the repo.
 
 ## State at handover
 
-- 370 tests green on fakes. Real metal is PROVEN: the stress matrix
-  (deploy/stress_l4.py) runs seven concurrent tenants — grpo/ppo/gspo/sft/
-  sdft/opd/self_anchor, live + replay + static sources, a judge pool, lag=2
-  — on one Modal L4 with ONE shared engine and ONE shared multi-tenant
-  learner, plus sleep-sharing kill/resume and cross-container resume, all
-  green. Image pinned: vllm 0.28.0 / torch 2.13.0 / transformers 5.16.1.
+- 372 tests green on fakes. Real metal is PROVEN through the stress
+  matrix (deploy/stress_l4.py): seven concurrent tenants — grpo/ppo/gspo/
+  sft/sdft/opd/self_anchor, live + replay + static sources, a judge pool,
+  lag=2 — on one Modal L4 with ONE shared engine and ONE shared
+  multi-tenant learner, plus sleep-sharing kill/resume and cross-container
+  resume, all green. An eighth tenant (opsd: hinted scoring through
+  VllmEngine.score_tokens) is in the harness but NOT yet executed on metal
+  — first-contact expected in the prompt_logprobs indexing. Image pinned:
+  vllm 0.28.0 / torch 2.13.0 / transformers 5.16.1.
 - The Host (runner/host.py) owns metal; experiments are tenants submitted to
   it, each with its own run store (one experiment, one store, for life). The
   GpuArbiter owns admission; leases are gone. The observer
@@ -62,8 +65,6 @@ modal run deploy/stress_l4.py                   # the full stress matrix (~1h)
 
 - Parity certificates designed (#25, rlstack_engine/certificates.py) but
   unwired — logprob_gap is the running alarm. side_attention numerics are B3+.
-- The engine SCORING verb (logprobs of given tokens under a pool) — unlocks
-  true hinted OPSD as a token_level post column (#38).
 - Async post daemon ("scorer"), pool-annotated flow graph, eval `terminal`
   bit, S3Store, the UI over observe/ — all designed in CONTEXT, not built.
 - Open threads listed at the foot of CONTEXT.md (identity rings, schedule

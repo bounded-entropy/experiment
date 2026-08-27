@@ -865,6 +865,34 @@ specs; backends (local/modal/skypilot) and GPU topology are semantics-neutral.
       same arc when they touch an invariant; CONTEXT stays the
       chronological authority between fold-ins.
 
+40. THE SCORING VERB + REAL OPSD + PoolClient (settled, Samarth-directed:
+    "hinted logprobs can easily be generated in one pass via a prefill
+    engine... let's implement"). The confusion it resolved: pool-calling
+    primitives always existed for GENERATION (envs, judges — channel 1);
+    the never-built loss-side planned passes (channel 2, retired #38) were
+    for SCORING. The missing primitive was one verb:
+    - Engine.score_tokens(messages, token_ids, bundle_id) -> logprobs of
+      GIVEN tokens: ONE prefill pass (vLLM prompt_logprobs=0 over context +
+      tokens, max_tokens=1 discarded; FakeEngine: pure hash of (bundle,
+      context, token, position)). Deterministic, seedless. Prefill-shaped
+      traffic — the natural tenant of Samarth's planned prefill/decode
+      disaggregation.
+    - SampleClient RENAMED PoolClient (rlstack/client.py; concrete
+      EnginePoolClient): it samples AND scores against a named pool.
+      score() consumes NO episode seed — adding a scoring processor never
+      shifts sampling seeds (tested).
+    - hinted_logprobs builtin (training/post/): walks the sealed message
+      stream in flatten order, scores each turn's own tokens under hint +
+      preceding messages through the POLICY pool, emits a token_level
+      column. Hint = task.meta["hint"] or "The answer is {answer}. ".
+    - opsd RE-REGISTERED AS THE REAL THING: requires=("hinted_logprobs",),
+      squared match of trainer logprobs to the hinted column — pure math
+      over postdata (I9 end to end). self_anchor keeps the lagged-record
+      objective. Stress stage 3 gains opsd as an 8th tenant — the vLLM
+      score_tokens path's first-contact vehicle (written, not yet executed
+      on metal). Spec v3 + CLAUDE.md updated in the same arc (#39 rule).
+    372 tests green.
+
 ## Open threads (do NOT treat as settled; flag when your answer touches them)
 
 - Identity rings: should GpuConfig (and EvalSpec) leave the run_id hash and become

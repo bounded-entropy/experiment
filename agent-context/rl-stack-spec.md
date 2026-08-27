@@ -261,7 +261,7 @@ class Lora(Adapter):
 
 @environment("math_single_turn")     # INFERENCE WORLD; class per file
 class MathSingleTurn(Environment):
-    async def run(self, llm: SampleClient, task: Task) -> Rollout: ...
+    async def run(self, llm: PoolClient, task: Task) -> Rollout: ...
                                      # envs produce Rollouts; the RUNNER seals
 
 @postprocessor("llm_judge")          # TRAINING WORLD; runs per group, after the
@@ -286,8 +286,9 @@ def grpo(out: PolicyOutputs, b: TokenBatch) -> LossResult: ...
 # logprob_gap) — the rails; logprob_gap is the trainer/sampler mismatch alarm.
 # Builtin zoo: grpo · ppo (center_reward advantage) · gspo (sequence-level
 # ratios) · sft · sdft (reward-weighted BC) · opd · self_anchor (lagged-record
-# matching; TRUE hinted OPSD = a token_level post column, awaiting the engine
-# scoring verb).
+# matching) · opsd (REAL hinted self-distillation: the hinted_logprobs post
+# processor scores each trajectory's own tokens under privileged conditioning
+# via PoolClient.score — a token_level column the loss purely consumes).
 
 # ════════════════════════════════════════════════════════════════════
 # C. RUNTIME — hosts own metal; experiments are tenants; daemons on a blackboard
@@ -298,6 +299,13 @@ class Engine(Protocol):              # inference metal (VllmEngine / FakeEngine)
     def sample_tokens(messages, sampling, stop, bundle_id, seed)
         -> AsyncIterator[TokenEvent | FinishEvent]: ...   # engines speak TOKENS;
                                      #   the bundle is PINNED at submission (I8)
+    async def score_tokens(messages, token_ids, bundle_id)
+        -> tuple[float, ...]: ...    # logprobs of GIVEN tokens: one prefill
+                                     #   pass, no decode, deterministic — the
+                                     #   teacher half of pool traffic (judges
+                                     #   sample, teachers score); prefill-
+                                     #   shaped, the natural tenant of a
+                                     #   future prefill-disaggregated pool
     def add_bundle(bundle): ...      # additive + idempotent (I8)
     def reachability(sites) -> Mapping[str, Mechanism]: ...
     def tokenize(text) -> tuple[int, ...]: ...

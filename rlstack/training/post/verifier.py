@@ -6,7 +6,7 @@ from __future__ import annotations
 import re
 from collections.abc import Mapping, Sequence
 
-from rlstack.client import SampleClient
+from rlstack.client import PoolClient
 from rlstack.data.trajectory import Group
 from rlstack.training.post.base import PostProcessor, postprocessor
 
@@ -18,7 +18,7 @@ class Verifier(PostProcessor):
     produces = ("reward",)
 
     async def process(self, group: Group, data: Mapping[str, Sequence[float]],
-                      llm: SampleClient) -> Mapping[str, Sequence[float]]:
+                      llm: PoolClient) -> Mapping[str, Sequence[float]]:
         rewards = []
         for traj in group.trajectories:
             numbers = _NUMBER.findall(traj.turns[-1].message.content)

@@ -10,7 +10,8 @@ The matrix (Samarth's list, 2026-08):
                                a wrong adapter served would blow the gap up)
   mid-run joins                tenant starts are staggered ~30s apart, so each
                                joins an engine already serving others
-  the loss zoo                 grpo / ppo / gspo / sdft / self_anchor (live) +
+  the loss zoo                 grpo / ppo / gspo / sdft / self_anchor /
+                               opsd (hinted scoring, live) +
                                sft (static cas://) + opd (replay store://),
                                many optimizer steps each
   resource sharing, 1 GPU      engine fraction + N resident learners under
@@ -284,6 +285,9 @@ def run_stress() -> dict:
                               master=105, n_updates=24),
             "sdft": make_spec(store, loss="sdft", post=("verifier",), master=106,
                               n_updates=24),
+            "opsd": make_spec(store, loss="opsd",
+                              post=("verifier", "hinted_logprobs"),
+                              master=109, n_updates=24),
             "self_anchor": make_spec(store, loss="self_anchor", post=("verifier",), master=107,
                               n_updates=24, lag=2, epochs=2),
             # the pool treaty on real metal: the judge pool is the SAME
@@ -306,7 +310,8 @@ def run_stress() -> dict:
         results = await asyncio.gather(*(launch(name, i * 30.0)
                                          for i, name in enumerate(tenants)))
         _free()
-        gap_alarms = {"sft": 1.0, "opd": 0.5, "self_anchor": 0.25}
+        gap_alarms = {"sft": 1.0, "opd": 0.5, "self_anchor": 0.25,
+                      "opsd": 0.5}
         for name, rep in results:
             print(f"\n  -- {name} ({rep.run_id})")
             out[name] = report_run(store, rep.run_id, name, 24,

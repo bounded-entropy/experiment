@@ -1,4 +1,4 @@
-"""The sampling side: wave collection and the EngineSampleClient (rlstack.runner.sampling)."""
+"""The sampling side: wave collection and the EnginePoolClient (rlstack.runner.sampling)."""
 
 from __future__ import annotations
 
@@ -9,7 +9,7 @@ from rlstack import (
     Bundle, FakeEngine, Message, Role, SamplingSpec, Task, Trajectory,
     collect_wave,
 )
-from rlstack.runner.sampling import EngineSampleClient
+from rlstack.runner.sampling import EnginePoolClient
 from rlstack.runner.sampling import run_episode
 
 BUNDLE = Bundle(bundle_id="bundle:test0000", policy_version={"pi": 0})
@@ -30,8 +30,8 @@ def go(coro):
 
 
 class EngineSampleClientTest(unittest.TestCase):
-    def client(self, **engine_kwargs) -> EngineSampleClient:
-        return EngineSampleClient(make_pools(**engine_kwargs), SAMPLING,
+    def client(self, **engine_kwargs) -> EnginePoolClient:
+        return EnginePoolClient(make_pools(**engine_kwargs), SAMPLING,
                                   episode_seed=7)
 
     def sample(self, **engine_kwargs):
@@ -80,7 +80,7 @@ class EngineSampleClientTest(unittest.TestCase):
     def test_unregistered_bundle_is_refused(self) -> None:
         bad = Bundle(bundle_id="bundle:unknown0", policy_version={})
         pools = {"main": (make_pools()["main"][0], bad)}
-        client = EngineSampleClient(pools, SAMPLING, episode_seed=7)
+        client = EnginePoolClient(pools, SAMPLING, episode_seed=7)
         with self.assertRaises(RuntimeError):
             go(client.sample([Message(Role.USER, "hi")]))
 
@@ -88,7 +88,7 @@ class EngineSampleClientTest(unittest.TestCase):
 class RunEpisodeTest(unittest.TestCase):
     def test_env_runs_and_seals(self) -> None:
         task = Task("t0", "What is 2+3?", {"answer": 5})
-        client = EngineSampleClient(make_pools(p_correct=1.0), SAMPLING, 7)
+        client = EnginePoolClient(make_pools(p_correct=1.0), SAMPLING, 7)
         traj = go(run_episode("math_single_turn", task, client))
         self.assertIsInstance(traj, Trajectory)
         self.assertEqual(traj.turns[0].message.content, "5")

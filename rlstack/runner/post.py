@@ -3,7 +3,7 @@ The processors themselves are DECLARED in training/post/ (one class per file);
 this module only runs a declared pipeline in order.
 
 For each group, the declared processors run in pipeline order; each sees the
-columns its predecessors produced for that group and a SampleClient (judges
+columns its predecessors produced for that group and a PoolClient (judges
 sample; `llm.pool(name)` reaches any engine pool). Outputs are validated
 against the declaration — exactly the `produces` names, one float per
 trajectory — and concatenated into wave-order columns, which the loop stores
@@ -20,7 +20,7 @@ from collections.abc import Sequence
 
 from rlstack.data.trajectory import Group, Wave
 from rlstack.registry import POST
-from rlstack.runner.sampling import EngineSampleClient, Routes
+from rlstack.runner.sampling import EnginePoolClient, Routes
 from rlstack.runner.seeds import derive
 from rlstack.spec.specs import SamplingSpec
 
@@ -55,7 +55,7 @@ async def run_pipeline(
             pdef = POST.get(name)
             # a processor's declared sampling (a judge's own budget) wins
             # over the run's generation sampling; None inherits
-            client = EngineSampleClient(
+            client = EnginePoolClient(
                 routes, pdef.instance.sampling or sampling,
                 derive(master, phase, update, group.key, name))
             out = await pdef.instance.process(group, data, client)

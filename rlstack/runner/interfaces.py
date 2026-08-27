@@ -3,7 +3,7 @@ metal), plus the event and result types that cross them.
 
 The Engine speaks TOKENS — its native unit — as a stream of TokenEvents ending
 in a FinishEvent; a request's bundle is pinned at submission, so registering a
-new bundle never disturbs generation in flight. The EngineSampleClient
+new bundle never disturbs generation in flight. The EnginePoolClient
 (runner/client.py) assembles the stream into a Turn, the membrane's record unit.
 
 Everything real slides in behind these protocols: FakeEngine/FakeLearner for
@@ -114,6 +114,18 @@ class Engine(Protocol):
     ) -> AsyncIterator[TokenEvent | FinishEvent]:
         """Stream tokens for one request, pinned to `bundle_id`, ending with a
         FinishEvent. Registering new bundles never affects requests in flight."""
+        ...
+
+    async def score_tokens(
+        self,
+        messages: Sequence[Message],
+        token_ids: Sequence[int],
+        bundle_id: str,
+    ) -> tuple[float, ...]:
+        """Logprob of each given token continuing `messages`, pinned to
+        `bundle_id` — ONE prefill pass over context + tokens, no decode loop,
+        deterministic (no seed). The scoring half of the pool surface: judges
+        sample, teachers score."""
         ...
 
     def add_bundle(self, bundle: Bundle) -> None:

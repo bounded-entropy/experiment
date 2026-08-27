@@ -221,3 +221,69 @@ class TokenLevelColumnTest(unittest.TestCase):
             go(run_pipeline(("post_token_liar",), wave, pools(),
                             SamplingSpec(), master=7, update=1))
         self.assertIn("generated tokens", str(caught.exception))
+
+
+class ScoringAndHintedTest(unittest.TestCase):
+    """The scoring verb and the real OPSD channel: score() is deterministic,
+    consumes no sampling seed, and hinted_logprobs lands a token-aligned
+    teacher column produced entirely by the post pipeline (I9)."""
+
+    def test_score_is_deterministic_and_seed_neutral(self) -> None:
+        from rlstack import Message, Role
+        from rlstack.runner.sampling import EnginePoolClient
+
+        async def scenario():
+            routes = pools()
+            msgs = (Message(Role.USER, "What is 2+2?"),)
+            a = EnginePoolClient(routes, SamplingSpec(), episode_seed=7)
+            b = EnginePoolClient(routes, SamplingSpec(), episode_seed=7)
+            await a.sample(msgs)
+            await b.sample(msgs)
+            scores = await a.score(msgs, (52, 53))        # only a scores
+            again = await a.score(msgs, (52, 53))
+            second_a = await a.sample(msgs)
+            second_b = await b.sample(msgs)
+            return scores, again, second_a, second_b
+
+        scores, again, second_a, second_b = go(scenario())
+        self.assertEqual(scores, again)                   # deterministic
+        self.assertEqual(len(scores), 2)
+        self.assertTrue(all(s < 0 for s in scores))
+        # scoring drew nothing: a's second sample matches b's exactly
+        self.assertEqual(second_a.token_ids, second_b.token_ids)
+        self.assertEqual(second_a.seed, second_b.seed)
+
+    def test_hinted_pipeline_feeds_opsd_end_to_end(self) -> None:
+        import tempfile
+
+        from common import arith_spec, arith_store
+        from dataclasses import replace
+        from rlstack import (
+            FakeEngine, FakeLearner, fake_qwen_schema, run_experiment,
+        )
+
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        store, train, heldout = arith_store(tmp.name)
+        base = arith_spec(train, heldout)
+        spec = replace(base, algo=replace(
+            base.algo, loss="opsd", post=("verifier", "hinted_logprobs")))
+
+        report = run_experiment(spec, fake_qwen_schema(4, base="Qwen/Qwen3-0.6B"),
+                                store, FakeEngine(), FakeLearner())
+        run = store.open_run(report.run_id)
+        self.assertEqual(len(run.read_ledger()), 4)
+
+        postdata = run.read_postdata(1)
+        rows = run.read_wave(1)
+        for vector, row in zip(postdata["hinted_logprobs"], rows):
+            generated = sum(len(t["token_ids"]) for t in row["turns"])
+            self.assertEqual(len(vector), generated)      # token-aligned
+            self.assertTrue(all(v < 0 for v in vector))
+
+        dictionary = store.peek_dictionary(report.run_id)
+        by_name = {(c["name"], c["phase"]): c for c in dictionary["columns"]}
+        hinted = by_name[("hinted_logprobs", "post")]
+        self.assertEqual(hinted["granularity"], "token")
+        self.assertTrue(hinted["feeds_loss"])
+        self.assertIn("loss:opsd", hinted["consumers"])

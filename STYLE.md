@@ -30,7 +30,7 @@ The one reader is Samarth, six months from now, mid-experiment. Optimize for
    ```
    spec/           the contract — declarative values, identity, submit gate
    registry.py     the index: name -> typed record; registrations live elsewhere
-   client.py       the sampling interface (SampleClient Protocol, pool(name))
+   client.py       the sampling interface (PoolClient Protocol, pool(name))
                    — neutral ground both worlds may type against
    policy/         the bridge (I2): sites + adapters/ (one file each) + compile
    inference/      the sampling world: Rollout + environments/ (an episode is

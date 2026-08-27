@@ -14,7 +14,7 @@ before the loss. Each processor is a CLASS in its own file under this folder:
 
 The contract every subclass inherits: `process` sees ONE group (the scope of a
 partial loss contribution), the columns earlier processors produced for that
-group, and a SampleClient (an LLM judge is just a processor that samples —
+group, and a PoolClient (an LLM judge is just a processor that samples —
 `llm.pool(name)` reaches any engine pool). It returns one vector per declared
 `produces` name, len(group) floats each, in group order.
 
@@ -32,7 +32,7 @@ from abc import ABC, abstractmethod
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 
-from rlstack.client import SampleClient
+from rlstack.client import PoolClient
 from rlstack.data.trajectory import Group
 from rlstack.registry import POST, source_hash
 from rlstack.spec.specs import SamplingSpec
@@ -63,7 +63,7 @@ class PostProcessor(ABC):
 
     @abstractmethod
     async def process(self, group: Group, data: Mapping[str, Sequence[float]],
-                      llm: SampleClient) -> Mapping[str, Sequence[float]]:
+                      llm: PoolClient) -> Mapping[str, Sequence[float]]:
         """One vector per `produces` name; each len(group), in group order."""
 
 
