@@ -947,10 +947,92 @@ specs; backends (local/modal/skypilot) and GPU topology are semantics-neutral.
     grad-collapse at saturation; gap_per_ktok correctly refused by the
     older run's dictionary. 382 tests green.
 
+43. THE FLEET: HOSTS AS ATOMIC PARTITIONS + JOIN/CARVE/ACQUIRE (settled,
+    Samarth-directed, the multi-GPU milestone's foundation). His rulings,
+    verbatim intent: per-capability hosts ("if a new experiment comes in
+    which just wants the tp-4 inference worker, it should be able to just
+    contact that host"); the unit ("a host should just represent some
+    partition of some gpu (or gpus) that can be used for some purpose and
+    cannot be reduced. thats the unit — not a gpu, not a node, not a
+    container"); sub-GPU hosts (0.5 inference + 0.5 training on one GPU);
+    alternation as ONE host with multiple regimes, never two hosts
+    coordinating; carve automatic, acquire human; the learner never remote.
+    Landed as (all fakes-proven; real TP/FSDP metal is the next layer):
+    - SHARDING IS A BUILD FACT: Engine.tp and Learner.fsdp are attributes
+      of the BUILD (FakeEngine(tp=), VllmEngine(tp=) → tensor_parallel_size,
+      TorchLearner.fsdp=1, FakeLearner(fsdp=)); the submit gate attests
+      them (validate.check_members_match_their_shape → pool-shape-mismatch
+      / learner-shape-mismatch, run with the other live-metal checks);
+      Host.bind_pools is shape-matched (tp has no wildcard). Switching
+      shards = handing different metal, never editing a spec.
+    - HOST = ATOMIC PURPOSED PARTITION (runner/host.py): born with a
+      Partition (gpuset, device indices, memory fraction — vLLM's
+      gpu_memory_utilization is a reservation, torch's
+      set_per_process_memory_fraction a cap; SM contention across
+      partitions is a stated cost) and Regimes (inference|training × base
+      × shape). attest_regimes dies at construction on wrong metal;
+      capability is a BIRTH FACT, never mutated after. >1 regime = the
+      host ALTERNATES them on its own arbiter exclusive group
+      ("host:<name>"); regime residents attach at birth with fraction 0.0,
+      so every JOIN is fraction-free (is_attached short-circuits
+      check_fit — fraction is a carve hint, meaningless once the weights
+      live). A tenant's sleep demand on metal already in a host group
+      DEFERS to the metal's truth (arbiter.attach: group None defers;
+      attach_residents consults arbiter.attached_group); sleep on
+      always-resident metal still raises.
+    - THE WIRE (runner/remote.py): HostService executes pool verbs on the
+      owning host's metal under the owning host's arbiter (admission
+      stays with the partition; engines addressed by CAPABILITY (base,
+      tp), never pool name). Transport carries JSON-safe dict frames —
+      async call() for admitted verbs (sample/score), sync ask() for
+      admission-free ones (add_bundle — additive by the tenancy
+      invariant — reachability, tokenize). RemotePool implements the full
+      Engine protocol over it; the runner cannot tell remote from local
+      (PROVEN: a run with a remote main pool is byte-identical to the
+      local run). LocalTransport json-round-trips every frame both ways,
+      so the Modal-cls transport is a drop-in (NOT YET BUILT). v0:
+      non-streamed sample replies; bundles ship bytes. Remote pools
+      attach locally as zero-footprint residents; remote + sleep group
+      refused (alternation is intra-partition).
+    - THE LADDER (runner/fleet.py): demands_of(spec) reads capability
+      demands (kind, base, shape; memory = the carve hint) off gpu_config.
+      JOIN (a host's regimes cover the unit; automatic, the target
+      host's arbiter decides, fractions ignored) → CARVE (first-fit over
+      RESIDUAL — capacity no partition owns, so automatic BECAUSE
+      journaled (fleet/log.jsonl, Store.append_fleet_event); residual-
+      only, never reshapes an existing host) → ACQUIRE (new metal = money
+      = human; place() names what to buy, submit() refuses to run it).
+      Placement units: a sleep group is ONE unit → ONE multi-regime host;
+      concurrent members place PER MEMBER (per-capability hosts;
+      concurrent grouping was only a colocation hint and colocation is
+      semantics-neutral, I5). Fleet.submit: the runner goes to the
+      learner's host (the learner is NEVER remote), reaches every other
+      partition through RemotePools, and journals the placement under the
+      run's identity before the run opens.
+    - Trainer BATCHES the forward now: TorchLearner._batched_logprobs is
+      one padded forward per microbatch (left-aligned docs + causal
+      attention ⇒ numerics identical to the per-doc [1,L] forwards it
+      replaced; padding never enters the gather). Prerequisite for the
+      8B-FSDP milestone; document-masked packing is the later upgrade.
+    NOT YET BUILT (the milestone's remaining layers): real TP engines +
+    FSDP learner processes; the Modal-cls transport + per-capability host
+    deployment; host linger/GC back to residual; join-refusal beyond
+    adapter slots (needs a measured saturation signal, not declared_load);
+    the OPD 8B←32B e2e across three L4 hosts. 401 tests green (test_fleet,
+    test_remote, ShapeAndRegimeTest new).
+
 ## Open threads (do NOT treat as settled; flag when your answer touches them)
 
 - Identity rings: should GpuConfig (and EvalSpec) leave the run_id hash and become
-  submit-time config (resume-across-hardware keeps identity)?
+  submit-time config (resume-across-hardware keeps identity)? #43 sharpens this:
+  demands are capability (base, shape) — arguably identity — while fractions and
+  grouping are placement hints — arguably not.
+- Generation-only runs (algo=None still NotImplementedError): the experiment
+  contract is identity + the sealed-by-ledger commit protocol + an extent +
+  self-description — none require gradients. Needs a committing Sealer daemon
+  (Trainer minus post/gradients) and the wave-shape/extent knobs (group_size,
+  trajectories_per_wave, n_waves) relocated out of Schedule (ties into the
+  schedule-split thread below).
 - Schedule: split statistical (group_size, epochs_per_wave, max_policy_lag) from
   engineering (microbatch_tokens) knobs?
 - Wave / ArchiveContext typing for the advantage stage (least-specified interface;

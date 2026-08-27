@@ -104,6 +104,12 @@ class Engine(Protocol):
     """The model this metal serves — checked against each pool's declared
     base at submit (pool-base-mismatch). None is the fake-metal wildcard."""
 
+    tp: int
+    """Tensor-parallel width of this BUILD — how many devices one forward
+    spans. Sharding is a build fact like reachability (#43): a pool declaring
+    tp=4 binds only onto an engine built tp=4 (pool-shape-mismatch), and
+    switching shards means handing different metal, never editing a spec."""
+
     def sample_tokens(
         self,
         messages: Sequence[Message],
@@ -154,6 +160,11 @@ class Learner(Protocol):
     switching costs module rebinds, never weight copies); batched multi-tenant
     forwards are a kernel upgrade behind the same surface.
     """
+
+    fsdp: int
+    """FSDP shard width of this BUILD — across how many ranks the base's
+    parameters shard. A build fact (#43), attested at submit against the
+    LearnerMember's declared fsdp (learner-shape-mismatch); 1 = unsharded."""
 
     def install(
         self,

@@ -31,14 +31,17 @@ from rlstack.spec.specs import SamplingSpec
 class VllmEngine:
     def __init__(self, base: str, *, gpu_memory_utilization: float = 0.45,
                  max_model_len: int = 1024, max_loras: int = 8,
-                 max_lora_rank: int = 32, enforce_eager: bool = True) -> None:
+                 max_lora_rank: int = 32, enforce_eager: bool = True,
+                 tp: int = 1) -> None:
         from transformers import AutoTokenizer
 
         self.base = base
+        self.tp = tp                # build fact (#43): tensor-parallel width
         self._engine_args = dict(
             model=base, enable_lora=True, max_loras=max_loras,
             max_lora_rank=max_lora_rank, max_model_len=max_model_len,
             gpu_memory_utilization=gpu_memory_utilization,
+            tensor_parallel_size=tp,
             enforce_eager=enforce_eager, disable_log_stats=True)
         self._tokenizer = AutoTokenizer.from_pretrained(base)
         self._llm = None                       # built inside the running loop

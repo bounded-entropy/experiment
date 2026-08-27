@@ -16,8 +16,9 @@ from dataclasses import replace
 
 from common import arith_spec, arith_store
 from rlstack import (
-    FakeEngine, FakeLearner, GpuConfig, GpuGroup, Host, HostError, Seeds,
-    fake_qwen_schema, gpus, learner, pool, run_experiment,
+    FakeEngine, FakeLearner, GpuConfig, GpuGroup, Host, HostError, Partition,
+    Regime, Seeds, SpecError, fake_qwen_schema, gpus, learner, pool,
+    run_experiment,
 )
 from rlstack.observe import render_gpu, render_hosts, render_runs, store_for
 
@@ -230,6 +231,78 @@ class StoreOwnershipTest(unittest.TestCase):
 
         clean = render_runs([self.journal_store])
         self.assertNotIn("FORK", clean)
+
+
+class ShapeAndRegimeTest(unittest.TestCase):
+    """Sharding as build facts, hosts as attested partitions (#43): binding
+    matches shape exactly, attestation dies at construction, and a
+    regime-host's joins are fraction-free (the partition is the footprint)."""
+
+    def setUp(self) -> None:
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.store, self.train, _ = arith_store(tmp.name)
+
+    def test_bind_is_shape_matched(self) -> None:
+        tp2 = FakeEngine(base="Qwen/Qwen3-8B", tp=2)
+        host = Host("shaped", engines=(FakeEngine(), tp2),
+                    learner=FakeLearner(), store=self.store)
+        spec = arith_spec(self.train, gpu_config=GpuConfig(groups=(
+            GpuGroup(gpus(n=2), (pool("judge", base="Qwen/Qwen3-8B", tp=2),)),
+            GpuGroup(gpus(n=1), (pool("main"), learner())),)))
+        self.assertIs(host.bind_pools(spec)["judge"], tp2)
+
+        four = arith_spec(self.train, gpu_config=GpuConfig(groups=(
+            GpuGroup(gpus(n=4), (pool("judge", base="Qwen/Qwen3-8B", tp=4),)),
+            GpuGroup(gpus(n=1), (pool("main"), learner())),)))
+        with self.assertRaises(HostError) as caught:
+            host.bind_pools(four)
+        self.assertIn("tp=4", str(caught.exception))
+
+    def test_attestation_refuses_mismatched_metal(self) -> None:
+        with self.assertRaises(HostError) as caught:
+            Host("bad", engines=(FakeEngine(tp=1),), learner=FakeLearner(),
+                 store=self.store,
+                 regimes=(Regime("teacher-tp4", "inference", None, 4),))
+        self.assertIn("tp=4", str(caught.exception))
+
+        with self.assertRaises(HostError) as caught:
+            Host("bad2", engines=(FakeEngine(),), learner=FakeLearner(),
+                 store=self.store,
+                 regimes=(Regime("learner-fsdp2", "training", None, 2),))
+        self.assertIn("fsdp=2", str(caught.exception))
+
+    def test_a_regime_host_admits_joins_fraction_free(self) -> None:
+        """Fractions this heavy would be refused by a bare host (see
+        test_capacity_refuses_what_cannot_fit) — on a regime-host they are
+        carve hints, ignored: the partition already is the footprint, and
+        the run alternates under the host's own birth group."""
+        host = Host(
+            "carved", engines=(FakeEngine(),), learner=FakeLearner(),
+            store=self.store,
+            partition=Partition("node-a", (0,), 1.0),
+            regimes=(Regime("main-tp1", "inference", None, 1),
+                     Regime("learner-fsdp1", "training", None, 1)))
+        def heavy(master: int):
+            return arith_spec(self.train, seeds=Seeds(master=master),
+                              gpu_config=GpuConfig(groups=(
+                                  GpuGroup(gpus(n=1),
+                                           (pool("main", fraction=0.6),
+                                            learner(fraction=0.4))),)))
+
+        report = go(host.submit(heavy(17), SCHEMA))     # two full-fraction
+        go(host.submit(heavy(99), SCHEMA))              # tenants both admit
+        self.assertEqual(report.updates_completed, 4)
+        self.assertEqual(host.arbiter.declared_load(), 0.0)
+        self.assertGreater(len(host.arbiter.switches), 1)
+
+    def test_learner_shape_mismatch_is_a_binding_issue(self) -> None:
+        spec = arith_spec(self.train, gpu_config=GpuConfig(groups=(
+            GpuGroup(gpus(n=2), (pool("main"), learner(fsdp=2))),)))
+        with self.assertRaises(SpecError) as caught:
+            run_experiment(spec, SCHEMA, self.store, FakeEngine(),
+                           FakeLearner())
+        self.assertIn("learner-shape-mismatch", str(caught.exception))
 
 
 class StoreForTest(unittest.TestCase):

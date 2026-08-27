@@ -113,6 +113,23 @@ consumers, phase, granularity, and whether it feeds the loss. Derived, never
 identity. A UI renders a run from its own dictionary — no registry, no version
 skew.
 
+**I12 — A host is an atomic purposed partition; capability is a birth fact.**
+The fleet's unit is not a GPU, a node, or a container: it is a Partition (some
+slice of some GPUs — half of one L4 up through devices spanning nodes) born
+with Regimes (inference|training × base × shard shape), attested against the
+metal at construction and never grown or reshaped after. Sharding (Engine.tp,
+Learner.fsdp) is a build fact the submit gate attests, like reachability.
+Placement climbs a ladder with one currency and one decider per rung: JOIN
+(capability exists; automatic; the target host's own arbiter admits — declared
+fractions are carve hints, ignored once the weights live), CARVE (from
+RESIDUAL only — capacity no partition owns — automatic because journaled;
+births a new host, never reshapes one), ACQUIRE (new metal = money = a
+human). A multi-regime host ALTERNATES its regimes on its own arbiter group —
+one host wearing masks, never two hosts coordinating — so a sleep group
+places onto exactly one host. The learner is never remote: the runner goes to
+the learner's host and reaches every other partition through RemotePools
+(Engine protocol over a transport; admission host-side, where the metal is).
+
 ## 2. Primitives
 
 **A. Specs** (hashable — they are identity) · **B. Registries** (declared +
@@ -294,8 +311,11 @@ def grpo(out: PolicyOutputs, b: TokenBatch) -> LossResult: ...
 # C. RUNTIME — hosts own metal; experiments are tenants; daemons on a blackboard
 # ════════════════════════════════════════════════════════════════════
 
-class Engine(Protocol):              # inference metal (VllmEngine / FakeEngine)
+class Engine(Protocol):              # inference metal (VllmEngine / FakeEngine
+                                     #   / RemotePool — the wire, I12)
     base: str | None                 # what this metal serves (checked at submit)
+    tp: int                          # BUILD fact (I12): tensor-parallel width,
+                                     #   shape-matched at bind, no wildcard
     def sample_tokens(messages, sampling, stop, bundle_id, seed)
         -> AsyncIterator[TokenEvent | FinishEvent]: ...   # engines speak TOKENS;
                                      #   the bundle is PINNED at submission (I8)
@@ -311,20 +331,40 @@ class Engine(Protocol):              # inference metal (VllmEngine / FakeEngine)
     def tokenize(text) -> tuple[int, ...]: ...
 
 class Learner(Protocol):             # training metal (TorchLearner / FakeLearner)
+    fsdp: int                        # BUILD fact (I12): shard width, attested
+                                     #   against LearnerMember.fsdp at submit
     def install(tenant, spec, resolved_sites): ...        # additive per tenant (I8)
     def forward_backward(tenant, batch) -> TrainStats: ...
     def optim_step(tenant): ...
     def emit(tenant) -> Emitted: ...
     def load(tenant, adapters, optim): ...
 
-# THE HOST owns one GpuSet's quartet — engines, ONE learner, the arbiter, its
-# journal store — and submission is how an experiment reaches metal:
-#   await host.submit(spec, schema, store)   # the experiment's OWN run store (I10)
-#     bind    declared pools onto owned engines by base
-#     fit     refuse past capacity (the host sees every tenant)
+# THE HOST is an atomic purposed partition (I12): born with a Partition
+# (gpuset, devices, memory fraction) and Regimes it attests its metal against
+# (engines by (base, tp); the learner by fsdp); >1 regime alternates on the
+# host's own arbiter group. It owns engines, at most ONE learner, the
+# arbiter, its journal store — and submission is how an experiment reaches it:
+#   await host.submit(spec, schema, store,   # the experiment's OWN store (I10)
+#                     remotes={...})         # pools served by OTHER hosts
+#     bind    declared pools onto owned engines by base AT the declared tp
+#     fit     refuse past capacity (regime residents attached at birth with
+#             fraction 0.0 — every join is fraction-free; remotes never count)
 #     attest  roster in memory + journal to hosts/<name>/log.jsonl
 #     run     run_experiment_async under the host's shared arbiter
 # run_experiment(spec, schema, store, engines, learner) remains the direct form.
+
+# THE FLEET (runner/fleet.py) holds Metal + hosts and climbs the I12 ladder:
+# demands_of(spec) reads (kind, base, shape, memory-hint) off gpu_config;
+# sleep groups place as ONE unit (one multi-regime host), concurrent members
+# per member (per-capability hosts). place() -> Plan(Join|Carve|Acquire);
+# apply() executes the automatic rungs (carves journaled in fleet/log.jsonl);
+# submit() runs beside the learner's host with RemotePools to the rest.
+
+# THE WIRE (runner/remote.py): HostService executes pool verbs under the
+# OWNING host's arbiter, addressed by capability (base, tp); Transport
+# carries JSON-safe frames (async call: sample/score — admitted; sync ask:
+# add_bundle/reachability/tokenize — admission-free by I8); RemotePool is the
+# Engine protocol over it — a remote main pool is byte-identical to local.
 
 # THE ARBITER is the physical half: object-keyed RESIDENTS (an engine, a
 # learner) attach with an exclusive group (from sharing="sleep") or none;

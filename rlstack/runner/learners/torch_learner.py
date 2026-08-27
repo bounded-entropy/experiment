@@ -59,6 +59,7 @@ class TorchLearner:
         self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
         self.dtype = dtype
         self.grad_clip = grad_clip
+        self.fsdp = 1               # build fact (#43): this build is unsharded
         self._base: str | None = None
         self._model: torch.nn.Module | None = None
         self._tenants: dict[str, _Tenant] = {}
@@ -100,8 +101,7 @@ class TorchLearner:
     def forward_backward(self, tenant: str, batch: TokenBatch) -> TrainStats:
         state = self._tenant(tenant)
         self._ensure_active(tenant)
-        logprobs = torch.cat([self._doc_logprobs(batch, start, stop)
-                              for start, stop in _doc_spans(batch)])
+        logprobs = self._batched_logprobs(batch)
         result = state.loss_fn(PolicyOutputs(logprobs=logprobs), batch)
         result.loss.backward()
         return TrainStats(loss=float(result.loss), mean_ratio=result.mean_ratio,
@@ -185,19 +185,36 @@ class TorchLearner:
 
     # ---- the forward --------------------------------------------------------
 
-    def _doc_logprobs(self, batch: TokenBatch, start: int, stop: int) -> torch.Tensor:
-        """[stop-start] logprobs: position t scores token t given tokens < t.
+    def _batched_logprobs(self, batch: TokenBatch) -> torch.Tensor:
+        """Per-token logprobs for every doc, ONE padded forward per
+        microbatch: position t scores token t given tokens < t within its
+        own doc.
 
-        Position 0 has no prefix; its logprob is 0.0 — flatten guarantees a
-        doc never starts with a trainable token (prompts come first).
-        """
-        ids = torch.tensor(batch.token_ids[start:stop], dtype=torch.long,
-                           device=self.device)
-        logits = self._model(ids[None]).logits[0]           # [L, V]
-        given_prefix = torch.log_softmax(logits[:-1].float(), dim=-1)
-        chosen = given_prefix.gather(1, ids[1:, None])[:, 0]  # [L-1]
-        zero = torch.zeros(1, dtype=chosen.dtype, device=self.device)
-        return torch.cat([zero, chosen])
+        Numerics are identical to the per-doc [1, L] forward it replaced:
+        docs are left-aligned and attention is causal, so a real position
+        never attends to the right padding behind it, and padded positions
+        never enter the gather. Position 0 has no prefix; its logprob is
+        0.0 — flatten guarantees a doc never starts with a trainable token
+        (prompts come first)."""
+        spans = _doc_spans(batch)
+        docs = [batch.token_ids[start:stop] for start, stop in spans]
+        longest = max(len(doc) for doc in docs)
+        padded = torch.zeros((len(docs), longest), dtype=torch.long,
+                             device=self.device)
+        for row, doc in enumerate(docs):
+            padded[row, :len(doc)] = torch.tensor(doc, dtype=torch.long,
+                                                  device=self.device)
+        logits = self._model(padded).logits                 # [D, longest, V]
+        zero = torch.zeros(1, dtype=torch.float32, device=self.device)
+        per_doc = []
+        for row, doc in enumerate(docs):
+            length = len(doc)
+            given_prefix = torch.log_softmax(
+                logits[row, :length - 1].float(), dim=-1)   # [L-1, V]
+            chosen = given_prefix.gather(
+                1, padded[row, 1:length, None])[:, 0]       # [L-1]
+            per_doc.append(torch.cat([zero, chosen]))
+        return torch.cat(per_doc)
 
     def _grad_norm(self, state: _Tenant) -> float:
         total = 0.0
