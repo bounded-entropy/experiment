@@ -842,6 +842,29 @@ specs; backends (local/modal/skypilot) and GPU topology are semantics-neutral.
     370 tests green; stress tenant renamed self_anchor (identity shift for
     opd/self_anchor specs only).
 
+39. DOC DEBT PAID (Samarth's process check: "as we're introducing new
+    invariants... you should be keeping track in the relevant docs").
+    Audit: CONTEXT.md / STYLE.md / code docstrings had tracked every change;
+    rl-stack-spec.md was frozen at v2 (the #21 "deltas pending fold-in"
+    debt, 18 entries deep — several sections outright wrong) and CLAUDE.md
+    described the pre-metal world. Remediated:
+    - rl-stack-spec.md REWRITTEN AS v3: folded #21–#38. The contract grew
+      four earned invariants — I8 multi-tenancy on both sides of the
+      bridge, I9 the loss is pure math / post owns production, I10 one
+      experiment one store (+ observers never attach), I11 runs
+      self-describe. Sections rewritten to current surfaces
+      (TrajectorySource, pool()/GpuGroup, post pipelines, Mechanism
+      reachability, Host/arbiter/blackboard runtime, waves/ + hosts/ +
+      dictionary store layout); examples modernized (judge + token_level as
+      the extension story; the seven-tenant stress as Example 6); honest
+      status notes kept inline (parity unwired, FSDP unexercised).
+    - CLAUDE.md rewritten to the current handover (370 tests, metal proven,
+      pins, Host/arbiter/observer state, quick commands, known-open list).
+    - PROCESS RULE going forward (also now in CLAUDE.md): spec-shape
+      changes get a CONTEXT entry ALWAYS, and fold into the spec in the
+      same arc when they touch an invariant; CONTEXT stays the
+      chronological authority between fold-ins.
+
 ## Open threads (do NOT treat as settled; flag when your answer touches them)
 
 - Identity rings: should GpuConfig (and EvalSpec) leave the run_id hash and become

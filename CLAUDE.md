@@ -1,8 +1,8 @@
 # rlstack — session handover
 
 Samarth's personal high-throughput RL-for-LLMs harness ("the thin wrapper").
-This file exists because the project was designed and built across long
-Claude sessions; everything you need to continue is in the repo.
+Designed and built across long Claude sessions; everything you need to
+continue is in the repo.
 
 ## Read before writing code
 
@@ -10,14 +10,13 @@ Claude sessions; everything you need to continue is in the repo.
    architecture, enforced by `tests/test_architecture.py`. Deviations are
    review findings.
 2. **agent-context/CONTEXT.md** — the decision log. Chronological, numbered;
-   later entries supersede earlier ones (#18–#27 cover the current shape:
-   post pipeline, Store ABC, site treaty, Mechanism/reachability, adapter
-   exports, engine plugins, B2/B3 on Modal, the blackboard runner). If code
-   and an early log entry disagree, the code plus the latest entry win.
-3. **agent-context/rl-stack-spec.md** — the original spec canon (invariants
-   I1–I7, worked examples). STALE relative to the deltas logged in
-   CONTEXT.md; trust it for the invariants and vocabulary, not for exact
-   type shapes.
+   later entries supersede earlier ones (#28–#38 cover the current shape:
+   the trajectory/wave rename, the loss zoo + stress matrix, the GpuArbiter,
+   the multi-tenant Learner, the Host, the operational CLI + observe/, the
+   flow graph + dictionary.json, and the #38 loss-purity ruling). If code
+   and an early entry disagree, the code plus the latest entry win.
+3. **agent-context/rl-stack-spec.md** — the spec canon, v3 (folded through
+   #38). Invariants I1–I11. Deltas after the fold-in live in CONTEXT.md.
 
 ## Working norms (Samarth's, stated across sessions)
 
@@ -25,39 +24,47 @@ Claude sessions; everything you need to continue is in the repo.
   positions. Docstrings state the rule a thing enforces.
 - One named function/method per rule; typed records, no meta-dict bags, no
   duck-typing (we own both sides of every interface).
-- Spec-shape changes get a new numbered entry in agent-context/CONTEXT.md.
+- Spec-shape changes get a new numbered entry in agent-context/CONTEXT.md —
+  and fold into rl-stack-spec.md when they change an invariant.
 - The fakes suite must stay green: `python3 -m unittest discover -s tests`
-  (Python ≥ 3.11; stdlib-only — torch/vllm/modal imports are all lazy).
-  Resume-equivalence (`tests/test_resume.py`) is byte-identical run dirs —
-  protect it.
+  (Python ≥ 3.11 — use python3.13 locally; stdlib-only, torch/vllm/modal
+  lazy). Resume-equivalence (`tests/test_resume.py`) is byte-identical run
+  dirs — protect it.
 
-## State at handover (commit 489d047 + agent-context)
+## State at handover
 
-- 327 tests green on fakes. Phase A + B1 done; B2 (TorchLearner, real grpo,
-  LoRA compute halves) and B3 (VllmEngine) are WRITTEN BUT NEVER EXECUTED —
-  the authoring environment had no PyPI/network, so real metal is untouched.
-- Runner is a blackboard: daemons (generator/trainer/evaluator) synchronized
-  only via the store (runner/signals.py), colocation via leases
-  (runner/lease.py). `max_policy_lag` = opportunistic buffer bound B; B=0
-  reproduces the old sequential runner byte-for-byte.
+- 370 tests green on fakes. Real metal is PROVEN: the stress matrix
+  (deploy/stress_l4.py) runs seven concurrent tenants — grpo/ppo/gspo/sft/
+  sdft/opd/self_anchor, live + replay + static sources, a judge pool, lag=2
+  — on one Modal L4 with ONE shared engine and ONE shared multi-tenant
+  learner, plus sleep-sharing kill/resume and cross-container resume, all
+  green. Image pinned: vllm 0.28.0 / torch 2.13.0 / transformers 5.16.1.
+- The Host (runner/host.py) owns metal; experiments are tenants submitted to
+  it, each with its own run store (one experiment, one store, for life). The
+  GpuArbiter owns admission; leases are gone. The observer
+  (rlstack/observe/, `python -m rlstack {hosts,runs,gpu}`) reads journals +
+  peeks only — never experiment content (that is the coming UI, which
+  renders each run from its own dictionary.json).
+- The loss is pure math (#38): requires names data columns only; post
+  processors produce everything else (token_level = per-token channel).
 
-## Immediate task: first real run, one Modal L4
+## Quick commands
 
 ```
-modal run deploy/modal_app.py::run_tests   # full suite inside the image (CPU)
-modal run deploy/modal_app.py::run_arith   # Qwen3-0.6B + LoRA + GRPO on L4
+python3.13 -m unittest discover -s tests        # fakes suite (~1s)
+modal run deploy/modal_app.py::run_tests        # same suite inside the image
+modal run deploy/modal_app.py::run_arith        # small real run via the Host
+modal run deploy/modal_app.py::hosts            # observer views on the volume
+modal run deploy/stress_l4.py                   # the full stress matrix (~1h)
 ```
 
-- Expect first-contact breakage in `rlstack/runner/engines/vllm_engine.py`
-  (AsyncLLMEngine kwargs, `logprobs=0` indexing, memory fractions 0.45/0.40)
-  and `rlstack/runner/learners/torch_learner.py`. Fix there; the client
-  library and data layer should not need to move.
-- `run_arith` prints resolved vllm/torch/transformers versions — PIN them in
-  `deploy/modal_app.py`'s image after the first green run (TODO(I7) marked).
-- Watch `logprob_gap` in the per-update printout: ~1e-2 (bf16 noise) is
-  healthy; large means trainer/sampler mismatch — the disease this stack
-  exists to catch. Reward trending up on 2-digit addition = success.
-- Known v0 simplifications (deliberate, logged): raw-completion prompts (no
-  chat template), uniform LoRA rank per merged bundle, engine+learner
-  colocated in one process, byte-identical resume is a fakes-only property
-  on real metal.
+## Known-open work (deliberate, logged)
+
+- Parity certificates designed (#25, rlstack_engine/certificates.py) but
+  unwired — logprob_gap is the running alarm. side_attention numerics are B3+.
+- The engine SCORING verb (logprobs of given tokens under a pool) — unlocks
+  true hinted OPSD as a token_level post column (#38).
+- Async post daemon ("scorer"), pool-annotated flow graph, eval `terminal`
+  bit, S3Store, the UI over observe/ — all designed in CONTEXT, not built.
+- Open threads listed at the foot of CONTEXT.md (identity rings, schedule
+  split, Wave/ArchiveContext typing).
