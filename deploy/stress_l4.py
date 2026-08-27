@@ -66,7 +66,8 @@ def arith_tasks(n: int, seed: int) -> bytes:
 
 
 def make_spec(store, *, loss, post, master, n_updates, source="live", lag=0,
-              epochs=1, group_size=4, per_wave=16, lr=1e-4, sharing="concurrent"):
+              epochs=1, group_size=4, per_wave=16, lr=1e-4, sharing="concurrent",
+              judge_pool=False):
     """One tenant's spec. Deterministic given its arguments (cas_put dedupes),
     so stage 5's second container rebuilds the identical identity."""
     from rlstack import (
@@ -78,6 +79,8 @@ def make_spec(store, *, loss, post, master, n_updates, source="live", lag=0,
     train = store.cas_put(arith_tasks(64, seed=0))
     heldout = store.cas_put(arith_tasks(16, seed=1))
     live = source == "live"
+    members = (engines("main", fraction=0.30),) + (
+        (engines("judge"),) if judge_pool else ()) + (learner(fraction=0.10),)
     return ExperimentSpec(
         policy=PolicySpec(base=BASE,
                           bank={"pi": lora("layers.*.self_attn.*", r=16)}),
@@ -97,8 +100,7 @@ def make_spec(store, *, loss, post, master, n_updates, source="live", lag=0,
         eval=EvalSpec(tasks=heldout, every=EVERY, n_samples=2,
                       env="math_single_turn", post=("verifier",)),
         gpu_config=GpuConfig(groups=(
-            GpuGroup(gpus(n=1), (engines("main", fraction=0.30),
-                                 learner(fraction=0.10)), sharing=sharing),)),
+            GpuGroup(gpus(n=1), members, sharing=sharing),)),
         seeds=Seeds(master=master),
     )
 
@@ -278,14 +280,22 @@ def run_stress() -> dict:
                               n_updates=24),
             "opsd": make_spec(store, loss="opsd", post=("verifier",), master=107,
                               n_updates=24, lag=2, epochs=2),
+            # the pool treaty on real metal: the judge pool is the SAME
+            # engine under a second name (multi-tenancy makes it free) —
+            # rewards come from llm_judge sampling it greedily
+            "judge": make_spec(store, loss="grpo",
+                               post=("llm_judge", "grpo_advantage"),
+                               master=108, n_updates=24, judge_pool=True),
         }
         learners = {name: TorchLearner() for name in tenants}
 
         async def launch(name: str, delay: float):
             await asyncio.sleep(delay)
             print(f"  [join] {name} starts (t+{delay:.0f}s)")
+            pools = ({"main": engine, "judge": engine} if name == "judge"
+                     else engine)
             return name, await run_experiment_async(
-                tenants[name], schema, store, engine, learners[name])
+                tenants[name], schema, store, pools, learners[name])
 
         results = await asyncio.gather(*(launch(name, i * 30.0)
                                          for i, name in enumerate(tenants)))
@@ -298,7 +308,7 @@ def run_stress() -> dict:
                                    gap_alarm=gap_alarms.get(name, 0.15))
         rid = {name: rep.run_id for name, rep in results}
         measure_lag(store, rid["opsd"], "opsd")
-        for name in ("ppo", "gspo", "sdft"):    # strictly on-policy tenants
+        for name in ("ppo", "gspo", "sdft", "judge"):   # strictly on-policy tenants
             run = store.open_run(rid[name])
             on_policy = all(
                 (u - 1) - int(t["policy_version"]["pi"]) == 0
