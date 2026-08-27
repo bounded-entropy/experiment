@@ -127,28 +127,42 @@ class Engine(Protocol):
 
 
 class Learner(Protocol):
-    """Training metal. Owns the frozen base, the trainable deltas, the optimizer."""
+    """Training metal. Owns ONE frozen base, many tenants' deltas + optimizers.
+
+    MULTI-TENANCY INVARIANT (the trainer-side mirror of the Engine's):
+    installation is ADDITIVE — any number of experiments' adapter sets coexist
+    on one loaded base — and every verb PINS a tenant (the run_id). One
+    resident learner serves many experiments; nothing about one tenant's
+    install, step, or load disturbs another's state. The v0 realization is
+    swap-install (the active tenant's adapters are wired into the module tree,
+    switching costs module rebinds, never weight copies); batched multi-tenant
+    forwards are a kernel upgrade behind the same surface.
+    """
 
     def install(
         self,
+        tenant: str,
         spec: ExperimentSpec,
         resolved_sites: Mapping[str, tuple[SiteMeta, ...]],
     ) -> None:
-        """Phase 1: build the trainable parameterization for every bank entry."""
+        """Phase 1: build `tenant`'s trainable parameterization for every bank
+        entry. Additive across tenants; rebuilding a tenant resets its state."""
         ...
 
-    def forward_backward(self, batch: TokenBatch) -> TrainStats:
-        """One microbatch: trainer-kernel forward, loss, backward. Grads accumulate."""
+    def forward_backward(self, tenant: str, batch: TokenBatch) -> TrainStats:
+        """One microbatch under `tenant`'s adapters: trainer-kernel forward,
+        loss, backward. Grads accumulate on that tenant's params."""
         ...
 
-    def optim_step(self) -> None:
-        """Apply accumulated gradients; the learner's deltas advance one version."""
+    def optim_step(self, tenant: str) -> None:
+        """Apply `tenant`'s accumulated gradients; its deltas advance one version."""
         ...
 
-    def emit(self) -> Emitted:
-        """Serialize current deltas + optimizer moments for the store and bundle."""
+    def emit(self, tenant: str) -> Emitted:
+        """Serialize `tenant`'s deltas + optimizer moments for store and bundle."""
         ...
 
-    def load(self, adapters: Mapping[str, bytes], optim: Mapping[str, bytes] | None) -> None:
-        """Restore deltas (and moments, unless None → fresh) — resume/warm-start."""
+    def load(self, tenant: str, adapters: Mapping[str, bytes],
+             optim: Mapping[str, bytes] | None) -> None:
+        """Restore `tenant`'s deltas (and moments, unless None → fresh)."""
         ...

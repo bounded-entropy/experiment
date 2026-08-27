@@ -1,10 +1,10 @@
-"""The blackboard runner: signals, leases, and the daemons' await conditions.
+"""The blackboard runner: signals, the arbiter, and the daemons' conditions.
 
-The properties under test are the ones the redesign claims: daemons
-synchronize ONLY through the store; the lag buffer bounds how far generation
-runs ahead; sleep colocation is an exclusive lease whose wake/evict hooks
-fire only on actual residency switches; and every recorded behavior policy is
-a committed (or initial) bundle.
+The properties under test are the ones the design claims: daemons synchronize
+ONLY through the store; the lag buffer bounds how far generation runs ahead;
+sleep colocation is an exclusive GROUP on the arbiter whose wake/evict hooks
+fire only on actual residency switches — while same-resident work overlaps
+freely; and every recorded behavior policy is a committed (or initial) bundle.
 """
 
 from __future__ import annotations
@@ -16,9 +16,8 @@ from dataclasses import replace
 
 from common import arith_spec, arith_store
 from rlstack import (
-    ENGINE, LEARNER, ExclusiveLease, FakeEngine, FakeLearner, GpuConfig,
-    GpuGroup, OpenLease, RunSignals, Schedule, fake_qwen_schema, gpus, pool,
-    learner, leases_for, run_experiment,
+    FakeEngine, FakeLearner, GpuArbiter, GpuConfig, GpuGroup, RunSignals,
+    Schedule, fake_qwen_schema, gpus, learner, pool, run_experiment,
 )
 
 SCHEMA = fake_qwen_schema(4, base="Qwen/Qwen3-0.6B")
@@ -48,56 +47,191 @@ class SignalsTest(unittest.TestCase):
         self.assertEqual(go(RunSignals().wait_for(lambda: "now")), "now")
 
 
-class ExclusiveLeaseTest(unittest.TestCase):
+class ArbiterTest(unittest.TestCase):
+    """The physical half: admission semantics of one exclusive group."""
+
+    def two_residents(self, **kwargs):
+        arbiter = GpuArbiter(**kwargs)
+        engine, trainer = object(), object()
+        log: list[str] = []
+        arbiter.attach(engine, label="engine:main", group="sleep:0",
+                       wake=_note(log, "engine:wake"),
+                       evict=_note(log, "engine:evict"))
+        arbiter.attach(trainer, label="learner", group="sleep:0",
+                       wake=_note(log, "learner:wake"),
+                       evict=_note(log, "learner:evict"))
+        return arbiter, engine, trainer, log
+
     def test_sticky_resident_fires_hooks_only_on_switch(self) -> None:
         async def scenario():
-            lease = ExclusiveLease()
-            log: list[str] = []
-            lease.on(ENGINE, wake=_note(log, "engine:wake"),
-                     evict=_note(log, "engine:evict"))
-            lease.on(LEARNER, wake=_note(log, "learner:wake"),
-                     evict=_note(log, "learner:evict"))
-            async with lease.held(ENGINE):
+            arbiter, engine, trainer, log = self.two_residents()
+            async with arbiter.admit(engine):
                 pass
-            async with lease.held(ENGINE):     # sticky: no hook churn
+            async with arbiter.admit(engine):   # sticky: no hook churn
                 pass
-            async with lease.held(LEARNER):    # switch: evict then wake
+            async with arbiter.admit(trainer):  # switch: evict then wake
                 pass
             return log
 
         self.assertEqual(go(scenario()),
                          ["engine:wake", "engine:evict", "learner:wake"])
 
-    def test_holders_alternate_never_overlap(self) -> None:
+    def test_exclusive_residents_never_overlap(self) -> None:
         async def scenario():
-            lease = ExclusiveLease()
-            active: list[str] = []
+            arbiter, engine, trainer, _ = self.two_residents()
+            active: list[object] = []
 
-            async def worker(resource: str):
+            async def worker(resident):
                 for _ in range(3):
-                    async with lease.held(resource):
-                        active.append(resource)
-                        await asyncio.sleep(0)     # yield while holding
-                        self.assertEqual(active, [resource])
-                        active.remove(resource)
+                    async with arbiter.admit(resident):
+                        active.append(resident)
+                        await asyncio.sleep(0)      # yield while admitted
+                        self.assertEqual(set(active), {resident})
+                        active.remove(resident)
 
             async with asyncio.TaskGroup() as group:
-                group.create_task(worker(ENGINE))
-                group.create_task(worker(LEARNER))
-            return lease.switches
+                group.create_task(worker(engine))
+                group.create_task(worker(trainer))
+            return arbiter.switches
 
         switches = go(scenario())
-        self.assertGreaterEqual(len(switches), 2)   # both resources ran
+        self.assertGreaterEqual(len(switches), 2)   # both residents ran
 
-    def test_leases_for_reads_the_sharing_field(self) -> None:
-        sleep_spec = arith_spec("cas://x/t.jsonl", gpu_config=GpuConfig(groups=(
-            GpuGroup(gpus(n=1), (pool("main"), learner()), sharing="sleep"),)))
-        leases = leases_for(sleep_spec)
-        self.assertIs(leases.for_pool("main"), leases.for_learner())
-        self.assertIsInstance(leases.for_pool("main"), ExclusiveLease)
+    def test_same_resident_work_overlaps(self) -> None:
+        """Alternation is about MEMORY, not mutual exclusion: two admits of
+        one resident run concurrently (the old ExclusiveLease serialized
+        them — generation and judge traffic on one engine should batch)."""
+        async def scenario():
+            arbiter, engine, _, _ = self.two_residents()
+            inside: list[int] = []
+            peak: list[int] = []
 
-        open_spec = arith_spec("cas://x/t.jsonl")
-        self.assertIsInstance(leases_for(open_spec).for_pool("main"), OpenLease)
+            async def worker():
+                async with arbiter.admit(engine):
+                    inside.append(1)
+                    await asyncio.sleep(0.01)
+                    peak.append(len(inside))
+                    inside.pop()
+
+            async with asyncio.TaskGroup() as group:
+                group.create_task(worker())
+                group.create_task(worker())
+            return max(peak)
+
+        self.assertEqual(go(scenario()), 2)
+
+    def test_switch_waits_for_inflight_to_drain(self) -> None:
+        async def scenario():
+            arbiter, engine, trainer, _ = self.two_residents()
+            order: list[str] = []
+
+            async def engine_work():
+                async with arbiter.admit(engine):
+                    await asyncio.sleep(0.02)
+                    order.append("engine-done")
+
+            async def trainer_work():
+                await asyncio.sleep(0.005)      # arrive while engine works
+                async with arbiter.admit(trainer):
+                    order.append("trainer-in")
+
+            async with asyncio.TaskGroup() as group:
+                group.create_task(engine_work())
+                group.create_task(trainer_work())
+            return order
+
+        self.assertEqual(go(scenario()), ["engine-done", "trainer-in"])
+
+    def test_quantum_defers_the_switch(self) -> None:
+        """Hysteresis on a fake clock: a switch may not happen again until
+        `quantum` has elapsed since the last one."""
+        async def scenario():
+            now = [0.0]
+            arbiter = GpuArbiter(quantum=10.0, clock=lambda: now[0])
+            engine, trainer = object(), object()
+            arbiter.attach(engine, label="engine:main", group="sleep:0")
+            arbiter.attach(trainer, label="learner", group="sleep:0")
+
+            async with arbiter.admit(engine):
+                pass                             # switch #1 at t=0
+
+            entered: list[str] = []
+
+            async def trainer_work():
+                async with arbiter.admit(trainer):
+                    entered.append("trainer")
+
+            task = asyncio.get_running_loop().create_task(trainer_work())
+            await asyncio.sleep(0.08)            # blocked: quantum not elapsed
+            self.assertEqual(entered, [])
+            now[0] = 11.0                        # clock passes the quantum
+            await task
+            return entered
+
+        self.assertEqual(go(scenario()), ["trainer"])
+
+    def test_max_wait_forces_a_handoff(self) -> None:
+        """Aging: a starving waiter stops the resident from being fed, so its
+        in-flight work drains and the waiter enters."""
+        async def scenario():
+            now = [0.0]
+            arbiter = GpuArbiter(max_wait=5.0, clock=lambda: now[0])
+            engine, trainer = object(), object()
+            arbiter.attach(engine, label="engine:main", group="sleep:0")
+            arbiter.attach(trainer, label="learner", group="sleep:0")
+            order: list[str] = []
+            feeding = [True]
+
+            async def engine_stream():
+                while feeding[0]:                # would stream forever
+                    async with arbiter.admit(engine):
+                        await asyncio.sleep(0.005)
+                order.append("engine-stopped")
+
+            async def trainer_work():
+                await asyncio.sleep(0.01)
+                async with arbiter.admit(trainer):
+                    order.append("trainer-in")
+                feeding[0] = False
+
+            async def clock_marches_on():
+                # the wait begins at t=0; only THEN does time pass it by
+                await asyncio.sleep(0.03)
+                now[0] = 6.0                     # trainer now starved > max_wait
+
+            async with asyncio.TaskGroup() as group:
+                group.create_task(engine_stream())
+                group.create_task(trainer_work())
+                group.create_task(clock_marches_on())
+            return order
+
+        self.assertEqual(go(scenario()), ["trainer-in", "engine-stopped"])
+
+    def test_admit_all_refuses_two_of_one_group(self) -> None:
+        async def scenario():
+            arbiter, engine, trainer, _ = self.two_residents()
+            with self.assertRaises(ValueError):
+                async with arbiter.admit_all((engine, trainer)):
+                    pass
+
+        go(scenario())
+
+    def test_admit_all_of_nothing_is_a_no_op(self) -> None:
+        async def scenario():
+            arbiter = GpuArbiter()
+            async with arbiter.admit_all(()):
+                return "ran"
+
+        self.assertEqual(go(scenario()), "ran")
+
+    def test_attach_is_idempotent_and_group_change_is_loud(self) -> None:
+        arbiter = GpuArbiter()
+        engine = object()
+        arbiter.attach(engine, label="engine:main", group=None, fraction=0.45)
+        arbiter.attach(engine, label="engine:judge", group=None)   # same object
+        self.assertEqual(arbiter.declared_load(), 0.45)
+        with self.assertRaises(ValueError):
+            arbiter.attach(engine, label="engine:main", group="sleep:0")
 
 
 def _note(log: list[str], entry: str):

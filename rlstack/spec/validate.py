@@ -394,6 +394,47 @@ def traffic_pools(spec: ExperimentSpec) -> set[str]:
     return pools
 
 
+def check_post_pools_can_coreside(spec: ExperimentSpec, schema: SiteSchema) -> list[ValidationIssue]:
+    """A pipeline holds every pool it samples from CO-RESIDENT for its whole
+    run — but two pools in one sharing="sleep" group alternate on the same
+    memory by declaration, so no admission order can satisfy that pipeline.
+    Refused at submit (the arbiter would raise at runtime, later and louder).
+    The algo pipeline's set is its processors' declared pools (the trainer
+    admits exactly those); the eval pipeline additionally holds eval.pool —
+    the evaluator runs episodes and scoring under one admission."""
+    sleep_group: dict[str, int] = {}
+    for gi, group in enumerate(spec.gpu_config.groups):
+        if group.sharing != "sleep":
+            continue
+        for member in group.members:
+            if isinstance(member, PoolMember):
+                sleep_group[member.name] = gi
+    if not sleep_group:
+        return []
+
+    pipelines = []
+    if spec.algo is not None:
+        pipelines.append(("algo.post", spec.algo.post, ()))
+    if spec.eval is not None:
+        pipelines.append(("eval.post", spec.eval.post, (spec.eval.pool,)))
+    issues = []
+    for field, pipeline, held in pipelines:
+        sampled = set(held) | {pool for name in pipeline if name in POST
+                               for pool in POST.get(name).pools}
+        by_group: dict[int, list[str]] = {}
+        for pool in sorted(sampled):
+            if pool in sleep_group:
+                by_group.setdefault(sleep_group[pool], []).append(pool)
+        for gi, members in sorted(by_group.items()):
+            if len(members) > 1:
+                issues.append(_issue(
+                    "post-pools-conflict", field,
+                    f"pipeline needs pools {members} co-resident, but they "
+                    f"alternate in sleep group gpu_config.groups[{gi}] — an "
+                    f"alternation set cannot serve one pipeline"))
+    return issues
+
+
 def check_live_trajectories_have_gen(spec: ExperimentSpec, schema: SiteSchema) -> list[ValidationIssue]:
     """source='live' consumes this run's own sealed gen output — gen must exist."""
     if spec.trajectories.source == "live" and spec.gen is None:
@@ -463,6 +504,7 @@ CHECKS = (
     check_fractions_fit,
     check_traffic_routes_to_declared_pools,
     check_post_pools_are_declared,
+    check_post_pools_can_coreside,
     check_live_trajectories_have_gen,
     check_eval_tasks_are_held_out,
     check_schedule_is_sane,

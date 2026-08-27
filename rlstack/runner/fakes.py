@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import random
 import re
+from dataclasses import dataclass
 from collections.abc import AsyncIterator, Mapping, Sequence
 
 from rlstack.data.flatten import TokenBatch
@@ -118,82 +119,99 @@ class FakeEngine:
         return str(answer + 1 + rng.randrange(9))
 
 
-class FakeLearner:
-    """Digest-state learner: no numerics, honest choreography.
+@dataclass
+class _FakeTenant:
+    """One experiment's digest state on this fake learner."""
 
-    State is a content hash folded over every batch and step, so emitted
-    payloads change exactly when training happened and `load` restores the
-    precise pre-crash state — which is what the resume-equivalence tests bite
-    on. Frozen deltas emit a constant init-derived payload (their bytes must
-    not drift with training).
+    trainable: list[str]
+    all_names: list[str]
+    init: str
+    state: str
+    steps: int = 0
+
+
+class FakeLearner:
+    """Digest-state learner: no numerics, honest choreography, multi-tenant.
+
+    Per-tenant state is a content hash folded over every batch and step, so
+    emitted payloads change exactly when training happened and `load` restores
+    the precise pre-crash state — which is what the resume-equivalence tests
+    bite on. The tenant key never enters the digests: a single-tenant run's
+    bytes are identical whether or not anyone shares the learner (the tenancy
+    invariant, testable). Frozen deltas emit a constant init-derived payload.
     """
 
     def __init__(self) -> None:
-        self._trainable: list[str] = []
-        self._all_names: list[str] = []
-        self._init = ""
-        self._state = ""
-        self._steps = 0
+        self._tenants: dict[str, _FakeTenant] = {}
+
+    def _tenant(self, tenant: str) -> _FakeTenant:
+        if tenant not in self._tenants:
+            raise KeyError(f"tenant {tenant!r} was never installed")
+        return self._tenants[tenant]
 
     # ---- Learner protocol ---------------------------------------------------
 
-    def install(self, spec: ExperimentSpec,
+    def install(self, tenant: str, spec: ExperimentSpec,
                 resolved_sites: Mapping[str, tuple[SiteMeta, ...]]) -> None:
-        self._all_names = sorted(spec.policy.bank)
-        self._trainable = sorted(name for name, a in spec.policy.bank.items()
-                                 if a.trainable)
-        self._init = content_hash({
+        all_names = sorted(spec.policy.bank)
+        init = content_hash({
             "master": spec.seeds.master,
-            "bank": {name: spec.policy.bank[name].kind for name in self._all_names},
+            "bank": {name: spec.policy.bank[name].kind for name in all_names},
             "sites": {name: [m.name for m in resolved_sites[name]]
-                      for name in self._all_names},
+                      for name in all_names},
         })
-        self._state = self._init
-        self._steps = 0
+        self._tenants[tenant] = _FakeTenant(
+            trainable=sorted(name for name, a in spec.policy.bank.items()
+                             if a.trainable),
+            all_names=all_names, init=init, state=init)
 
-    def forward_backward(self, batch: TokenBatch) -> TrainStats:
-        self._state = content_hash({
-            "state": self._state,
+    def forward_backward(self, tenant: str, batch: TokenBatch) -> TrainStats:
+        state = self._tenant(tenant)
+        state.state = content_hash({
+            "state": state.state,
             "ids": batch.token_ids,
             "mask": batch.loss_mask,
             "post": {k: batch.post[k] for k in sorted(batch.post)},
             "blp": batch.behavior_logprobs,
         })
         return TrainStats(
-            loss=int(self._state[:8], 16) / 16 ** 8,
+            loss=int(state.state[:8], 16) / 16 ** 8,
             mean_ratio=1.0,
             logprob_gap=0.0,
-            grad_norm=int(self._state[8:16], 16) / 16 ** 8,
+            grad_norm=int(state.state[8:16], 16) / 16 ** 8,
             tokens=len(batch),
         )
 
-    def optim_step(self) -> None:
-        self._steps += 1
-        self._state = content_hash({"state": self._state, "step": self._steps})
+    def optim_step(self, tenant: str) -> None:
+        state = self._tenant(tenant)
+        state.steps += 1
+        state.state = content_hash({"state": state.state, "step": state.steps})
 
-    def emit(self) -> Emitted:
+    def emit(self, tenant: str) -> Emitted:
+        state = self._tenant(tenant)
         adapters = {
             name: (f"fake-delta:{name}:"
-                   f"{self._state if name in self._trainable else self._init}"
+                   f"{state.state if name in state.trainable else state.init}"
                    ).encode()
-            for name in self._all_names
+            for name in state.all_names
         }
-        optim = {name: f"fake-optim:{name}:{self._steps}:{self._state}".encode()
-                 for name in self._trainable}
+        optim = {name: f"fake-optim:{name}:{state.steps}:{state.state}".encode()
+                 for name in state.trainable}
         return Emitted(adapters=adapters, optim=optim)
 
-    def load(self, adapters: Mapping[str, bytes],
+    def load(self, tenant: str, adapters: Mapping[str, bytes],
              optim: Mapping[str, bytes] | None) -> None:
+        state = self._tenant(tenant)
         states = {payload.decode().rsplit(":", 1)[1] for name, payload
-                  in adapters.items() if name in self._trainable}
+                  in adapters.items() if name in state.trainable}
         if len(states) > 1:
             raise ValueError(f"inconsistent adapter payloads: {sorted(states)}")
         if states:
-            self._state = states.pop()
+            state.state = states.pop()
         if optim:
             steps = {int(p.decode().split(":")[2]) for p in optim.values()}
             if len(steps) != 1:
                 raise ValueError(f"inconsistent optim payloads: {sorted(steps)}")
-            self._steps = steps.pop()
+            state.steps = steps.pop()
         else:
-            self._steps = 0
+            state.steps = 0

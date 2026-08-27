@@ -125,6 +125,36 @@ class LoopTest(unittest.TestCase):
         self.assertIn("site-unreachable", str(caught.exception))
         self.assertEqual(self.store.list_runs(), [])
 
+    def test_two_experiments_share_one_learner(self) -> None:
+        """The Learner tenancy invariant (the trainer-side mirror): every verb
+        pins a tenant, so two experiments' states coexist on ONE learner — and
+        neither run's bytes change versus a private learner."""
+        shared_engine, shared_learner = FakeEngine(), FakeLearner()
+        report_a, _ = self.run_spec(arith_spec(self.train),
+                                    engine=shared_engine,
+                                    learner=shared_learner)
+        report_b, _ = self.run_spec(arith_spec(self.train, seeds=Seeds(master=99)),
+                                    engine=shared_engine,
+                                    learner=shared_learner)
+        self.assertNotEqual(report_a.run_id, report_b.run_id)
+
+        import tempfile
+
+        from common import arith_store as fresh_store
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        other_store, other_train, _ = fresh_store(tmp.name)
+        for spec, report in ((arith_spec(other_train), report_a),
+                             (arith_spec(other_train, seeds=Seeds(master=99)),
+                              report_b)):
+            private = run_experiment(spec, SCHEMA, other_store,
+                                     FakeEngine(), FakeLearner())
+            self.assertEqual(
+                self.store.path_of(
+                    f"runs/{report.run_id}/ledger.jsonl").read_bytes(),
+                other_store.path_of(
+                    f"runs/{private.run_id}/ledger.jsonl").read_bytes())
+
     def test_two_experiments_share_one_engine(self) -> None:
         """The multi-tenancy invariant, exercised: bundle registration is
         additive, so a second experiment's bundles coexist with the first's on

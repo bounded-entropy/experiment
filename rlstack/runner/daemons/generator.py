@@ -17,7 +17,8 @@ from rlstack.data.stores.base import RunHandle
 from rlstack.data.trajectory import Task, wave_to_rows
 from rlstack.policy.compile import Bundle
 from rlstack.runner.sampling import Routes
-from rlstack.runner.lease import ENGINE, Lease
+from rlstack.runner.arbiter import GpuArbiter
+from rlstack.runner.interfaces import Engine
 from rlstack.runner.daemons.base import Daemon
 from rlstack.runner.signals import RunSignals
 from rlstack.runner.sampling import collect_wave
@@ -25,11 +26,12 @@ from rlstack.spec.specs import ExperimentSpec
 
 
 class Generator(Daemon):
-    def __init__(self, signals: RunSignals, lease: Lease, run: RunHandle, *,
-                 spec: ExperimentSpec, tasks: Sequence[Task],
+    def __init__(self, signals: RunSignals, arbiter: GpuArbiter, run: RunHandle, *,
+                 spec: ExperimentSpec, tasks: Sequence[Task], engine: Engine,
                  routes_at: Callable[[Bundle], Routes],
                  initial_bundle: Bundle, max_inflight: int) -> None:
-        super().__init__(signals, lease, run)
+        super().__init__(signals, arbiter, run)
+        self.engine = engine
         self.gen = spec.gen
         self.schedule = spec.algo.schedule
         self.master = spec.seeds.master
@@ -60,7 +62,7 @@ class Generator(Daemon):
         for wave_index in range(self.committed() + 1,
                                 self.schedule.n_updates + 1):
             await self.signals.wait_for(lambda: self.may_generate(wave_index))
-            async with self.lease.held(ENGINE):
+            async with self.arbiter.admit(self.engine):
                 wave = await collect_wave(
                     wave_index,
                     env_name=self.gen.env,

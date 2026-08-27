@@ -11,8 +11,9 @@ The map, by responsibility — read top to bottom:
                     hold lease, work, write + notify
     signals.py      the LOGICAL half of the blackboard: awaitable predicates
                     over the store — roles never call each other
-    lease.py        the PHYSICAL half: who may occupy the metal
-                    (OpenLease / ExclusiveLease, from GpuGroup.sharing)
+    arbiter.py      the PHYSICAL half: the GpuArbiter owns admission to the
+                    metal — object-keyed residents, exclusive groups from
+                    GpuGroup.sharing="sleep", sticky drain-until-blocked
     sampling.py     token stream → Turn (EngineSampleClient) → episode seal
                     (run_episode) → sealed wave (collect_wave)
     post.py         EXECUTES the declared post pipeline per group (the
@@ -29,6 +30,6 @@ This is the one package allowed to import both worlds.
 """
 
 from rlstack.runner import (  # noqa: F401
-    interfaces, seeds, sampling, signals, lease, sources, post, daemons,
+    interfaces, seeds, sampling, signals, arbiter, sources, post, daemons,
     loop, fakes,
 )

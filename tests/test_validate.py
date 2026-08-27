@@ -461,3 +461,44 @@ class TestPostPools(unittest.TestCase):
             algo=self.judge_algo(),
             eval=EvalSpec(tasks="cas://y/heldout.jsonl", pool="scorer"))
         self.assertEqual(traffic_pools(spec), {"main", "judge", "scorer"})
+
+
+class TestPostPoolCoresidency(unittest.TestCase):
+    """A pipeline cannot need two pools of one sleep group co-resident."""
+
+    def judge_algo(self):
+        base = clean_spec().algo
+        return replace(base, post=("llm_judge", "grpo_advantage"))
+
+    def sleep_both(self):
+        return GpuConfig(groups=(
+            GpuGroup(gpus(n=1), (pool("main"), pool("judge"), learner()),
+                     sharing="sleep"),))
+
+    def test_eval_pipeline_conflicts_with_its_serving_pool(self) -> None:
+        """The evaluator holds eval.pool AND its pipeline's pools under one
+        admission — main+judge alternating in one sleep group cannot serve it."""
+        spec = clean_spec(
+            gpu_config=self.sleep_both(),
+            eval=EvalSpec(tasks="cas://y/heldout.jsonl", pool="main",
+                          post=("llm_judge",)))
+        self.assertIn("post-pools-conflict", codes(spec))
+
+    def test_algo_judge_alone_coexists_with_sleeping_main(self) -> None:
+        """The trainer admits only the pipeline's declared pools around post,
+        so a judge-only pipeline is FINE even when its pool alternates with
+        main — three-way alternation, one resident at a time."""
+        spec = clean_spec(algo=self.judge_algo(),
+                          gpu_config=self.sleep_both())
+        self.assertNotIn("post-pools-conflict", codes(spec))
+
+    def test_judge_in_its_own_group_is_clean(self) -> None:
+        spec = clean_spec(
+            algo=self.judge_algo(),
+            gpu_config=GpuConfig(groups=(
+                GpuGroup(gpus(n=1), (pool("main"), learner()),
+                         sharing="sleep"),
+                GpuGroup(gpus(n=1), (pool("judge"),)),)),
+            eval=EvalSpec(tasks="cas://y/heldout.jsonl", pool="main",
+                          post=("verifier",)))
+        self.assertNotIn("post-pools-conflict", codes(spec))

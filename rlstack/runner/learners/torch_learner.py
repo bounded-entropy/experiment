@@ -1,10 +1,15 @@
-"""TorchLearner: the Learner protocol on real metal (Phase B2, v0).
+"""TorchLearner: the Learner protocol on real metal (Phase B2, multi-tenant).
 
-Owns the frozen HF base, per-entry adapter params (built and installed by each
-kind's OWN compute half — the learner never knows what a LoRA is), one
-optimizer per entry (so optim blobs map 1:1 onto the store's optim/<name>@v),
-and the forward that turns a TokenBatch into PolicyOutputs for the registered
-loss.
+Owns ONE frozen HF base shared by every tenant (the memory asymmetry that
+capped tenancy — CONTEXT #34), per-tenant adapter params built and installed
+by each kind's OWN compute half, and one optimizer per (tenant, entry) so
+optim blobs map 1:1 onto the store's optim/<name>@v.
+
+Tenancy is swap-install: exactly one tenant's adapters are wired into the
+module tree at a time; `_ensure_active` uninstalls the previous tenant's
+kinds (their exact inverse, module rebinds only — no weight copies) and
+installs the requester's. Params objects survive deactivation untouched, so
+switching is numerics-exact and costs microseconds.
 
 v0 choices, stated: docs run one at a time (no cross-doc packing in the
 forward — correct first, fast later); attention is the stock HF sdpa path;
@@ -17,6 +22,7 @@ from __future__ import annotations
 
 import hashlib
 from collections.abc import Mapping
+from dataclasses import dataclass, field
 
 import torch
 
@@ -33,6 +39,19 @@ def _init_seed(master: int, entry: str) -> int:
     return int.from_bytes(digest[:8], "big")
 
 
+@dataclass
+class _Tenant:
+    """One experiment's state on this learner: params, kinds, optimizers."""
+
+    loss_fn: object
+    trainable: list[str]
+    entries: list[str]                                  # install order
+    params: dict[str, object] = field(default_factory=dict)
+    kinds: dict[str, object] = field(default_factory=dict)
+    sites: dict[str, tuple[SiteMeta, ...]] = field(default_factory=dict)
+    optimizers: dict[str, torch.optim.Optimizer] = field(default_factory=dict)
+
+
 class TorchLearner:
     def __init__(self, device: str | None = None,
                  dtype: torch.dtype = torch.bfloat16,
@@ -40,77 +59,127 @@ class TorchLearner:
         self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
         self.dtype = dtype
         self.grad_clip = grad_clip
+        self._base: str | None = None
         self._model: torch.nn.Module | None = None
-        self._params: dict[str, object] = {}          # entry -> kind's state
-        self._kinds: dict[str, object] = {}           # entry -> Adapter instance
-        self._optimizers: dict[str, torch.optim.Optimizer] = {}
-        self._trainable: list[str] = []
-        self._loss_fn = None
+        self._tenants: dict[str, _Tenant] = {}
+        self._active: str | None = None
 
     # ---- Learner protocol ---------------------------------------------------
 
-    def install(self, spec: ExperimentSpec,
+    def install(self, tenant: str, spec: ExperimentSpec,
                 resolved_sites: Mapping[str, tuple[SiteMeta, ...]]) -> None:
-        from transformers import AutoModelForCausalLM
+        self._ensure_base(spec.policy.base)
+        if tenant in self._tenants:            # Phase 1 re-runs on attach
+            if self._active == tenant:
+                self._deactivate()
+            del self._tenants[tenant]
 
-        self._model = AutoModelForCausalLM.from_pretrained(
-            spec.policy.base, torch_dtype=self.dtype).to(self.device)
-        self._model.requires_grad_(False)
-        self._model.eval()   # replay is exact recompute: no dropout, ever
-
-        self._loss_fn = LOSSES.get(spec.algo.loss).fn
-        self._trainable = sorted(name for name, a in spec.policy.bank.items()
-                                 if a.trainable)
+        state = _Tenant(
+            loss_fn=LOSSES.get(spec.algo.loss).fn,
+            trainable=sorted(n for n, a in spec.policy.bank.items()
+                             if a.trainable),
+            entries=list(spec.policy.bank),
+        )
         for entry, adapter_spec in spec.policy.bank.items():
             kind = ADAPTERS.get(adapter_spec.kind).instance
             init = dict(adapter_spec.init)
             init.setdefault("seed", _init_seed(spec.seeds.master, entry))
             params = kind.params(resolved_sites[entry], init)
-            kind.install_replay(self._model, params, resolved_sites[entry])
-            self._params[entry] = params
-            self._kinds[entry] = kind
-            if entry in self._trainable:
+            state.params[entry] = params
+            state.kinds[entry] = kind
+            state.sites[entry] = resolved_sites[entry]
+            if entry in state.trainable:
                 overrides = dict(spec.algo.optim.overrides.get(entry, {}))
-                self._optimizers[entry] = torch.optim.AdamW(
+                state.optimizers[entry] = torch.optim.AdamW(
                     params.parameters(),
                     lr=float(overrides.get("lr", spec.algo.optim.lr)),
                     betas=spec.algo.optim.betas,
                     weight_decay=spec.algo.optim.weight_decay)
+        self._tenants[tenant] = state
 
-    def forward_backward(self, batch: TokenBatch) -> TrainStats:
+    def forward_backward(self, tenant: str, batch: TokenBatch) -> TrainStats:
+        state = self._tenant(tenant)
+        self._ensure_active(tenant)
         logprobs = torch.cat([self._doc_logprobs(batch, start, stop)
                               for start, stop in _doc_spans(batch)])
-        result = self._loss_fn(PolicyOutputs(logprobs=logprobs), batch)
+        result = state.loss_fn(PolicyOutputs(logprobs=logprobs), batch)
         result.loss.backward()
         return TrainStats(loss=float(result.loss), mean_ratio=result.mean_ratio,
                           logprob_gap=result.logprob_gap,
-                          grad_norm=self._grad_norm(), tokens=len(batch))
+                          grad_norm=self._grad_norm(state), tokens=len(batch))
 
-    def optim_step(self) -> None:
-        parameters = [p for entry in self._trainable
-                      for p in self._params[entry].parameters()]
+    def optim_step(self, tenant: str) -> None:
+        state = self._tenant(tenant)
+        parameters = [p for entry in state.trainable
+                      for p in state.params[entry].parameters()]
         torch.nn.utils.clip_grad_norm_(parameters, self.grad_clip)
-        for optimizer in self._optimizers.values():
+        for optimizer in state.optimizers.values():
             optimizer.step()
             optimizer.zero_grad()
 
-    def emit(self) -> Emitted:
-        adapters = {entry: self._kinds[entry].emit(self._params[entry])
-                    for entry in self._params}
-        optim = {entry: _state_bytes(self._optimizers[entry])
-                 for entry in self._trainable}
+    def emit(self, tenant: str) -> Emitted:
+        state = self._tenant(tenant)
+        adapters = {entry: state.kinds[entry].emit(state.params[entry])
+                    for entry in state.params}
+        optim = {entry: _state_bytes(state.optimizers[entry])
+                 for entry in state.trainable}
         return Emitted(adapters=adapters, optim=optim)
 
-    def load(self, adapters: Mapping[str, bytes],
+    def load(self, tenant: str, adapters: Mapping[str, bytes],
              optim: Mapping[str, bytes] | None) -> None:
+        state = self._tenant(tenant)
         for entry, payload in adapters.items():
-            self._kinds[entry].load(self._params[entry], payload)
+            state.kinds[entry].load(state.params[entry], payload)
         if optim:
             for entry, payload in optim.items():
-                self._optimizers[entry].load_state_dict(_state_from(payload))
+                state.optimizers[entry].load_state_dict(_state_from(payload))
         else:
-            for optimizer in self._optimizers.values():
+            for optimizer in state.optimizers.values():
                 optimizer.state.clear()
+
+    # ---- tenancy ------------------------------------------------------------
+
+    def _ensure_base(self, base: str) -> None:
+        """One learner, one base: the first install loads it, later tenants
+        must agree (a different base needs its own learner — its own metal)."""
+        if self._model is None:
+            from transformers import AutoModelForCausalLM
+
+            self._model = AutoModelForCausalLM.from_pretrained(
+                base, torch_dtype=self.dtype).to(self.device)
+            self._model.requires_grad_(False)
+            self._model.eval()   # replay is exact recompute: no dropout, ever
+            self._base = base
+        elif self._base != base:
+            raise ValueError(
+                f"this learner holds base {self._base!r}; tenant wants "
+                f"{base!r} — one learner serves one base")
+
+    def _ensure_active(self, tenant: str) -> None:
+        """Swap-install: wire `tenant`'s adapters into the module tree,
+        unwinding the previous tenant's first. Rebinds only, never copies."""
+        if self._active == tenant:
+            return
+        self._deactivate()
+        state = self._tenants[tenant]
+        for entry in state.entries:
+            state.kinds[entry].install_replay(
+                self._model, state.params[entry], state.sites[entry])
+        self._active = tenant
+
+    def _deactivate(self) -> None:
+        if self._active is None:
+            return
+        state = self._tenants[self._active]
+        for entry in reversed(state.entries):
+            state.kinds[entry].uninstall_replay(
+                self._model, state.params[entry], state.sites[entry])
+        self._active = None
+
+    def _tenant(self, tenant: str) -> _Tenant:
+        if tenant not in self._tenants:
+            raise KeyError(f"tenant {tenant!r} was never installed")
+        return self._tenants[tenant]
 
     # ---- the forward --------------------------------------------------------
 
@@ -128,10 +197,10 @@ class TorchLearner:
         zero = torch.zeros(1, dtype=chosen.dtype, device=self.device)
         return torch.cat([zero, chosen])
 
-    def _grad_norm(self) -> float:
+    def _grad_norm(self, state: _Tenant) -> float:
         total = 0.0
-        for entry in self._trainable:
-            for p in self._params[entry].parameters():
+        for entry in state.trainable:
+            for p in state.params[entry].parameters():
                 if p.grad is not None:
                     total += float(p.grad.detach().pow(2).sum())
         return total ** 0.5

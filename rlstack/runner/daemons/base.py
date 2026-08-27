@@ -2,9 +2,10 @@
 
 A role owns one GPU responsibility. Its loop is always the same four beats:
 await its CONDITION (a predicate over the store — never a call into another
-role), hold its LEASE for the metal, do the work, write the store and notify.
-Subclass a role and override its condition method to change when it wants the
-mutex; the lease itself stays dumb.
+role), ADMIT the residents its work occupies (arbiter.py: the physical
+resource decides, waking and evicting per its policy), do the work, write the
+store and notify. Subclass a role and override its condition method to change
+when it wants the metal; the arbiter stays dumb about roles.
 """
 
 from __future__ import annotations
@@ -12,14 +13,15 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 
 from rlstack.data.stores.base import RunHandle
-from rlstack.runner.lease import Lease
+from rlstack.runner.arbiter import GpuArbiter
 from rlstack.runner.signals import RunSignals
 
 
 class Daemon(ABC):
-    def __init__(self, signals: RunSignals, lease: Lease, run: RunHandle) -> None:
+    def __init__(self, signals: RunSignals, arbiter: GpuArbiter,
+                 run: RunHandle) -> None:
         self.signals = signals
-        self.lease = lease
+        self.arbiter = arbiter
         self.run = run
 
     def committed(self) -> int:

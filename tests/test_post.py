@@ -43,9 +43,11 @@ class _BadLength(PostProcessor):
 
 @postprocessor("post_sampling_judge")
 class _SamplingJudge(PostProcessor):
-    """A judge: a postprocessor that SAMPLES (through any pool it likes)."""
+    """A judge: a postprocessor that SAMPLES (through any pool it likes).
+    It samples the default main-pinned client, so it declares "main"."""
 
     produces = ("judge",)
+    pools = ("main",)
 
     async def process(self, group: Any, data: Any, llm: Any):
         scores = []

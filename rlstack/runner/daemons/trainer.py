@@ -27,8 +27,8 @@ from rlstack.data.trajectory import wave_from_rows
 from rlstack.policy.compile import Bundle, compile_bundle
 from rlstack.registry import ADAPTERS
 from rlstack.runner.sampling import Routes
+from rlstack.runner.arbiter import GpuArbiter
 from rlstack.runner.interfaces import Engine, Learner, TrainStats
-from rlstack.runner.lease import ENGINE, LEARNER, Lease
 from rlstack.runner.post import run_pipeline
 from rlstack.runner.daemons.base import Daemon
 from rlstack.runner.signals import RunSignals
@@ -37,12 +37,16 @@ from rlstack.spec.specs import ExperimentSpec, SamplingSpec
 
 
 class Trainer(Daemon):
-    def __init__(self, signals: RunSignals, lease: Lease, run: RunHandle, *,
+    def __init__(self, signals: RunSignals, arbiter: GpuArbiter, run: RunHandle, *,
                  spec: ExperimentSpec, feed: WaveFeed, engine: Engine,
-                 learner: Learner, routes_at: Callable[[Bundle], Routes],
+                 learner: Learner, tenant: str,
+                 post_residents: tuple[Engine, ...],
+                 routes_at: Callable[[Bundle], Routes],
                  initial_bundle: Bundle,
                  initial_version: dict[str, int]) -> None:
-        super().__init__(signals, lease, run)
+        super().__init__(signals, arbiter, run)
+        self.tenant = tenant
+        self.post_residents = post_residents
         self.spec = spec
         self.schedule = spec.algo.schedule
         self.sampling = spec.gen.sampling if spec.gen else SamplingSpec()
@@ -72,7 +76,8 @@ class Trainer(Daemon):
             rows = await self.signals.wait_for(lambda: self.next_rows(update))
             wave = wave_from_rows(rows)
 
-            async with self.lease.held(ENGINE):    # postprocessors may sample
+            # judges sample: admit the engines the pipeline declared
+            async with self.arbiter.admit_all(self.post_residents):
                 postdata = await run_pipeline(
                     self.spec.algo.post, wave, self.routes_at(self.bundle),
                     self.sampling, self.spec.seeds.master, update)
@@ -83,12 +88,13 @@ class Trainer(Daemon):
             docs = list(zip(flats, broadcast(postdata, flats)))
 
             stats: list[TrainStats] = []
-            async with self.lease.held(LEARNER):
+            async with self.arbiter.admit(self.learner):
                 for _ in range(self.schedule.epochs_per_wave):
                     for batch in pack(docs, self.schedule.microbatch_tokens):
-                        stats.append(self.learner.forward_backward(batch))
-                self.learner.optim_step()
-                emitted = self.learner.emit()
+                        stats.append(
+                            self.learner.forward_backward(self.tenant, batch))
+                self.learner.optim_step(self.tenant)
+                emitted = self.learner.emit(self.tenant)
 
             self.version = bump(self.version, self.trainable)
             self.bundle = compile_bundle(emitted.adapters, self.version,

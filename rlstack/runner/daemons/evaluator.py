@@ -23,7 +23,7 @@ from rlstack.policy.compile import Bundle, compile_bundle
 from rlstack.registry import ADAPTERS
 from rlstack.runner.sampling import EngineSampleClient, Routes
 from rlstack.runner.interfaces import Engine
-from rlstack.runner.lease import ENGINE, Lease
+from rlstack.runner.arbiter import GpuArbiter
 from rlstack.runner.post import run_pipeline
 from rlstack.runner.daemons.base import Daemon
 from rlstack.runner.seeds import derive
@@ -33,11 +33,13 @@ from rlstack.spec.specs import ExperimentSpec, SamplingSpec
 
 
 class Evaluator(Daemon):
-    def __init__(self, signals: RunSignals, lease: Lease, run: RunHandle, *,
+    def __init__(self, signals: RunSignals, arbiter: GpuArbiter, run: RunHandle, *,
                  spec: ExperimentSpec, store: Store, engine: Engine,
+                 post_residents: tuple[Engine, ...],
                  routes_at: Callable[[Bundle], Routes],
                  max_inflight: int) -> None:
-        super().__init__(signals, lease, run)
+        super().__init__(signals, arbiter, run)
+        self.post_residents = post_residents
         assert spec.eval is not None
         self.engine = engine
         bank = spec.policy.bank
@@ -99,7 +101,8 @@ class Evaluator(Daemon):
                 continue                       # written before a crash
             pinned = self.bundle_for(entry)
             self.engine.add_bundle(pinned)
-            async with self.lease.held(ENGINE):
+            async with self.arbiter.admit_all(
+                    (self.engine, *self.post_residents)):
                 await self._evaluate(update, self.routes_at(pinned))
             await self.signals.notify()
 

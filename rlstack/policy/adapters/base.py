@@ -78,6 +78,14 @@ class Adapter:
         """Wire the replay lowering into the trainer forward."""
         raise NotImplementedError
 
+    def uninstall_replay(self, model: Any, params: Any, sites: tuple[SiteMeta, ...]) -> None:
+        """install_replay's exact inverse: restore the module tree so another
+        tenant's adapters can install (the trainer-side mirror of the engine
+        evicting a bundle). A kind without this cannot swap-share a learner."""
+        raise NotImplementedError(
+            f"{type(self).__name__} has no uninstall_replay: it cannot share "
+            f"a multi-tenant learner (each tenant needs exclusive install)")
+
     def emit(self, params: Any) -> Any:
         """Lower params into the bundle payload the engine-side consumer reads."""
         raise NotImplementedError

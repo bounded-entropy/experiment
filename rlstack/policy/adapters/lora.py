@@ -23,6 +23,10 @@ class Lora(Adapter):
         from rlstack.policy.adapters import lora_torch
         lora_torch.install(model, params)
 
+    def uninstall_replay(self, model, params, sites: tuple[SiteMeta, ...]) -> None:
+        from rlstack.policy.adapters import lora_torch
+        lora_torch.uninstall(model, params)
+
     def emit(self, params) -> bytes:
         from rlstack.policy.adapters import lora_torch
         return lora_torch.emit(params)

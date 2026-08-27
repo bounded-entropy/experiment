@@ -87,6 +87,23 @@ def install(model: torch.nn.Module, state: LoraState) -> None:
         setattr(parent, leaf, LoraLinear(inner, state.a[path], state.b[path]))
 
 
+def uninstall(model: torch.nn.Module, state: LoraState) -> None:
+    """install's exact inverse: unwrap each LoraLinear back to its inner
+    module. The params object survives untouched (its tensors are shared with
+    the wrapper, not copied), so re-install restores identical numerics."""
+    for path in state.a:
+        parent = model
+        *walk, leaf = path.split(".")
+        for step in walk:
+            parent = getattr(parent, step)
+        wrapper = getattr(parent, leaf)
+        if not isinstance(wrapper, LoraLinear):
+            raise RuntimeError(
+                f"uninstall at {path}: expected LoraLinear, found "
+                f"{type(wrapper).__name__} — install/uninstall out of balance")
+        setattr(parent, leaf, wrapper.inner)
+
+
 def emit(state: LoraState) -> bytes:
     """peft-format safetensors: keys are module paths — the site knowledge
     crosses the membrane INSIDE the payload, in the consumer's native format."""

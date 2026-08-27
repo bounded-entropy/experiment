@@ -43,9 +43,13 @@ class PostProcessor(ABC):
     with @postprocessor. Subclasses must construct with no arguments — the
     decorator instantiates one shared instance.
 
-    `pools` declares the engine pools this processor SAMPLES from via
-    `llm.pool(name)` — Phase 0 holds them against the spec's declared pools
-    (the "main" pool needs no declaring: the runner always requires it).
+    `pools` declares EVERY engine pool this processor samples from — via
+    `llm.pool(name)` or the default main-pinned client. Phase 0 holds them
+    against the spec's declared pools (existence — "main" is exempt there,
+    the runner requires it unconditionally) and against sleep-sharing
+    (co-residency: the trainer admits exactly these residents around the
+    pipeline, so an undeclared pool is sampled UNADMITTED — under sleep
+    colocation that is a sleeping engine).
     `sampling` overrides the run's generation sampling for this processor's
     calls (a judge wants its own temperature and budget, not the policy's);
     None inherits. Both live in the class source, so they hash into run

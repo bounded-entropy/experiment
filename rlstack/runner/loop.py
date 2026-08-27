@@ -24,15 +24,15 @@ from dataclasses import dataclass
 from rlstack.data.stores.base import Store
 from rlstack.policy.compile import Bundle, compile_bundle
 from rlstack.policy.siteschema import SiteSchema, resolve
-from rlstack.registry import ADAPTERS, code_hashes
+from rlstack.registry import ADAPTERS, POST, code_hashes
 from rlstack.runner.daemons import Daemon, Evaluator, Generator, Trainer
 from rlstack.runner.interfaces import Engine, Learner
-from rlstack.runner.lease import LeaseMap, leases_for
+from rlstack.runner.arbiter import GpuArbiter
 from rlstack.runner.sampling import Routes, load_tasks
 from rlstack.runner.signals import RunSignals
 from rlstack.runner.sources import feed_for
 from rlstack.spec.canonical import canonical_json, run_id
-from rlstack.spec.specs import ExperimentSpec, WarmStart
+from rlstack.spec.specs import ExperimentSpec, PoolMember, WarmStart
 from rlstack.spec.validate import (
     SpecError, check_sites_reachable_on, site_space, traffic_pools,
     validate_or_raise,
@@ -50,27 +50,33 @@ class RunReport:
 
 def run_experiment(spec: ExperimentSpec, schema: SiteSchema, store: Store,
                    engines: Engine | Mapping[str, Engine], learner: Learner,
-                   max_inflight: int = 64) -> RunReport:
+                   max_inflight: int = 64,
+                   arbiter: GpuArbiter | None = None) -> RunReport:
     """Submit and drive one experiment to completion. Safe to call again on the
     same spec: identical identity attaches and continues (or no-ops if done).
 
     `engines` is one Engine (used as the "main" policy pool) or {pool: Engine}.
     """
     return asyncio.run(
-        run_experiment_async(spec, schema, store, engines, learner, max_inflight))
+        run_experiment_async(spec, schema, store, engines, learner, max_inflight,
+                             arbiter))
 
 
 async def run_experiment_async(
         spec: ExperimentSpec, schema: SiteSchema, store: Store,
         engines: Engine | Mapping[str, Engine], learner: Learner,
-        max_inflight: int = 64) -> RunReport:
+        max_inflight: int = 64,
+        arbiter: GpuArbiter | None = None) -> RunReport:
     """The async form of run_experiment — the multi-tenant entry.
 
     The multi-tenancy invariant (Engine protocol) is only expressible when
     several experiments share ONE event loop around one resident engine:
     gather() any number of these on the same Engine and their bundles coexist,
-    each request pinning its own. The sync wrapper is the one-experiment
-    convenience; the Phase-C resident daemon drives this form directly.
+    each request pinning its own — and on the same Learner, whose tenants
+    coexist the same way. Pass the metal-owner's shared `arbiter` so colocated
+    tenants alternate under ONE admission authority; None builds a private one
+    (the single-experiment convenience). The Phase-C resident daemon drives
+    this form directly.
     """
     if spec.algo is None:
         raise NotImplementedError("B1 runs training specs: algo required")
@@ -115,7 +121,10 @@ async def run_experiment_async(
                       if ADAPTERS.get(a.kind).instance.serving is not None)
     kinds = {name: bank[name].kind for name in servable}
     resolved = {name: resolve(space, a.site) for name, a in bank.items()}
-    learner.install(spec, resolved)
+    learner.install(rid, spec, resolved)
+    if arbiter is None:
+        arbiter = GpuArbiter()
+    attach_residents(spec, engine_map, learner, arbiter)
 
     policy_version = {name: 0 for name in bank}
     resumed_from: int | None = None
@@ -123,6 +132,7 @@ async def run_experiment_async(
     if tail is not None:
         policy_version = {name: int(v) for name, v in tail["versions"].items()}
         learner.load(
+            rid,
             adapters={name: run.read_blob("adapters", name, policy_version[name])
                       for name in trainable},
             optim={name: run.read_blob("optim", name, policy_version[name])
@@ -130,10 +140,10 @@ async def run_experiment_async(
         )
         resumed_from = int(tail["update"])
     elif spec.init is not None:
-        _warm_start(spec.init, bank_names=set(bank), trainable=trainable,
-                    store=store, learner=learner)
+        _warm_start(spec.init, tenant=rid, bank_names=set(bank),
+                    trainable=trainable, store=store, learner=learner)
 
-    emitted = learner.emit()
+    emitted = learner.emit(rid)
     bundle = compile_bundle(emitted.adapters, policy_version, servable, kinds)
     engine_map["main"].add_bundle(bundle)
 
@@ -152,7 +162,8 @@ async def run_experiment_async(
                            learner=learner, routes_at=routes_at,
                            initial_bundle=bundle,
                            initial_version=policy_version,
-                           max_inflight=max_inflight)
+                           max_inflight=max_inflight,
+                           arbiter=arbiter, tenant=rid)
     try:
         async with asyncio.TaskGroup() as group:
             for daemon in daemons:
@@ -166,38 +177,82 @@ async def run_experiment_async(
 
 def plan_daemons(spec: ExperimentSpec, *, run, store, engine_map, learner,
                  routes_at, initial_bundle, initial_version,
-                 max_inflight) -> list[Daemon]:
+                 max_inflight, arbiter, tenant) -> list[Daemon]:
     """The spec already declares the daemons; this reads them off.
 
     live trajectories → a Generator writes the data bus; eval declared → an
-    Evaluator watches the commit bus; the Trainer always. Leases come from
-    GpuConfig (sleep-sharing groups share an ExclusiveLease); each daemon's
-    acquisition condition is its own overridable method.
+    Evaluator watches the commit bus; the Trainer always. Each daemon admits
+    the RESIDENTS its work occupies: the trainer's post phase the engines of
+    its pipeline's declared pools, its train phase the learner, the generator
+    and evaluator their serving pool's engine (plus the eval pipeline's).
     """
     signals = RunSignals()
-    leases: LeaseMap = leases_for(spec)
     daemons: list[Daemon] = [
-        Trainer(signals, leases.for_learner(), run,
+        Trainer(signals, arbiter, run,
                 spec=spec, feed=feed_for(spec, store, run),
-                engine=engine_map["main"], learner=learner, routes_at=routes_at,
+                engine=engine_map["main"], learner=learner, tenant=tenant,
+                post_residents=pipeline_residents(spec.algo.post, engine_map),
+                routes_at=routes_at,
                 initial_bundle=initial_bundle, initial_version=initial_version),
     ]
     if spec.trajectories.source == "live":
         daemons.append(Generator(
-            signals, leases.for_pool("main"), run,
+            signals, arbiter, run,
             spec=spec, tasks=load_tasks(store, spec.gen.tasks),
-            routes_at=routes_at, initial_bundle=initial_bundle,
-            max_inflight=max_inflight))
+            engine=engine_map["main"], routes_at=routes_at,
+            initial_bundle=initial_bundle, max_inflight=max_inflight))
     if spec.eval is not None:
         daemons.append(Evaluator(
-            signals, leases.for_pool(spec.eval.pool), run,
-            spec=spec, store=store, engine=engine_map["main"],
+            signals, arbiter, run,
+            spec=spec, store=store, engine=engine_map[spec.eval.pool],
+            post_residents=pipeline_residents(spec.eval.post, engine_map),
             routes_at=routes_at, max_inflight=max_inflight))
     return daemons
 
 
-def _warm_start(init: WarmStart, *, bank_names: set[str], trainable: list[str],
-                store: Store, learner: Learner) -> None:
+def pipeline_residents(pipeline, engine_map) -> tuple[Engine, ...]:
+    """The distinct engine objects behind a post pipeline's declared pools —
+    what its judges will occupy, so what its runner must admit."""
+    pools = sorted({name for proc in pipeline if proc in POST
+                    for name in POST.get(proc).pools})
+    distinct = {id(engine_map[name]): engine_map[name] for name in pools}
+    return tuple(distinct.values())
+
+
+def attach_residents(spec: ExperimentSpec, engine_map, learner,
+                     arbiter: GpuArbiter) -> None:
+    """Register this experiment's metal with the (possibly shared) arbiter.
+
+    Object-keyed and idempotent: two pools backed by one engine are ONE
+    resident; a second experiment attaching the same engine is a no-op.
+    Exclusive groups come from GpuGroup.sharing="sleep" — alternation exists
+    only there. Fractions are declared, reported, not yet enforced (until the
+    learner is multi-tenant, per-experiment fractions are overlapping views).
+    """
+    pool_group: dict[str, str | None] = {}
+    pool_fraction: dict[str, float | None] = {}
+    learner_group: str | None = None
+    learner_fraction: float | None = None
+    for gi, gpu_group in enumerate(spec.gpu_config.groups):
+        sleeping = gpu_group.sharing == "sleep"
+        for member in gpu_group.members:
+            if isinstance(member, PoolMember):
+                pool_group[member.name] = f"sleep:{gi}" if sleeping else None
+                pool_fraction[member.name] = member.fraction
+            else:
+                learner_group = f"sleep:{gi}" if sleeping else None
+                learner_fraction = member.fraction
+
+    for name in sorted(engine_map):
+        arbiter.attach(engine_map[name], label=f"engine:{name}",
+                       group=pool_group.get(name),
+                       fraction=pool_fraction.get(name))
+    arbiter.attach(learner, label="learner", group=learner_group,
+                   fraction=learner_fraction)
+
+
+def _warm_start(init: WarmStart, *, tenant: str, bank_names: set[str],
+                trainable: list[str], store: Store, learner: Learner) -> None:
     """Load another run's sealed deltas (renamed via init.map) into this learner."""
     if not init.policy.startswith("store://"):
         raise NotImplementedError("B1 warm-starts from store:// runs only")
@@ -217,4 +272,4 @@ def _warm_start(init: WarmStart, *, bank_names: set[str], trainable: list[str],
             continue  # no sealed state for this delta: it starts fresh
         if init.optim == "load" and name in trainable:
             optim[name] = parent.read_blob("optim", source, version)
-    learner.load(adapters, optim if init.optim == "load" else None)
+    learner.load(tenant, adapters, optim if init.optim == "load" else None)
