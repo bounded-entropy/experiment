@@ -165,6 +165,8 @@ class TorchLearner:
         for entry in state.entries:
             state.kinds[entry].install_replay(
                 self._model, state.params[entry], state.sites[entry])
+        for optimizer in state.optimizers.values():
+            _colocate_optim_state(optimizer)
         self._active = tenant
 
     def _deactivate(self) -> None:
@@ -204,6 +206,23 @@ class TorchLearner:
                 if p.grad is not None:
                     total += float(p.grad.detach().pow(2).sum())
         return total ** 0.5
+
+
+def _colocate_optim_state(optimizer: torch.optim.Optimizer) -> None:
+    """Optimizer moments live WHERE THEIR PARAMS LIVE — the rule activation
+    enforces. A tenant `load`ed before its first activation has CPU moments
+    (load_state_dict casts to the params' device, and params move to the GPU
+    only when the kind's install_replay wires them in), so the first
+    optim_step after a resume would mix devices. Activation is the placement
+    moment of truth; after the first pass this is a no-op scan."""
+    for group in optimizer.param_groups:
+        for param in group["params"]:
+            moments = optimizer.state.get(param)
+            if not moments:
+                continue
+            for key, value in moments.items():
+                if torch.is_tensor(value) and value.device != param.device:
+                    moments[key] = value.to(param.device)
 
 
 def _doc_spans(batch: TokenBatch) -> list[tuple[int, int]]:
