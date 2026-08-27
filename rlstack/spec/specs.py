@@ -152,7 +152,7 @@ class GpuSet:
 
 
 @dataclass(frozen=True)
-class EnginesMember:
+class PoolMember:
     """An engine pool: serves sample + score traffic under a name."""
 
     name: str
@@ -170,14 +170,14 @@ class LearnerMember:
     fraction: float | None = None
 
 
-Member = EnginesMember | LearnerMember
+Member = PoolMember | LearnerMember
 
 
 @dataclass(frozen=True)
 class GpuGroup:
     """The unit of colocation: members co-resident on one GpuSet.
 
-    The member vocabulary is closed at engines + learner; everything else
+    The member vocabulary is closed at pool + learner; everything else
     (rollout, eval, judge, teacher) is traffic routed to named pools.
     "sleep" alternates the learner with the engines on the same memory
     (and therefore implies max_policy_lag == 0).
@@ -282,10 +282,10 @@ def gpus(n: int | None = None, nodes: int = 1, ids: tuple[str, ...] | None = Non
     return GpuSet(n=n, nodes=nodes, ids=ids)
 
 
-def engines(name: str, base: str | None = None, tp: int = 1, n: int = 1,
-            fraction: float | None = None) -> EnginesMember:
+def pool(name: str, base: str | None = None, tp: int = 1, n: int = 1,
+            fraction: float | None = None) -> PoolMember:
     """A named engine pool."""
-    return EnginesMember(name=name, base=base, tp=tp, n=n, fraction=fraction)
+    return PoolMember(name=name, base=base, tp=tp, n=n, fraction=fraction)
 
 
 def learner(fsdp: int = 1, fraction: float | None = None) -> LearnerMember:

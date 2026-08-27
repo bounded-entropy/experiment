@@ -14,7 +14,7 @@ from rlstack.training.post.base import PostProcessor, postprocessor
 from rlstack.spec.specs import (
     AdapterSpec, AlgoSpec, EvalSpec, ExperimentSpec, GenSpec, GpuConfig, GpuGroup,
     OptimSpec, PolicySpec, TrajectorySource, Schedule, Seeds, WarmStart,
-    engines, gpus, learner, lora,
+    gpus, learner, lora, pool,
 )
 from rlstack.spec.validate import (
     SpecError, ValidationIssue, check_sites_reachable_on, site_space, traffic_pools,
@@ -82,7 +82,7 @@ def clean_spec(**overrides: Any) -> ExperimentSpec:
                       optim=OptimSpec("adamw", lr=1e-5),
                       schedule=Schedule(group_size=8, trajectories_per_wave=64, n_updates=10)),
         gpu_config=GpuConfig(groups=(
-            GpuGroup(gpus(n=2), (engines("main"), learner())),)),
+            GpuGroup(gpus(n=2), (pool("main"), learner())),)),
         seeds=Seeds(master=0),
     )
     fields.update(overrides)
@@ -307,25 +307,25 @@ class TestTopology(unittest.TestCase):
 
     def test_duplicate_pool(self) -> None:
         spec = clean_spec(gpu_config=GpuConfig(groups=(
-            GpuGroup(gpus(n=1), (engines("main"), learner())),
-            GpuGroup(gpus(n=1), (engines("main"),)),
+            GpuGroup(gpus(n=1), (pool("main"), learner())),
+            GpuGroup(gpus(n=1), (pool("main"),)),
         )))
         self.assertEqual(codes(spec), {"duplicate-pool"})
 
     def test_bad_sleep_group_no_learner(self) -> None:
         spec = clean_spec(gpu_config=GpuConfig(groups=(
-            GpuGroup(gpus(n=1), (engines("main"),), sharing="sleep"),)))
+            GpuGroup(gpus(n=1), (pool("main"),), sharing="sleep"),)))
         self.assertEqual(codes(spec), {"bad-sleep-group"})
 
     def test_bad_sleep_group_two_learners(self) -> None:
         spec = clean_spec(gpu_config=GpuConfig(groups=(
-            GpuGroup(gpus(n=1), (engines("main"), learner(), learner()),
+            GpuGroup(gpus(n=1), (pool("main"), learner(), learner()),
                   sharing="sleep"),)))
         self.assertEqual(codes(spec), {"bad-sleep-group"})
 
     def test_sleep_lag_conflict(self) -> None:
         sleepy = GpuConfig(groups=(
-            GpuGroup(gpus(n=1), (engines("main"), learner()), sharing="sleep"),))
+            GpuGroup(gpus(n=1), (pool("main"), learner()), sharing="sleep"),))
         laggy = replace(clean_spec().algo,
                         schedule=Schedule(group_size=8, trajectories_per_wave=64,
                                           n_updates=10, max_policy_lag=1))
@@ -334,29 +334,29 @@ class TestTopology(unittest.TestCase):
 
     def test_sleep_group_with_lag_zero_is_fine(self) -> None:
         spec = clean_spec(gpu_config=GpuConfig(groups=(
-            GpuGroup(gpus(n=1), (engines("main"), learner()), sharing="sleep"),)))
+            GpuGroup(gpus(n=1), (pool("main"), learner()), sharing="sleep"),)))
         self.assertEqual(validate(spec, SCHEMA), [])
 
     def test_fraction_overflow(self) -> None:
         spec = clean_spec(gpu_config=GpuConfig(groups=(
-            GpuGroup(gpus(n=1), (engines("main", fraction=0.7),
+            GpuGroup(gpus(n=1), (pool("main", fraction=0.7),
                               learner(fraction=0.5))),)))
         self.assertEqual(codes(spec), {"fraction-overflow"})
 
     def test_fractions_summing_to_one_are_fine(self) -> None:
         spec = clean_spec(gpu_config=GpuConfig(groups=(
-            GpuGroup(gpus(n=1), (engines("main", fraction=0.75),
+            GpuGroup(gpus(n=1), (pool("main", fraction=0.75),
                               learner(fraction=0.25))),)))
         self.assertEqual(validate(spec, SCHEMA), [])
 
     def test_partial_fractions_are_not_summed(self) -> None:
         spec = clean_spec(gpu_config=GpuConfig(groups=(
-            GpuGroup(gpus(n=1), (engines("main", fraction=0.9), learner())),)))
+            GpuGroup(gpus(n=1), (pool("main", fraction=0.9), learner())),)))
         self.assertEqual(validate(spec, SCHEMA), [])
 
     def test_main_pool_missing(self) -> None:
         spec = clean_spec(gpu_config=GpuConfig(groups=(
-            GpuGroup(gpus(n=1), (engines("rollout"), learner())),)))
+            GpuGroup(gpus(n=1), (pool("rollout"), learner())),)))
         self.assertEqual(codes(spec), {"main-pool-missing"})
 
     def test_eval_pool_missing(self) -> None:
@@ -447,7 +447,7 @@ class TestPostPools(unittest.TestCase):
         spec = clean_spec(
             algo=self.judge_algo(),
             gpu_config=GpuConfig(groups=(
-                GpuGroup(gpus(n=2), (engines("main"), engines("judge"),
+                GpuGroup(gpus(n=2), (pool("main"), pool("judge"),
                                      learner())),)))
         self.assertEqual(validate(spec, SCHEMA), [])
 

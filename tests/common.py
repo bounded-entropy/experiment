@@ -9,7 +9,7 @@ from typing import Any
 from rlstack import (
     AlgoSpec, EvalSpec, ExperimentSpec, GenSpec, GpuConfig, GpuGroup,
     LocalStore, Message, OptimSpec, PolicySpec, Role, Rollout, TrajectorySource,
-    Schedule, Seeds, Task, Trajectory, Turn, engines, gpus, learner, lora,
+    Schedule, Seeds, Task, Trajectory, Turn, gpus, learner, lora, pool,
 )
 
 
@@ -40,7 +40,7 @@ def arith_spec(train_uri: str, heldout_uri: str | None = None,
                        post=("verifier",))
               if heldout_uri else None),
         gpu_config=GpuConfig(groups=(
-            GpuGroup(gpus(n=1), (engines("main"), learner())),)),
+            GpuGroup(gpus(n=1), (pool("main"), learner())),)),
         seeds=Seeds(master=17),
     )
     fields.update(overrides)

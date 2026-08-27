@@ -73,14 +73,14 @@ def make_spec(store, *, loss, post, master, n_updates, source="live", lag=0,
     from rlstack import (
         AlgoSpec, EvalSpec, ExperimentSpec, GenSpec, GpuConfig, GpuGroup,
         OptimSpec, PolicySpec, SamplingSpec, Schedule, Seeds, TrajectorySource,
-        engines, gpus, learner, lora,
+        gpus, learner, lora, pool,
     )
 
     train = store.cas_put(arith_tasks(64, seed=0))
     heldout = store.cas_put(arith_tasks(16, seed=1))
     live = source == "live"
-    members = (engines("main", fraction=0.30),) + (
-        (engines("judge"),) if judge_pool else ()) + (learner(fraction=0.10),)
+    members = (pool("main", fraction=0.30),) + (
+        (pool("judge"),) if judge_pool else ()) + (learner(fraction=0.10),)
     return ExperimentSpec(
         policy=PolicySpec(base=BASE,
                           bank={"pi": lora("layers.*.self_attn.*", r=16)}),

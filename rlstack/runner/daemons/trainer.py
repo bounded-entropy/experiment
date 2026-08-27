@@ -26,7 +26,7 @@ from rlstack.data.stores.base import RunHandle, bump
 from rlstack.data.trajectory import wave_from_rows
 from rlstack.policy.compile import Bundle, compile_bundle
 from rlstack.registry import ADAPTERS
-from rlstack.runner.sampling import Pools
+from rlstack.runner.sampling import Routes
 from rlstack.runner.interfaces import Engine, Learner, TrainStats
 from rlstack.runner.lease import ENGINE, LEARNER, Lease
 from rlstack.runner.post import run_pipeline
@@ -39,7 +39,7 @@ from rlstack.spec.specs import ExperimentSpec, SamplingSpec
 class Trainer(Daemon):
     def __init__(self, signals: RunSignals, lease: Lease, run: RunHandle, *,
                  spec: ExperimentSpec, feed: WaveFeed, engine: Engine,
-                 learner: Learner, pools_at: Callable[[Bundle], Pools],
+                 learner: Learner, routes_at: Callable[[Bundle], Routes],
                  initial_bundle: Bundle,
                  initial_version: dict[str, int]) -> None:
         super().__init__(signals, lease, run)
@@ -49,7 +49,7 @@ class Trainer(Daemon):
         self.feed = feed
         self.engine = engine
         self.learner = learner
-        self.pools_at = pools_at
+        self.routes_at = routes_at
         self.bundle = initial_bundle
         self.version = dict(initial_version)
         bank = spec.policy.bank
@@ -74,7 +74,7 @@ class Trainer(Daemon):
 
             async with self.lease.held(ENGINE):    # postprocessors may sample
                 postdata = await run_pipeline(
-                    self.spec.algo.post, wave, self.pools_at(self.bundle),
+                    self.spec.algo.post, wave, self.routes_at(self.bundle),
                     self.sampling, self.spec.seeds.master, update)
             self.run.write_postdata(update, postdata)
 

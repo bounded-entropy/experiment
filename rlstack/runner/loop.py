@@ -28,7 +28,7 @@ from rlstack.registry import ADAPTERS, code_hashes
 from rlstack.runner.daemons import Daemon, Evaluator, Generator, Trainer
 from rlstack.runner.interfaces import Engine, Learner
 from rlstack.runner.lease import LeaseMap, leases_for
-from rlstack.runner.sampling import Pools, load_tasks
+from rlstack.runner.sampling import Routes, load_tasks
 from rlstack.runner.signals import RunSignals
 from rlstack.runner.sources import feed_for
 from rlstack.spec.canonical import canonical_json, run_id
@@ -143,13 +143,13 @@ async def run_experiment_async(
     for name, base_bundle in base_bundles.items():
         engine_map[name].add_bundle(base_bundle)
 
-    def pools_at(current: Bundle) -> Pools:
+    def routes_at(current: Bundle) -> Routes:
         return {name: (eng, current if name == "main" else base_bundles[name])
                 for name, eng in engine_map.items()}
 
     # ---- Phase 2: the blackboard --------------------------------------------
     daemons = plan_daemons(spec, run=run, store=store, engine_map=engine_map,
-                           learner=learner, pools_at=pools_at,
+                           learner=learner, routes_at=routes_at,
                            initial_bundle=bundle,
                            initial_version=policy_version,
                            max_inflight=max_inflight)
@@ -165,7 +165,7 @@ async def run_experiment_async(
 
 
 def plan_daemons(spec: ExperimentSpec, *, run, store, engine_map, learner,
-                 pools_at, initial_bundle, initial_version,
+                 routes_at, initial_bundle, initial_version,
                  max_inflight) -> list[Daemon]:
     """The spec already declares the daemons; this reads them off.
 
@@ -179,20 +179,20 @@ def plan_daemons(spec: ExperimentSpec, *, run, store, engine_map, learner,
     daemons: list[Daemon] = [
         Trainer(signals, leases.for_learner(), run,
                 spec=spec, feed=feed_for(spec, store, run),
-                engine=engine_map["main"], learner=learner, pools_at=pools_at,
+                engine=engine_map["main"], learner=learner, routes_at=routes_at,
                 initial_bundle=initial_bundle, initial_version=initial_version),
     ]
     if spec.trajectories.source == "live":
         daemons.append(Generator(
             signals, leases.for_pool("main"), run,
             spec=spec, tasks=load_tasks(store, spec.gen.tasks),
-            pools_at=pools_at, initial_bundle=initial_bundle,
+            routes_at=routes_at, initial_bundle=initial_bundle,
             max_inflight=max_inflight))
     if spec.eval is not None:
         daemons.append(Evaluator(
             signals, leases.for_pool(spec.eval.pool), run,
             spec=spec, store=store, engine=engine_map["main"],
-            pools_at=pools_at, max_inflight=max_inflight))
+            routes_at=routes_at, max_inflight=max_inflight))
     return daemons
 
 

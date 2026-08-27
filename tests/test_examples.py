@@ -39,7 +39,7 @@ from rlstack import (
     broadcast,
     canonical_json,
     code_hashes,
-    engines,
+    pool,
     environment,
     flatten,
     gpus,
@@ -108,8 +108,8 @@ def example_1() -> ExperimentSpec:
         ),
         eval=EvalSpec(tasks=HELD_OUT, every=10, pool="eval", post=("verifier",)),
         gpu_config=GpuConfig(groups=(
-            GpuGroup(gpus(n=6), (engines("main", tp=2, n=3), learner(fsdp=2))),
-            GpuGroup(gpus(n=1), (engines("eval"),)),
+            GpuGroup(gpus(n=6), (pool("main", tp=2, n=3), learner(fsdp=2))),
+            GpuGroup(gpus(n=1), (pool("eval"),)),
         )),
         seeds=Seeds(master=17),
     )
@@ -267,9 +267,9 @@ class TestExample5MultiNode(unittest.TestCase):
                          schedule=Schedule(group_size=8, trajectories_per_wave=512,
                                            n_updates=300, max_policy_lag=1)),
             gpu_config=GpuConfig(groups=(
-                GpuGroup(gpus(n=16, nodes=2), (engines("main", tp=2, n=8),)),
+                GpuGroup(gpus(n=16, nodes=2), (pool("main", tp=2, n=8),)),
                 GpuGroup(gpus(n=8), (learner(fsdp=8),)),
-                GpuGroup(gpus(n=1), (engines("eval"),)),
+                GpuGroup(gpus(n=1), (pool("eval"),)),
             )),
         )
         validate_or_raise(exp, SCHEMA_35B)
@@ -289,7 +289,7 @@ class TestExample6Replicates(unittest.TestCase):
             eval=None,
             gpu_config=GpuConfig(groups=(
                 GpuGroup(gpus(ids=("0",)),
-                      (engines("main", n=2, fraction=0.30), learner(fraction=0.25))),
+                      (pool("main", n=2, fraction=0.30), learner(fraction=0.25))),
             )),
         )
 
@@ -304,7 +304,7 @@ class TestExample6Replicates(unittest.TestCase):
     def test_the_memory_treaty_is_checked_at_submit(self) -> None:
         overfull = replace(self.base(), gpu_config=GpuConfig(groups=(
             GpuGroup(gpus(ids=("0",)),
-                  (engines("main", n=2, fraction=0.80), learner(fraction=0.25))),)))
+                  (pool("main", n=2, fraction=0.80), learner(fraction=0.25))),)))
         self.assertEqual({i.code for i in validate(overfull, SCHEMA_17B)},
                          {"fraction-overflow"})
 

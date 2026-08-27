@@ -16,7 +16,7 @@ from typing import Callable, Sequence
 from rlstack.data.stores.base import RunHandle
 from rlstack.data.trajectory import Task, wave_to_rows
 from rlstack.policy.compile import Bundle
-from rlstack.runner.sampling import Pools
+from rlstack.runner.sampling import Routes
 from rlstack.runner.lease import ENGINE, Lease
 from rlstack.runner.daemons.base import Daemon
 from rlstack.runner.signals import RunSignals
@@ -27,7 +27,7 @@ from rlstack.spec.specs import ExperimentSpec
 class Generator(Daemon):
     def __init__(self, signals: RunSignals, lease: Lease, run: RunHandle, *,
                  spec: ExperimentSpec, tasks: Sequence[Task],
-                 pools_at: Callable[[Bundle], Pools],
+                 routes_at: Callable[[Bundle], Routes],
                  initial_bundle: Bundle, max_inflight: int) -> None:
         super().__init__(signals, lease, run)
         self.gen = spec.gen
@@ -35,7 +35,7 @@ class Generator(Daemon):
         self.master = spec.seeds.master
         self.buffer = spec.algo.schedule.max_policy_lag
         self.tasks = tasks
-        self.pools_at = pools_at
+        self.routes_at = routes_at
         self.initial_bundle = initial_bundle
         self.max_inflight = max_inflight
 
@@ -52,7 +52,7 @@ class Generator(Daemon):
         tail = self.run.ledger_tail()
         if tail is None:
             return self.initial_bundle
-        return Bundle(tail["bundle_id"], dict(tail["versions"]))
+        return Bundle.pin(tail["bundle_id"], tail["versions"])
 
     # ---- the daemon ---------------------------------------------------------
 
@@ -68,7 +68,7 @@ class Generator(Daemon):
                     tasks=self.tasks,
                     group_size=self.schedule.group_size,
                     trajectories_per_wave=self.schedule.trajectories_per_wave,
-                    pools=self.pools_at(self.newest_bundle()),
+                    routes=self.routes_at(self.newest_bundle()),
                     master=self.master,
                     max_inflight=self.max_inflight,
                 )

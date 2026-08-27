@@ -24,7 +24,7 @@ from rlstack.registry import (
 )
 from rlstack.spec.specs import (
     AlgoSpec, EvalSpec, ExperimentSpec, GenSpec, GpuConfig, GpuGroup, OptimSpec,
-    PolicySpec, TrajectorySource, Schedule, Seeds, engines, gpus, learner, lora,
+    PolicySpec, TrajectorySource, Schedule, Seeds, gpus, learner, lora, pool,
 )
 
 
@@ -222,7 +222,7 @@ def minimal_spec(**overrides: Any) -> ExperimentSpec:
                       optim=OptimSpec("adamw", lr=1e-5),
                       schedule=Schedule(group_size=8, trajectories_per_wave=64, n_updates=10)),
         gpu_config=GpuConfig(groups=(
-            GpuGroup(gpus(n=1), (engines("main"), learner())),)),
+            GpuGroup(gpus(n=1), (pool("main"), learner())),)),
         seeds=Seeds(master=0),
     )
     fields.update(overrides)

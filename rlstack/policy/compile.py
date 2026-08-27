@@ -37,6 +37,13 @@ class Bundle:
     payloads: Mapping[str, bytes] = field(repr=False, default_factory=dict)
     kinds: Mapping[str, str] = field(default_factory=dict)
 
+    @classmethod
+    def pin(cls, bundle_id: str, policy_version: Mapping[str, int]) -> "Bundle":
+        """A payload-less Bundle used purely as an ADDRESS: requests pin its
+        id; the serving engine already holds the payloads (add_bundle happens
+        before the ledger commit that makes the id visible)."""
+        return cls(bundle_id, dict(policy_version))
+
 
 def compile_bundle(
     payloads: Mapping[str, bytes],

@@ -17,7 +17,7 @@ from dataclasses import replace
 from common import arith_spec, arith_store
 from rlstack import (
     ENGINE, LEARNER, ExclusiveLease, FakeEngine, FakeLearner, GpuConfig,
-    GpuGroup, OpenLease, RunSignals, Schedule, engines, fake_qwen_schema, gpus,
+    GpuGroup, OpenLease, RunSignals, Schedule, fake_qwen_schema, gpus, pool,
     learner, leases_for, run_experiment,
 )
 
@@ -91,7 +91,7 @@ class ExclusiveLeaseTest(unittest.TestCase):
 
     def test_leases_for_reads_the_sharing_field(self) -> None:
         sleep_spec = arith_spec("cas://x/t.jsonl", gpu_config=GpuConfig(groups=(
-            GpuGroup(gpus(n=1), (engines("main"), learner()), sharing="sleep"),)))
+            GpuGroup(gpus(n=1), (pool("main"), learner()), sharing="sleep"),)))
         leases = leases_for(sleep_spec)
         self.assertIs(leases.for_pool("main"), leases.for_learner())
         self.assertIsInstance(leases.for_pool("main"), ExclusiveLease)
@@ -151,7 +151,7 @@ class BlackboardRunTest(unittest.TestCase):
 
     def test_sleep_colocation_runs_green(self) -> None:
         spec = arith_spec(self.train, self.heldout, gpu_config=GpuConfig(groups=(
-            GpuGroup(gpus(n=1), (engines("main"), learner()), sharing="sleep"),)))
+            GpuGroup(gpus(n=1), (pool("main"), learner()), sharing="sleep"),)))
         report, run = self.run_spec(spec)
         self.assertEqual(len(run.read_ledger()), 4)
         self.assertTrue(run.has_eval(2) and run.has_eval(4))

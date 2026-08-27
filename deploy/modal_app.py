@@ -62,7 +62,7 @@ def run_arith(n_updates: int = 4, trajectories_per_wave: int = 16,
     from rlstack import (
         AlgoSpec, EvalSpec, ExperimentSpec, GenSpec, GpuConfig, GpuGroup,
         ModalVolumeStore, OptimSpec, PolicySpec, SamplingSpec, Schedule, Seeds,
-        TrajectorySource, engines, gpus, learner, lora, run_experiment,
+        TrajectorySource, gpus, learner, lora, pool, run_experiment,
     )
     from rlstack.policy.siteschema import hf_schema
     from rlstack.runner.engines.vllm_engine import VllmEngine
@@ -90,7 +90,7 @@ def run_arith(n_updates: int = 4, trajectories_per_wave: int = 16,
                                         microbatch_tokens=2048)),
         eval=EvalSpec(tasks=heldout, every=2, n_samples=2, post=("verifier",)),
         gpu_config=GpuConfig(groups=(
-            GpuGroup(gpus(n=1), (engines("main", fraction=0.45),
+            GpuGroup(gpus(n=1), (pool("main", fraction=0.45),
                                  learner(fraction=0.40))),)),
         seeds=Seeds(master=master_seed),
     )

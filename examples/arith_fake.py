@@ -19,8 +19,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from rlstack import (
     AlgoSpec, EvalSpec, ExperimentSpec, GenSpec, GpuConfig, GpuGroup, LocalStore,
-    OptimSpec, PolicySpec, Schedule, Seeds, TrajectorySource, engines, gpus,
-    fake_qwen_schema, learner, lora,
+    OptimSpec, PolicySpec, Schedule, Seeds, TrajectorySource, gpus,
+    fake_qwen_schema, learner, lora, pool,
 )
 from rlstack.runner.fakes import FakeEngine, FakeLearner
 from rlstack.runner.loop import run_experiment
@@ -55,7 +55,7 @@ def main() -> None:
         ),
         eval=EvalSpec(tasks=heldout_uri, every=2, post=("verifier",)),
         gpu_config=GpuConfig(groups=(
-            GpuGroup(gpus(n=1), (engines("main"), learner())),)),
+            GpuGroup(gpus(n=1), (pool("main"), learner())),)),
         seeds=Seeds(master=17),
     )
 

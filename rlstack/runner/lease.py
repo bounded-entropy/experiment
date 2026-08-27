@@ -27,7 +27,7 @@ from abc import ABC, abstractmethod
 from contextlib import asynccontextmanager
 from typing import Awaitable, Callable
 
-from rlstack.spec.specs import EnginesMember
+from rlstack.spec.specs import PoolMember
 
 Hook = Callable[[], Awaitable[None]]
 
@@ -105,7 +105,7 @@ def leases_for(spec) -> LeaseMap:
         lease: Lease = (ExclusiveLease() if group.sharing == "sleep"
                         else OpenLease())
         for member in group.members:
-            if isinstance(member, EnginesMember):
+            if isinstance(member, PoolMember):
                 pools[member.name] = lease
             else:
                 learner_lease = lease

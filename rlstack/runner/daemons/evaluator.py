@@ -21,7 +21,7 @@ from rlstack.data.stores.base import RunHandle, Store
 from rlstack.data.trajectory import Group, Wave
 from rlstack.policy.compile import Bundle, compile_bundle
 from rlstack.registry import ADAPTERS
-from rlstack.runner.sampling import EngineSampleClient, Pools
+from rlstack.runner.sampling import EngineSampleClient, Routes
 from rlstack.runner.interfaces import Engine
 from rlstack.runner.lease import ENGINE, Lease
 from rlstack.runner.post import run_pipeline
@@ -35,7 +35,7 @@ from rlstack.spec.specs import ExperimentSpec, SamplingSpec
 class Evaluator(Daemon):
     def __init__(self, signals: RunSignals, lease: Lease, run: RunHandle, *,
                  spec: ExperimentSpec, store: Store, engine: Engine,
-                 pools_at: Callable[[Bundle], Pools],
+                 routes_at: Callable[[Bundle], Routes],
                  max_inflight: int) -> None:
         super().__init__(signals, lease, run)
         assert spec.eval is not None
@@ -54,7 +54,7 @@ class Evaluator(Daemon):
         self.sampling = spec.gen.sampling if spec.gen else SamplingSpec()
         self.master = spec.seeds.master
         self.tasks = load_tasks(store, spec.eval.tasks)
-        self.pools_at = pools_at
+        self.routes_at = routes_at
         self.max_inflight = max_inflight
 
     # ---- the acquisition condition (override to change the schedule) --------
@@ -100,16 +100,16 @@ class Evaluator(Daemon):
             pinned = self.bundle_for(entry)
             self.engine.add_bundle(pinned)
             async with self.lease.held(ENGINE):
-                await self._evaluate(update, self.pools_at(pinned))
+                await self._evaluate(update, self.routes_at(pinned))
             await self.signals.notify()
 
-    async def _evaluate(self, update: int, pools: Pools) -> None:
+    async def _evaluate(self, update: int, routes: Routes) -> None:
         limiter = asyncio.Semaphore(self.max_inflight)
 
         async def one(task, sample_index: int):
             async with limiter:
                 seed = derive(self.master, "eval", update, task.id, sample_index)
-                client = EngineSampleClient(pools, self.sampling, seed)
+                client = EngineSampleClient(routes, self.sampling, seed)
                 return await run_episode(self.env_name, task, client)
 
         groups = []
@@ -119,7 +119,7 @@ class Evaluator(Daemon):
             groups.append(Group(task.id, episodes))
         wave = Wave(groups)
 
-        columns = await run_pipeline(self.pipeline, wave, pools, self.sampling,
+        columns = await run_pipeline(self.pipeline, wave, routes, self.sampling,
                                      self.master, update, phase="eval-post")
 
         rows, index = [], 0

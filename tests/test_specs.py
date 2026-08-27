@@ -10,7 +10,7 @@ from rlstack.spec.specs import (
     AdapterSpec,
     AlgoSpec,
     BackendProfile,
-    EnginesMember,
+    PoolMember,
     EvalSpec,
     ExperimentSpec,
     GenSpec,
@@ -26,7 +26,7 @@ from rlstack.spec.specs import (
     Seeds,
     WarmStart,
     attn_bias,
-    engines,
+    pool,
     gpus,
     learner,
     lora,
@@ -64,9 +64,9 @@ def example_1(bank: dict[str, AdapterSpec] | None = None) -> ExperimentSpec:
         ),
         eval=EvalSpec(tasks="cas://8c31f0.../gsm_heldout.jsonl", every=10),
         gpu_config=GpuConfig(groups=(
-            GpuGroup(gpus(n=6), (engines("main", tp=2, n=3), learner(fsdp=2)),
+            GpuGroup(gpus(n=6), (pool("main", tp=2, n=3), learner(fsdp=2)),
                   sharing="concurrent"),
-            GpuGroup(gpus(n=1), (engines("eval", tp=1, n=1),)),
+            GpuGroup(gpus(n=1), (pool("eval", tp=1, n=1),)),
         )),
         seeds=Seeds(master=17),
     )
@@ -86,7 +86,7 @@ class TestConstruction(unittest.TestCase):
 
     def test_topology_members(self) -> None:
         main_group = self.exp.gpu_config.groups[0]
-        self.assertIsInstance(main_group.members[0], EnginesMember)
+        self.assertIsInstance(main_group.members[0], PoolMember)
         self.assertIsInstance(main_group.members[1], LearnerMember)
         self.assertEqual(main_group.members[0].name, "main")
         self.assertEqual(main_group.sharing, "concurrent")
@@ -105,7 +105,7 @@ class TestConstruction(unittest.TestCase):
 
     def test_multi_node_topology_example_5(self) -> None:
         config = GpuConfig(groups=(
-            GpuGroup(gpus(n=16, nodes=2), (engines("main", tp=2, n=8),)),
+            GpuGroup(gpus(n=16, nodes=2), (pool("main", tp=2, n=8),)),
             GpuGroup(gpus(n=8), (learner(fsdp=8),)),
         ))
         self.assertEqual(config.groups[0].gpus.nodes, 2)
@@ -113,7 +113,7 @@ class TestConstruction(unittest.TestCase):
 
     def test_fractional_colocation_example_6(self) -> None:
         solo = GpuGroup(gpus(ids=("0",)),
-                     (engines("main", n=2, fraction=0.30), learner(fraction=0.25)),
+                     (pool("main", n=2, fraction=0.30), learner(fraction=0.25)),
                      sharing="concurrent")
         self.assertEqual(solo.members[0].fraction, 0.30)
         self.assertEqual(solo.gpus.ids, ("0",))
@@ -231,9 +231,9 @@ class TestSugar(unittest.TestCase):
         self.assertEqual(gpus(16, nodes=2), GpuSet(n=16, nodes=2))
         self.assertEqual(gpus(ids=("0", "1")), GpuSet(ids=("0", "1")))
 
-    def test_engines_and_learner(self) -> None:
-        self.assertEqual(engines("main", tp=2, n=3),
-                         EnginesMember(name="main", tp=2, n=3))
+    def test_pool_and_learner(self) -> None:
+        self.assertEqual(pool("main", tp=2, n=3),
+                         PoolMember(name="main", tp=2, n=3))
         self.assertEqual(learner(fsdp=2), LearnerMember(fsdp=2))
 
     def test_lora(self) -> None:

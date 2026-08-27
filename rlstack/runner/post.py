@@ -20,7 +20,7 @@ from collections.abc import Sequence
 
 from rlstack.data.trajectory import Group, Wave
 from rlstack.registry import POST
-from rlstack.runner.sampling import EngineSampleClient, Pools
+from rlstack.runner.sampling import EngineSampleClient, Routes
 from rlstack.runner.seeds import derive
 from rlstack.spec.specs import SamplingSpec
 
@@ -28,7 +28,7 @@ from rlstack.spec.specs import SamplingSpec
 async def run_pipeline(
     pipeline: Sequence[str],
     wave: Wave,
-    pools: Pools,
+    routes: Routes,
     sampling: SamplingSpec,
     master: int,
     update: int,
@@ -43,7 +43,7 @@ async def run_pipeline(
             # a processor's declared sampling (a judge's own budget) wins
             # over the run's generation sampling; None inherits
             client = EngineSampleClient(
-                pools, pdef.instance.sampling or sampling,
+                routes, pdef.instance.sampling or sampling,
                 derive(master, phase, update, group.key, name))
             out = await pdef.instance.process(group, data, client)
             if set(out) != set(pdef.produces):

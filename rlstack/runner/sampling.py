@@ -29,7 +29,7 @@ from rlstack.runner.seeds import derive
 from rlstack.spec.specs import SamplingSpec
 
 # One named pool: the engine and the bundle its requests pin.
-Pools = Mapping[str, tuple[Engine, Bundle]]
+Routes = Mapping[str, tuple[Engine, Bundle]]
 
 
 class EngineSampleClient:
@@ -37,21 +37,21 @@ class EngineSampleClient:
     sequence, so multi-pool traffic is deterministic regardless of which
     pools an episode touches."""
 
-    def __init__(self, pools: Pools, sampling: SamplingSpec, episode_seed: int,
+    def __init__(self, routes: Routes, sampling: SamplingSpec, episode_seed: int,
                  pool_name: str = "main", _counter: list[int] | None = None) -> None:
-        if pool_name not in pools:
+        if pool_name not in routes:
             raise KeyError(
-                f"unknown engine pool {pool_name!r}; pools: {sorted(pools)}")
-        self._pools = pools
+                f"unknown engine pool {pool_name!r}; pools: {sorted(routes)}")
+        self._routes = routes
         self._sampling = sampling
         self._episode_seed = episode_seed
         self._pool_name = pool_name
-        self._engine, self._bundle = pools[pool_name]
+        self._engine, self._bundle = routes[pool_name]
         self._counter = _counter if _counter is not None else [0]
 
     def pool(self, name: str) -> "EngineSampleClient":
         """A sibling client for another pool, sharing this episode's seeds."""
-        return EngineSampleClient(self._pools, self._sampling, self._episode_seed,
+        return EngineSampleClient(self._routes, self._sampling, self._episode_seed,
                                   name, self._counter)
 
     async def sample(self, messages: Sequence[Message],
@@ -130,7 +130,7 @@ async def collect_wave(
     tasks: Sequence[Task],
     group_size: int,
     trajectories_per_wave: int,
-    pools: Pools,
+    routes: Routes,
     master: int,
     phase: str = "rollout",
     max_inflight: int = 64,
@@ -153,7 +153,7 @@ async def collect_wave(
     async def one(task: Task, sample_index: int) -> Trajectory:
         async with limiter:
             episode_seed = derive(master, phase, update, task.id, sample_index)
-            client = EngineSampleClient(pools, sampling, episode_seed)
+            client = EngineSampleClient(routes, sampling, episode_seed)
             return await run_episode(env_name, task, client)
 
     jobs = [one(task, s) for task in chosen for s in range(group_size)]

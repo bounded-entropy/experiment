@@ -9,7 +9,7 @@ from dataclasses import replace
 
 from common import arith_spec, arith_store
 from rlstack import (
-    GpuConfig, GpuGroup, engines, gpus, learner, run_experiment,
+    GpuConfig, GpuGroup, gpus, learner, pool, run_experiment,
     Seeds,
     FakeEngine, FakeLearner, PolicySpec, WarmStart, flatten, lora,
     fake_qwen_schema, run_experiment, trajectory_from_row,
@@ -201,7 +201,7 @@ class JudgePoolTest(unittest.TestCase):
             base,
             algo=replace(base.algo, post=("llm_judge", "grpo_advantage")),
             gpu_config=GpuConfig(groups=(
-                GpuGroup(gpus(n=1), (engines("main"), engines("judge"),
+                GpuGroup(gpus(n=1), (pool("main"), pool("judge"),
                                      learner())),)))
 
     def test_unmapped_judge_pool_is_refused_at_submit(self) -> None:

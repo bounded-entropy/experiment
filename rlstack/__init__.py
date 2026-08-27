@@ -17,10 +17,10 @@ __version__ = "0.0.1"
 
 from rlstack.spec.canonical import canonical_json, content_hash, run_id
 from rlstack.spec.specs import (
-    AdapterSpec, AlgoSpec, BackendProfile, EnginesMember, EvalSpec, ExperimentSpec,
+    AdapterSpec, AlgoSpec, BackendProfile, PoolMember, EvalSpec, ExperimentSpec,
     GenSpec, GpuConfig, GpuSet, GpuGroup, LearnerMember, OptimSpec, PolicySpec,
     SamplingSpec, Schedule, Seeds, TrajectorySource, WarmStart,
-    attn_bias, engines, gpus, learner, lora, soft_prompt,
+    attn_bias, gpus, learner, lora, pool, soft_prompt,
 )
 from rlstack.registry import (
     ADAPTERS, ENVS, LOSSES, POST,
@@ -58,7 +58,7 @@ from rlstack.runner.interfaces import (
 )
 from rlstack.runner.seeds import derive
 from rlstack.runner.sampling import (
-    EngineSampleClient, Pools, collect_wave, load_tasks,
+    EngineSampleClient, Routes, collect_wave, load_tasks,
 )
 from rlstack.runner.post import run_pipeline
 from rlstack.runner.signals import RunSignals

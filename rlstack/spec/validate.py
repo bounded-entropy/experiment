@@ -29,7 +29,7 @@ from rlstack.registry import (
     Ref,
     Teacher,
 )
-from rlstack.spec.specs import EnginesMember, ExperimentSpec, LearnerMember
+from rlstack.spec.specs import PoolMember, ExperimentSpec, LearnerMember
 
 # PolicyOutputs fields the training forward can always produce, with no bank help.
 BASE_PROVIDES = frozenset({"ref_logprobs", "entropies", "hidden_states"})
@@ -72,7 +72,7 @@ def _declared_pools(spec: ExperimentSpec) -> dict[str, str]:
     pools: dict[str, str] = {}
     for gi, group in enumerate(spec.gpu_config.groups):
         for mi, member in enumerate(group.members):
-            if isinstance(member, EnginesMember) and member.name not in pools:
+            if isinstance(member, PoolMember) and member.name not in pools:
                 pools[member.name] = f"gpu_config.groups[{gi}].members[{mi}]"
     return pools
 
@@ -277,7 +277,7 @@ def check_pool_names_are_unique(spec: ExperimentSpec, schema: SiteSchema) -> lis
     first: dict[str, str] = {}
     for gi, group in enumerate(spec.gpu_config.groups):
         for mi, member in enumerate(group.members):
-            if not isinstance(member, EnginesMember):
+            if not isinstance(member, PoolMember):
                 continue
             path = f"gpu_config.groups[{gi}].members[{mi}]"
             if member.name in first:

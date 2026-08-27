@@ -620,6 +620,26 @@ specs; backends (local/modal/skypilot) and GPU topology are semantics-neutral.
     llm.pool(name) and have no `pools` declaration — same gap, same fix
     shape (EnvDef.pools), when a multi-pool env first exists.
 
+33. VOCABULARY DE-OVERLOAD (settled, Samarth-directed). Three words, one
+    meaning each, fixed at the source:
+    - ENGINE = metal only: an object satisfying the Engine protocol (one
+      resident vLLM process / FakeEngine). The spec helper that DECLARED a
+      pool was misleadingly named engines(...) — RENAMED pool(...), record
+      EnginesMember → PoolMember. Identity impact: run_ids change (__type__
+      in canonical_json); bundle_ids do NOT (content-addressed from
+      payloads+versions — fake example ids unchanged).
+    - POOL = a NAME traffic routes to, with two lives: declared capacity
+      (PoolMember in GpuConfig) and runtime routing entry. The name↔metal
+      relation is many-to-many (one engine may back many pools — the free
+      judge; one pool may fan over n engines — future replicas).
+    - BUNDLE = a policy version as servable content. The payload-less
+      pinning stub is now explicit: Bundle.pin(id, versions) — an ADDRESS,
+      used by Generator.newest_bundle; full bundles carry payloads+kinds.
+    - Runtime map Mapping[pool_name, (Engine, Bundle)] RENAMED Pools →
+      Routes (runner/sampling.py); routes_at closure, `routes=` params.
+      The canonical sentence: a request is TRAFFIC, addressed to a POOL,
+      served by whichever ENGINE backs that name, under a pinned BUNDLE.
+
 ## Open threads (do NOT treat as settled; flag when your answer touches them)
 
 - Identity rings: should GpuConfig (and EvalSpec) leave the run_id hash and become
