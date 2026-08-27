@@ -5,17 +5,20 @@ capped tenancy — CONTEXT #34), per-tenant adapter params built and installed
 by each kind's OWN compute half, and one optimizer per (tenant, entry) so
 optim blobs map 1:1 onto the store's optim/<name>@v.
 
-Tenancy is swap-install: exactly one tenant's adapters are wired into the
-module tree at a time; `_ensure_active` uninstalls the previous tenant's
-kinds (their exact inverse, module rebinds only — no weight copies) and
-installs the requester's. Params objects survive deactivation untouched, so
-switching is numerics-exact and costs microseconds.
+Tenancy is ADDITIVE INSTALL + ROW ROUTING (#44) — the trainer-side twin of
+the engine's punica path (I8). A tenant's deltas stay wired into the module
+tree for as long as it is installed; each row of a padded microbatch carries
+the SLOT whose delta applies to it. Every verb pins one tenant, so today all
+rows of a forward carry that tenant's slot: the degenerate one-slot case,
+which applies the same expression swap-install did. Rows carrying different
+slots in ONE forward is the same mechanism with a mixed index — scheduling
+them across tenants is the coalescer's job, not the kernel's.
 
-v0 choices, stated: docs run one at a time (no cross-doc packing in the
-forward — correct first, fast later); attention is the stock HF sdpa path;
-determinism is best-effort (CUDA kernels are not bit-stable — byte-identical
-resume stays a fakes-suite property; the real-metal invariant is the ledger's
-logprob_gap staying small).
+v0 choices, stated: ONE padded forward per microbatch (documents left-aligned
+and right-padded, stock HF sdpa, causal attention); determinism is
+best-effort (CUDA kernels are not bit-stable — byte-identical resume stays a
+fakes-suite property; the real-metal invariant is the ledger's logprob_gap
+staying small).
 """
 
 from __future__ import annotations
@@ -23,10 +26,12 @@ from __future__ import annotations
 import hashlib
 from collections.abc import Mapping
 from dataclasses import dataclass, field
+from typing import Any
 
 import torch
 
 from rlstack.data.flatten import TokenBatch
+from rlstack.policy.adapters.replay import ReplayRows, row_plan
 from rlstack.policy.siteschema import SiteMeta
 from rlstack.registry import ADAPTERS, LOSSES
 from rlstack.runner.interfaces import Emitted, TrainStats
@@ -41,7 +46,9 @@ def _init_seed(master: int, entry: str) -> int:
 
 @dataclass
 class _Tenant:
-    """One experiment's state on this learner: params, kinds, optimizers."""
+    """One experiment's state on this learner: params, kinds, optimizers, and
+    the SLOT a forward's rows route to — this tenant's installed deltas keyed
+    the way a site asks for them (site path -> the params holding it)."""
 
     loss_fn: object
     trainable: list[str]
@@ -50,6 +57,7 @@ class _Tenant:
     kinds: dict[str, object] = field(default_factory=dict)
     sites: dict[str, tuple[SiteMeta, ...]] = field(default_factory=dict)
     optimizers: dict[str, torch.optim.Optimizer] = field(default_factory=dict)
+    slot: dict[str, Any] = field(default_factory=dict)
 
 
 class TorchLearner:
@@ -62,7 +70,6 @@ class TorchLearner:
         self._base: str | None = None
         self._model: torch.nn.Module | None = None
         self._tenants: dict[str, _Tenant] = {}
-        self._active: str | None = None
 
     # ---- Learner protocol ---------------------------------------------------
 
@@ -70,9 +77,7 @@ class TorchLearner:
                 resolved_sites: Mapping[str, tuple[SiteMeta, ...]]) -> None:
         self._ensure_base(spec.policy.base)
         if tenant in self._tenants:            # Phase 1 re-runs on attach
-            if self._active == tenant:
-                self._deactivate()
-            del self._tenants[tenant]
+            self._remove(tenant)
 
         state = _Tenant(
             loss_fn=LOSSES.get(spec.algo.loss).fn,
@@ -88,6 +93,8 @@ class TorchLearner:
             state.params[entry] = params
             state.kinds[entry] = kind
             state.sites[entry] = resolved_sites[entry]
+            kind.install_replay(self._model, params, resolved_sites[entry])
+            self._claim_slot(state, resolved_sites[entry], params)
             if entry in state.trainable:
                 overrides = dict(spec.algo.optim.overrides.get(entry, {}))
                 state.optimizers[entry] = torch.optim.AdamW(
@@ -99,9 +106,9 @@ class TorchLearner:
 
     def forward_backward(self, tenant: str, batch: TokenBatch) -> TrainStats:
         state = self._tenant(tenant)
-        self._ensure_active(tenant)
-        logprobs = torch.cat([self._doc_logprobs(batch, start, stop)
-                              for start, stop in _doc_spans(batch)])
+        spans = _doc_spans(batch)
+        with row_plan(self._model).route(self._rows_of(state, len(spans))):
+            logprobs = self._batched_logprobs(batch, spans)
         result = state.loss_fn(PolicyOutputs(logprobs=logprobs), batch)
         result.loss.backward()
         return TrainStats(loss=float(result.loss), mean_ratio=result.mean_ratio,
@@ -127,6 +134,10 @@ class TorchLearner:
 
     def load(self, tenant: str, adapters: Mapping[str, bytes],
              optim: Mapping[str, bytes] | None) -> None:
+        """Restore in place. Install already placed this tenant's params on
+        the base's device, so restored moments land beside them (AdamW's
+        load_state_dict casts to each param's device) — placement is settled
+        before any load, never after it."""
         state = self._tenant(tenant)
         for entry, payload in adapters.items():
             state.kinds[entry].load(state.params[entry], payload)
@@ -155,28 +166,25 @@ class TorchLearner:
                 f"this learner holds base {self._base!r}; tenant wants "
                 f"{base!r} — one learner serves one base")
 
-    def _ensure_active(self, tenant: str) -> None:
-        """Swap-install: wire `tenant`'s adapters into the module tree,
-        unwinding the previous tenant's first. Rebinds only, never copies."""
-        if self._active == tenant:
-            return
-        self._deactivate()
-        state = self._tenants[tenant]
-        for entry in state.entries:
-            state.kinds[entry].install_replay(
-                self._model, state.params[entry], state.sites[entry])
-        for optimizer in state.optimizers.values():
-            _colocate_optim_state(optimizer)
-        self._active = tenant
+    def _claim_slot(self, state: _Tenant, sites: tuple[SiteMeta, ...],
+                    params: object) -> None:
+        """One delta per site (the bank rule) reaches the forward as one
+        params object per site PATH — the slot rows route to."""
+        for meta in sites:
+            if meta.path in state.slot:
+                raise ValueError(
+                    f"two bank entries claim the replay path {meta.path!r} — "
+                    f"a site carries at most one delta")
+            state.slot[meta.path] = params
 
-    def _deactivate(self) -> None:
-        if self._active is None:
-            return
-        state = self._tenants[self._active]
+    def _remove(self, tenant: str) -> None:
+        """Unwire a tenant: every kind's uninstall_replay, install order
+        reversed. Its params objects survive untouched — what leaves the tree
+        is the routability of its deltas, not the deltas."""
+        state = self._tenants.pop(tenant)
         for entry in reversed(state.entries):
             state.kinds[entry].uninstall_replay(
                 self._model, state.params[entry], state.sites[entry])
-        self._active = None
 
     def _tenant(self, tenant: str) -> _Tenant:
         if tenant not in self._tenants:
@@ -185,19 +193,43 @@ class TorchLearner:
 
     # ---- the forward --------------------------------------------------------
 
-    def _doc_logprobs(self, batch: TokenBatch, start: int, stop: int) -> torch.Tensor:
-        """[stop-start] logprobs: position t scores token t given tokens < t.
+    def _rows_of(self, state: _Tenant, rows: int) -> ReplayRows:
+        """Every row of a microbatch pins the verb's tenant: ONE slot, index
+        all zeros. The lowering is per-row either way, so a coalesced
+        microbatch is this same record with more slots and a mixed index —
+        the sites need no change to serve it."""
+        return ReplayRows(slots=(state.slot,),
+                          index=torch.zeros(rows, dtype=torch.long,
+                                            device=self.device))
 
-        Position 0 has no prefix; its logprob is 0.0 — flatten guarantees a
-        doc never starts with a trainable token (prompts come first).
+    def _batched_logprobs(self, batch: TokenBatch,
+                          spans: list[tuple[int, int]]) -> torch.Tensor:
+        """[len(batch)] logprobs from ONE padded forward: position t scores
+        token t given tokens < t.
+
+        Row d is document d, LEFT-ALIGNED and right-padded: causal attention
+        over the padding mask makes each real position's score identical to
+        the document-at-a-time forward this replaced, and the rows are exactly
+        the unit the row plan routes. Position 0 of a document has no prefix;
+        its logprob is 0.0 — flatten guarantees a doc never starts with a
+        trainable token (prompts come first).
         """
-        ids = torch.tensor(batch.token_ids[start:stop], dtype=torch.long,
-                           device=self.device)
-        logits = self._model(ids[None]).logits[0]           # [L, V]
-        given_prefix = torch.log_softmax(logits[:-1].float(), dim=-1)
-        chosen = given_prefix.gather(1, ids[1:, None])[:, 0]  # [L-1]
+        width = max(stop - start for start, stop in spans)
+        ids = torch.zeros((len(spans), width), dtype=torch.long,
+                          device=self.device)
+        attention = torch.zeros((len(spans), width), dtype=torch.long,
+                                device=self.device)
+        for row, (start, stop) in enumerate(spans):
+            ids[row, :stop - start] = torch.tensor(
+                batch.token_ids[start:stop], dtype=torch.long,
+                device=self.device)
+            attention[row, :stop - start] = 1
+        logits = self._model(input_ids=ids, attention_mask=attention).logits
+        given_prefix = torch.log_softmax(logits[:, :-1].float(), dim=-1)
+        chosen = given_prefix.gather(2, ids[:, 1:, None])[..., 0]   # [R, W-1]
         zero = torch.zeros(1, dtype=chosen.dtype, device=self.device)
-        return torch.cat([zero, chosen])
+        return torch.cat([torch.cat([zero, chosen[row, :stop - start - 1]])
+                          for row, (start, stop) in enumerate(spans)])
 
     def _grad_norm(self, state: _Tenant) -> float:
         total = 0.0
@@ -206,23 +238,6 @@ class TorchLearner:
                 if p.grad is not None:
                     total += float(p.grad.detach().pow(2).sum())
         return total ** 0.5
-
-
-def _colocate_optim_state(optimizer: torch.optim.Optimizer) -> None:
-    """Optimizer moments live WHERE THEIR PARAMS LIVE — the rule activation
-    enforces. A tenant `load`ed before its first activation has CPU moments
-    (load_state_dict casts to the params' device, and params move to the GPU
-    only when the kind's install_replay wires them in), so the first
-    optim_step after a resume would mix devices. Activation is the placement
-    moment of truth; after the first pass this is a no-op scan."""
-    for group in optimizer.param_groups:
-        for param in group["params"]:
-            moments = optimizer.state.get(param)
-            if not moments:
-                continue
-            for key, value in moments.items():
-                if torch.is_tensor(value) and value.device != param.device:
-                    moments[key] = value.to(param.device)
 
 
 def _doc_spans(batch: TokenBatch) -> list[tuple[int, int]]:
