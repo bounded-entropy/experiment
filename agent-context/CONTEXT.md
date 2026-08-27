@@ -1023,6 +1023,15 @@ specs; backends (local/modal/skypilot) and GPU topology are semantics-neutral.
 
 ## Open threads (do NOT treat as settled; flag when your answer touches them)
 
+- TODO (Samarth, settled intent): DELETE RunSignals.notify() and run the
+  blackboard on the poll leg alone — the store predicate is already the only
+  truth, notify is a latency hint, and removing it makes in-process and
+  cross-container daemons identical (one code path, no illusion of a message
+  bus). Cost: up to poll_seconds latency per daemon edge — tune poll_seconds
+  down (constructor param exists; tests should pass a small value so the
+  fakes suite stays ~1s). The arbiter's own 50ms admission poll is separate
+  and unaffected.
+
 - Identity rings: should GpuConfig (and EvalSpec) leave the run_id hash and become
   submit-time config (resume-across-hardware keeps identity)? #43 sharpens this:
   demands are capability (base, shape) — arguably identity — while fractions and
