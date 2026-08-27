@@ -12,7 +12,8 @@ The matrix (Samarth's list, 2026-08):
                                joins an engine already serving others
   the loss zoo                 grpo / ppo / gspo / sdft / self_anchor /
                                opsd (hinted scoring, live) +
-                               sft (static cas://) + opd (replay store://),
+                               sft (static cas://) +
+                               replay_distill (replay store://),
                                many optimizer steps each
   resource sharing, 1 GPU      engine fraction + N resident learners under
                                concurrent leases; stage 4 runs sharing="sleep"
@@ -125,11 +126,12 @@ def report_run(store, run_id: str, label: str, n_updates: int,
     gap_alarm is FAMILY-AWARE: for IS-corrected losses the gap is the
     off-policy/contamination alarm, and 0.15 is generous headroom over the
     ~0.03 kernel floor; for behavior cloning (sft) and distillation onto a
-    moving teacher (opd) the gap MEASURES teacher-student distance — growth
-    is the objective working, and only an adapter mixup (gap ~5+) is a bug,
-    so their bound is loose. Verified against the first stress run's gap
-    curves: opd starts at the 0.03 floor (teacher v0 == fresh student, so no
-    contamination) and its squared loss pulls 0.166 back down to 0.09."""
+    replayed teacher (replay_distill) the gap MEASURES teacher-student
+    distance — growth is the objective working, and only an adapter mixup
+    (gap ~5+) is a bug, so their bound is loose. Verified against the first
+    stress run's gap curves: replay_distill starts at the 0.03 floor (teacher
+    v0 == fresh student, so no contamination) and its squared loss pulls 0.166
+    back down to 0.09."""
     run = store.open_run(run_id)
     entries = run.read_ledger()
     updates = [int(e["update"]) for e in entries]
@@ -277,8 +279,10 @@ def run_stress() -> dict:
         tenants = {
             "sft":  make_spec(store, loss="sft", post=(), master=102,
                               n_updates=24, source=sft_uri, group_size=1),
-            "opd":  make_spec(store, loss="opd", post=("verifier",), master=103,
-                              n_updates=24, source=f"store://{grpo_rid}"),
+            "replay_distill":
+                    make_spec(store, loss="replay_distill", post=("verifier",),
+                              master=103, n_updates=24,
+                              source=f"store://{grpo_rid}"),
             "ppo":  make_spec(store, loss="ppo", post=("verifier", "center_reward"),
                               master=104, n_updates=24),
             "gspo": make_spec(store, loss="gspo", post=("verifier", "grpo_advantage"),
@@ -310,7 +314,7 @@ def run_stress() -> dict:
         results = await asyncio.gather(*(launch(name, i * 30.0)
                                          for i, name in enumerate(tenants)))
         _free()
-        gap_alarms = {"sft": 1.0, "opd": 0.5, "self_anchor": 0.25,
+        gap_alarms = {"sft": 1.0, "replay_distill": 0.5, "self_anchor": 0.25,
                       "opsd": 0.5}
         for name, rep in results:
             print(f"\n  -- {name} ({rep.run_id})")

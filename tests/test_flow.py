@@ -60,7 +60,7 @@ class FlowGraphTest(unittest.TestCase):
         self.assertTrue(node(direct, "reward", "post").feeds_loss)
         self.assertIn("loss:sdft", node(direct, "reward", "post").consumers)
 
-        measured = self.graph(loss="opd", post=("verifier",))
+        measured = self.graph(loss="replay_distill", post=("verifier",))
         self.assertFalse(node(measured, "reward", "post").feeds_loss)
 
     def test_records_rails_and_lag_are_in_the_graph(self) -> None:
