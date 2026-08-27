@@ -58,6 +58,9 @@ python3.13 -m unittest discover -s tests        # fakes suite (~1s)
 modal run deploy/modal_app.py::run_tests        # same suite inside the image
 modal run deploy/modal_app.py::run_arith        # small real run via the Host
 modal run deploy/modal_app.py::hosts            # observer views on the volume
+modal deploy deploy/modal_app.py                # + the observer UI beside the
+                                                #   volume (…--rlstack-ui.modal.run)
+python3.13 -m rlstack ui <store-root>           # the same UI over a local store
 modal run deploy/stress_l4.py                   # the full stress matrix (~1h)
 ```
 
@@ -66,6 +69,8 @@ modal run deploy/stress_l4.py                   # the full stress matrix (~1h)
 - Parity certificates designed (#25, rlstack_engine/certificates.py) but
   unwired — logprob_gap is the running alarm. side_attention numerics are B3+.
 - Async post daemon ("scorer"), pool-annotated flow graph, eval `terminal`
-  bit, S3Store, the UI over observe/ — all designed in CONTEXT, not built.
+  bit, S3Store — designed in CONTEXT, not built. The UI (observe/ui.py)
+  exists: graphs with loss-walkback priority; distributions, token drill-
+  down, gpu/host pages are the named next features.
 - Open threads listed at the foot of CONTEXT.md (identity rings, schedule
   split, Wave/ArchiveContext typing).

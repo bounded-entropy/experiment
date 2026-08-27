@@ -893,6 +893,32 @@ specs; backends (local/modal/skypilot) and GPU topology are semantics-neutral.
       on metal). Spec v3 + CLAUDE.md updated in the same arc (#39 rule).
     372 tests green.
 
+41. THE OBSERVER UI (settled, Samarth-directed: "a local wandb, as little
+    interference with my main code as possible; just the graphs for now,
+    walkback-from-loss priority"). Landed with ONE core touch
+    (Store.peek_eval_summaries beside the existing peeks); everything else
+    in observe/:
+    - series.py run_series(store, run_id): the run's dictionary + per-
+      update ledger post-means and train rails + eval-summary means, from
+      peeks alone.
+    - ui.py: dependency-free stdlib WSGI app + one self-contained page
+      (hand-rolled SVG charts, no CDN, 3s polling). PANEL PRIORITY IS THE
+      DICTIONARY (I11): "feeds the loss (walkback from <loss>)" section
+      first, rails second, measurement + dashed held-out eval overlays
+      last. Index = runs_data (status, fork flags, hosts).
+    - Served two ways per the locator principle: `python -m rlstack ui
+      <store>` locally; `modal deploy` wraps the same ui_app beside the
+      volume (throttled volume.reload per API read) at
+      samarthmbhargav--rlstack-ui.modal.run.
+    - E2E ON METAL: 30-update GRPO, Qwen3-0.6B, one L4, submitted through
+      the Host, WATCHED LIVE in the deployed UI (run 3be52610bb51):
+      reward 0.5 → 1.0 with the dashed eval overlay tracking to 1.0,
+      advantage collapsing to 0 as groups saturate (z-score of equals —
+      the estimator visible), gap at the 0.019 floor, 30/30 + 15/15 evals.
+      The cross-container-resume run renders as one run on two hosts.
+    Next UI features (named, not built): postdata distributions, token
+    drill-down (waves peeks), gpu/host pages, run compare.
+
 ## Open threads (do NOT treat as settled; flag when your answer touches them)
 
 - Identity rings: should GpuConfig (and EvalSpec) leave the run_id hash and become
