@@ -35,15 +35,26 @@ from dataclasses import dataclass
 from rlstack.client import SampleClient
 from rlstack.data.trajectory import Group
 from rlstack.registry import POST, source_hash
+from rlstack.spec.specs import SamplingSpec
 
 
 class PostProcessor(ABC):
-    """Subclass, declare produces/consumes, implement `process`, register with
-    @postprocessor. Subclasses must construct with no arguments — the decorator
-    instantiates one shared instance."""
+    """Subclass, declare produces/consumes/pools, implement `process`, register
+    with @postprocessor. Subclasses must construct with no arguments — the
+    decorator instantiates one shared instance.
+
+    `pools` declares the engine pools this processor SAMPLES from via
+    `llm.pool(name)` — Phase 0 holds them against the spec's declared pools
+    (the "main" pool needs no declaring: the runner always requires it).
+    `sampling` overrides the run's generation sampling for this processor's
+    calls (a judge wants its own temperature and budget, not the policy's);
+    None inherits. Both live in the class source, so they hash into run
+    identity through code_hashes like the rest of the declaration."""
 
     produces: tuple[str, ...] = ()
     consumes: tuple[str, ...] = ()
+    pools: tuple[str, ...] = ()
+    sampling: "SamplingSpec | None" = None
 
     @abstractmethod
     async def process(self, group: Group, data: Mapping[str, Sequence[float]],
@@ -60,6 +71,7 @@ class PostDef:
     instance: PostProcessor
     produces: tuple[str, ...]
     consumes: tuple[str, ...]
+    pools: tuple[str, ...]
     source_hash: str
 
 
@@ -67,6 +79,7 @@ def postprocessor(name: str):
     def register(cls: type[PostProcessor]) -> type[PostProcessor]:
         instance = cls()
         POST.add(PostDef(name, cls, instance, tuple(instance.produces),
-                         tuple(instance.consumes), source_hash(cls)))
+                         tuple(instance.consumes), tuple(instance.pools),
+                         source_hash(cls)))
         return cls
     return register

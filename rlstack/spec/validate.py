@@ -352,6 +352,48 @@ def check_traffic_routes_to_declared_pools(spec: ExperimentSpec, schema: SiteSch
     return issues
 
 
+def check_post_pools_are_declared(spec: ExperimentSpec, schema: SiteSchema) -> list[ValidationIssue]:
+    """Every pool a pipeline processor samples from (PostDef.pools) must be a
+    declared engine pool — a judge's traffic is vetted at submit, never
+    discovered as a KeyError mid-update. "main" needs no declaring here: the
+    runner requires it unconditionally."""
+    pools = _declared_pools(spec)
+    pipelines = []
+    if spec.algo is not None:
+        pipelines.append(("algo.post", spec.algo.post))
+    if spec.eval is not None:
+        pipelines.append(("eval.post", spec.eval.post))
+    issues = []
+    for field, pipeline in pipelines:
+        for i, name in enumerate(pipeline):
+            if name not in POST:
+                continue                    # unknown-post already reported
+            for pool in POST.get(name).pools:
+                if pool != "main" and pool not in pools:
+                    issues.append(_issue(
+                        "post-pool-missing", f"{field}[{i}]",
+                        f"postprocessor {name!r} samples from pool {pool!r}, "
+                        f"which no group declares; pools: "
+                        f"{', '.join(sorted(pools)) or '(none)'}"))
+    return issues
+
+
+def traffic_pools(spec: ExperimentSpec) -> set[str]:
+    """Every pool this spec's traffic can route to at run time: "main" (gen
+    and the pipelines' default client), eval.pool, and each pipeline
+    processor's declared pools. The loop holds the engine map it was handed
+    against this set before any daemon starts."""
+    pools = {"main"}
+    if spec.eval is not None:
+        pools.add(spec.eval.pool)
+        pools.update(p for name in spec.eval.post if name in POST
+                     for p in POST.get(name).pools)
+    if spec.algo is not None:
+        pools.update(p for name in spec.algo.post if name in POST
+                     for p in POST.get(name).pools)
+    return pools
+
+
 def check_live_trajectories_have_gen(spec: ExperimentSpec, schema: SiteSchema) -> list[ValidationIssue]:
     """source='live' consumes this run's own sealed gen output — gen must exist."""
     if spec.trajectories.source == "live" and spec.gen is None:
@@ -420,6 +462,7 @@ CHECKS = (
     check_sleep_implies_zero_lag,
     check_fractions_fit,
     check_traffic_routes_to_declared_pools,
+    check_post_pools_are_declared,
     check_live_trajectories_have_gen,
     check_eval_tasks_are_held_out,
     check_schedule_is_sane,

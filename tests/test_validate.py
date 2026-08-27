@@ -17,7 +17,7 @@ from rlstack.spec.specs import (
     engines, gpus, learner, lora,
 )
 from rlstack.spec.validate import (
-    SpecError, ValidationIssue, check_sites_reachable_on, site_space,
+    SpecError, ValidationIssue, check_sites_reachable_on, site_space, traffic_pools,
     validate, validate_or_raise,
 )
 
@@ -430,3 +430,34 @@ class TestSpecError(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestPostPools(unittest.TestCase):
+    """A pipeline processor's declared pools are vetted at submit."""
+
+    def judge_algo(self):
+        base = clean_spec().algo
+        return replace(base, post=("llm_judge", "grpo_advantage"))
+
+    def test_judge_without_declared_pool_is_caught(self) -> None:
+        spec = clean_spec(algo=self.judge_algo())
+        self.assertEqual(codes(spec), {"post-pool-missing"})
+
+    def test_judge_with_declared_pool_is_clean(self) -> None:
+        spec = clean_spec(
+            algo=self.judge_algo(),
+            gpu_config=GpuConfig(groups=(
+                GpuGroup(gpus(n=2), (engines("main"), engines("judge"),
+                                     learner())),)))
+        self.assertEqual(validate(spec, SCHEMA), [])
+
+    def test_eval_pipeline_pools_are_checked_too(self) -> None:
+        spec = clean_spec(eval=EvalSpec(tasks="cas://y/heldout.jsonl",
+                                        post=("llm_judge",)))
+        self.assertIn("post-pool-missing", codes(spec))
+
+    def test_traffic_pools_collects_every_route(self) -> None:
+        spec = clean_spec(
+            algo=self.judge_algo(),
+            eval=EvalSpec(tasks="cas://y/heldout.jsonl", pool="scorer"))
+        self.assertEqual(traffic_pools(spec), {"main", "judge", "scorer"})

@@ -34,7 +34,8 @@ from rlstack.runner.sources import feed_for
 from rlstack.spec.canonical import canonical_json, run_id
 from rlstack.spec.specs import ExperimentSpec, WarmStart
 from rlstack.spec.validate import (
-    SpecError, check_sites_reachable_on, site_space, validate_or_raise,
+    SpecError, check_sites_reachable_on, site_space, traffic_pools,
+    validate_or_raise,
 )
 
 
@@ -80,6 +81,13 @@ async def run_experiment_async(
 
     # ---- Phase 0: identity — computed, never typed (I3) ----------------------
     validate_or_raise(spec, schema)
+    # the engine map must cover every pool the spec's traffic can route to
+    # (gen, eval, and each pipeline processor's declared judge/teacher pools)
+    unmapped = sorted(traffic_pools(spec) - set(engine_map))
+    if unmapped:
+        raise ValueError(
+            f"spec routes traffic to pools {unmapped} but the engine map "
+            f"provides only {sorted(engine_map)}")
     # reachability is a build fact, not a spec fact: ask the serving pool's
     # engine for its inventory and hold every served adapter against it
     space = site_space(spec, schema)

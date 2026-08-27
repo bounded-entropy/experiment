@@ -40,8 +40,11 @@ async def run_pipeline(
         data: dict[str, list[float]] = {}
         for name in pipeline:
             pdef = POST.get(name)
+            # a processor's declared sampling (a judge's own budget) wins
+            # over the run's generation sampling; None inherits
             client = EngineSampleClient(
-                pools, sampling, derive(master, phase, update, group.key, name))
+                pools, pdef.instance.sampling or sampling,
+                derive(master, phase, update, group.key, name))
             out = await pdef.instance.process(group, data, client)
             if set(out) != set(pdef.produces):
                 raise ValueError(

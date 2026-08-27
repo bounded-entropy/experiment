@@ -8,7 +8,7 @@ from typing import Any
 
 from common import sealed
 from rlstack import (
-    POST, Bundle, FakeEngine, Group, PostProcessor, SamplingSpec, Wave,
+    POST, Bundle, FakeEngine, Group, Message, PostProcessor, Role, SamplingSpec, Wave,
     postprocessor, run_pipeline, zscore,
 )
 
@@ -125,3 +125,43 @@ class RegistrationTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+@postprocessor("post_tiny_budget")
+class _TinyBudget(PostProcessor):
+    """Declares its OWN sampling: max_tokens=1 truncates the fake's 2-char
+    answer to prove the per-processor override beats the run's sampling."""
+
+    produces = ("length",)
+    sampling = SamplingSpec(max_tokens=1)
+
+    async def process(self, group: Any, data: Any, llm: Any):
+        out = []
+        for _ in group.trajectories:
+            turn = await llm.sample((Message(Role.USER, "What is 30+40?"),))
+            out.append(float(len(turn.message.content)))
+        return {"length": out}
+
+
+class PoolDeclarationTest(unittest.TestCase):
+    def test_processor_sampling_overrides_the_runs(self) -> None:
+        wave = Wave([Group("t", [sealed("t")])])
+        columns = go(run_pipeline(("post_tiny_budget",), wave, pools(),
+                                  SamplingSpec(max_tokens=64), 7, 1))
+        self.assertEqual(columns["length"], [1.0])
+
+    def test_llm_judge_rewards_agreement_with_the_judge_pool(self) -> None:
+        main_engine, judge_engine = FakeEngine(), FakeEngine(p_correct=1.0)
+        main_engine.add_bundle(BUNDLE)
+        judge_engine.add_bundle(BUNDLE)
+        both = {"main": (main_engine, BUNDLE), "judge": (judge_engine, BUNDLE)}
+        wave = Wave([Group("t", [sealed("t", content="4", answer=4),
+                                 sealed("t", content="5", answer=4)])])
+        columns = go(run_pipeline(("llm_judge",), wave, both,
+                                  SamplingSpec(), 7, 1))
+        self.assertEqual(columns["reward"], [1.0, 0.0])
+
+    def test_llm_judge_declares_its_pool(self) -> None:
+        pdef = POST.get("llm_judge")
+        self.assertEqual(pdef.pools, ("judge",))
+        self.assertEqual(pdef.instance.sampling.temperature, 0.0)

@@ -79,15 +79,10 @@ class ToolUse(Environment):
         raise NotImplementedError
 
 
-@postprocessor("llm_judge")
-class LlmJudge(PostProcessor):
-    """A judge: a postprocessor that SAMPLES — scoring is post-seal analysis,
-    never part of the episode and never inside the loss."""
-
-    produces = ("judge",)
-
-    async def process(self, group: Any, data: Any, llm: Any) -> Any:
-        raise NotImplementedError
+# A judge is just a postprocessor that SAMPLES — scoring is post-seal
+# analysis, never part of the episode and never inside the loss. The real
+# one is a builtin now: training/post/llm_judge.py (produces "reward",
+# declares pools=("judge",), carries its own SamplingSpec).
 
 
 # --- Example 1 — a basic LoRA experiment, end to end -------------------------

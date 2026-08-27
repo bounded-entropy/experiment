@@ -9,6 +9,7 @@ from dataclasses import replace
 
 from common import arith_spec, arith_store
 from rlstack import (
+    GpuConfig, GpuGroup, engines, gpus, learner, run_experiment,
     Seeds,
     FakeEngine, FakeLearner, PolicySpec, WarmStart, flatten, lora,
     fake_qwen_schema, run_experiment, trajectory_from_row,
@@ -178,3 +179,45 @@ class LoopTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class JudgePoolTest(unittest.TestCase):
+    """Pipelines that sample from a declared judge pool, end to end."""
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.store, self.train, self.heldout = arith_store(self._tmp.name)
+
+    def run_spec(self, spec, engine=None, learner=None):
+        engine = engine or FakeEngine()
+        report = run_experiment(spec, SCHEMA, self.store, engine,
+                                learner or FakeLearner())
+        return report, engine
+
+    def judge_spec(self):
+        base = arith_spec(self.train)
+        return replace(
+            base,
+            algo=replace(base.algo, post=("llm_judge", "grpo_advantage")),
+            gpu_config=GpuConfig(groups=(
+                GpuGroup(gpus(n=1), (engines("main"), engines("judge"),
+                                     learner())),)))
+
+    def test_unmapped_judge_pool_is_refused_at_submit(self) -> None:
+        with self.assertRaises(ValueError) as caught:
+            self.run_spec(self.judge_spec())     # one engine: judge unmapped
+        self.assertIn("judge", str(caught.exception))
+
+    def test_judge_pool_end_to_end(self) -> None:
+        engines_map = {"main": FakeEngine(), "judge": FakeEngine(p_correct=1.0)}
+        report = run_experiment(self.judge_spec(), SCHEMA, self.store,
+                                engines_map, FakeLearner())
+        run = self.store.open_run(report.run_id)
+        entries = run.read_ledger()
+        self.assertEqual([e["update"] for e in entries], [1, 2, 3, 4])
+        for entry in entries:
+            self.assertIn("reward", entry["post"])   # the judge's column
+        # the judge pool served ONLY its base bundle; policy bundles stayed
+        # on the main engine
+        self.assertEqual(engines_map["judge"].bundle_log, ["bundle:base:judge"])
