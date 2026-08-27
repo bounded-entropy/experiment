@@ -155,10 +155,13 @@ class Learner(Protocol):
     installation is ADDITIVE — any number of experiments' adapter sets coexist
     on one loaded base — and every verb PINS a tenant (the run_id). One
     resident learner serves many experiments; nothing about one tenant's
-    install, step, or load disturbs another's state. The v0 realization is
-    swap-install (the active tenant's adapters are wired into the module tree,
-    switching costs module rebinds, never weight copies); batched multi-tenant
-    forwards are a kernel upgrade behind the same surface.
+    install, step, or load disturbs another's state. The realization (#44) is
+    additive install + row routing — the trainer-side twin of the engine's
+    punica path: every installed tenant's deltas stay wired, and each row of
+    a batched forward carries the slot whose delta applies to it. A verb pins
+    one tenant, so today every forward is the one-slot case; cross-tenant
+    coalescing is a scheduling upgrade behind the same surface, not a kernel
+    change.
     """
 
     fsdp: int

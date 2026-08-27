@@ -89,9 +89,13 @@ pinned versions + the logprob_gap alarm.
 **I8 — Multi-tenancy on both sides of the bridge.** Engine: bundle registration
 is additive; every request pins its bundle at submission; requests batch across
 tenants. Learner: installation is additive; every verb pins a tenant (the
-run_id); one loaded base serves every tenant's adapters (v0: swap-install —
-module rebinds, never weight copies). Nothing about one tenant's traffic,
-install, or load disturbs another's.
+run_id); one loaded base serves every tenant's adapters (#44: additive
+install + row routing — every installed tenant's deltas stay wired, each
+batched-forward row carries the slot whose delta applies; the trainer-side
+punica). Nothing about one tenant's traffic, install, or load disturbs
+another's. Sealed learner bytes are SHARD-WIDTH-FREE (#45): emit/load
+payloads are identical at any fsdp width, so resume and bundle compile never
+know how the metal was cut.
 
 **I9 — The loss is pure math; post owns all production.** A loss is
 `fn(PolicyOutputs, TokenBatch) -> LossResult` and can never cause metal work:
@@ -566,7 +570,7 @@ not yet exercised; the fakes and one-L4 paths are.)*
 
 Seven experiments — different losses, sources, and lag regimes — share ONE
 resident engine (multi-LoRA batching across tenants) and ONE resident learner
-(swap-install per microbatch), submitted to one Host that binds, fits,
+(additive install + row routing, #44), submitted to one Host that binds, fits,
 journals, and runs them under a shared arbiter. Per-tenant `logprob_gap`
 staying at the bf16 kernel floor is the cross-tenant isolation alarm. This is
 the stress matrix (deploy/stress_l4.py), green on an L4 end to end, including
