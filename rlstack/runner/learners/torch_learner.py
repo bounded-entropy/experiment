@@ -213,6 +213,12 @@ class TorchLearner:
         the unit the row plan routes. Position 0 of a document has no prefix;
         its logprob is 0.0 — flatten guarantees a doc never starts with a
         trainable token (prompts come first).
+
+        What padding costs: the logits are rows × LONGEST document, while
+        pack() bounds a microbatch by its token SUM. A wave of near-equal
+        documents pays nothing; a very ragged one pays that ratio in logit
+        memory. Length-bucketed sub-forwards are the fix when a wave needs
+        one — logged, not built.
         """
         width = max(stop - start for start, stop in spans)
         ids = torch.zeros((len(spans), width), dtype=torch.long,

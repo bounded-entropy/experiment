@@ -947,6 +947,97 @@ specs; backends (local/modal/skypilot) and GPU topology are semantics-neutral.
     grad-collapse at saturation; gap_per_ktok correctly refused by the
     older run's dictionary. 382 tests green.
 
+44. THE TRAINER'S PUNICA: BATCHED FORWARD, SITES EXPOSED PER ROW (settled,
+    Samarth-directed: "implement batching for training... this batching is
+    of the same flavor as the engine, where sites are exposed, so it
+    supports multi lora and other types of adapters"). Scope was fixed as
+    MECHANISM FIRST: the trainer-side analog of the punica kernel, NOT the
+    cross-tenant request queue (see "next"). Supersedes the swap-install
+    half of #34(b).
+    (a) ONE PADDED FORWARD PER MICROBATCH. TorchLearner._doc_logprobs (one
+    document per model call) became _batched_logprobs: documents are rows,
+    left-aligned and right-padded, one causal forward with the padding
+    mask. The rows are the unit everything below routes on. Cost logged,
+    not fixed: logits are rows × LONGEST document while pack() bounds the
+    token SUM, so a very ragged wave pays that ratio in logit memory
+    (length-bucketed sub-forwards are the fix when a wave needs one).
+    (b) THE ROW PLAN (policy/adapters/replay.py, new): ReplayRows = slot
+    order + a [rows] index; a SLOT is one tenant's installed deltas keyed
+    {site path -> the params holding it}. RowPlan is routed for exactly one
+    forward and RAISES when a lowering runs unrouted — an unrouted replay
+    forward is a wiring bug, never a fallback to whoever went last. The
+    plan rides ON THE MODEL (row_plan(model), one named accessor) because
+    the model is the one handle Adapter.install_replay receives: the
+    five-member protocol in adapters/base.py is UNTOUCHED, and the same
+    hook is what soft-prompt replay will read for its per-row rows.
+    (c) LORA APPLIES PER ROW (lora_torch.LoraLinear -> LoraSite). One slot
+    takes the pre-#44 expression verbatim ((x A^T) B^T over the whole
+    batch); many slots gather each row's (A, B) out of a stack and do two
+    bmms — punica's shape in stock torch. Slots of one forward must agree
+    on rank (punica zero-pads to max_rank; the coalescer will).
+    (d) INSTALL IS ADDITIVE, THE MIRROR OF add_bundle (I8). Swap-install is
+    gone: every tenant is wired at install() and stays wired, a second
+    tenant at a site JOINS the LoraSite it finds, and uninstall unwraps only
+    when the last state leaves. A verb pins one tenant, so today every row
+    of a forward carries that tenant's slot — the degenerate one-slot case.
+    Consequences: placement moved to install (params reach the device before
+    optimizers exist and before any load), so _colocate_optim_state from
+    185c07c is DELETED as dead by construction; a trainer-only kind with no
+    install_replay now fails at Phase 1 instead of the first backward;
+    per-tenant deltas deliberately do NOT register in model.parameters()
+    (the base is shared and frozen, a delta is one tenant's state).
+    (e) EVIDENCE. tests/test_batched_replay.py: 17 tests that skip without
+    torch and RUN ON CPU in the deploy image (modal_app::run_tests) — the
+    unrouted-forward refusal, one-slot-equals-swap-install bit-identity,
+    rows-carry-their-own-delta, additive install/uninstall balance, "another
+    tenant's install does not move the numbers", gradients reaching only
+    routed slots, and the padded forward against the verbatim pre-#44
+    per-doc forward on a toy causal LM. deploy/batch_parity.py (new, ~4 min
+    on one L4, Qwen3-0.6B, 112 self_attn sites, r=8): 16/16, reference =
+    the pre-#44 LoraLinear body wired the pre-#44 way. ONE ROW PER FORWARD
+    is BIT-IDENTICAL in float32 AND bfloat16 (max|d| = 0.00e+00) — every
+    thing #44 added is exact; the full padded batch differs by 2.07e-05
+    (base) / 3.43e-05 (uniform) / 1.72e-05 (mixed) in fp32 and 1.15e-01 /
+    1.70e-01 / 3.12e-01 in bf16, all of it the batch dimension's reduction
+    order (the base row carries no adapter at all), against deltas that move
+    logprobs by 9 nats. The mixed case is two tenants' deltas in ONE
+    forward, which swap-install cannot express. End to end: run_arith
+    (run bc9c177d23bb, seed 17) rewards .500/.812/.875/.812 with ledger gap
+    0.0241–0.0280 — inside the 0.022–0.033 kernel floor #28 calibrated for
+    this exact stack, i.e. batching did not widen the alarm.
+    (f) DOC DEBT, deliberate: runner/interfaces.py's Learner docstring still
+    says "the v0 realization is swap-install" and STYLE rule 8's policy/
+    line still reads "adapters/ (one file each)" — replay.py is the kinds'
+    shared compute-side seam, not a kind. Both are one-line edits owed;
+    they were not made because a parallel track owns those files this cycle.
+    PROPOSED SPEC DELTA (I8, rl-stack-spec.md): replace "(v0: swap-install —
+    module rebinds, never weight copies)" with "installation is additive on
+    the trainer side too: every installed tenant's deltas stay wired, and
+    each row of a microbatch carries the slot whose delta applies to it —
+    the mirror of a request pinning its bundle."
+    NEXT (designed, no code): the CROSS-TENANT COALESCER, the analog of
+    AsyncLLMEngine's request queue over this kernel. The learner grows an
+    internal queue of (tenant, microbatch) work items behind the SAME five
+    sync verbs; forward_backward enqueues and blocks on its item's result
+    instead of running it. A step loop drains the queue into one padded
+    forward whose rows come from several tenants: slot order = the distinct
+    tenants in the draw, index = each row's tenant, which is exactly the
+    ReplayRows this entry already builds. Three things it must own, none of
+    them kernel work: ADMISSION (a draw may only mix tenants whose ranks
+    agree and whose bank paths cover every routed row — today's loud raises
+    become the queue's filter), LOSS SEPARATION (I9 keeps the loss pure per
+    tenant, so the coalesced forward's logprobs must be split back along
+    doc spans and each tenant's loss run on its own slice, with backward
+    accumulating into that tenant's params only — already true, since a
+    slot no row carries takes no gradient), and FAIRNESS (the GpuArbiter
+    owns admission to the metal, #34, so the coalescer must not become a
+    second scheduler: draw policy is FIFO with a per-tenant cap, and a
+    tenant's bytes must stay identical whether or not it was coalesced,
+    which the tenancy invariant already demands and bf16 batching already
+    threatens — the honest form is "identical up to the batching noise
+    deploy/batch_parity.py measures"). 399 tests green (382 + 17, the new
+    ones skipped locally and green in the image).
+
 ## Open threads (do NOT treat as settled; flag when your answer touches them)
 
 - Identity rings: should GpuConfig (and EvalSpec) leave the run_id hash and become
