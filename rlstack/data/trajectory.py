@@ -182,21 +182,21 @@ class Wave:
 # ---------------------------------------------------------------------------
 
 def wave_to_rows(wave: Wave) -> list[dict[str, Any]]:
-    """A wave as flat rollout rows; each row carries its group key, so group
+    """A wave as flat trajectory rows; each row carries its group key, so group
     structure survives the store (offline advantage re-runs need it)."""
     return [dict(trajectory_to_row(traj), group=group.key)
             for group in wave.groups for traj in group.trajectories]
 
 
 def wave_from_rows(rows: Sequence[Mapping[str, Any]]) -> Wave:
-    """Rebuild a wave from rollout rows, grouping by key in first-seen order."""
+    """Rebuild a wave from trajectory rows, grouping by key in first-seen order."""
     members: dict[str, list[Trajectory]] = {}
     for row in rows:
         members.setdefault(row["group"], []).append(trajectory_from_row(row))
     return Wave([Group(key, trajs) for key, trajs in members.items()])
 
 def trajectory_to_row(traj: Trajectory) -> dict[str, Any]:
-    """A trajectory as one plain-JSON rollout row. Lossless roundtrip."""
+    """A trajectory as one plain-JSON row. Lossless roundtrip."""
     if not isinstance(traj, Trajectory):
         raise DataError(
             f"only sealed Trajectory reaches the store (I1), got "
@@ -231,7 +231,7 @@ def trajectory_to_row(traj: Trajectory) -> dict[str, Any]:
 
 
 def trajectory_from_row(row: Mapping[str, Any]) -> Trajectory:
-    """Rebuild a sealed trajectory from its rollout row, message identity intact."""
+    """Rebuild a sealed trajectory from its row, message identity intact."""
     task = Task(id=row["task"]["id"], prompt=row["task"]["prompt"],
                 meta=dict(row["task"]["meta"]))
     messages = [Message(Role(m["role"]), m["content"]) for m in row["messages"]]

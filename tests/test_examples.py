@@ -151,8 +151,8 @@ class Gae(PostProcessor):
         raise NotImplementedError  # detached, CPU, group-scope
 
 
-@loss("ppo", requires=("values", "gae_advantage"))
-def ppo(out: Any, batch: Any) -> Any:
+@loss("ppo_critic", requires=("values", "gae_advantage"))
+def ppo_critic(out: Any, batch: Any) -> Any:
     raise NotImplementedError  # grads flow to the critic head
 
 
@@ -165,12 +165,12 @@ class TestExample2PPO(unittest.TestCase):
         exp2 = replace(
             exp,
             policy=replace(exp.policy, bank=bank),
-            algo=replace(exp.algo, loss="ppo", post=("verifier", "gae")),
+            algo=replace(exp.algo, loss="ppo_critic", post=("verifier", "gae")),
         )
-        validate_or_raise(exp2, SCHEMA)  # value_head provides "values"; ppo needs it
+        validate_or_raise(exp2, SCHEMA)  # value_head provides "values"; ppo_critic needs it
 
     def test_ppo_without_a_critic_is_caught_at_submit(self) -> None:
-        exp = replace(example_1(), algo=replace(example_1().algo, loss="ppo"))
+        exp = replace(example_1(), algo=replace(example_1().algo, loss="ppo_critic"))
         self.assertEqual({i.code for i in validate(exp, SCHEMA)},
                          {"unsatisfied-requires"})
 

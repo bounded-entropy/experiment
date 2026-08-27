@@ -6,4 +6,4 @@ builtins.
 """
 
 from rlstack.training.post.base import PostDef, PostProcessor, postprocessor  # noqa: F401
-from rlstack.training.post import constant, grpo_advantage, verifier  # noqa: F401
+from rlstack.training.post import center_reward, constant, grpo_advantage, verifier  # noqa: F401

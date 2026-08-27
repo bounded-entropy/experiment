@@ -56,12 +56,22 @@ def run_experiment(spec: ExperimentSpec, schema: SiteSchema, store: Store,
 
     `engines` is one Engine (used as the "main" policy pool) or {pool: Engine}.
     """
-    return asyncio.run(_run(spec, schema, store, engines, learner, max_inflight))
+    return asyncio.run(
+        run_experiment_async(spec, schema, store, engines, learner, max_inflight))
 
 
-async def _run(spec: ExperimentSpec, schema: SiteSchema, store: Store,
-               engines: Engine | Mapping[str, Engine], learner: Learner,
-               max_inflight: int) -> RunReport:
+async def run_experiment_async(
+        spec: ExperimentSpec, schema: SiteSchema, store: Store,
+        engines: Engine | Mapping[str, Engine], learner: Learner,
+        max_inflight: int = 64) -> RunReport:
+    """The async form of run_experiment — the multi-tenant entry.
+
+    The multi-tenancy invariant (Engine protocol) is only expressible when
+    several experiments share ONE event loop around one resident engine:
+    gather() any number of these on the same Engine and their bundles coexist,
+    each request pinning its own. The sync wrapper is the one-experiment
+    convenience; the Phase-C resident daemon drives this form directly.
+    """
     if spec.algo is None:
         raise NotImplementedError("B1 runs training specs: algo required")
     engine_map: dict[str, Engine] = (
