@@ -12,6 +12,7 @@ is an intra-partition fact.
 from __future__ import annotations
 
 import asyncio
+import json
 import tempfile
 import unittest
 
@@ -131,6 +132,74 @@ class WireTest(unittest.TestCase):
         with self.assertRaises(KeyError) as caught:
             wrong.tokenize("a")
         self.assertIn("serves no", str(caught.exception))
+
+
+class Recorder:
+    """A Transport that records which side each verb took, and enforces the
+    JSON-safety contract on the way past."""
+
+    def __init__(self) -> None:
+        self.called: list[str] = []
+        self.asked: list[str] = []
+
+    async def call(self, verb: str, payload: dict) -> dict:
+        json.dumps(payload)
+        self.called.append(verb)
+        return {"events": [], "logprobs": []}
+
+    def ask(self, verb: str, payload: dict) -> dict:
+        json.dumps(payload)
+        self.asked.append(verb)
+        return {"mechanisms": {}, "token_ids": []}
+
+
+class VerbSplitTest(unittest.TestCase):
+    """WHICH verb rides WHICH calling convention is a contract, not an
+    implementation detail (#45): an out-of-process transport carries the
+    admitted verbs asynchronously (they occupy the serving host's GPU) and
+    the admission-free ones synchronously, because their call sites are sync
+    — Phase 1's add_bundle, flatten's tokenize. A verb that changed sides
+    would break every real transport, so the split is pinned here rather
+    than rediscovered on metal."""
+
+    def setUp(self) -> None:
+        self.recorder = Recorder()
+        self.pool = RemotePool(self.recorder, base="Qwen/Qwen3-0.6B")
+        self.messages = (Message(Role.USER, "What is 2+2?"),)
+
+    def test_the_admitted_verbs_ride_call(self) -> None:
+        async def both():
+            async for _ in self.pool.sample_tokens(
+                    self.messages, SamplingSpec(), (), "bundle:x", seed=1):
+                pass
+            await self.pool.score_tokens(self.messages, (5,), "bundle:x")
+
+        go(both())
+        self.assertEqual(self.recorder.called, ["sample_tokens", "score_tokens"])
+        self.assertEqual(self.recorder.asked, [])
+
+    def test_the_admission_free_verbs_ride_ask(self) -> None:
+        self.pool.add_bundle(Bundle("bundle:x", {"pi": 0},
+                                    payloads={"pi": b"\x00\xff"},
+                                    kinds={"pi": "lora"}))
+        self.pool.reachability(())
+        self.pool.tokenize("ab")
+        self.assertEqual(self.recorder.asked,
+                         ["add_bundle", "reachability", "tokenize"])
+        self.assertEqual(self.recorder.called, [])
+
+    def test_every_verb_addresses_the_capability_it_wants(self) -> None:
+        """base and tp travel in EVERY frame: the serving host addresses its
+        engines by capability, never by the caller's pool name (#43)."""
+        addressed: list[dict] = []
+
+        class Address(Recorder):
+            def ask(self, verb: str, payload: dict) -> dict:
+                addressed.append({"base": payload["base"], "tp": payload["tp"]})
+                return super().ask(verb, payload)
+
+        RemotePool(Address(), base="Qwen/Qwen3-8B", tp=4).tokenize("a")
+        self.assertEqual(addressed, [{"base": "Qwen/Qwen3-8B", "tp": 4}])
 
 
 if __name__ == "__main__":
