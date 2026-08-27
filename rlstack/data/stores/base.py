@@ -148,6 +148,38 @@ class Store(ABC):
             raise FileNotFoundError(f"cas object not found: {uri}")
         return self._read(key)
 
+    def describe(self) -> str:
+        """Where this store's data lives, for journals and CLIs — a path,
+        a bucket, a mount. Backends override; the class name is the floor."""
+        return type(self).__name__
+
+    # ---- read-only peeks (for observers: never attach, never mutate) --------
+
+    def peek_manifest(self, run_id: str) -> dict[str, Any] | None:
+        """A run's manifest WITHOUT attaching (open_run sweeps unsealed
+        work — an observer must never do that to a live run)."""
+        try:
+            return json.loads(
+                self._read(f"runs/{run_id}/manifest.json").decode("utf-8"))
+        except FileNotFoundError:
+            return None
+
+    def peek_ledger(self, run_id: str) -> list[dict[str, Any]]:
+        """A run's committed entries WITHOUT attaching; torn or corrupt
+        lines are skipped, not repaired — peeking never writes."""
+        try:
+            text = self._read(f"runs/{run_id}/ledger.jsonl").decode("utf-8")
+        except FileNotFoundError:
+            return []
+        out = []
+        for line in text.split("\n"):
+            if line:
+                try:
+                    out.append(json.loads(line))
+                except json.JSONDecodeError:
+                    pass
+        return out
+
     # ---- host journal (observability ONLY; correctness never reads it) ------
 
     def append_host_event(self, host: str, entry: dict[str, Any]) -> None:

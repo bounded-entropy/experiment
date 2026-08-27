@@ -101,7 +101,14 @@ def run_arith(n_updates: int = 4, trajectories_per_wave: int = 16,
         VllmEngine(BASE, gpu_memory_utilization=0.45, max_model_len=512,
                    max_lora_rank=16),),
         learner=TorchLearner(), store=store)
-    report = asyncio.run(host.submit(spec, hf_schema(BASE)))
+    async def submit_with_stats():
+        stats = asyncio.get_running_loop().create_task(host.run_stats(30.0))
+        try:
+            return await host.submit(spec, hf_schema(BASE))
+        finally:
+            stats.cancel()
+
+    report = asyncio.run(submit_with_stats())
     store_volume.commit()   # persist anything staged after the last ledger line
 
     run = store.open_run(report.run_id)
@@ -119,9 +126,12 @@ def run_arith(n_updates: int = 4, trajectories_per_wave: int = 16,
 def hosts():
     """The hosts CLI against the volume:  modal run deploy/modal_app.py::hosts"""
     from rlstack import ModalVolumeStore
-    from rlstack.__main__ import render_hosts
+    from rlstack.__main__ import render_gpu, render_hosts, render_runs
 
-    print(render_hosts(ModalVolumeStore("/store", volume=store_volume)), end="")
+    store = ModalVolumeStore("/store", volume=store_volume)
+    for view in (render_hosts, render_runs, render_gpu):
+        print(view([store]), end="")
+        print("-" * 72)
 
 
 @app.function(image=image, timeout=900)

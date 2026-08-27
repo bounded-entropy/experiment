@@ -18,6 +18,9 @@ class LocalStore(Store):
         self.root = Path(root)
         self.root.mkdir(parents=True, exist_ok=True)
 
+    def describe(self) -> str:
+        return str(self.root)
+
     def path_of(self, key: str) -> Path:
         """The on-disk path for a key (for tools and tests)."""
         return self.root / key

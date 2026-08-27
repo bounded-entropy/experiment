@@ -734,6 +734,41 @@ specs; backends (local/modal/skypilot) and GPU topology are semantics-neutral.
     Phase C from here = a Host kept alive behind a submission queue.
     357 tests green.
 
+36. OPERATIONAL CLI (settled, Samarth-directed: "small number of commands,
+    useful views, NO experiment content — a separate UI reads the same
+    stores for that"). Three commands over one or more store roots
+    (rlstack/__main__.py; roots positional or $RLSTACK_STORES):
+        python -m rlstack hosts <root>...   per-host: engines' bases, bound
+                                            store, first/last seen, boots,
+                                            tenant counts by status
+        python -m rlstack runs  <root>...   per-experiment: host(s) it
+                                            attached to, status, committed/
+                                            target, WHERE ITS DATA LIVES
+        python -m rlstack gpu   <root>...   per-host metal: utilization,
+                                            memory, sample cadence, downtime
+                                            gaps — from journaled samples
+    Supporting treaty pieces:
+    - THE HOST IS THE UNIT THAT BINDS EXPERIMENT → STORE (Host(store=...)
+      is where a submission's runs and the journal land); attach and
+      host-up events now record store.describe() so future store-
+      multiplexing hosts stay resolvable. Store.describe(): LocalStore →
+      its root path.
+    - GPU stats are JOURNALED BY THE HOST (the only thing near the metal):
+      Host.run_stats(every) samples nvidia-smi (sampler injectable; None
+      off-metal) into "stats" events; a gap in samples IS the downtime.
+      Deploy entrypoints run it beside submissions.
+    - Store gained READ-ONLY PEEKS (peek_manifest/peek_ledger): observers
+      must never open_run — attach SWEEPS UNSEALED WORK, which would
+      corrupt a live run's staged wave. Pinned by test
+      (test_peeks_never_mutate_a_live_run); the CLI renders exclusively
+      from peeks + journals. Render functions (render_hosts/runs/gpu) are
+      importable — the coming UI's data layer starts there.
+    - Views are OPERATIONAL ONLY by design: identity, placement, status,
+      progress. No rewards/losses/curves in the CLI, ever.
+    358 tests green. (Also this arc: the stress harness's 20-minute
+    measurement stall was diagnosed — report_run/measure_lag re-read every
+    wave over the volume mount; fix deferred with the harness.)
+
 ## Open threads (do NOT treat as settled; flag when your answer touches them)
 
 - Identity rings: should GpuConfig (and EvalSpec) leave the run_id hash and become

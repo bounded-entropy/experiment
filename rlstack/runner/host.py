@@ -23,6 +23,8 @@ the journals: `python -m rlstack hosts <store-root>`.
 
 from __future__ import annotations
 
+import asyncio
+import subprocess
 import time
 from collections.abc import Sequence
 from dataclasses import dataclass, field
@@ -56,17 +58,19 @@ class Host:
     def __init__(self, name: str, *, engines: Sequence[Engine],
                  learner: Learner, store: Store,
                  arbiter: GpuArbiter | None = None,
-                 capacity: float = 1.0) -> None:
+                 capacity: float = 1.0, sampler=None) -> None:
         self.name = name
         self.engines = tuple(engines)
         self.learner = learner
         self.store = store
         self.arbiter = arbiter or GpuArbiter()
         self.capacity = capacity
+        self.sampler = sampler or sample_gpu
         self.roster: dict[str, Tenancy] = {}
         store.append_host_event(name, {
             "event": "host-up", "t": time.time(),
-            "engines": [engine.base or "*" for engine in self.engines]})
+            "engines": [engine.base or "*" for engine in self.engines],
+            "store": store.describe()})
 
     # ---- the submission steps, one named method per rule --------------------
 
@@ -126,7 +130,8 @@ class Host:
         self.store.append_host_event(self.name, {
             "event": "attach", "t": time.time(), "run_id": rid,
             "pools": sorted(binding),
-            "n_updates": spec.algo.schedule.n_updates if spec.algo else None})
+            "n_updates": spec.algo.schedule.n_updates if spec.algo else None,
+            "store": self.store.describe()})
         try:
             report = await run_experiment_async(
                 spec, schema, self.store, binding, self.learner,
@@ -146,6 +151,18 @@ class Host:
 
     # ---- observability ------------------------------------------------------
 
+    async def run_stats(self, every: float = 30.0) -> None:
+        """Journal one GPU sample every `every` seconds until cancelled —
+        the CLI's `gpu` view (utilization, memory, downtime) is computed from
+        these events; a gap in them IS the downtime. Run it alongside
+        submissions: create_task(host.run_stats()), cancel when done."""
+        while True:
+            sample = await asyncio.to_thread(self.sampler)
+            if sample is not None:
+                self.store.append_host_event(self.name, {
+                    "event": "stats", "t": time.time(), **sample})
+            await asyncio.sleep(every)
+
     def status(self) -> dict:
         """The GpuSet as this host sees it: state (arbiter residency),
         declared load, and the tenant roster."""
@@ -158,3 +175,26 @@ class Host:
                               "updates_completed": t.updates_completed}
                         for rid, t in sorted(self.roster.items())},
         }
+
+
+def sample_gpu() -> dict | None:
+    """One nvidia-smi sample: per-GPU utilization %% and memory MiB. None
+    when no NVIDIA runtime is visible (fakes, laptops, CPU CI) — sampling
+    quietly does nothing off the metal."""
+    try:
+        out = subprocess.run(
+            ["nvidia-smi", "--query-gpu=utilization.gpu,memory.used,memory.total",
+             "--format=csv,noheader,nounits"],
+            capture_output=True, text=True, timeout=5)
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+        return None
+    if out.returncode != 0:
+        return None
+    gpus = []
+    for line in out.stdout.strip().splitlines():
+        try:
+            util, used, total = [int(part.strip()) for part in line.split(",")]
+        except ValueError:
+            continue
+        gpus.append({"util": util, "mem_used": used, "mem_total": total})
+    return {"gpus": gpus} if gpus else None

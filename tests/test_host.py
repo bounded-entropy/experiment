@@ -19,7 +19,7 @@ from rlstack import (
     FakeEngine, FakeLearner, GpuConfig, GpuGroup, Host, HostError, Seeds,
     fake_qwen_schema, gpus, learner, pool, run_experiment,
 )
-from rlstack.__main__ import render_hosts
+from rlstack.__main__ import render_gpu, render_hosts, render_runs
 
 SCHEMA = fake_qwen_schema(4, base="Qwen/Qwen3-0.6B")
 
@@ -131,14 +131,54 @@ class HostTest(unittest.TestCase):
         self.assertEqual(statuses, ["done", "failed"])
         self.assertEqual(self.store.list_hosts(), ["test-host"])
 
-    def test_cli_renders_hosts_from_the_store_alone(self) -> None:
+    def test_cli_views_render_from_the_store_alone(self) -> None:
+        """The three views are pure functions of store bytes — operational
+        facts only (identity, placement, status, progress), no experiment
+        content: exactly what a separate UI will NOT have to re-derive."""
+        fake_sample = {"gpus": [{"util": 55, "mem_used": 9000,
+                                 "mem_total": 23034}]}
+        host = self.host(sampler=lambda: dict(fake_sample))
+        report = go(host.submit(arith_spec(self.train), SCHEMA))
+
+        async def sample_twice():
+            task = asyncio.get_running_loop().create_task(
+                host.run_stats(every=0.01))
+            await asyncio.sleep(0.05)
+            task.cancel()
+
+        go(sample_twice())
+
+        hosts_text = render_hosts([self.store])
+        self.assertIn("host test-host", hosts_text)
+        self.assertIn("1 done", hosts_text)
+        self.assertIn(self.store.describe(), hosts_text)
+
+        runs_text = render_runs([self.store])
+        self.assertIn(report.run_id, runs_text)
+        self.assertIn("done", runs_text)
+        self.assertIn("4/4", runs_text)
+        self.assertIn("test-host", runs_text)
+        self.assertNotIn("reward", runs_text)     # operational only, no content
+
+        gpu_text = render_gpu([self.store])
+        self.assertIn("host test-host", gpu_text)
+        self.assertIn("9000/23034 MiB", gpu_text)
+        self.assertIn("55%", gpu_text)
+
+    def test_peeks_never_mutate_a_live_run(self) -> None:
+        """An observer peeks; only attach may sweep. A staged (uncommitted)
+        wave must survive a peek — open_run would have deleted it."""
         host = self.host()
         report = go(host.submit(arith_spec(self.train), SCHEMA))
-        text = render_hosts(self.store)
-        self.assertIn("host test-host", text)
-        self.assertIn(report.run_id, text)
-        self.assertIn("status done", text)
-        self.assertIn("4/4 committed", text)
+        run = self.store.open_run(report.run_id)
+        staged = self.store.path_of(
+            f"runs/{report.run_id}/waves/000099.jsonl.gz")
+        staged.parent.mkdir(parents=True, exist_ok=True)
+        staged.write_bytes(b"staged-not-committed")
+        self.store.peek_ledger(report.run_id)
+        self.store.peek_manifest(report.run_id)
+        render_runs([self.store])
+        self.assertTrue(staged.exists())
 
 
 if __name__ == "__main__":

@@ -256,6 +256,7 @@ def run_stress() -> dict:
 
     async def main() -> dict:
         out: dict = {}
+        stats = asyncio.get_running_loop().create_task(host.run_stats(30.0))
 
         # ---- stage 1: solo grpo, many steps — also the teacher run ----------
         print("\n== stage 1: grpo, 30 updates, solo =============================")
@@ -356,6 +357,7 @@ def run_stress() -> dict:
         _free()
         print("  cancelled; stage 5b (a fresh container) must finish it")
         print("\n[host status]", host.status())
+        stats.cancel()
         return out
 
     out = asyncio.run(main())
