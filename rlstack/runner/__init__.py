@@ -18,6 +18,9 @@ The map, by responsibility — read top to bottom:
                     (run_episode) → sealed wave (collect_wave)
     post.py         EXECUTES the declared post pipeline per group (the
                     processors themselves are declared in training/post/)
+    host.py         the metal's owner: Host binds submitted specs onto
+                    its engines/learner, checks fit, rosters + journals
+                    tenancies, runs them under its shared arbiter
     sources/        WaveFeed: where the trainer's waves come from
                     (live / replay / static), one file each
     seeds.py        the seed tree: derive(master, *path)
@@ -31,5 +34,5 @@ This is the one package allowed to import both worlds.
 
 from rlstack.runner import (  # noqa: F401
     interfaces, seeds, sampling, signals, arbiter, sources, post, daemons,
-    loop, fakes,
+    loop, host, fakes,
 )

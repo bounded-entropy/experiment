@@ -62,7 +62,7 @@ def run_arith(n_updates: int = 4, trajectories_per_wave: int = 16,
     from rlstack import (
         AlgoSpec, EvalSpec, ExperimentSpec, GenSpec, GpuConfig, GpuGroup,
         ModalVolumeStore, OptimSpec, PolicySpec, SamplingSpec, Schedule, Seeds,
-        TrajectorySource, gpus, learner, lora, pool, run_experiment,
+        Host, TrajectorySource, gpus, learner, lora, pool,
     )
     from rlstack.policy.siteschema import hf_schema
     from rlstack.runner.engines.vllm_engine import VllmEngine
@@ -95,11 +95,13 @@ def run_arith(n_updates: int = 4, trajectories_per_wave: int = 16,
         seeds=Seeds(master=master_seed),
     )
 
-    report = run_experiment(
-        spec, hf_schema(BASE), store,
+    import asyncio
+
+    host = Host("l4-arith", engines=(
         VllmEngine(BASE, gpu_memory_utilization=0.45, max_model_len=512,
-                   max_lora_rank=16),
-        TorchLearner())
+                   max_lora_rank=16),),
+        learner=TorchLearner(), store=store)
+    report = asyncio.run(host.submit(spec, hf_schema(BASE)))
     store_volume.commit()   # persist anything staged after the last ledger line
 
     run = store.open_run(report.run_id)
@@ -111,6 +113,15 @@ def run_arith(n_updates: int = 4, trajectories_per_wave: int = 16,
               f"gap {entry['train']['logprob_gap']:.4f}  "
               f"grad {entry['train']['grad_norm']:.3f}")
     return report.run_id
+
+
+@app.function(image=image, volumes={"/store": store_volume}, timeout=300)
+def hosts():
+    """The hosts CLI against the volume:  modal run deploy/modal_app.py::hosts"""
+    from rlstack import ModalVolumeStore
+    from rlstack.__main__ import render_hosts
+
+    print(render_hosts(ModalVolumeStore("/store", volume=store_volume)), end="")
 
 
 @app.function(image=image, timeout=900)

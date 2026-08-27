@@ -115,6 +115,18 @@ class GpuArbiter:
                                          r.fraction or 0.0)
         return free + sum(per_group.values())
 
+    def is_attached(self, obj: object) -> bool:
+        """Whether this object is already a resident here (its fraction is
+        already counted — the host's capacity check asks)."""
+        return id(obj) in self._residents
+
+    def residency(self) -> dict[str, str | None]:
+        """Per exclusive group: the resident's label (None: nothing yet).
+        The GpuSet's STATE, as the host's status reports it."""
+        return {name: (self._entry(group.resident).label
+                       if group.resident is not None else None)
+                for name, group in sorted(self._groups.items())}
+
     # ---- admit ---------------------------------------------------------------
 
     @asynccontextmanager

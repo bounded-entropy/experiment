@@ -14,6 +14,8 @@ reference). Every backend stores the same key tree:
                   optim/<name>@<v>.bin         optimizer moments (lockstep)
                   eval/<update>/...            firewalled measurement output
     cas/<sha256>/blob                          content-addressed objects
+    hosts/<name>/log.jsonl                     host observability journal
+                                               (correctness never reads it)
 
 Invariants: identity is computed, never typed (I3); writes are atomic; the
 ledger is append-only and strictly increasing; resume = attach + ledger tail;
@@ -145,6 +147,35 @@ class Store(ABC):
         if not self._exists(key):
             raise FileNotFoundError(f"cas object not found: {uri}")
         return self._read(key)
+
+    # ---- host journal (observability ONLY; correctness never reads it) ------
+
+    def append_host_event(self, host: str, entry: dict[str, Any]) -> None:
+        """One event line in hosts/<host>/log.jsonl (host-up/attach/detach).
+        Outside every run directory, outside identity, outside recovery."""
+        self._append_line(f"hosts/{host}/log.jsonl", _canonical(entry))
+
+    def read_host_log(self, host: str) -> list[dict[str, Any]]:
+        """Every parseable event for one host; a torn tail is tolerated —
+        this is observability, not a commit record."""
+        try:
+            text = self._read(f"hosts/{host}/log.jsonl").decode("utf-8")
+        except FileNotFoundError:
+            return []
+        out = []
+        for line in text.split("\n"):
+            if line:
+                try:
+                    out.append(json.loads(line))
+                except json.JSONDecodeError:
+                    pass
+        return out
+
+    def list_hosts(self) -> list[str]:
+        """Host names that have ever journaled to this store."""
+        return sorted({key.split("/")[1] for key in self._list("hosts/")
+                       if key.endswith("/log.jsonl")})
+
 
 
 @dataclass

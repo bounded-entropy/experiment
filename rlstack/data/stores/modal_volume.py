@@ -40,3 +40,5 @@ class ModalVolumeStore(LocalStore):
         super()._append_line(key, line)
         if key.endswith("ledger.jsonl"):
             self._persist()   # THE commit point: seals the whole update
+        elif key.startswith("hosts/"):
+            self._persist()   # observability should survive the container

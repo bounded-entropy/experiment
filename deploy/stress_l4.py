@@ -237,7 +237,7 @@ def run_stress() -> dict:
     from rlstack import ModalVolumeStore
     from rlstack.policy.siteschema import hf_schema
     from rlstack.runner.engines.vllm_engine import VllmEngine
-    from rlstack import GpuArbiter
+    from rlstack import Host
     from rlstack.runner.learners.torch_learner import TorchLearner
     from rlstack.runner.loop import run_experiment_async
 
@@ -248,7 +248,11 @@ def run_stress() -> dict:
     engine = VllmEngine(BASE, gpu_memory_utilization=0.30, max_model_len=512,
                         max_loras=8, max_lora_rank=16)
 
-    arbiter = GpuArbiter()      # the metal's admission authority (concurrent regime)
+    # the metal's ONE owner for the concurrent-regime stages: binds pools,
+    # checks fit, rosters + journals tenants, shares one arbiter and one
+    # multi-tenant learner across every submission
+    host = Host("l4-stress", engines=(engine,), learner=TorchLearner(),
+                store=store)
 
     async def main() -> dict:
         out: dict = {}
@@ -257,11 +261,7 @@ def run_stress() -> dict:
         print("\n== stage 1: grpo, 30 updates, solo =============================")
         spec = make_spec(store, loss="grpo", post=("verifier", "grpo_advantage"),
                          master=101, n_updates=30)
-        lrn = TorchLearner()
-        rep = await run_experiment_async(spec, schema, store, engine, lrn,
-                                         arbiter=arbiter)
-        del lrn
-        _free()
+        rep = await host.submit(spec, schema)
         out["grpo"] = report_run(store, rep.run_id, "grpo", 30)
         grpo_rid = rep.run_id
 
@@ -291,23 +291,18 @@ def run_stress() -> dict:
                                post=("llm_judge", "grpo_advantage"),
                                master=108, n_updates=24, judge_pool=True),
         }
-        # ONE learner for all seven tenants: one shared base, per-tenant
-        # adapters, swap-install between interleaved microbatches — the
-        # Learner tenancy invariant on real metal (was 7 base copies)
-        shared_learner = TorchLearner()
+        # seven tenants through ONE host: one engine, one multi-tenant
+        # learner (was 7 base copies), one arbiter — and bind_pools routes
+        # the judge tenant's second pool onto the same engine by base, so
+        # the hand-wired {"main","judge"} map is gone
 
         async def launch(name: str, delay: float):
             await asyncio.sleep(delay)
             print(f"  [join] {name} starts (t+{delay:.0f}s)")
-            pools = ({"main": engine, "judge": engine} if name == "judge"
-                     else engine)
-            return name, await run_experiment_async(
-                tenants[name], schema, store, pools, shared_learner,
-                arbiter=arbiter)
+            return name, await host.submit(tenants[name], schema)
 
         results = await asyncio.gather(*(launch(name, i * 30.0)
                                          for i, name in enumerate(tenants)))
-        del shared_learner
         _free()
         gap_alarms = {"sft": 1.0, "opd": 0.5, "opsd": 0.25}
         for name, rep in results:
@@ -355,14 +350,12 @@ def run_stress() -> dict:
         print("\n== stage 5a: cancel for cross-container resume =================")
         spec = make_spec(store, loss="grpo", post=("verifier", "grpo_advantage"),
                          master=301, n_updates=24)
-        lrn = TorchLearner()
-        task = asyncio.ensure_future(
-            run_experiment_async(spec, schema, store, engine, lrn,
-                                 arbiter=arbiter))
+        task = asyncio.ensure_future(host.submit(spec, schema))
         await _cancel_after(task, 90.0)
-        del task, lrn
+        del task
         _free()
         print("  cancelled; stage 5b (a fresh container) must finish it")
+        print("\n[host status]", host.status())
         return out
 
     out = asyncio.run(main())
@@ -388,14 +381,19 @@ def resume_cross_container() -> dict:
     from rlstack.policy.siteschema import hf_schema
     from rlstack.runner.engines.vllm_engine import VllmEngine
     from rlstack.runner.learners.torch_learner import TorchLearner
-    from rlstack.runner.loop import run_experiment
+
 
     store = ModalVolumeStore("/store", volume=store_volume)
     spec = make_spec(store, loss="grpo", post=("verifier", "grpo_advantage"),
                      master=301, n_updates=24)
     engine = VllmEngine(BASE, gpu_memory_utilization=0.30, max_model_len=512,
                         max_loras=8, max_lora_rank=16)
-    rep = run_experiment(spec, hf_schema(BASE), store, engine, TorchLearner())
+    import asyncio as _asyncio
+
+    from rlstack import Host
+    host = Host("l4-stress-resume", engines=(engine,),
+                learner=TorchLearner(), store=store)
+    rep = _asyncio.run(host.submit(spec, hf_schema(BASE)))
     store_volume.commit()
 
     print(f"\n== stage 5b: cross-container resume of {rep.run_id} ============")

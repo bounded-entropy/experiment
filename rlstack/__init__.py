@@ -67,5 +67,8 @@ from rlstack.runner.sources import (
     LiveFeed, ReplayFeed, StaticFeed, WaveFeed, feed_for,
 )
 from rlstack.runner.daemons import Daemon, Evaluator, Generator, Trainer
-from rlstack.runner.loop import RunReport, plan_daemons, run_experiment
+from rlstack.runner.host import Host, HostError, Tenancy
+from rlstack.runner.loop import (
+    RunReport, experiment_identity, plan_daemons, run_experiment,
+)
 from rlstack.runner.fakes import FakeEngine, FakeLearner

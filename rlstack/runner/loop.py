@@ -3,8 +3,8 @@
 Phase 2 is a blackboard, not a choreography: plan_daemons derives one daemon
 per GPU responsibility from the spec — a Generator iff trajectories are live, the
 Trainer always, an Evaluator iff eval is declared — and they run concurrently,
-synchronized ONLY through the store (signals.py) and throttled onto shared
-metal by leases (lease.py). Nobody calls anybody:
+synchronized ONLY through the store (signals.py) and admitted onto shared
+metal by the GpuArbiter (arbiter.py). Nobody calls anybody:
 
     Generator   awaits commit w-1-B      → writes waves/<w>
     Trainer     awaits waves/<u>      → post, train, blobs, LEDGER (commit)
@@ -60,6 +60,17 @@ def run_experiment(spec: ExperimentSpec, schema: SiteSchema, store: Store,
     return asyncio.run(
         run_experiment_async(spec, schema, store, engines, learner, max_inflight,
                              arbiter))
+
+
+def experiment_identity(spec: ExperimentSpec, schema: SiteSchema) -> str:
+    """Phase 0's identity, importable: validate, hash the referenced code,
+    fingerprint the data, derive the run_id — computed, never typed (I3).
+    The host journals under this id before the run opens."""
+    validate_or_raise(spec, schema)
+    hashes = code_hashes(spec)
+    data_fingerprint = (spec.gen.tasks if spec.gen is not None
+                        else spec.trajectories.source)
+    return run_id(spec, hashes, data_fingerprint)
 
 
 async def run_experiment_async(
