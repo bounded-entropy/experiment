@@ -115,8 +115,18 @@ def check(name: str, ok: bool, detail: str = "") -> None:
     print(f"  [{'PASS' if ok else 'FAIL'}] {name}" + (f"  {detail}" if detail else ""))
 
 
-def report_run(store, run_id: str, label: str, n_updates: int) -> dict:
-    """Read one finished run back and print its story; returns key metrics."""
+def report_run(store, run_id: str, label: str, n_updates: int,
+               gap_alarm: float = 0.15) -> dict:
+    """Read one finished run back and print its story; returns key metrics.
+
+    gap_alarm is FAMILY-AWARE: for IS-corrected losses the gap is the
+    off-policy/contamination alarm, and 0.15 is generous headroom over the
+    ~0.03 kernel floor; for behavior cloning (sft) and distillation onto a
+    moving teacher (opd) the gap MEASURES teacher-student distance — growth
+    is the objective working, and only an adapter mixup (gap ~5+) is a bug,
+    so their bound is loose. Verified against the first stress run's gap
+    curves: opd starts at the 0.03 floor (teacher v0 == fresh student, so no
+    contamination) and its squared loss pulls 0.166 back down to 0.09."""
     run = store.open_run(run_id)
     entries = run.read_ledger()
     updates = [int(e["update"]) for e in entries]
@@ -131,8 +141,8 @@ def report_run(store, run_id: str, label: str, n_updates: int) -> dict:
     gaps = [e["train"]["logprob_gap"] for e in entries]
     head = mean(rewards[:3]) if rewards else None
     tail = mean(rewards[-3:]) if rewards else None
-    check(f"{label}: logprob_gap bounded", max(gaps) < 0.15,
-          f"max {max(gaps):.4f}")
+    check(f"{label}: logprob_gap bounded", max(gaps) < gap_alarm,
+          f"max {max(gaps):.4f} < {gap_alarm}")
     for e in entries[:: max(1, len(entries) // 6)] + entries[-1:]:
         print(f"    u{e['update']:>3}: reward {e['post'].get('reward', float('nan')):.3f} "
               f"loss {e['train']['loss']:+.4f} gap {e['train']['logprob_gap']:.4f} "
@@ -281,9 +291,11 @@ def run_stress() -> dict:
                                          for i, name in enumerate(tenants)))
         learners.clear()
         _free()
+        gap_alarms = {"sft": 1.0, "opd": 0.5, "opsd": 0.25}
         for name, rep in results:
             print(f"\n  -- {name} ({rep.run_id})")
-            out[name] = report_run(store, rep.run_id, name, 24)
+            out[name] = report_run(store, rep.run_id, name, 24,
+                                   gap_alarm=gap_alarms.get(name, 0.15))
         rid = {name: rep.run_id for name, rep in results}
         measure_lag(store, rid["opsd"], "opsd")
         for name in ("ppo", "gspo", "sdft"):    # strictly on-policy tenants
