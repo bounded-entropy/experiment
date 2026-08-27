@@ -57,6 +57,7 @@ class PostProcessor(ABC):
 
     produces: tuple[str, ...] = ()
     consumes: tuple[str, ...] = ()
+    token_level: tuple[str, ...] = ()   # produced columns that are per-token
     pools: tuple[str, ...] = ()
     sampling: "SamplingSpec | None" = None
 
@@ -75,6 +76,7 @@ class PostDef:
     instance: PostProcessor
     produces: tuple[str, ...]
     consumes: tuple[str, ...]
+    token_level: tuple[str, ...]
     pools: tuple[str, ...]
     source_hash: str
 
@@ -83,7 +85,7 @@ def postprocessor(name: str):
     def register(cls: type[PostProcessor]) -> type[PostProcessor]:
         instance = cls()
         POST.add(PostDef(name, cls, instance, tuple(instance.produces),
-                         tuple(instance.consumes), tuple(instance.pools),
-                         source_hash(cls)))
+                         tuple(instance.consumes), tuple(instance.token_level),
+                         tuple(instance.pools), source_hash(cls)))
         return cls
     return register

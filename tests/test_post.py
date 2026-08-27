@@ -167,3 +167,57 @@ class PoolDeclarationTest(unittest.TestCase):
         pdef = POST.get("llm_judge")
         self.assertEqual(pdef.pools, ("judge",))
         self.assertEqual(pdef.instance.sampling.temperature, 0.0)
+
+
+@postprocessor("post_token_teacher")
+class _TokenTeacher(PostProcessor):
+    """token_level: one float per GENERATED token — the per-token teacher
+    channel (#38: post produces everything the loss operates on)."""
+
+    produces = ("teacher_lp",)
+    token_level = ("teacher_lp",)
+
+    async def process(self, group: Any, data: Any, llm: Any):
+        return {"teacher_lp": [
+            [0.5] * sum(len(t.token_ids) for t in traj.turns)
+            for traj in group.trajectories]}
+
+
+@postprocessor("post_token_liar")
+class _TokenLiar(PostProcessor):
+    produces = ("bad_lp",)
+    token_level = ("bad_lp",)
+
+    async def process(self, group: Any, data: Any, llm: Any):
+        return {"bad_lp": [[0.5, 0.5] for _ in group.trajectories]}
+
+
+class TokenLevelColumnTest(unittest.TestCase):
+    def wave_of_one(self):
+        traj = sealed("t0")
+        return Wave([Group("g0", [traj])]), traj
+
+    def test_token_vector_flows_to_token_aligned_postdata(self) -> None:
+        from rlstack.data.flatten import broadcast, flatten
+        wave, traj = self.wave_of_one()
+        columns = go(run_pipeline(("post_token_teacher",), wave, pools(),
+                                  SamplingSpec(), master=7, update=1))
+        generated = sum(len(t.token_ids) for t in traj.turns)
+        self.assertEqual(len(columns["teacher_lp"][0]), generated)
+
+        flat = flatten(traj, tokenize=lambda s: tuple(ord(c) for c in s))
+        (per_doc,) = broadcast(columns, [flat])
+        aligned = per_doc["teacher_lp"]
+        self.assertEqual(len(aligned), len(flat.token_ids))
+        self.assertEqual(
+            [v for v, m in zip(aligned, flat.loss_mask) if m],
+            [0.5] * generated)
+        self.assertTrue(all(v == 0.0 for v, m
+                            in zip(aligned, flat.loss_mask) if not m))
+
+    def test_wrong_token_count_dies_loudly(self) -> None:
+        wave, _ = self.wave_of_one()
+        with self.assertRaises(ValueError) as caught:
+            go(run_pipeline(("post_token_liar",), wave, pools(),
+                            SamplingSpec(), master=7, update=1))
+        self.assertIn("generated tokens", str(caught.exception))

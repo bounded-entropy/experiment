@@ -14,10 +14,7 @@ from rlstack.registry import (
     LOSSES,
     POST,
     LossDef,
-    Probe,
-    Ref,
     Registry,
-    Teacher,
     code_hashes,
     loss,
     source_hash,
@@ -117,19 +114,14 @@ class TestDecorators(unittest.TestCase):
         self.assertIs(pdef.cls, Scorer)
         self.assertIsInstance(pdef.instance, Scorer)
 
-    def test_loss_declares_requires_including_planned_passes(self) -> None:
-        @loss("test_dec_loss", requires=("values", Ref("pi@0"), Teacher("judge"), Probe("p")))
+    def test_loss_declares_data_only_requires(self) -> None:
+        """#38: requires names data columns — never a pass, never metal."""
+        @loss("test_dec_loss", requires=("values", "reward"))
         def objective(out: Any, batch: Any) -> Any: ...
 
         ldef = LOSSES.get("test_dec_loss")
         self.assertIsInstance(ldef, LossDef)
-        self.assertEqual(ldef.requires[0], "values")
-        self.assertEqual(ldef.requires[1:], (Ref("pi@0"), Teacher("judge"), Probe("p")))
-
-    def test_planned_pass_declarations_are_frozen_values(self) -> None:
-        self.assertEqual(Ref("v"), Ref("v"))
-        with self.assertRaises(Exception):
-            Ref("v").version = "w"  # type: ignore[misc]
+        self.assertEqual(ldef.requires, ("values", "reward"))
 
     def test_environment_decorator_registers(self) -> None:
         @environment("test_dec_env")

@@ -99,6 +99,9 @@ class FlowGraphTest(unittest.TestCase):
                          ["verifier", "grpo_advantage"])
         by_name = {(c["name"], c["phase"]): c for c in dictionary["columns"]}
         self.assertTrue(by_name[("reward", "post")]["feeds_loss"])
+        self.assertEqual(by_name[("reward", "post")]["granularity"], "trajectory")
+        self.assertEqual(
+            by_name[("behavior_logprobs", "wave")]["granularity"], "token")
 
         # attach again: same bytes (derived and deterministic, never identity)
         before = store.path_of(

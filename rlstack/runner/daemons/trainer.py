@@ -117,8 +117,15 @@ class Trainer(Daemon):
 
 
 def _column_means(columns) -> dict[str, float]:
-    return {name: math.fsum(values) / len(values)
-            for name, values in sorted(columns.items()) if values}
+    """Scalar columns mean over trajectories; token_level columns over all
+    their tokens — one ledger scalar either way."""
+    out = {}
+    for name, values in sorted(columns.items()):
+        flat = [v for value in values
+                for v in (value if isinstance(value, (list, tuple)) else [value])]
+        if flat:
+            out[name] = math.fsum(flat) / len(flat)
+    return out
 
 
 def _train_summary(stats: list[TrainStats]) -> dict:

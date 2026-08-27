@@ -25,7 +25,7 @@ from rlstack.spec.specs import (
 )
 from rlstack.registry import (
     ADAPTERS, ENVS, LOSSES, POST,
-    LossDef, Probe, Ref, Registry, Teacher,
+    LossDef, Registry,
     code_hashes, loss, source_hash,
 )
 from rlstack.client import SampleClient

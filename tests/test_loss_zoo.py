@@ -19,7 +19,7 @@ ZOO = {
     "ppo": ("verifier", "center_reward"),
     "gspo": ("verifier", "grpo_advantage"),
     "sdft": ("verifier",),
-    "opsd": ("verifier",),
+    "self_anchor": ("verifier",),
     "sft": (),
     "opd": (),
 }
@@ -43,7 +43,7 @@ class LossZooTest(unittest.TestCase):
 
     def spec_for(self, loss: str):
         overrides = {"algo": algo(loss, ZOO[loss],
-                                  lag=2 if loss == "opsd" else 0)}
+                                  lag=2 if loss == "self_anchor" else 0)}
         if loss in OFFLINE:
             overrides["gen"] = None
             overrides["trajectories"] = TrajectorySource("store://parent/waves")

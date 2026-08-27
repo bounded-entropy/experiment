@@ -10,13 +10,13 @@ The matrix (Samarth's list, 2026-08):
                                a wrong adapter served would blow the gap up)
   mid-run joins                tenant starts are staggered ~30s apart, so each
                                joins an engine already serving others
-  the loss zoo                 grpo / ppo / gspo / sdft / opsd (live) +
+  the loss zoo                 grpo / ppo / gspo / sdft / self_anchor (live) +
                                sft (static cas://) + opd (replay store://),
                                many optimizer steps each
   resource sharing, 1 GPU      engine fraction + N resident learners under
                                concurrent leases; stage 4 runs sharing="sleep"
                                (the ExclusiveLease alternation) as well
-  policy lag                   opsd runs max_policy_lag=2 with a deliberately
+  policy lag                   self_anchor runs max_policy_lag=2 with a deliberately
                                slowed trainer (epochs_per_wave=2); realized
                                per-turn lag is measured from the sealed record
   resume                       stage 4 cancels mid-run and re-attaches in
@@ -284,7 +284,7 @@ def run_stress() -> dict:
                               master=105, n_updates=24),
             "sdft": make_spec(store, loss="sdft", post=("verifier",), master=106,
                               n_updates=24),
-            "opsd": make_spec(store, loss="opsd", post=("verifier",), master=107,
+            "self_anchor": make_spec(store, loss="self_anchor", post=("verifier",), master=107,
                               n_updates=24, lag=2, epochs=2),
             # the pool treaty on real metal: the judge pool is the SAME
             # engine under a second name (multi-tenancy makes it free) —
@@ -306,13 +306,13 @@ def run_stress() -> dict:
         results = await asyncio.gather(*(launch(name, i * 30.0)
                                          for i, name in enumerate(tenants)))
         _free()
-        gap_alarms = {"sft": 1.0, "opd": 0.5, "opsd": 0.25}
+        gap_alarms = {"sft": 1.0, "opd": 0.5, "self_anchor": 0.25}
         for name, rep in results:
             print(f"\n  -- {name} ({rep.run_id})")
             out[name] = report_run(store, rep.run_id, name, 24,
                                    gap_alarm=gap_alarms.get(name, 0.15))
         rid = {name: rep.run_id for name, rep in results}
-        measure_lag(store, rid["opsd"], "opsd")
+        measure_lag(store, rid["self_anchor"], "self_anchor")
         for name in ("ppo", "gspo", "sdft", "judge"):   # strictly on-policy tenants
             run = store.open_run(rid[name])
             on_policy = all(

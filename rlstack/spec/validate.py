@@ -25,20 +25,13 @@ from rlstack.registry import (
     ENVS,
     LOSSES,
     POST,
-    Probe,
-    Ref,
-    Teacher,
 )
 from rlstack.spec.specs import PoolMember, ExperimentSpec, LearnerMember
 
 # The base provides/records sets live with the flow graph (spec/flow.py),
 # the one canonical walk over the data declarations; re-exported here because
 # they are part of the validation vocabulary.
-from rlstack.spec.flow import BASE_PROVIDES, BASE_RECORDS, flow_graph  # noqa: E402,F401
-
-# Loss requirements that name a planned pass (satisfied by the runner, not the bank).
-PLANNED_PASSES = (Ref, Teacher, Probe)
-
+from rlstack.spec.flow import BASE_RECORDS, flow_graph  # noqa: E402,F401
 
 @dataclass(frozen=True)
 class ValidationIssue:
@@ -116,8 +109,8 @@ def check_loss_requires_are_provided(spec: ExperimentSpec, schema: SiteSchema) -
     """Every string the loss requires is either PROVIDED (a training-forward
     field: from the base forward or a kind's replay lowering) or RECORDED (a
     sampling-time fact: a base column or a kind's `records`) or PRODUCED by
-    the post pipeline. A query on the flow graph (spec/flow.py) — planned
-    passes (Ref/Teacher/Probe) are the runner's job, not graph nodes."""
+    the post pipeline. A query on the flow graph (spec/flow.py). The loss is
+    pure math (#38): requires can only name data, never cause metal work."""
     if spec.algo is None or spec.algo.loss not in LOSSES:
         return []
     graph = flow_graph(spec)

@@ -810,6 +810,38 @@ specs; backends (local/modal/skypilot) and GPU topology are semantics-neutral.
     functions + per-run dictionary/postdata/ledger series endpoints,
     deployed beside whichever store backend.
 
+38. THE LOSS IS PURE MATH; POST OWNS ALL PRODUCTION (settled, Samarth's
+    ruling, supersedes decision #5's planned passes). "The post processor
+    contract is: produce all scalars necessary for the loss to operate on.
+    LossDef.requires rerouting back to a GpuSet is wrong." Enforced:
+    - PLANNED PASSES RETIRED: Ref/Teacher/Probe deleted from the registry;
+      BASE_PROVIDES (ref_logprobs/entropies/hidden_states — the planned-
+      pass vocabulary, never implemented) deleted from the flow graph.
+      @loss now REFUSES non-string requires at registration (TypeError
+      naming the rule). requires resolves against: post columns ∪ records
+      (base + bank) ∪ bank provides (replay-lowering forward tensors are
+      the forward itself, not metal routing — value_head "values" stays).
+    - TOKEN_LEVEL COLUMNS: a PostProcessor may declare produced columns in
+      `token_level` — one float per GENERATED token per trajectory (sealed
+      order), validated by run_pipeline, stored in postdata, aligned by
+      broadcast into TokenBatch.post at loss_mask==1 positions (injected
+      0.0), ledger-meaned over tokens. THE channel for per-token teacher
+      signals: hinted/teacher logprobs are produced by a post processor
+      through a pool, land in postdata, and the loss consumes a column —
+      never plans a pass. Flow nodes + dictionary.json carry `granularity`
+      (trajectory | token | update) so a UI knows series from facet.
+    - OPSD CORRECTED: what #30 called "opsd" was NOT on-policy self-
+      distillation — it matched the lagged sampler's RECORDED logprobs.
+      RENAMED self_anchor (honest docstring). True OPSD = distilling from
+      HINTED logprobs (same weights re-scored under privileged
+      conditioning) = a token_level post column, awaiting a SCORING verb on
+      the engine/client (score given tokens under a pool's serving stack) —
+      the named follow-up, not built here. opd + self_anchor now declare
+      requires=("behavior_logprobs",): the teacher signal visibly FEEDS
+      those losses in the graph (records-in-requires path exercised).
+    370 tests green; stress tenant renamed self_anchor (identity shift for
+    opd/self_anchor specs only).
+
 ## Open threads (do NOT treat as settled; flag when your answer touches them)
 
 - Identity rings: should GpuConfig (and EvalSpec) leave the run_id hash and become

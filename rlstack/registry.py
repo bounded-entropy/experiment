@@ -25,33 +25,6 @@ if TYPE_CHECKING:
 
 
 # ---------------------------------------------------------------------------
-# planned passes — the non-string members of a loss's `requires`. Each names a
-# pass the runner plans (memoized per wave) rather than a field the training
-# forward already produces.
-# ---------------------------------------------------------------------------
-
-@dataclass(frozen=True)
-class Ref:
-    """A pinned reference policy version → planned no_grad pass."""
-
-    version: str
-
-
-@dataclass(frozen=True)
-class Teacher:
-    """A scoring pass on a named engine pool (inference-world traffic)."""
-
-    pool: str
-
-
-@dataclass(frozen=True)
-class Probe:
-    """A differentiable scoring forward, built by a named probe builder."""
-
-    name: str
-
-
-# ---------------------------------------------------------------------------
 # the mechanism
 # ---------------------------------------------------------------------------
 
@@ -122,21 +95,29 @@ ADAPTERS = Registry("adapter")      # AdapterDef (policy/adapters/base.py)
 
 @dataclass(frozen=True)
 class LossDef:
-    """Microbatch-scope loss: pure fn(PolicyOutputs, TokenBatch) -> Loss.
+    """Microbatch-scope loss: PURE MATH — fn(PolicyOutputs, TokenBatch) -> Loss.
 
-    `requires` mixes PolicyOutputs field names ("values", "ref_logprobs", ...)
-    with planned passes (Ref / Teacher / Probe); the runner plans the passes and
-    Phase 0 checks the fields against what the bank provides.
+    `requires` names DATA COLUMNS only: postdata columns the pipeline
+    produced, recorded facts (base or bank), or bank-provided forward
+    tensors. THE INVARIANT (#38): a loss never causes metal work — anything
+    that needs a GPU to compute (judges, teacher scoring, hinted rescoring)
+    is a post processor's job, landing in postdata before the loss runs.
     """
 
     name: str
     fn: Callable[..., Any]
-    requires: tuple
+    requires: tuple[str, ...]
     source_hash: str
 
 
 def loss(name: str, requires: tuple = ()) -> Callable:
     def register(fn: Callable) -> Callable:
+        bad = [r for r in requires if not isinstance(r, str)]
+        if bad:
+            raise TypeError(
+                f"loss {name!r} requires {bad!r}: requires names data columns "
+                f"only — anything needing metal to compute is a post "
+                f"processor's job (it lands in postdata before the loss runs)")
         LOSSES.add(LossDef(name, fn, tuple(requires), source_hash(fn)))
         return fn
     return register

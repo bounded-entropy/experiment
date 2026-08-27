@@ -25,6 +25,19 @@ from rlstack.runner.seeds import derive
 from rlstack.spec.specs import SamplingSpec
 
 
+def _token_vector(processor: str, column: str, traj, value) -> list[float]:
+    """A token_level column carries one float per GENERATED token of its
+    trajectory, in sealed order — the channel for per-token teacher signals
+    (#38: the loss is pure math; post produces everything it operates on)."""
+    generated = sum(len(turn.token_ids) for turn in traj.turns)
+    if len(value) != generated:
+        raise ValueError(
+            f"postprocessor {processor!r} token_level column {column!r} has "
+            f"{len(value)} floats for a trajectory with {generated} generated "
+            f"tokens")
+    return [float(v) for v in value]
+
+
 async def run_pipeline(
     pipeline: Sequence[str],
     wave: Wave,
@@ -55,7 +68,12 @@ async def run_pipeline(
                     raise ValueError(
                         f"postprocessor {name!r} column {column!r} has "
                         f"{len(values)} values for {len(group)} trajectories")
-                data[column] = [float(v) for v in values]
+                if column in pdef.token_level:
+                    data[column] = [_token_vector(name, column, traj, value)
+                                    for traj, value
+                                    in zip(group.trajectories, values)]
+                else:
+                    data[column] = [float(v) for v in values]
         return data
 
     per_group = await asyncio.gather(*[one_group(g) for g in wave.groups])

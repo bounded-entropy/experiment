@@ -8,12 +8,13 @@ from rlstack.registry import loss
 from rlstack.training.losses.base import LossResult, PolicyOutputs, rails, token_tensors
 
 
-@loss("opd")
+@loss("opd", requires=("behavior_logprobs",))
 def opd(out: PolicyOutputs, batch: Any) -> LossResult:
     """Off-policy distillation, v0: match the teacher's RECORDED confidence on
     its own sampled tokens — squared error between trainer and behavior
     logprobs. The teacher is whatever policy sealed the replayed run (I6: its
-    logprobs are read from the record, never recomputed)."""
+    logprobs are read from the record, never recomputed). Declaring the
+    record makes the graph honest: the teacher signal FEEDS this loss."""
     lp, mask, behavior = token_tensors(out, batch)
     objective = (((lp - behavior) ** 2) * mask).sum() / mask.sum().clamp(min=1.0)
 

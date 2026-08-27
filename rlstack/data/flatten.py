@@ -85,12 +85,15 @@ def flatten(traj: Trajectory, tokenize: Callable[[str], tuple[int, ...]]) -> Fla
                 token_extras={k: tuple(v) for k, v in extras.items()})
 
 
-def broadcast(columns: Mapping[str, Sequence[float]],
+def broadcast(columns: Mapping[str, Sequence],
               flats: Sequence[Flat]) -> list[dict[str, tuple[float, ...]]]:
     """Per-trajectory postdata columns → per-token columns, one dict per doc.
 
-    Each trajectory's scalar repeats over its tokens, zeroed where loss_mask=0
-    (injected tokens carry no credit).
+    A trajectory's value is a SCALAR (repeated over its generated tokens) or
+    a PER-TOKEN VECTOR (one float per generated token, consumed in order —
+    the token_level channel). Either way injected positions get 0.0
+    (loss_mask=0 carries no credit). Dumb by charter: shape logic only —
+    the runner validated vectors against declarations upstream.
     """
     for name, values in columns.items():
         if len(values) != len(flats):
@@ -98,10 +101,22 @@ def broadcast(columns: Mapping[str, Sequence[float]],
                 f"postdata column {name!r} has {len(values)} values for "
                 f"{len(flats)} trajectories")
     return [
-        {name: tuple(float(values[i]) if m else 0.0 for m in flat.loss_mask)
+        {name: _per_token(name, values[i], flat)
          for name, values in columns.items()}
         for i, flat in enumerate(flats)
     ]
+
+
+def _per_token(name: str, value, flat: Flat) -> tuple[float, ...]:
+    if isinstance(value, (int, float)):
+        return tuple(float(value) if m else 0.0 for m in flat.loss_mask)
+    generated = sum(flat.loss_mask)
+    if len(value) != generated:
+        raise DataError(
+            f"postdata column {name!r} has {len(value)} floats for a doc "
+            f"with {generated} generated tokens")
+    it = iter(value)
+    return tuple(float(next(it)) if m else 0.0 for m in flat.loss_mask)
 
 
 @dataclass(frozen=True)

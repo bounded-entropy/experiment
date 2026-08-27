@@ -14,8 +14,9 @@ semantics without validation failing with it. A new declaration kind gets a
 node or edge here ONCE and every consumer sees it.
 
 Unknown registered names contribute nothing (check_names_are_registered
-reports them); planned-pass requirements (Ref/Teacher/Probe) are the
-runner's to satisfy and are not graph nodes in v0.
+reports them). The loss is pure math (#38): its requires may only name
+nodes of this graph — post columns, records, bank-provided forward tensors
+— never a pass the runner would have to plan.
 """
 
 from __future__ import annotations
@@ -24,9 +25,6 @@ from dataclasses import dataclass
 
 from rlstack.registry import ADAPTERS, LOSSES, POST
 from rlstack.spec.specs import ExperimentSpec
-
-# PolicyOutputs fields the training forward can always produce, with no bank help.
-BASE_PROVIDES = frozenset({"ref_logprobs", "entropies", "hidden_states"})
 
 # Rollout facts every trajectory records regardless of the bank (I6).
 BASE_RECORDS = frozenset({"behavior_logprobs", "finish"})
@@ -56,6 +54,7 @@ class FlowNode:
     consumers: tuple[str, ...]
     feeds_loss: bool
     stored: bool
+    granularity: str = "trajectory"     # trajectory | token | update
 
 
 @dataclass(frozen=True)
@@ -114,7 +113,7 @@ class FlowGraph:
             return ()
         available = self.available_to_loss()
         return tuple(req for req in LOSSES.get(self.loss).requires
-                     if isinstance(req, str) and req not in available)
+                     if req not in available)
 
     # ---- the run's self-description -----------------------------------------
 
@@ -126,6 +125,7 @@ class FlowGraph:
                 "name": n.name, "kind": n.kind, "phase": n.phase,
                 "producer": n.producer, "consumers": list(n.consumers),
                 "feeds_loss": n.feeds_loss, "stored": n.stored,
+                "granularity": n.granularity,
             } for n in self.nodes],
             "loss": self.loss,
             "rails": list(RAILS),
@@ -149,9 +149,8 @@ def flow_graph(spec: ExperimentSpec) -> FlowGraph:
     eval_pipeline = tuple(spec.eval.post) if spec.eval is not None else ()
 
     requires = frozenset(
-        req for req in (LOSSES.get(loss).requires
-                        if loss is not None and loss in LOSSES else ())
-        if isinstance(req, str))
+        LOSSES.get(loss).requires
+        if loss is not None and loss in LOSSES else ())
     feeding = _transitively_feeding(post_pipeline, requires)
 
     nodes: list[FlowNode] = []
@@ -173,19 +172,15 @@ def flow_graph(spec: ExperimentSpec) -> FlowGraph:
                     name=column, kind="column", phase=phase,
                     producer=f"postprocessor:{name}", consumers=consumers,
                     feeds_loss=(phase == "post" and column in feeding),
-                    stored=True))
+                    stored=True,
+                    granularity=("token" if column in POST.get(name).token_level
+                                 else "trajectory")))
 
     for record in sorted(BASE_RECORDS):
         nodes.append(FlowNode(
             name=record, kind="record", phase="wave", producer="base",
             consumers=(f"loss:{loss}",) if record in requires else (),
-            feeds_loss=record in requires, stored=True))
-    for provided in sorted(BASE_PROVIDES):
-        nodes.append(FlowNode(
-            name=provided, kind="provided", phase="forward", producer="base",
-            consumers=(f"loss:{loss}",) if provided in requires else (),
-            feeds_loss=provided in requires, stored=False))
-
+            feeds_loss=record in requires, stored=True, granularity="token"))
     for entry, adapter_spec in sorted(spec.policy.bank.items()):
         if adapter_spec.kind not in ADAPTERS:
             continue
@@ -208,7 +203,7 @@ def flow_graph(spec: ExperimentSpec) -> FlowGraph:
             nodes.append(FlowNode(
                 name=rail, kind="rail", phase="train",
                 producer=f"loss:{loss}", consumers=(), feeds_loss=False,
-                stored=True))
+                stored=True, granularity="update"))
 
     return FlowGraph(nodes=tuple(nodes), loss=loss,
                      lag=(spec.algo.schedule.max_policy_lag

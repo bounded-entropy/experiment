@@ -8,7 +8,7 @@ from typing import Any
 
 from rlstack.policy.adapters import Adapter, Mechanism, adapter
 from rlstack.policy.siteschema import fake_qwen_schema
-from rlstack.registry import Probe, Ref, Teacher, loss
+from rlstack.registry import loss
 from rlstack.runner.fakes import FakeEngine
 from rlstack.training.post.base import PostProcessor, postprocessor
 from rlstack.spec.specs import (
@@ -30,9 +30,17 @@ SCHEMA = fake_qwen_schema(4, base="Qwen/Qwen3-1.7B")
 def _needs_values(out: Any, batch: Any) -> Any: ...
 
 
-@loss("val_planned_passes", requires=(Ref("pi@120"), Teacher("judge"), Probe("p"),
-                                      "ref_logprobs"))
-def _planned(out: Any, batch: Any) -> Any: ...
+# The #38 invariant, enforced at the door: requires names data columns
+# only — a loss can never route work to metal.
+class RequiresAreDataOnlyTest(unittest.TestCase):
+    def test_non_string_requires_refused_at_registration(self) -> None:
+        class Teacherish:
+            pass
+
+        with self.assertRaises(TypeError) as caught:
+            @loss("val_planned_passes", requires=(Teacherish(), "reward"))
+            def _planned(out: Any, batch: Any) -> Any: ...
+        self.assertIn("post processor's job", str(caught.exception))
 
 
 @postprocessor("val_needs_judge")
@@ -105,9 +113,16 @@ class TestHappyPath(unittest.TestCase):
                           trajectories=TrajectorySource("store://parent/waves"))
         self.assertEqual(validate(spec, SCHEMA), [])
 
-    def test_planned_pass_requires_need_no_bank_support(self) -> None:
-        spec = clean_spec(algo=replace(clean_spec().algo, loss="val_planned_passes"))
-        self.assertEqual(validate(spec, SCHEMA), [])
+    def test_bank_provides_satisfy_requires(self) -> None:
+        """A loss may require a tensor the bank's replay lowering computes
+        (value_head provides "values") — the forward is not metal routing."""
+        spec = clean_spec(policy=PolicySpec(
+            base="Qwen/Qwen3-1.7B",
+            bank={"v": AdapterSpec(kind="value_head", site="value_head")}),
+            algo=replace(clean_spec().algo, loss="val_needs_values"))
+        self.assertEqual(
+            [i for i in validate(spec, SCHEMA)
+             if i.code == "unsatisfied-requires"], [])
 
     def test_trainer_only_kind_validates(self) -> None:
         spec = clean_spec(policy=PolicySpec(
