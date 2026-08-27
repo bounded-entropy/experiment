@@ -18,6 +18,8 @@ reference). Every backend stores the same key tree:
     cas/<sha256>/blob                          content-addressed objects
     hosts/<name>/log.jsonl                     host observability journal
                                                (correctness never reads it)
+    panels.json                                user-defined derived graphs
+                                               (observer reads; never identity)
 
 Invariants: identity is computed, never typed (I3); writes are atomic; the
 ledger is append-only and strictly increasing; resume = attach + ledger tail;
@@ -203,6 +205,18 @@ class Store(ABC):
             except (FileNotFoundError, json.JSONDecodeError):
                 pass
         return sorted(out, key=lambda s: s.get("update", 0))
+
+    def read_panels(self) -> list[dict[str, Any]]:
+        """User-defined derived-graph declarations (panels.json at the store
+        root): [{"name", "expr"}, ...]. Written by the user (cp locally,
+        `modal volume put` remotely); the observer only reads. Malformed or
+        absent → empty."""
+        try:
+            payload = json.loads(self._read("panels.json").decode("utf-8"))
+        except (FileNotFoundError, json.JSONDecodeError):
+            return []
+        return [p for p in payload if isinstance(p, dict)
+                and "name" in p and "expr" in p] if isinstance(payload, list) else []
 
     # ---- host journal (observability ONLY; correctness never reads it) ------
 

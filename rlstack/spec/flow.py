@@ -32,6 +32,10 @@ BASE_RECORDS = frozenset({"behavior_logprobs", "finish"})
 # What every loss reports into the ledger, regardless of family.
 RAILS = ("loss", "mean_ratio", "logprob_gap", "grad_norm")
 
+# Trainer bookkeeping in the same ledger summary — stored, plottable,
+# panel-addressable, but not the loss's rails.
+TRAIN_STATS = ("tokens", "microbatches")
+
 
 @dataclass(frozen=True)
 class FlowNode:
@@ -204,6 +208,11 @@ def flow_graph(spec: ExperimentSpec) -> FlowGraph:
                 name=rail, kind="rail", phase="train",
                 producer=f"loss:{loss}", consumers=(), feeds_loss=False,
                 stored=True, granularity="update"))
+        for stat in TRAIN_STATS:
+            nodes.append(FlowNode(
+                name=stat, kind="stat", phase="train", producer="trainer",
+                consumers=(), feeds_loss=False, stored=True,
+                granularity="update"))
 
     return FlowGraph(nodes=tuple(nodes), loss=loss,
                      lag=(spec.algo.schedule.max_policy_lag

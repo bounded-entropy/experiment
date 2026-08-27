@@ -30,9 +30,12 @@ from rlstack.observe.views import runs_data
 
 
 def ui_app(stores: Sequence[Store],
-           refresh: Callable[[], None] | None = None):
+           refresh: Callable[[], None] | None = None,
+           panels: Callable[[], list[dict]] | None = None):
     """The WSGI app. `refresh` runs before each API read (a Modal volume
-    needs .reload() to see commits from other containers; None for local)."""
+    needs .reload() to see commits from other containers; None for local).
+    `panels` supplies derived-graph declarations (None → each store's own
+    panels.json, re-read per request so edits appear live)."""
 
     def app(environ, start_response):
         path = environ.get("PATH_INFO", "/")
@@ -44,7 +47,9 @@ def ui_app(stores: Sequence[Store],
             if path.startswith("/api/run/"):
                 run_id = path[len("/api/run/"):]
                 for store in stores:
-                    series = run_series(store, run_id)
+                    series = run_series(
+                        store, run_id,
+                        panels=panels() if panels is not None else None)
                     if series is not None:
                         return _json(start_response, series)
                 return _json(start_response, {"error": "unknown run"}, "404 Not Found")
@@ -63,11 +68,22 @@ def _json(start_response, payload, status: str = "200 OK"):
     return [body]
 
 
-def serve(stores: Sequence[Store], port: int = 8321) -> None:
-    """Local serving: python -m rlstack ui <store> [--port N]."""
+def serve(stores: Sequence[Store], port: int = 8321,
+          panels_path: str | None = None) -> None:
+    """Local serving: python -m rlstack ui <store> [--port N]
+    [--panels panels.json] — the file re-reads per refresh, so editing a
+    panel and saving shows up on the next poll."""
+    import json as _json_mod
     from wsgiref.simple_server import make_server
 
-    with make_server("127.0.0.1", port, ui_app(stores)) as httpd:
+    def panels():
+        try:
+            return _json_mod.loads(open(panels_path).read())
+        except (OSError, ValueError):
+            return []
+
+    app = ui_app(stores, panels=panels if panels_path else None)
+    with make_server("127.0.0.1", port, app) as httpd:
         print(f"rlstack ui: http://127.0.0.1:{port}  (ctrl-c to stop)")
         httpd.serve_forever()
 
@@ -203,6 +219,23 @@ async function drawRun() {
   for (const r of (dict.rails || []))
     rails.append(card(r, "loss:" + (dict.loss ?? "?"),
                       seriesOf(data, "train", r), [], "#9de08f"));
+  const derived = data.derived || [];
+  if (derived.length) {
+    const grid = section("derived (your panels.json)");
+    for (const d of derived) {
+      if (d.missing || d.error) {
+        const node = el("div", {class: "card"});
+        node.append(el("div", {}, `<span class="name">${d.name}</span>` +
+                                  `<span class="who">${d.expr}</span>`));
+        node.append(el("div", {class: "now", style: "color:#e07a7a"},
+            d.error ? d.error :
+            "missing from this run's pipeline: " + d.missing.join(", ")));
+        grid.append(node);
+      } else {
+        grid.append(card(d.name, d.expr, d.points, d.eval, "#c792ea"));
+      }
+    }
+  }
   if (measure.length || evalCols.length) {
     const grid = section("measurement");
     const seen = new Set();

@@ -33,6 +33,9 @@ def main(argv: list[str] | None = None) -> None:
     ui = sub.add_parser("ui", help="the graphs, in a browser (local wandb)")
     ui.add_argument("store_locators", nargs="*")
     ui.add_argument("--port", type=int, default=8321)
+    ui.add_argument("--panels", default=None,
+                    help="panels.json of derived graphs (default: the "
+                         "store's own panels.json)")
     args = parser.parse_args(argv)
     locators = args.store_locators or [
         r for r in os.environ.get("RLSTACK_STORES", "").split(":") if r]
@@ -40,7 +43,7 @@ def main(argv: list[str] | None = None) -> None:
         parser.error("no store locators given and RLSTACK_STORES is unset")
     stores = [store_for(loc) for loc in locators]
     if args.command == "ui":
-        serve_ui(stores, port=args.port)
+        serve_ui(stores, port=args.port, panels_path=args.panels)
         return
     print(VIEWS[args.command](stores), end="")
 
