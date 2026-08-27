@@ -237,6 +237,7 @@ def run_stress() -> dict:
     from rlstack import ModalVolumeStore
     from rlstack.policy.siteschema import hf_schema
     from rlstack.runner.engines.vllm_engine import VllmEngine
+    from rlstack import GpuArbiter
     from rlstack.runner.learners.torch_learner import TorchLearner
     from rlstack.runner.loop import run_experiment_async
 
@@ -247,6 +248,8 @@ def run_stress() -> dict:
     engine = VllmEngine(BASE, gpu_memory_utilization=0.30, max_model_len=512,
                         max_loras=8, max_lora_rank=16)
 
+    arbiter = GpuArbiter()      # the metal's admission authority (concurrent regime)
+
     async def main() -> dict:
         out: dict = {}
 
@@ -255,7 +258,8 @@ def run_stress() -> dict:
         spec = make_spec(store, loss="grpo", post=("verifier", "grpo_advantage"),
                          master=101, n_updates=30)
         lrn = TorchLearner()
-        rep = await run_experiment_async(spec, schema, store, engine, lrn)
+        rep = await run_experiment_async(spec, schema, store, engine, lrn,
+                                         arbiter=arbiter)
         del lrn
         _free()
         out["grpo"] = report_run(store, rep.run_id, "grpo", 30)
@@ -287,7 +291,10 @@ def run_stress() -> dict:
                                post=("llm_judge", "grpo_advantage"),
                                master=108, n_updates=24, judge_pool=True),
         }
-        learners = {name: TorchLearner() for name in tenants}
+        # ONE learner for all seven tenants: one shared base, per-tenant
+        # adapters, swap-install between interleaved microbatches — the
+        # Learner tenancy invariant on real metal (was 7 base copies)
+        shared_learner = TorchLearner()
 
         async def launch(name: str, delay: float):
             await asyncio.sleep(delay)
@@ -295,11 +302,12 @@ def run_stress() -> dict:
             pools = ({"main": engine, "judge": engine} if name == "judge"
                      else engine)
             return name, await run_experiment_async(
-                tenants[name], schema, store, pools, learners[name])
+                tenants[name], schema, store, pools, shared_learner,
+                arbiter=arbiter)
 
         results = await asyncio.gather(*(launch(name, i * 30.0)
                                          for i, name in enumerate(tenants)))
-        learners.clear()
+        del shared_learner
         _free()
         gap_alarms = {"sft": 1.0, "opd": 0.5, "opsd": 0.25}
         for name, rep in results:
@@ -319,6 +327,10 @@ def run_stress() -> dict:
 
         # ---- stage 4: kill mid-run, re-attach in process, sleep-sharing -----
         print("\n== stage 4: cancel + in-process resume (sharing='sleep') =======")
+        # deliberately NOT the shared arbiter: this spec declares sleep
+        # alternation for the same engine object the concurrent stages
+        # attached as free — a regime change is a different residency world,
+        # and the arbiter's group-mismatch guard would (rightly) refuse it
         spec = make_spec(store, loss="grpo", post=("verifier", "grpo_advantage"),
                          master=208, n_updates=40, sharing="sleep")
         lrn = TorchLearner()
@@ -345,7 +357,8 @@ def run_stress() -> dict:
                          master=301, n_updates=24)
         lrn = TorchLearner()
         task = asyncio.ensure_future(
-            run_experiment_async(spec, schema, store, engine, lrn))
+            run_experiment_async(spec, schema, store, engine, lrn,
+                                 arbiter=arbiter))
         await _cancel_after(task, 90.0)
         del task, lrn
         _free()
