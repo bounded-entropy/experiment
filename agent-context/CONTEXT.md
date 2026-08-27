@@ -691,6 +691,49 @@ specs; backends (local/modal/skypilot) and GPU topology are semantics-neutral.
     judge or second GpuSet exists; self-judge bundle-version recording gap
     unchanged from #32.
 
+35. THE HOST (settled, Samarth-directed — his five-bullet model: "a GpuSet
+    can always be running; an arbiter informs its state; experiments are
+    submitted; residency is logged; when the state is right the work runs").
+    The experiment ↔ metal relationship has ONE owner now:
+    - runner/host.py: Host(name, engines, learner, store, arbiter) owns the
+      quartet. submit(spec, schema): BIND declared pools onto owned engines
+      by base (PoolMember.base or policy base; exact first, base=None is
+      fake metal's wildcard) → FIT (refuse past capacity — honest at last:
+      the host sees every tenant, and object-keyed residents mean shared
+      metal adds zero load) → roster in memory + JOURNAL to store → run
+      under the host's shared arbiter. Host adds custody, never semantics:
+      byte-identity with raw run_experiment is pinned by test.
+    - ROSTER ownership settled per discussion: in the HOST, not the arbiter
+      (the admission machine stays anonymous/stdlib-pure — its counters
+      must not know experiment identity for same-resident overlap to stay
+      trivially correct). "GpuSet state" = arbiter.residency() (per
+      exclusive group, the resident's label) — Samarth's state vocabulary
+      and the resident vocabulary are duals.
+    - JOURNAL ownership settled: hosts/<name>/log.jsonl in the STORE
+      (host-up/attach/detach events, wall-clock ts), deliberately NOT in
+      run manifests (placement in the identity-checked manifest would make
+      resume-on-different-metal a ManifestMismatch — placement must stay
+      out of identity). Observability only; correctness never reads it;
+      torn tails tolerated. Store verbs: append_host_event/read_host_log/
+      list_hosts; ModalVolumeStore persists journal lines.
+    - CLI: `python -m rlstack hosts <store-root>` (rlstack/__main__.py) —
+      per host: up count, engines' bases, attached runs with pools, status,
+      ledger progress (joined from run manifests/ledgers). On Modal:
+      `modal run deploy/modal_app.py::hosts`.
+    - Engine protocol gained `base` (None = fake wildcard) and the loop
+      refuses pool-base-mismatch at submit — the deploy can no longer hand
+      the wrong metal silently. loop.experiment_identity is Phase 0's
+      identity computation made importable (the host journals under it).
+    - Deploy shrank to "build one Host, submit N specs": run_arith and
+      stress stages 1/3/5a go through one Host (the hand-wired judge
+      engine-map died — bind_pools routes a second pool name onto the same
+      engine by base); stage 4 keeps a raw private-arbiter run (sleep
+      regime on metal the concurrent host attached as free — the regime
+      guard refuses mixing, correctly); the cross-container resume is its
+      own Host, so the CLI shows one run's life across two hosts.
+    Phase C from here = a Host kept alive behind a submission queue.
+    357 tests green.
+
 ## Open threads (do NOT treat as settled; flag when your answer touches them)
 
 - Identity rings: should GpuConfig (and EvalSpec) leave the run_id hash and become
