@@ -136,6 +136,31 @@ def hosts():
         print("-" * 72)
 
 
+@app.function(image=image, volumes={"/store": store_volume},
+              min_containers=0)
+@modal.wsgi_app()
+def ui():
+    """The observer UI beside the volume:  modal deploy deploy/modal_app.py
+    then open the printed .modal.run URL. The volume is reloaded (throttled)
+    before each API read so live runs stream in from other containers."""
+    import time
+
+    from rlstack import ModalVolumeStore
+    from rlstack.observe.ui import ui_app
+
+    store = ModalVolumeStore("/store", volume=store_volume,
+                             locator="modal://rlstack-store")
+    last = [0.0]
+
+    def refresh():
+        now = time.monotonic()
+        if now - last[0] > 2.0:
+            last[0] = now
+            store_volume.reload()
+
+    return ui_app([store], refresh=refresh)
+
+
 @app.function(image=image, timeout=900)
 def run_tests():
     """The full fakes suite inside the deploy image (CPU): proves the code

@@ -11,9 +11,16 @@ instead of re-deriving any declaration.
                 inside a container beside the volume
     views.py    hosts/runs/gpu: the *_data functions (structured, for a UI)
                 and render_* (text, for the CLI)
+    series.py   run_series: one run's dictionary + committed history, the
+                graphs' data — peeks only
+    ui.py       the graphs: a dependency-free WSGI app + self-contained page
+                (python -m rlstack ui locally; deploy serves it beside a
+                remote store) — panel priority is the dictionary's walkback
 """
 
 from rlstack.observe.locate import store_for  # noqa: F401
+from rlstack.observe.series import run_series  # noqa: F401
+from rlstack.observe.ui import serve, ui_app  # noqa: F401
 from rlstack.observe.views import (  # noqa: F401
     gpu_data, hosts_data, render_gpu, render_hosts, render_runs, runs_data,
 )

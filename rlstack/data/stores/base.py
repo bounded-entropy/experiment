@@ -191,6 +191,19 @@ class Store(ABC):
                     pass
         return out
 
+    def peek_eval_summaries(self, run_id: str) -> list[dict[str, Any]]:
+        """Every completed eval summary for a run, WITHOUT attaching —
+        the observer's held-out series. Unparseable files are skipped."""
+        out = []
+        for key in self._list(f"runs/{run_id}/eval"):
+            if not key.endswith("/summary.json"):
+                continue
+            try:
+                out.append(json.loads(self._read(key).decode("utf-8")))
+            except (FileNotFoundError, json.JSONDecodeError):
+                pass
+        return sorted(out, key=lambda s: s.get("update", 0))
+
     # ---- host journal (observability ONLY; correctness never reads it) ------
 
     def append_host_event(self, host: str, entry: dict[str, Any]) -> None:
