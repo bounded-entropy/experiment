@@ -230,7 +230,7 @@ class ScoringAndHintedTest(unittest.TestCase):
 
     def test_score_is_deterministic_and_seed_neutral(self) -> None:
         from rlstack import Message, Role
-        from rlstack.runner.sampling import EnginePoolClient
+        from rlstack.runner.traffic import EnginePoolClient
 
         async def scenario():
             routes = pools()

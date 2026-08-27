@@ -21,14 +21,14 @@ from rlstack.data.stores.base import RunHandle, Store
 from rlstack.data.trajectory import Group, Wave
 from rlstack.policy.compile import Bundle, compile_bundle
 from rlstack.registry import ADAPTERS
-from rlstack.runner.sampling import EnginePoolClient, Routes
+from rlstack.runner.traffic import EnginePoolClient, Routes
 from rlstack.runner.interfaces import Engine
 from rlstack.runner.arbiter import GpuArbiter
 from rlstack.runner.post import run_pipeline
 from rlstack.runner.daemons.base import Daemon
 from rlstack.runner.seeds import derive
 from rlstack.runner.signals import RunSignals
-from rlstack.runner.sampling import load_tasks, run_episode
+from rlstack.runner.traffic import load_tasks, run_episode
 from rlstack.spec.specs import ExperimentSpec, SamplingSpec
 
 

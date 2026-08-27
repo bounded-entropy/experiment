@@ -26,7 +26,7 @@ from rlstack.data.stores.base import RunHandle, bump
 from rlstack.data.trajectory import wave_from_rows
 from rlstack.policy.compile import Bundle, compile_bundle
 from rlstack.registry import ADAPTERS
-from rlstack.runner.sampling import Routes
+from rlstack.runner.traffic import Routes
 from rlstack.runner.arbiter import GpuArbiter
 from rlstack.runner.interfaces import Engine, Learner, TrainStats
 from rlstack.runner.post import run_pipeline

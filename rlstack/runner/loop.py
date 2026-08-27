@@ -28,7 +28,7 @@ from rlstack.registry import ADAPTERS, POST, code_hashes
 from rlstack.runner.daemons import Daemon, Evaluator, Generator, Trainer
 from rlstack.runner.interfaces import Engine, Learner
 from rlstack.runner.arbiter import GpuArbiter
-from rlstack.runner.sampling import Routes, load_tasks
+from rlstack.runner.traffic import Routes, load_tasks
 from rlstack.runner.signals import RunSignals
 from rlstack.runner.sources import feed_for
 from rlstack.spec.canonical import canonical_json, run_id

@@ -16,12 +16,12 @@ from typing import Callable, Sequence
 from rlstack.data.stores.base import RunHandle
 from rlstack.data.trajectory import Task, wave_to_rows
 from rlstack.policy.compile import Bundle
-from rlstack.runner.sampling import Routes
+from rlstack.runner.traffic import Routes
 from rlstack.runner.arbiter import GpuArbiter
 from rlstack.runner.interfaces import Engine
 from rlstack.runner.daemons.base import Daemon
 from rlstack.runner.signals import RunSignals
-from rlstack.runner.sampling import collect_wave
+from rlstack.runner.traffic import collect_wave
 from rlstack.spec.specs import ExperimentSpec
 
 

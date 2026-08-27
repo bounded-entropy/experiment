@@ -20,7 +20,7 @@ from collections.abc import Sequence
 
 from rlstack.data.trajectory import Group, Wave
 from rlstack.registry import POST
-from rlstack.runner.sampling import EnginePoolClient, Routes
+from rlstack.runner.traffic import EnginePoolClient, Routes
 from rlstack.runner.seeds import derive
 from rlstack.spec.specs import SamplingSpec
 

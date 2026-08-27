@@ -563,7 +563,7 @@ specs; backends (local/modal/skypilot) and GPU topology are semantics-neutral.
     - training/losses.py SPLIT into training/losses/ mirroring post/: base.py
       (PolicyOutputs, LossResult, token_tensors, rails — the loss contract)
       + one file per registered loss; package __init__ registers builtins.
-    - runner/client.py + runner/waves.py MERGED into runner/sampling.py
+    - runner/client.py + runner/waves.py MERGED into runner/traffic.py
       ("token stream → Turn → episode seal → sealed wave") — kills the
       rlstack/client.py vs runner/client.py name collision and the waves.py
       grab-bag; tests/test_waves.py renamed test_sampling.py.
@@ -636,7 +636,7 @@ specs; backends (local/modal/skypilot) and GPU topology are semantics-neutral.
       pinning stub is now explicit: Bundle.pin(id, versions) — an ADDRESS,
       used by Generator.newest_bundle; full bundles carry payloads+kinds.
     - Runtime map Mapping[pool_name, (Engine, Bundle)] RENAMED Pools →
-      Routes (runner/sampling.py); routes_at closure, `routes=` params.
+      Routes (runner/traffic.py); routes_at closure, `routes=` params.
       The canonical sentence: a request is TRAFFIC, addressed to a POOL,
       served by whichever ENGINE backs that name, under a pinned BUNDLE.
 

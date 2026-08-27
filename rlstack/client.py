@@ -4,7 +4,7 @@ Consumer-defined Protocols, deliberately neutral ground (like registry.py):
 environments (inference world) sample during rollouts, and postprocessors
 (training world) sample or SCORE after the seal (LLM judges, hinted/teacher
 rescoring) — both type against these without either world importing the
-other. The concrete implementation is EnginePoolClient (runner/sampling.py).
+other. The concrete implementation is EnginePoolClient (runner/traffic.py).
 
 The pool principle: nothing is limited to the one policy pool. `pool(name)`
 returns a client for any named engine pool in the experiment's GpuConfig —

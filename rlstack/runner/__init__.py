@@ -14,8 +14,9 @@ The map, by responsibility — read top to bottom:
     arbiter.py      the PHYSICAL half: the GpuArbiter owns admission to the
                     metal — object-keyed residents, exclusive groups from
                     GpuGroup.sharing="sleep", sticky drain-until-blocked
-    sampling.py     token stream → Turn (EnginePoolClient) → episode seal
-                    (run_episode) → sealed wave (collect_wave)
+    traffic.py      what travels to pools: EnginePoolClient (sample +
+                    score) → episode seal (run_episode) → sealed wave
+                    (collect_wave)
     post.py         EXECUTES the declared post pipeline per group (the
                     processors themselves are declared in training/post/)
     host.py         the metal's owner: Host binds submitted specs onto
@@ -33,6 +34,6 @@ This is the one package allowed to import both worlds.
 """
 
 from rlstack.runner import (  # noqa: F401
-    interfaces, seeds, sampling, signals, arbiter, sources, post, daemons,
+    interfaces, seeds, traffic, signals, arbiter, sources, post, daemons,
     loop, host, fakes,
 )

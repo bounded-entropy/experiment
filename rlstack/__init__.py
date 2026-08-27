@@ -58,7 +58,7 @@ from rlstack.runner.interfaces import (
     Emitted, Engine, FinishEvent, Learner, TokenEvent, TrainStats,
 )
 from rlstack.runner.seeds import derive
-from rlstack.runner.sampling import (
+from rlstack.runner.traffic import (
     EnginePoolClient, Routes, collect_wave, load_tasks,
 )
 from rlstack.runner.post import run_pipeline

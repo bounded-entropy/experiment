@@ -1,5 +1,7 @@
-"""The runner's sampling side: everything between an engine's token stream
-and a sealed wave.
+"""The runner's pool-traffic side: everything between a pool's engine and
+a sealed wave. Traffic is the I5 word — pools are destinations, and this
+module is what travels: sample traffic (token streams assembled into Turns)
+and score traffic (given tokens, one prefill pass).
 
 Bottom-up: EnginePoolClient is the concrete PoolClient (rlstack/client.py
 protocol) — it drives one engine pool for one episode, assembling TokenEvents

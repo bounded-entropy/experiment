@@ -4,7 +4,7 @@ metal), plus the event and result types that cross them.
 The Engine speaks TOKENS — its native unit — as a stream of TokenEvents ending
 in a FinishEvent; a request's bundle is pinned at submission, so registering a
 new bundle never disturbs generation in flight. The EnginePoolClient
-(runner/client.py) assembles the stream into a Turn, the membrane's record unit.
+(runner/traffic.py) assembles the stream into a Turn, the membrane's record unit.
 
 Everything real slides in behind these protocols: FakeEngine/FakeLearner for
 dry runs and tests (runner/fakes.py), vLLM and the torch learner in Phase B2/3,

@@ -1,4 +1,4 @@
-"""The sampling side: wave collection and the EnginePoolClient (rlstack.runner.sampling)."""
+"""The traffic side: wave collection and the EnginePoolClient (rlstack.runner.traffic)."""
 
 from __future__ import annotations
 
@@ -9,8 +9,8 @@ from rlstack import (
     Bundle, FakeEngine, Message, Role, SamplingSpec, Task, Trajectory,
     collect_wave,
 )
-from rlstack.runner.sampling import EnginePoolClient
-from rlstack.runner.sampling import run_episode
+from rlstack.runner.traffic import EnginePoolClient
+from rlstack.runner.traffic import run_episode
 
 BUNDLE = Bundle(bundle_id="bundle:test0000", policy_version={"pi": 0})
 HINT_BUNDLE = Bundle(bundle_id="bundle:base:hints", policy_version={})
