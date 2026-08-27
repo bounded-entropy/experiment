@@ -80,10 +80,21 @@ class LoraSite(torch.nn.Module):
         self.installed = kept
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """A row's delta is the one its slot carries HERE — and a slot that
+        carries none here gets the base.
+
+        The site is wrapped because SOME installed tenant has a delta at it;
+        a tenant whose bank never mentions this path (a soft-prompt-only
+        tenant sharing the learner, say) must see the module it would have
+        seen alone. That is the transparent case, not a missing-delta bug.
+        """
         rows = self.plan.rows
         one = rows.uniform()
         if one is not None:
-            delta = _whole_batch_delta(x, one[self.path], self.path)
+            state = one.get(self.path)
+            if state is None:
+                return self.inner(x)
+            delta = _whole_batch_delta(x, state, self.path)
         else:
             delta = _per_row_delta(x, rows, self.path)
         return self.inner(x) + delta.to(x.dtype)
@@ -102,8 +113,17 @@ def _per_row_delta(x: torch.Tensor, rows: ReplayRows,
     stack, then two batched GEMMs — punica's shape, written in stock torch.
 
     The rows of `x` ARE the plan's rows, so a site whose activations are not
-    [rows, tokens, in] cannot be routed per row and says so.
+    [rows, tokens, in] cannot be routed per row and says so. Every slot of a
+    MIXED forward must carry this path: the transparent case is uniform-only,
+    because zero-padding one row's delta is the coalescer's admission rule
+    (#44), not a silent fallback here.
     """
+    missing = [i for i, slot in enumerate(rows.slots) if path not in slot]
+    if missing:
+        raise ValueError(
+            f"site {path}: slots {missing} carry no delta here, so a mixed "
+            f"forward cannot route this site (a uniform forward serves them "
+            f"the base; admission is the coalescer's job)")
     states = [slot[path] for slot in rows.slots]
     ranks = sorted({state.r for state in states})
     if len(ranks) > 1:

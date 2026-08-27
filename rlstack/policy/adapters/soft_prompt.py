@@ -5,6 +5,14 @@ positions — this entry creates them, so their names resolve only when a soft
 prompt is in the bank. Alongside the positions themselves it exports the
 queries -> prompt[:n] attention rectangle, the site an attn_bias attaches to
 (served jointly with this entry by the side_attention plugin).
+
+Its two lowerings prepend the same rows at the same place. ROLLOUT: vLLM
+0.28's mixed embeds prompt — the engine embeds the request's token ids from
+its OWN table and takes only the learned rows from us (runner/engines/
+vllm_engine.py::_prompt_for). REPLAY: a boundary around the trainer's forward
+that prepends the rows and cuts the positions back off the logits
+(soft_prompt_torch.PromptBoundary), so the [len(batch)] alignment above it is
+untouched.
 """
 
 from __future__ import annotations
@@ -29,3 +37,25 @@ class SoftPrompt(Adapter):
             SiteMeta(name=f"queries -> prompt[:{n}]", path="attn_scores",
                      has_weight=False, shape=None, is_boundary=False),
         )
+
+    # compute half — soft_prompt_torch imports torch, so it loads lazily (rule 7)
+
+    def params(self, sites: tuple[SiteMeta, ...], init: dict):
+        from rlstack.policy.adapters import soft_prompt_torch
+        return soft_prompt_torch.build(sites, init)
+
+    def install_replay(self, model, params, sites: tuple[SiteMeta, ...]) -> None:
+        from rlstack.policy.adapters import soft_prompt_torch
+        soft_prompt_torch.install(model, params)
+
+    def uninstall_replay(self, model, params, sites: tuple[SiteMeta, ...]) -> None:
+        from rlstack.policy.adapters import soft_prompt_torch
+        soft_prompt_torch.uninstall(model, params)
+
+    def emit(self, params) -> bytes:
+        from rlstack.policy.adapters import soft_prompt_torch
+        return soft_prompt_torch.emit(params)
+
+    def load(self, params, payload: bytes) -> None:
+        from rlstack.policy.adapters import soft_prompt_torch
+        soft_prompt_torch.load(params, payload)
