@@ -25,9 +25,10 @@ from __future__ import annotations
 
 import os
 import socket
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import timedelta
-from typing import Any, Callable
+from typing import Any
 
 import torch
 import torch.distributed as dist
@@ -70,7 +71,7 @@ class RankGroup:
     rank: int
     width: int
     port: int
-    children: tuple = ()
+    children: tuple[torch.multiprocessing.Process, ...] = ()
     _mesh: Any = field(default=None, repr=False)
     _stopped: bool = False
 
@@ -106,7 +107,8 @@ class RankGroup:
 
     @classmethod
     def _take_place(cls, rank: int, width: int, port: int, *,
-                    children: tuple = (), timeout_s: float) -> RankGroup:
+                    children: tuple[torch.multiprocessing.Process, ...] = (),
+                    timeout_s: float) -> RankGroup:
         """The rendezvous itself: this rank's device, then the group.
 
         The timeout is generous because the first collective after `install`

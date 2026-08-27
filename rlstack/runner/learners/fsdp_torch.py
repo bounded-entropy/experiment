@@ -114,7 +114,7 @@ class FsdpTorchLearner(TorchLearner):
         self.attest_emit_is_width_free(tenant)
         return super().emit(tenant)
 
-    # ---- the two rules this build adds, one named method each ---------------
+    # ---- the rules this build adds, one named method each -------------------
 
     def shard_the_frozen_base(self) -> None:
         """FSDP2 over the frozen base: one group per decoder block, then the
@@ -130,6 +130,12 @@ class FsdpTorchLearner(TorchLearner):
             fully_shard(block, mesh=mesh)
         fully_shard(self._model, mesh=mesh)
         self.attest_base_is_sharded()
+        # The load is whole-then-shard, so the peak was the WHOLE base and
+        # torch's caching allocator is still holding it. A co-resident engine
+        # reserves from the driver, not from that cache, so the difference
+        # between the peak and the shard has to go back — on an 8B base that
+        # is 8 GiB, and without this the sampler beside us cannot start.
+        torch.cuda.empty_cache()
 
     def frozen_blocks(self) -> list[torch.nn.Module]:
         """The units FSDP shards: the base's decoder blocks, named

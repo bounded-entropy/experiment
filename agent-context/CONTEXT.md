@@ -1021,6 +1021,144 @@ specs; backends (local/modal/skypilot) and GPU topology are semantics-neutral.
     the OPD 8B←32B e2e across three L4 hosts. 401 tests green (test_fleet,
     test_remote, ShapeAndRegimeTest new).
 
+45. REAL MULTI-GPU METAL: TP INFERENCE, THE MODAL-CLS TRANSPORT, THE FSDP
+    LEARNER (settled by execution — #43's three named-unbuilt layers, now
+    run on L4:2 metal). #43 designed the fleet against fakes and listed what
+    had never touched a second GPU. All three exist now; this entry records
+    what the metal said, not what the design hoped.
+    - TP INFERENCE (deploy/tp_l4.py, new; nothing in rlstack/ changed):
+      VllmEngine(tp=2) on one L4:2 host, Qwen3-0.6B AND Qwen3-8B. Sampling
+      streams. Two compiled LoRA bundles COEXIST on the sharded build and
+      three concurrent requests (bare base / bundle A / bundle B) come back
+      under three different adapters — punica's per-token adapter indices
+      survive tensor parallelism, so the Engine multi-tenancy invariant
+      holds unchanged at tp>1. 8B at tp=2 is the case that matters: 16 GiB
+      of bf16 weights do not fit one L4 beside a KV cache, so tp is not an
+      optimization there, it is the only way that base serves.
+    - SCORE_TOKENS' FIRST CONTACT (its first anywhere, at any tp) came back
+      CLEAN: the prompt_logprobs suffix is indexed correctly and
+      vllm_engine.py needed NO fix. The proof is a shift test, not a
+      tolerance: the aligned sampled-vs-scored gap against the gap a
+      one-position shift gives — 0.0066 vs 0.452 on 0.6B, 0.0091 vs 0.354 on
+      8B (position 0 matches to five decimals). An off-by-one cannot survive
+      that at any adapter magnitude. The residual gap is punica numerics —
+      prefill applies a delta with different kernels than decode — and it
+      tracks adapter MAGNITUDE, not position: 0.6B 0.021 (base) / 0.045
+      (|B|~0.005) / 0.277 (|B|~0.05), while 8B stays at the floor at every
+      magnitude. Real deltas start at B=0 and grow slowly, so the verb runs
+      in the regime where the two agree to ~0.02 — but the gap is real, and
+      a scoring-based loss should treat it as a floor, not as zero.
+    - THE MODAL-CLS TRANSPORT (deploy/modal_host.py, new; remote.py
+      unchanged). Samarth's venue model, executed: POOL TRAFFIC rides a real
+      transport, the STORE PLANE rides the volume as it always did.
+      ServedHost is a modal.cls that builds the metal, wears it as a Host
+      born with its Partition and Regime, journals host-up to the volume
+      (the observer's `hosts` view sees a remote partition like any other),
+      and exposes HostService's two verbs as Modal methods. ModalTransport
+      is four lines of body — call → .remote.aio, ask → .remote — and that
+      is the whole point: because HostService already speaks JSON-safe dict
+      frames and LocalTransport already round-trips them, a real transport
+      has nothing to serialize. PROVEN: a complete arith GRPO run, learner
+      local to the driver container, "main" pool served by another
+      container: 3/3 updates, reward 0.375→0.875, logprob_gap 0.023–0.033
+      (the kernel floor — the remote engine served exactly the adapters the
+      local trainer recomputed), evals present, the remote pool journaled.
+      Cost observed: 217s wall for 3 updates of 8 trajectories. The tax is
+      per-verb round trips, and the loudest is TOKENIZE — flatten calls it
+      per message per trajectory, so a wave costs dozens of RPCs for an
+      answer the pool's base fixes at build time. A local tokenizer beside
+      each RemotePool is the obvious fix and was NOT taken here (it changes
+      remote.py's contract; logged, not smuggled).
+    - THE FSDP LEARNER (rlstack/runner/learners/ranks.py + fsdp_torch.py,
+      new; torch_learner.py NOT edited — FsdpTorchLearner subclasses it and
+      overrides exactly one method, _ensure_base). The blackboard stays ONE
+      async process: rank 0 runs the runner and the five verbs, ranks
+      1..N-1 run a command loop and exist only to stand in the collectives.
+      Rank 0 ANNOUNCES each collective verb (install / forward_backward /
+      optim_step / load) before running it; emit is NOT announced, because
+      it touches no collective — and a broadcast that buys nothing is a
+      deadlock waiting for its first caller. Rank 0's copy is the truth; the
+      other ranks' answers are discarded. torch 2.13 facts, source-checked
+      in the pinned image: FSDP1 (FullyShardedDataParallel) is deprecated,
+      fully_shard (FSDP2) is the top-level export, and it shards to DTensors
+      one group per decoder block plus the root.
+      THE SHAPE OF IT: the base is sharded, the DELTAS ARE NOT. A tenant
+      installs after the wrap, so no FSDP group owns its LoRA params; they
+      live whole on every rank and each rank steps its own copy. Nothing
+      trainable is inside a group, so no gradient is ever reduce-scattered.
+      This build therefore buys MEMORY, not throughput — the ranks recompute
+      the same microbatch rather than splitting one. Data-parallel width is
+      a later upgrade and would change exactly one thing: the deltas would
+      need a reduction before optim_step.
+      WIDTH-INDEPENDENCE (the invariant this whole design serves): emit/load
+      bytes must not depend on fsdp. It holds by construction (the only
+      sharded thing is the frozen base, which is never emitted) and
+      attest_emit_is_width_free proves it at every emit instead of trusting
+      it. PROVEN end to end: a fsdp=2 run's sealed adapter bytes (18,379,976)
+      reload into an UNSHARDED TorchLearner unchanged and compile to the same
+      bundle id.
+      Also proven on metal (Qwen3-0.6B, L4:2): the regime attests both ways
+      (a fsdp=2 learner accepted, an unsharded one refused at construction);
+      310/310 base parameters sharded with rank 0 holding exactly 50.0% of
+      them (298.0M of 596.0M) while 4.59M delta params stay whole; a 10-update
+      GRPO run killed mid-flight at update 2 and finished behind a FRESH
+      chorus; logprob_gap max 0.0343 — the same floor an unsharded run sits
+      at, which is the real correctness signal for a sharded forward.
+      base_parameters() is the correction the metal asked for: after an
+      install the module tree carries BOTH shapes, so every statement about
+      "the base" must cut the deltas out by identity first (the first run
+      reported "310/534 sharded" and looked like a bug; it was the design).
+      OUT OF SCOPE, stated: sleep-sharing x FSDP (an alternation would have
+      to swing every rank in step) — an FSDP host is dedicated or concurrent.
+      8B AT fsdp=2, HONESTLY: the SHARDING is proven (399/399 base params
+      sharded, rank 0 holding exactly 50.0% of 8,190.7M, 7.63 GiB resident,
+      deltas 15.34M whole), but the RUN does not fit on 2xL4 — and the
+      reason is the SAMPLER, not the learner. An 8B engine at tp=1 holds the
+      whole model (~15.3 GiB of weights; gpu_memory_utilization bounds the
+      budget, not the weights) and wants it on cuda:0 where the learner's
+      7.63 GiB shard already lives, so vLLM's engine core OOMs part way
+      through loading. The answer is not a smaller fraction; it is the
+      fleet's own: the sampler goes on its OWN partition, reached over the
+      wire — the per-capability host shape #43 designed, which this entry's
+      other two deliverables now make possible. The three pieces compose
+      exactly where the milestone needs them to.
+    - DEPLOYMENT FACTS (I5, learned the hard way, all in deploy/): vLLM's TP
+      workers segfault in libgomp (gomp_team_start) on their FIRST
+      OpenMP-parallel CPU op in this image — 0.6B never reaches one (its
+      buffers stay under torch's parallel grain size), 8B hits it during
+      model-runner setup; spawned workers with OMP_NUM_THREADS=1 never form
+      the thread team. Bigger models also want a bigger container (cpu=8,
+      memory=32-64Gi). modal.parameter cannot validate stringized
+      annotations, so a file with modal.cls parameters may not carry `from
+      __future__ import annotations`. A sync `ask` from inside the runner's
+      loop warns (it works; ModalVolumeStore.commit() has always crossed the
+      same way).
+    - PROPOSED SPEC DELTA (for the main session; I did not touch canon):
+      (1) A new invariant candidate — SHARDING IS INVISIBLE IN THE STORE:
+      what a learner emits and loads is independent of its build width, so a
+      run trained at one width resumes, warm-starts and compiles at any
+      other. It is the deepest thing #45 proved and nothing in I1–I12 says
+      it. (2) HARD EVIDENCE FOR THE IDENTITY-RINGS THREAD (first open thread
+      below): gpu_config IS inside canonical_json(spec) and therefore inside
+      run_id, so a spec declaring learner(fsdp=2) and the same spec
+      declaring fsdp=1 are DIFFERENT RUNS — even though the store's bytes
+      are provably width-free and the resume would be sound. I5 says GPU
+      topology is semantics-neutral; identity currently disagrees. Either
+      gpu_config leaves the hash (making I5 literal) or I5 narrows to
+      "topology changes semantics never, identity yes".
+    NOT YET BUILT (what this layer leaves): an 8B training run end to end,
+    which now needs the sampler on its own host rather than any new
+    mechanism; a CPU-side base load before the wrap (the peak is the whole
+    model, not its shard — shard_the_frozen_base returns the difference to
+    the driver, but the peak itself is TorchLearner's `.to(device)`); a local
+    tokenizer beside RemotePool; streamed sample replies (the wire is still
+    one reply per request); host linger/GC; the OPD 8B←32B e2e across
+    per-capability hosts, which is now only wiring — TP inference, the
+    transport and the sharded learner all exist.
+    404 tests green (VerbSplitTest new: which verb rides `call` and which
+    rides `ask` is the contract every out-of-process transport implements
+    against, pinned in the fakes suite rather than rediscovered on metal).
+
 ## Open threads (do NOT treat as settled; flag when your answer touches them)
 
 - Identity rings: should GpuConfig (and EvalSpec) leave the run_id hash and become

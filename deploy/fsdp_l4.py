@@ -338,16 +338,39 @@ def fsdp_run(width: int = 2, n_updates: int = 10,
 
 @app.function(image=image, gpu="L4:2", volumes={"/store": store_volume},
               timeout=7200, cpu=8.0, memory=65536)
-def fsdp_8b(width: int = 2, n_updates: int = 4,
-            kill_after: float = 600.0) -> dict:
-    """8B at fsdp=2: the base is 16 GiB in bf16, so ONE L4 cannot hold it
-    beside a sampler at all — sharding is what makes the run exist."""
+def fsdp_8b(width: int = 2, n_updates: int = 3,
+            kill_after: float = 420.0) -> dict:
+    """8B at fsdp=2. WHAT THIS PROBE ESTABLISHED, and where it stops.
+
+    The sharding works: 399/399 base parameters became DTensors, rank 0 held
+    exactly 50.0% of 8,190.7M params, 7.63 GiB resident on cuda:0, with the
+    tenant's 15.34M delta params whole on every rank.
+
+    The RUN does not fit on 2xL4 in this shape, and the reason is the
+    sampler, not the learner: an 8B engine at tp=1 must hold the whole model
+    (~15.3 GiB of weights — `gpu_memory_utilization` bounds its budget, not
+    its weights), and it wants that on cuda:0 where the learner's 7.63 GiB
+    shard already lives. 7.6 + 15.3 > 22.03, so vLLM's engine core dies part
+    way through loading (observed: OOM with 13.75 GiB of weights in).
+
+    The fix is not a smaller fraction — it is the fleet's own answer: put the
+    sampler on its OWN partition and reach it over the wire
+    (deploy/modal_host.py), which is exactly the per-capability host shape
+    #43 designed and the OPD 8B<-32B milestone needs. Sharing one 2xL4 host
+    between an 8B learner and an 8B sampler would need both sharded AND room
+    for the trainer's vocabulary-sized logits; that is a capacity question
+    for bigger metal, not a design question.
+
+    Also note the load is WHOLE-THEN-SHARD: TorchLearner puts the entire base
+    on the rank's device and fully_shard divides it afterwards, so the peak
+    is the whole 16 GiB. shard_the_frozen_base returns the difference to the
+    driver; removing the peak itself needs a CPU-side load, in the learner."""
     import os
 
     os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
     os.environ["OMP_NUM_THREADS"] = "1"
     return run_fsdp(BIG, width, n_updates, kill_after,
-                    gpu_memory_utilization=0.35)
+                    gpu_memory_utilization=0.15)
 
 
 @app.local_entrypoint()
