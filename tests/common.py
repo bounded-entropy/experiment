@@ -8,7 +8,7 @@ from typing import Any
 
 from rlstack import (
     AlgoSpec, EvalSpec, ExperimentSpec, GenSpec, GpuConfig, GpuGroup,
-    LocalStore, Message, OptimSpec, PolicySpec, Role, Rollout, RolloutSource,
+    LocalStore, Message, OptimSpec, PolicySpec, Role, Rollout, TrajectorySource,
     Schedule, Seeds, Task, Trajectory, Turn, engines, gpus, learner, lora,
 )
 
@@ -31,10 +31,10 @@ def arith_spec(train_uri: str, heldout_uri: str | None = None,
         policy=PolicySpec(base="Qwen/Qwen3-0.6B",
                           bank={"pi": lora("layers.0-3.self_attn.*", r=16)}),
         gen=GenSpec(env="math_single_turn", tasks=train_uri),
-        rollouts=RolloutSource("live"),
+        trajectories=TrajectorySource("live"),
         algo=AlgoSpec(loss="grpo", post=("verifier", "grpo_advantage"),
                       optim=OptimSpec("adamw", lr=1e-5),
-                      schedule=Schedule(group_size=2, rollouts_per_wave=4,
+                      schedule=Schedule(group_size=2, trajectories_per_wave=4,
                                         n_updates=4, microbatch_tokens=64)),
         eval=(EvalSpec(tasks=heldout_uri, every=2, n_samples=2,
                        post=("verifier",))

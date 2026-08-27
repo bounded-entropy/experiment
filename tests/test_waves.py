@@ -105,7 +105,7 @@ class CollectWaveTest(unittest.TestCase):
             sampling=SAMPLING,
             tasks=self.TASKS,
             group_size=4,
-            rollouts_per_wave=16,
+            trajectories_per_wave=16,
             pools=make_pools(),
             master=17,
         ))
@@ -132,14 +132,14 @@ class CollectWaveTest(unittest.TestCase):
     def test_indivisible_wave_is_rejected(self) -> None:
         with self.assertRaises(ValueError):
             go(collect_wave(1, env_name="math_single_turn", sampling=SAMPLING,
-                            tasks=self.TASKS, group_size=3, rollouts_per_wave=16,
+                            tasks=self.TASKS, group_size=3, trajectories_per_wave=16,
                             pools=make_pools(), master=17))
 
     def test_too_few_tasks_is_rejected(self) -> None:
         with self.assertRaises(ValueError):
             go(collect_wave(1, env_name="math_single_turn", sampling=SAMPLING,
                             tasks=self.TASKS[:2], group_size=4,
-                            rollouts_per_wave=16, pools=make_pools(), master=17))
+                            trajectories_per_wave=16, pools=make_pools(), master=17))
 
 
 if __name__ == "__main__":

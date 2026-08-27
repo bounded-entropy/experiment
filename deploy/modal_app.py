@@ -53,7 +53,7 @@ def arith_tasks(n: int, seed: int) -> bytes:
 
 @app.function(image=image, gpu="L4", volumes={"/store": store_volume},
               timeout=3600)
-def run_arith(n_updates: int = 4, rollouts_per_wave: int = 16,
+def run_arith(n_updates: int = 4, trajectories_per_wave: int = 16,
               group_size: int = 4, lr: float = 1e-4, master_seed: int = 17):
     import torch
     import transformers
@@ -61,8 +61,8 @@ def run_arith(n_updates: int = 4, rollouts_per_wave: int = 16,
 
     from rlstack import (
         AlgoSpec, EvalSpec, ExperimentSpec, GenSpec, GpuConfig, GpuGroup,
-        ModalVolumeStore, OptimSpec, PolicySpec, RolloutSource, SamplingSpec,
-        Schedule, Seeds, engines, gpus, learner, lora, run_experiment,
+        ModalVolumeStore, OptimSpec, PolicySpec, SamplingSpec, Schedule, Seeds,
+        TrajectorySource, engines, gpus, learner, lora, run_experiment,
     )
     from rlstack.policy.siteschema import hf_schema
     from rlstack.runner.engines.vllm_engine import VllmEngine
@@ -81,11 +81,11 @@ def run_arith(n_updates: int = 4, rollouts_per_wave: int = 16,
         gen=GenSpec(env="math_single_turn", tasks=train,
                     sampling=SamplingSpec(temperature=1.0, top_p=1.0,
                                           max_tokens=12)),
-        rollouts=RolloutSource("live"),
+        trajectories=TrajectorySource("live"),
         algo=AlgoSpec(loss="grpo", post=("verifier", "grpo_advantage"),
                       optim=OptimSpec("adamw", lr=lr),
                       schedule=Schedule(group_size=group_size,
-                                        rollouts_per_wave=rollouts_per_wave,
+                                        trajectories_per_wave=trajectories_per_wave,
                                         n_updates=n_updates,
                                         microbatch_tokens=2048)),
         eval=EvalSpec(tasks=heldout, every=2, n_samples=2, post=("verifier",)),

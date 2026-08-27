@@ -20,7 +20,7 @@ from rlstack.spec.specs import (
     GpuGroup,
     OptimSpec,
     PolicySpec,
-    RolloutSource,
+    TrajectorySource,
     SamplingSpec,
     Schedule,
     Seeds,
@@ -65,12 +65,12 @@ def _small_spec() -> ExperimentSpec:
             tasks="cas://abc/train.jsonl",
 
         ),
-        rollouts=RolloutSource("live"),
+        trajectories=TrajectorySource("live"),
         algo=AlgoSpec(
             loss="grpo",
             post=("verifier", "grpo_advantage"),
             optim=OptimSpec("adamw", lr=1e-5),
-            schedule=Schedule(group_size=8, rollouts_per_wave=64, n_updates=10),
+            schedule=Schedule(group_size=8, trajectories_per_wave=64, n_updates=10),
         ),
         gpu_config=GpuConfig(
             groups=(GpuGroup(gpus(n=1), (engines("main"), learner())),)
@@ -111,7 +111,7 @@ class TestCanonicalJsonShape(unittest.TestCase):
             '"post":["verifier","grpo_advantage"],'
             '"schedule":{"__type__":"Schedule","epochs_per_wave":1,"group_size":8,'
             '"max_policy_lag":0,"microbatch_tokens":16384,"n_updates":10,'
-            '"rollouts_per_wave":64}},"eval":null,'
+            '"trajectories_per_wave":64}},"eval":null,'
             '"gen":{"__type__":"GenSpec","env":"math_single_turn",'
             '"sampling":{"__type__":"SamplingSpec",'
             '"max_tokens":1024,"temperature":1.0,"top_p":1.0},'
@@ -124,8 +124,8 @@ class TestCanonicalJsonShape(unittest.TestCase):
             '"policy":{"__type__":"PolicySpec","bank":{"pi":{"__type__":'
             '"AdapterSpec","init":{"r":16,"tie":false},"kind":"lora",'
             '"site":"layers.*.mlp.*","trainable":true}},"base":"Qwen/Qwen3-1.7B"},'
-            '"rollouts":{"__type__":"RolloutSource","source":"live"},'
-            '"seeds":{"__type__":"Seeds","master":0},"tier":"lab"}',
+            '"seeds":{"__type__":"Seeds","master":0},"tier":"lab",'
+            '"trajectories":{"__type__":"TrajectorySource","source":"live"}}',
         )
 
     def test_type_tag_separates_structurally_identical_classes(self) -> None:

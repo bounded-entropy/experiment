@@ -20,7 +20,7 @@ from rlstack.spec.specs import (
     LearnerMember,
     OptimSpec,
     PolicySpec,
-    RolloutSource,
+    TrajectorySource,
     SamplingSpec,
     Schedule,
     Seeds,
@@ -52,13 +52,13 @@ def example_1(bank: dict[str, AdapterSpec] | None = None) -> ExperimentSpec:
             tasks="cas://3fa9c2.../math_train.jsonl",
 
         ),
-        rollouts=RolloutSource("live"),
+        trajectories=TrajectorySource("live"),
         algo=AlgoSpec(
             loss="grpo",
             post=("verifier", "grpo_advantage"),
             optim=OptimSpec("adamw", lr=1e-5, betas=(0.9, 0.95),
                             overrides={"head": {"lr": 3e-6}}),
-            schedule=Schedule(group_size=8, rollouts_per_wave=512, n_updates=300,
+            schedule=Schedule(group_size=8, trajectories_per_wave=512, n_updates=300,
                               epochs_per_wave=1, microbatch_tokens=16384,
                               max_policy_lag=0),
         ),
@@ -80,7 +80,7 @@ class TestConstruction(unittest.TestCase):
         self.assertEqual(self.exp.policy.base, "Qwen/Qwen3-8B")
         self.assertEqual(self.exp.policy.bank["attn"].init["r"], 16)
         self.assertEqual(self.exp.algo.optim.overrides["head"]["lr"], 3e-6)
-        self.assertEqual(self.exp.algo.schedule.rollouts_per_wave, 512)
+        self.assertEqual(self.exp.algo.schedule.trajectories_per_wave, 512)
         self.assertIsNone(self.exp.init)
         self.assertEqual(self.exp.tier, "lab")
 
@@ -98,7 +98,7 @@ class TestConstruction(unittest.TestCase):
 
     def test_optional_halves(self) -> None:
         offline = replace(self.exp, gen=None, eval=None,
-                          rollouts=RolloutSource("store://parent/rollouts"))
+                          trajectories=TrajectorySource("store://parent/waves"))
         self.assertIsNone(offline.gen)
         generation_only = replace(self.exp, algo=None)
         self.assertIsNone(generation_only.algo)
@@ -156,13 +156,13 @@ class TestIdentity(unittest.TestCase):
 
 class TestVocabularies(unittest.TestCase):
     def test_rollout_source_accepts_the_three_forms(self) -> None:
-        for source in ("live", "store://run/rollouts", "cas://3fa9/tasks.jsonl"):
-            self.assertEqual(RolloutSource(source).source, source)
+        for source in ("live", "store://run/waves", "cas://3fa9/tasks.jsonl"):
+            self.assertEqual(TrajectorySource(source).source, source)
 
     def test_rollout_source_rejects_anything_else(self) -> None:
         for source in ("s3://bucket/x", "/tmp/rollouts", "", "LIVE"):
             with self.assertRaises(ValueError):
-                RolloutSource(source)
+                TrajectorySource(source)
 
     def test_sharing_vocabulary(self) -> None:
         group = GpuGroup(gpus(n=1), (learner(),), sharing="sleep")
@@ -200,7 +200,7 @@ class TestDefaults(unittest.TestCase):
                          (10, None, (), 1, "main"))
 
     def test_schedule(self) -> None:
-        s = Schedule(group_size=8, rollouts_per_wave=512, n_updates=300)
+        s = Schedule(group_size=8, trajectories_per_wave=512, n_updates=300)
         self.assertEqual((s.epochs_per_wave, s.microbatch_tokens, s.max_policy_lag),
                          (1, 16384, 0))
 

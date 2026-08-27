@@ -4,7 +4,7 @@ seals into a Trajectory the moment its episode ends.
 An episode is now exactly the environment's business — everything necessary
 for the policy to complete a rollout and seal it. Scoring happens later, in
 the postprocessing pipeline (runner/post.py). `collect_wave` schedules one
-wave: `rollouts_per_wave / group_size` tasks (chosen deterministically per
+wave: `trajectories_per_wave / group_size` tasks (chosen deterministically per
 update), `group_size` episodes each, one Group per task.
 """
 
@@ -55,7 +55,7 @@ async def collect_wave(
     sampling: SamplingSpec,
     tasks: Sequence[Task],
     group_size: int,
-    rollouts_per_wave: int,
+    trajectories_per_wave: int,
     pools: Pools,
     master: int,
     phase: str = "rollout",
@@ -67,11 +67,11 @@ async def collect_wave(
     id. The Group primitive doesn't require that: a TTT-style wave of many
     groups over one task just assembles differently at this spot.
     """
-    if rollouts_per_wave % group_size:
+    if trajectories_per_wave % group_size:
         raise ValueError(
-            f"rollouts_per_wave={rollouts_per_wave} is not a multiple of "
+            f"trajectories_per_wave={trajectories_per_wave} is not a multiple of "
             f"group_size={group_size}")
-    chosen = choose_tasks(tasks, rollouts_per_wave // group_size,
+    chosen = choose_tasks(tasks, trajectories_per_wave // group_size,
                           master, phase, update)
 
     limiter = asyncio.Semaphore(max_inflight)

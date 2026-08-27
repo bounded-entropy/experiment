@@ -13,7 +13,7 @@ from rlstack.runner.fakes import FakeEngine
 from rlstack.training.post.base import PostProcessor, postprocessor
 from rlstack.spec.specs import (
     AdapterSpec, AlgoSpec, EvalSpec, ExperimentSpec, GenSpec, GpuConfig, GpuGroup,
-    OptimSpec, PolicySpec, RolloutSource, Schedule, Seeds, WarmStart,
+    OptimSpec, PolicySpec, TrajectorySource, Schedule, Seeds, WarmStart,
     engines, gpus, learner, lora,
 )
 from rlstack.spec.validate import (
@@ -77,10 +77,10 @@ def clean_spec(**overrides: Any) -> ExperimentSpec:
         policy=PolicySpec(base="Qwen/Qwen3-1.7B",
                           bank={"pi": lora("layers.0-3.self_attn.*", r=16)}),
         gen=GenSpec(env="noop_env", tasks="cas://x/train.jsonl"),
-        rollouts=RolloutSource("live"),
+        trajectories=TrajectorySource("live"),
         algo=AlgoSpec(loss="grpo", post=("verifier", "grpo_advantage"),
                       optim=OptimSpec("adamw", lr=1e-5),
-                      schedule=Schedule(group_size=8, rollouts_per_wave=64, n_updates=10)),
+                      schedule=Schedule(group_size=8, trajectories_per_wave=64, n_updates=10)),
         gpu_config=GpuConfig(groups=(
             GpuGroup(gpus(n=2), (engines("main"), learner())),)),
         seeds=Seeds(master=0),
@@ -102,7 +102,7 @@ class TestHappyPath(unittest.TestCase):
 
     def test_offline_spec_without_gen_or_algo_validates(self) -> None:
         spec = clean_spec(gen=None, algo=None,
-                          rollouts=RolloutSource("store://parent/rollouts"))
+                          trajectories=TrajectorySource("store://parent/waves"))
         self.assertEqual(validate(spec, SCHEMA), [])
 
     def test_planned_pass_requires_need_no_bank_support(self) -> None:
@@ -327,7 +327,7 @@ class TestTopology(unittest.TestCase):
         sleepy = GpuConfig(groups=(
             GpuGroup(gpus(n=1), (engines("main"), learner()), sharing="sleep"),))
         laggy = replace(clean_spec().algo,
-                        schedule=Schedule(group_size=8, rollouts_per_wave=64,
+                        schedule=Schedule(group_size=8, trajectories_per_wave=64,
                                           n_updates=10, max_policy_lag=1))
         spec = clean_spec(gpu_config=sleepy, algo=laggy)
         self.assertEqual(codes(spec), {"sleep-lag-conflict"})
@@ -370,7 +370,7 @@ class TestCoherence(unittest.TestCase):
         self.assertEqual(codes(spec), {"live-without-gen"})
 
     def test_store_source_without_gen_is_fine(self) -> None:
-        spec = clean_spec(gen=None, rollouts=RolloutSource("store://parent/rollouts"))
+        spec = clean_spec(gen=None, trajectories=TrajectorySource("store://parent/waves"))
         self.assertEqual(validate(spec, SCHEMA), [])
 
     def test_eval_train_overlap(self) -> None:
@@ -379,13 +379,13 @@ class TestCoherence(unittest.TestCase):
 
     def test_bad_schedule_non_positive_count(self) -> None:
         laggy = replace(clean_spec().algo,
-                        schedule=Schedule(group_size=0, rollouts_per_wave=64,
+                        schedule=Schedule(group_size=0, trajectories_per_wave=64,
                                           n_updates=10))
         self.assertEqual(codes(clean_spec(algo=laggy)), {"bad-schedule"})
 
     def test_bad_schedule_negative_lag(self) -> None:
         laggy = replace(clean_spec().algo,
-                        schedule=Schedule(group_size=8, rollouts_per_wave=64,
+                        schedule=Schedule(group_size=8, trajectories_per_wave=64,
                                           n_updates=10, max_policy_lag=-1))
         self.assertEqual(codes(clean_spec(algo=laggy)), {"bad-schedule"})
 
@@ -409,7 +409,7 @@ class TestSpecError(unittest.TestCase):
         broken = clean_spec(
             algo=AlgoSpec(loss="nope", post=("also_nope",),
                           optim=OptimSpec("adamw", lr=1e-5),
-                          schedule=Schedule(group_size=0, rollouts_per_wave=64,
+                          schedule=Schedule(group_size=0, trajectories_per_wave=64,
                                             n_updates=10)),
             gpu_config=GpuConfig(groups=()),
         )

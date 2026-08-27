@@ -478,6 +478,35 @@ specs; backends (local/modal/skypilot) and GPU topology are semantics-neutral.
     .aio() is the clean fix but that is a data/-layer change, deliberately
     not hotfixed).
 
+29. VOCABULARY CONSISTENCY PASS (settled, Samarth-directed: "keep the
+    rollout <-> inference and trajectory <-> learner pattern consistent
+    wherever possible"). The #23 treaty words now hold in every executable
+    position; "rollout" survives ONLY on the inference side (the Rollout
+    type, the "rollout" seed phase, GenSpec's docstring). SPEC DELTAS, all
+    three IDENTITY-AFFECTING (they hash into run_id — every run_id changes;
+    the two pre-rename L4 smoke runs on the volume are orphaned, left in
+    place):
+    - RolloutSource RENAMED TrajectorySource (its own docstring always said
+      "what training consumes — always sealed store data");
+      ExperimentSpec.rollouts -> ExperimentSpec.trajectories.
+    - Schedule.rollouts_per_wave -> trajectories_per_wave (it is the
+      statistical wave-size knob, sibling of group_size).
+    - Store section rollouts/ RENAMED waves/ — the per-update artifact is
+      exactly one serialized Wave (#22's primitive); RunHandle verbs
+      write_rollouts/read_rollouts -> write_wave/read_wave; the ledger's
+      wave summary key "rollouts" -> "trajectories".
+    validate: check_live_rollouts_have_gen -> check_live_trajectories_have_gen,
+    issue field "trajectories.source" (code "live-without-gen" unchanged).
+    StaticFeed KEPT and clarified: it is the cas:// arm of TrajectorySource
+    (the SFT / offline-distillation shape) — a fixed file of sealed
+    trajectory rows sliced into singleton-group waves; it already satisfied
+    "the learner only consumes trajectories", the offense was naming.
+    Deliberately untouched: the seed-tree phase string "rollout" (it seeds
+    SAMPLING — correct word, and identity-bearing) and
+    tests/test_trajectory.py::test_unsealed_rollouts_are_refused (an
+    unsealed record IS a rollout; the name states the treaty). 327 green;
+    examples/arith_fake.py e2e on fakes.
+
 ## Open threads (do NOT treat as settled; flag when your answer touches them)
 
 - Identity rings: should GpuConfig (and EvalSpec) leave the run_id hash and become

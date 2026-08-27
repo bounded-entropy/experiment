@@ -1,4 +1,4 @@
-"""Replay: another run's sealed rollouts, copied in update for update.
+"""Replay: another run's sealed waves, copied in update for update.
 
 Off-policy consumption through the exact contract live uses — the behavior
 policy is whatever the parent recorded (bundle ids, logprobs, draws are all
@@ -20,15 +20,15 @@ class ReplayFeed(WaveFeed):
 
     def obtain(self, update: int) -> list[dict] | None:
         try:
-            return self._run.read_rollouts(update)       # already copied
+            return self._run.read_wave(update)       # already copied
         except FileNotFoundError:
             pass
         try:
-            rows = self._parent.read_rollouts(update)
+            rows = self._parent.read_wave(update)
         except FileNotFoundError:
             raise ValueError(
-                f"parent run {self._parent_id!r} has no sealed rollouts for "
+                f"parent run {self._parent_id!r} has no sealed wave for "
                 f"update {update} — its run stopped earlier; lower n_updates"
             ) from None
-        self._run.write_rollouts(update, rows)
+        self._run.write_wave(update, rows)
         return rows

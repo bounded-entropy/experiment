@@ -43,7 +43,7 @@ class LoopTest(unittest.TestCase):
         for k in range(1, 5):
             run.read_blob("adapters", "pi", k)   # raises if missing
             run.read_blob("optim", "pi", k)
-            self.assertTrue(run.read_rollouts(k))
+            self.assertTrue(run.read_wave(k))
 
         # phase-1 bundle + one per update, all distinct, ledger agrees
         self.assertEqual(len(engine.bundle_log), 5)
@@ -51,14 +51,14 @@ class LoopTest(unittest.TestCase):
         self.assertEqual([e["bundle_id"] for e in entries], engine.bundle_log[1:])
 
         for entry in entries:
-            self.assertEqual(entry["wave"]["rollouts"], 4)
+            self.assertEqual(entry["wave"]["trajectories"], 4)
             self.assertIn("reward", entry["post"])       # pipeline means
             self.assertIn("advantage", entry["post"])
             for key in ("loss", "mean_ratio", "logprob_gap", "grad_norm",
                         "tokens", "microbatches"):
                 self.assertIn(key, entry["train"])
 
-        # postdata is stored beside the rollouts, wave-aligned
+        # postdata is stored beside the waves, wave-aligned
         columns = run.read_postdata(1)
         self.assertEqual(set(columns), {"reward", "advantage"})
         self.assertEqual(len(columns["reward"]), 4)
@@ -67,7 +67,7 @@ class LoopTest(unittest.TestCase):
         spec = arith_spec(self.train)
         report, engine = self.run_spec(spec)
         run = self.store.open_run(report.run_id)
-        for row in run.read_rollouts(1):
+        for row in run.read_wave(1):
             traj = trajectory_from_row(row)
             flat = flatten(traj, engine.tokenize)
             self.assertEqual(flat.doc_len, len(flat.token_ids))
@@ -78,7 +78,7 @@ class LoopTest(unittest.TestCase):
         spec = arith_spec(self.train)
         report, _ = self.run_spec(spec, engine=FakeEngine(record_draws=True))
         run = self.store.open_run(report.run_id)
-        row = run.read_rollouts(1)[0]
+        row = run.read_wave(1)[0]
         traj = trajectory_from_row(row)
         draws = traj.turns[0].token_extras["adapter_draw"]
         self.assertEqual(len(draws), len(traj.turns[0].token_ids))

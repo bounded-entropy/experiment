@@ -51,7 +51,7 @@ class OpenRunTest(StoreTestCase):
         run = self.open()
         self.assertEqual(run.manifest, MANIFEST)
         self.assertTrue((self.root / "runs" / "run-abc" / "manifest.json").exists())
-        for section in ("rollouts", "adapters", "optim", "eval"):
+        for section in ("waves", "adapters", "optim", "eval"):
             self.assertTrue(rpath(run, section).parent.is_dir(), section)
         again = self.store.open_run("run-abc")  # attach without offering a manifest
         self.assertEqual(again.manifest, MANIFEST)
@@ -136,14 +136,14 @@ class LedgerTest(StoreTestCase):
         self.assertEqual([e["update"] for e in run.read_ledger()], [0, 1, 2])
 
 
-class RolloutsTest(StoreTestCase):
+class WavesTest(StoreTestCase):
     def test_roundtrip_and_listing(self) -> None:
         run = self.open()
         rows = [{"traj": 0, "token_ids": [1, 2, 3]}, {"traj": 1, "token_ids": []}]
-        run.write_rollouts(3, rows)
-        self.assertTrue(rpath(run, "rollouts", "000003.jsonl.gz").exists())
-        self.assertEqual(run.read_rollouts(3), rows)
-        run.write_rollouts(10, [])
+        run.write_wave(3, rows)
+        self.assertTrue(rpath(run, "waves", "000003.jsonl.gz").exists())
+        self.assertEqual(run.read_wave(3), rows)
+        run.write_wave(10, [])
         self.assertEqual(run.list_updates(), [3, 10])
         self.assert_no_tmp_files()
 
@@ -159,27 +159,27 @@ class RolloutsTest(StoreTestCase):
                 "none": None,
             }
         ]
-        run.write_rollouts(1, rows)
-        back = run.read_rollouts(1)
+        run.write_wave(1, rows)
+        back = run.read_wave(1)
         self.assertEqual(back, rows)
         self.assertEqual(back[0]["logprobs"][3], 5e-324)
         self.assertEqual(repr(back[0]["nested"]["π"][1]), "-0.0")
-        with gzip.open(rpath(run, "rollouts", "000001.jsonl.gz"), "rb") as handle:
+        with gzip.open(rpath(run, "waves", "000001.jsonl.gz"), "rb") as handle:
             raw = handle.read().decode("utf-8")
         self.assertIn("café", raw)  # UTF-8 on disk, not \uXXXX escapes
         self.assertEqual(raw.count("\n"), 1)
 
     def test_missing_update(self) -> None:
         with self.assertRaises(FileNotFoundError):
-            self.open().read_rollouts(99)
+            self.open().read_wave(99)
 
-    def test_committed_rollouts_are_append_only(self) -> None:
+    def test_committed_waves_are_append_only(self) -> None:
         run = self.open()
-        run.write_rollouts(1, [{"a": 1}])
+        run.write_wave(1, [{"a": 1}])
         run.append_ledger({"update": 1})
         with self.assertRaises(StoreError):
-            run.write_rollouts(1, [{"a": 2}])
-        self.assertEqual(run.read_rollouts(1), [{"a": 1}])
+            run.write_wave(1, [{"a": 2}])
+        self.assertEqual(run.read_wave(1), [{"a": 1}])
 
 
 class BlobTest(StoreTestCase):
@@ -244,22 +244,22 @@ class CasTest(StoreTestCase):
 
 class CrashRecoveryTest(StoreTestCase):
     def commit(self, run: RunHandle, update: int, version: int) -> None:
-        """Normal order: rollouts, then blobs, then the ledger entry that seals them."""
-        run.write_rollouts(update, [{"update": update}])
+        """Normal order: wave, then blobs, then the ledger entry that seals them."""
+        run.write_wave(update, [{"update": update}])
         run.write_blob("adapters", "attn", version, b"delta")
         run.write_blob("optim", "attn", version, b"moments")
         run.append_ledger({"update": update, "versions": {"attn": version}})
 
-    def test_rollouts_without_ledger_are_dropped(self) -> None:
+    def test_waves_without_ledger_are_dropped(self) -> None:
         run = self.open()
         self.commit(run, 1, 1)
         self.commit(run, 2, 2)
-        run.write_rollouts(3, [{"update": 3}])  # crash before append_ledger
+        run.write_wave(3, [{"update": 3}])  # crash before append_ledger
         self.assertEqual(run.list_updates(), [1, 2, 3])
 
         reopened = self.open()
         self.assertEqual(reopened.list_updates(), [1, 2])
-        self.assertEqual(reopened.read_rollouts(2), [{"update": 2}])
+        self.assertEqual(reopened.read_wave(2), [{"update": 2}])
         tail = reopened.ledger_tail()
         assert tail is not None
         self.assertEqual(tail["update"], 2)
@@ -294,7 +294,7 @@ class CrashRecoveryTest(StoreTestCase):
 
     def test_everything_dropped_when_ledger_is_empty(self) -> None:
         run = self.open()
-        run.write_rollouts(0, [{"update": 0}])
+        run.write_wave(0, [{"update": 0}])
         self.assertEqual(self.open().list_updates(), [])
 
     def test_blobs_kept_when_ledger_records_no_versions(self) -> None:
@@ -317,7 +317,7 @@ class CrashRecoveryTest(StoreTestCase):
 
     def test_stray_temporaries_swept_on_attach(self) -> None:
         run = self.open()
-        stray = rpath(run, "rollouts", "000007.jsonl.gz.999.tmp")
+        stray = rpath(run, "waves", "000007.jsonl.gz.999.tmp")
         stray.parent.mkdir(parents=True, exist_ok=True)
         stray.write_bytes(b"partial")
         self.open()
@@ -326,12 +326,12 @@ class CrashRecoveryTest(StoreTestCase):
     def test_resume_continues_after_recovery(self) -> None:
         run = self.open()
         self.commit(run, 1, 1)
-        run.write_rollouts(2, [{"update": 2, "torn": True}])  # crash
+        run.write_wave(2, [{"update": 2, "torn": True}])  # crash
 
         resumed = self.open()
-        resumed.write_rollouts(2, [{"update": 2}])
+        resumed.write_wave(2, [{"update": 2}])
         resumed.append_ledger({"update": 2, "versions": {"attn": 2}})
-        self.assertEqual(resumed.read_rollouts(2), [{"update": 2}])
+        self.assertEqual(resumed.read_wave(2), [{"update": 2}])
         self.assertEqual(resumed.list_updates(), [1, 2])
         self.assert_no_tmp_files()
 

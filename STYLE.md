@@ -50,7 +50,7 @@ The one reader is Samarth, six months from now, mid-experiment. Optimize for
                    evaluator), synchronized ONLY via the store; each daemon's
                    acquisition condition is a named, overridable method
    runner/sources/ where training data comes from — one base (WaveFeed:
-                   rows exist in the run's own rollouts/, or not yet),
+                   rows exist in the run's own waves/, or not yet),
                    one file per option (live / replay / static)
    runner/engines/ real inference metal, one file per engine (vllm_engine);
    runner/learners/ real training metal (torch_learner) — both import their

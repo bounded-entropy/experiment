@@ -1,4 +1,4 @@
-"""Live: the Generator role writes rollouts/<u>; this feed just reads them.
+"""Live: the Generator role writes waves/<u>; this feed just reads them.
 
 The behavior policy is whatever bundle the generator sampled under — recorded
 per turn, opportunistic within the lag buffer. "Not yet" is the normal answer
@@ -16,6 +16,6 @@ class LiveFeed(WaveFeed):
 
     def obtain(self, update: int) -> list[dict] | None:
         try:
-            return self._run.read_rollouts(update)
+            return self._run.read_wave(update)
         except FileNotFoundError:
             return None

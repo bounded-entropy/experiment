@@ -46,7 +46,7 @@ class EvalSpec:
     tasks: str
     every: int = 10               # run after every N optim updates
     env: str | None = None        # None → gen.env
-    post: tuple[str, ...] = ()    # scoring pipeline over eval rollouts
+    post: tuple[str, ...] = ()    # scoring pipeline over eval trajectories
     n_samples: int = 1
     pool: str = "main"            # which engine pool carries eval traffic
 
@@ -78,7 +78,7 @@ class PolicySpec:
 # ---------------------------------------------------------------------------
 
 @dataclass(frozen=True)
-class RolloutSource:
+class TrajectorySource:
     """What training consumes — always sealed store data (I1).
 
     "live" means this run's own gen output; "store://<run>/..." and "cas://<sha>"
@@ -92,7 +92,7 @@ class RolloutSource:
         ok = self.source == "live" or self.source.startswith(("store://", "cas://"))
         if not ok:
             raise ValueError(
-                f"RolloutSource.source must be 'live', 'store://...', or "
+                f"TrajectorySource.source must be 'live', 'store://...', or "
                 f"'cas://...', got {self.source!r}"
             )
 
@@ -115,7 +115,7 @@ class Schedule:
     estimator policy — how stale a behavior policy the trainer tolerates."""
 
     group_size: int
-    rollouts_per_wave: int
+    trajectories_per_wave: int
     n_updates: int
     epochs_per_wave: int = 1
     microbatch_tokens: int = 16384
@@ -243,7 +243,7 @@ class ExperimentSpec:
 
     policy: PolicySpec            # the bridge (I2)
     gen: GenSpec | None           # inference world; None = pure-offline run
-    rollouts: RolloutSource       # the training world's ONLY input (I1)
+    trajectories: TrajectorySource   # the training world's ONLY input (I1)
     algo: AlgoSpec | None         # training world; None = generation-only run
     gpu_config: GpuConfig         # semantics-neutral (I5)
     seeds: Seeds

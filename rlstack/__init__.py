@@ -19,7 +19,7 @@ from rlstack.spec.canonical import canonical_json, content_hash, run_id
 from rlstack.spec.specs import (
     AdapterSpec, AlgoSpec, BackendProfile, EnginesMember, EvalSpec, ExperimentSpec,
     GenSpec, GpuConfig, GpuSet, GpuGroup, LearnerMember, OptimSpec, PolicySpec,
-    RolloutSource, SamplingSpec, Schedule, Seeds, WarmStart,
+    SamplingSpec, Schedule, Seeds, TrajectorySource, WarmStart,
     attn_bias, engines, gpus, learner, lora, soft_prompt,
 )
 from rlstack.registry import (

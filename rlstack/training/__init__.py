@@ -2,7 +2,7 @@
 
 Postprocessors may sample (an LLM judge scores sealed trajectories through the
 neutral SampleClient interface) but never mutate the sealed record — what they
-compute lives in postdata, beside the rollouts, never inside them.
+compute lives in postdata, beside the sealed waves, never inside them.
 
 Must never import rlstack.inference (enforced by tests/test_architecture.py).
 """

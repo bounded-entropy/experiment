@@ -1,16 +1,16 @@
 """The runner: Phase 0 (identity), Phase 1 (idempotent setup), Phase 2 (daemons).
 
 Phase 2 is a blackboard, not a choreography: plan_daemons derives one daemon
-per GPU responsibility from the spec — a Generator iff rollouts are live, the
+per GPU responsibility from the spec — a Generator iff trajectories are live, the
 Trainer always, an Evaluator iff eval is declared — and they run concurrently,
 synchronized ONLY through the store (signals.py) and throttled onto shared
 metal by leases (lease.py). Nobody calls anybody:
 
-    Generator   awaits commit w-1-B      → writes rollouts/<w>
-    Trainer     awaits rollouts/<u>      → post, train, blobs, LEDGER (commit)
+    Generator   awaits commit w-1-B      → writes waves/<w>
+    Trainer     awaits waves/<u>      → post, train, blobs, LEDGER (commit)
     Evaluator   awaits commits (mod N)   → writes eval/<u>
 
-The ledger is the commit bus, rollouts/ is the data bus, and crash recovery
+The ledger is the commit bus, waves/ is the data bus, and crash recovery
 (data/stores/) plus the seed tree make the whole thing attachable: resume =
 re-run Phases 0-1, then the daemons pick up from the ledger tail.
 """
@@ -80,7 +80,7 @@ async def _run(spec: ExperimentSpec, schema: SiteSchema, store: Store,
         raise SpecError(reachability_issues)
     hashes = code_hashes(spec)
     # both forms are content-addressed: live → the task file, else the source
-    data_fingerprint = spec.gen.tasks if spec.gen is not None else spec.rollouts.source
+    data_fingerprint = spec.gen.tasks if spec.gen is not None else spec.trajectories.source
     rid = run_id(spec, hashes, data_fingerprint)
     run = store.open_run(rid, manifest={
         "run_id": rid,
@@ -152,7 +152,7 @@ def plan_daemons(spec: ExperimentSpec, *, run, store, engine_map, learner,
                  max_inflight) -> list[Daemon]:
     """The spec already declares the daemons; this reads them off.
 
-    live rollouts → a Generator writes the data bus; eval declared → an
+    live trajectories → a Generator writes the data bus; eval declared → an
     Evaluator watches the commit bus; the Trainer always. Leases come from
     GpuConfig (sleep-sharing groups share an ExclusiveLease); each daemon's
     acquisition condition is its own overridable method.
@@ -165,7 +165,7 @@ def plan_daemons(spec: ExperimentSpec, *, run, store, engine_map, learner,
                 engine=engine_map["main"], learner=learner, pools_at=pools_at,
                 initial_bundle=initial_bundle, initial_version=initial_version),
     ]
-    if spec.rollouts.source == "live":
+    if spec.trajectories.source == "live":
         daemons.append(Generator(
             signals, leases.for_pool("main"), run,
             spec=spec, tasks=load_tasks(store, spec.gen.tasks),

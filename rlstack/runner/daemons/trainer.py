@@ -3,7 +3,7 @@
 One update's choreography and the commit protocol that makes kill -9 safe at
 any point:
 
-    await rollouts/<u> (the feed) → POST PIPELINE → write postdata →
+    await waves/<u> (the feed) → POST PIPELINE → write postdata →
     flatten/broadcast/pack → forward_backward × microbatches × epochs →
     optim_step → bump → write blobs → register bundle → APPEND LEDGER
     (the commit point) → notify
@@ -61,7 +61,7 @@ class Trainer(Daemon):
     # ---- the acquisition condition (override to change the alternation) -----
 
     def next_rows(self, update: int) -> list[dict] | None:
-        """Data for update u, from this run's own rollouts/ (the feed makes
+        """Data for update u, from this run's own waves/ (the feed makes
         storage-backed data appear there; the Generator makes live data)."""
         return self.feed.obtain(update)
 
@@ -103,7 +103,7 @@ class Trainer(Daemon):
                 "update": update,
                 "versions": dict(self.version),
                 "bundle_id": self.bundle.bundle_id,
-                "wave": {"rollouts": len(wave), "groups": len(wave.groups)},
+                "wave": {"trajectories": len(wave), "groups": len(wave.groups)},
                 "post": _column_means(postdata),
                 "train": _train_summary(stats),
             })

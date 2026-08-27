@@ -67,10 +67,10 @@ class Generator(Daemon):
                     sampling=self.gen.sampling,
                     tasks=self.tasks,
                     group_size=self.schedule.group_size,
-                    rollouts_per_wave=self.schedule.rollouts_per_wave,
+                    trajectories_per_wave=self.schedule.trajectories_per_wave,
                     pools=self.pools_at(self.newest_bundle()),
                     master=self.master,
                     max_inflight=self.max_inflight,
                 )
-            self.run.write_rollouts(wave_index, wave_to_rows(wave))
+            self.run.write_wave(wave_index, wave_to_rows(wave))
             await self.signals.notify()

@@ -19,7 +19,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from rlstack import (
     AlgoSpec, EvalSpec, ExperimentSpec, GenSpec, GpuConfig, GpuGroup, LocalStore,
-    OptimSpec, PolicySpec, RolloutSource, Schedule, Seeds, engines, gpus,
+    OptimSpec, PolicySpec, Schedule, Seeds, TrajectorySource, engines, gpus,
     fake_qwen_schema, learner, lora,
 )
 from rlstack.runner.fakes import FakeEngine, FakeLearner
@@ -46,11 +46,11 @@ def main() -> None:
         policy=PolicySpec(base="Qwen/Qwen3-0.6B",
                           bank={"pi": lora("layers.0-3.self_attn.*", r=16)}),
         gen=GenSpec(env="math_single_turn", tasks=train_uri),
-        rollouts=RolloutSource("live"),
+        trajectories=TrajectorySource("live"),
         algo=AlgoSpec(
             loss="grpo", post=("verifier", "grpo_advantage"),
             optim=OptimSpec("adamw", lr=1e-5),
-            schedule=Schedule(group_size=4, rollouts_per_wave=16, n_updates=4,
+            schedule=Schedule(group_size=4, trajectories_per_wave=16, n_updates=4,
                               microbatch_tokens=256),
         ),
         eval=EvalSpec(tasks=heldout_uri, every=2, post=("verifier",)),

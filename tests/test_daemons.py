@@ -124,7 +124,7 @@ class BlackboardRunTest(unittest.TestCase):
     def spec_with_lag(self, lag: int):
         base = arith_spec(self.train)
         return replace(base, algo=replace(
-            base.algo, schedule=Schedule(group_size=2, rollouts_per_wave=4,
+            base.algo, schedule=Schedule(group_size=2, trajectories_per_wave=4,
                                          n_updates=4, microbatch_tokens=64,
                                          max_policy_lag=lag)))
 
@@ -138,7 +138,7 @@ class BlackboardRunTest(unittest.TestCase):
 
         published = {e["bundle_id"]: e["update"] for e in entries}
         for update in (1, 2, 3, 4):
-            for row in run.read_rollouts(update):
+            for row in run.read_wave(update):
                 for turn in row["turns"]:
                     served = turn["bundle_id"]
                     if served in published:

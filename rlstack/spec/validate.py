@@ -305,7 +305,7 @@ def check_sleep_groups_have_one_learner(spec: ExperimentSpec, schema: SiteSchema
 
 
 def check_sleep_implies_zero_lag(spec: ExperimentSpec, schema: SiteSchema) -> list[ValidationIssue]:
-    """Sleep serializes rollout and training, so rollouts are never stale."""
+    """Sleep serializes generation and training, so sampled waves are never stale."""
     has_sleep = any(g.sharing == "sleep" for g in spec.gpu_config.groups)
     if not has_sleep or spec.algo is None:
         return []
@@ -352,11 +352,11 @@ def check_traffic_routes_to_declared_pools(spec: ExperimentSpec, schema: SiteSch
     return issues
 
 
-def check_live_rollouts_have_gen(spec: ExperimentSpec, schema: SiteSchema) -> list[ValidationIssue]:
+def check_live_trajectories_have_gen(spec: ExperimentSpec, schema: SiteSchema) -> list[ValidationIssue]:
     """source='live' consumes this run's own sealed gen output — gen must exist."""
-    if spec.rollouts.source == "live" and spec.gen is None:
+    if spec.trajectories.source == "live" and spec.gen is None:
         return [_issue(
-            "live-without-gen", "rollouts.source",
+            "live-without-gen", "trajectories.source",
             "source='live' consumes this run's own sealed gen output, but gen is None")]
     return []
 
@@ -378,7 +378,7 @@ def check_schedule_is_sane(spec: ExperimentSpec, schema: SiteSchema) -> list[Val
     s = spec.algo.schedule
     issues = []
     for name, value in [("group_size", s.group_size),
-                        ("rollouts_per_wave", s.rollouts_per_wave),
+                        ("trajectories_per_wave", s.trajectories_per_wave),
                         ("n_updates", s.n_updates),
                         ("epochs_per_wave", s.epochs_per_wave),
                         ("microbatch_tokens", s.microbatch_tokens)]:
@@ -420,7 +420,7 @@ CHECKS = (
     check_sleep_implies_zero_lag,
     check_fractions_fit,
     check_traffic_routes_to_declared_pools,
-    check_live_rollouts_have_gen,
+    check_live_trajectories_have_gen,
     check_eval_tasks_are_held_out,
     check_schedule_is_sane,
     check_warm_start_map_targets_this_bank,

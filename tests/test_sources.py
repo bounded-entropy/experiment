@@ -1,6 +1,6 @@
 """The WaveFeed family (rlstack.runner.sources): live, replay, static.
 
-A feed's contract: make update u's rows exist in the run's own rollouts/
+A feed's contract: make update u's rows exist in the run's own waves/
 and return them (or None when live data has not arrived yet)."""
 
 from __future__ import annotations
@@ -14,7 +14,7 @@ from rlstack import (
     FakeLearner,
     LiveFeed,
     ReplayFeed,
-    RolloutSource,
+    TrajectorySource,
     Schedule,
     StaticFeed,
     StoreError,
@@ -43,12 +43,12 @@ class SourcesTest(unittest.TestCase):
                                 FakeEngine(), FakeLearner())
         return report.run_id
 
-    def offline_algo(self, n_updates: int, rollouts_per_wave: int = 4,
+    def offline_algo(self, n_updates: int, trajectories_per_wave: int = 4,
                      group_size: int = 2) -> AlgoSpec:
         return AlgoSpec(loss="grpo", post=("verifier", "grpo_advantage"),
                         optim=OptimSpec("adamw", lr=1e-5),
                         schedule=Schedule(group_size=group_size,
-                                          rollouts_per_wave=rollouts_per_wave,
+                                          trajectories_per_wave=trajectories_per_wave,
                                           n_updates=n_updates,
                                           microbatch_tokens=64))
 
@@ -65,7 +65,7 @@ class SourcesTest(unittest.TestCase):
 
         parent = self.run_live_parent()
         replay_spec = arith_spec(self.train, gen=None, eval=None,
-                                 rollouts=RolloutSource(f"store://{parent}"),
+                                 trajectories=TrajectorySource(f"store://{parent}"),
                                  algo=self.offline_algo(3))
         self.assertIsInstance(
             feed_for(replay_spec, self.store, run), ReplayFeed)
@@ -74,7 +74,7 @@ class SourcesTest(unittest.TestCase):
         uri = self.store.cas_put(
             "".join(json.dumps(r) + "\n" for r in rows).encode())
         static_spec = arith_spec(self.train, gen=None, eval=None,
-                                 rollouts=RolloutSource(uri),
+                                 trajectories=TrajectorySource(uri),
                                  algo=self.offline_algo(3))
         self.assertIsInstance(
             feed_for(static_spec, self.store, run), StaticFeed)
@@ -84,7 +84,7 @@ class SourcesTest(unittest.TestCase):
     def test_replay_consumes_the_parent_waves_verbatim(self) -> None:
         parent = self.run_live_parent()
         spec = arith_spec(self.train, gen=None, eval=None,
-                          rollouts=RolloutSource(f"store://{parent}"),
+                          trajectories=TrajectorySource(f"store://{parent}"),
                           algo=self.offline_algo(3))
         report = run_experiment(spec, SCHEMA, self.store,
                                 FakeEngine(), FakeLearner())
@@ -95,18 +95,18 @@ class SourcesTest(unittest.TestCase):
         for update in (1, 2, 3):
             # self-contained: the child persisted what it trained on,
             # and it is exactly the parent's sealed wave
-            self.assertEqual(child.read_rollouts(update),
-                             parent_run.read_rollouts(update))
+            self.assertEqual(child.read_wave(update),
+                             parent_run.read_wave(update))
         self.assertEqual(len(child.read_ledger()), 3)
 
     def test_replay_beyond_the_parent_is_a_clear_error(self) -> None:
         parent = self.run_live_parent()          # parent has 4 updates
         spec = arith_spec(self.train, gen=None, eval=None,
-                          rollouts=RolloutSource(f"store://{parent}"),
+                          trajectories=TrajectorySource(f"store://{parent}"),
                           algo=self.offline_algo(n_updates=9))
         with self.assertRaises(ValueError) as caught:
             run_experiment(spec, SCHEMA, self.store, FakeEngine(), FakeLearner())
-        self.assertIn("no sealed rollouts for update 5", str(caught.exception))
+        self.assertIn("no sealed wave for update 5", str(caught.exception))
 
     def test_replay_of_a_missing_run_fails_at_setup(self) -> None:
         with self.assertRaises(StoreError):
@@ -122,15 +122,15 @@ class SourcesTest(unittest.TestCase):
     def test_static_dataset_trains_in_deterministic_slices(self) -> None:
         uri = self.make_dataset(6)
         spec = arith_spec(self.train, gen=None, eval=None,
-                          rollouts=RolloutSource(uri),
+                          trajectories=TrajectorySource(uri),
                           algo=self.offline_algo(3))
         report = run_experiment(spec, SCHEMA, self.store,
                                 FakeEngine(), FakeLearner())
         run = self.store.open_run(report.run_id)
         self.assertEqual(len(run.read_ledger()), 3)
         # singleton groups; update 3 wraps around the 6-row dataset
-        first = run.read_rollouts(1)
-        third = run.read_rollouts(3)
+        first = run.read_wave(1)
+        third = run.read_wave(3)
         self.assertEqual([r["group"] for r in first],
                          ["row-000000", "row-000001", "row-000002", "row-000003"])
         self.assertEqual([r["group"] for r in third],
@@ -139,7 +139,7 @@ class SourcesTest(unittest.TestCase):
     def test_static_dataset_smaller_than_a_wave_is_rejected(self) -> None:
         uri = self.make_dataset(2)
         with self.assertRaises(ValueError):
-            StaticFeed(self.store, uri, self.scratch_run(), rollouts_per_wave=4)
+            StaticFeed(self.store, uri, self.scratch_run(), trajectories_per_wave=4)
 
 
 if __name__ == "__main__":

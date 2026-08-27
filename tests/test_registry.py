@@ -24,7 +24,7 @@ from rlstack.registry import (
 )
 from rlstack.spec.specs import (
     AlgoSpec, EvalSpec, ExperimentSpec, GenSpec, GpuConfig, GpuGroup, OptimSpec,
-    PolicySpec, RolloutSource, Schedule, Seeds, engines, gpus, learner, lora,
+    PolicySpec, TrajectorySource, Schedule, Seeds, engines, gpus, learner, lora,
 )
 
 
@@ -217,10 +217,10 @@ def minimal_spec(**overrides: Any) -> ExperimentSpec:
         policy=PolicySpec(base="Qwen/Qwen3-1.7B",
                           bank={"pi": lora("layers.*.mlp.*", r=16)}),
         gen=GenSpec(env="noop_env", tasks="cas://x/train.jsonl"),
-        rollouts=RolloutSource("live"),
+        trajectories=TrajectorySource("live"),
         algo=AlgoSpec(loss="grpo", post=("verifier", "grpo_advantage"),
                       optim=OptimSpec("adamw", lr=1e-5),
-                      schedule=Schedule(group_size=8, rollouts_per_wave=64, n_updates=10)),
+                      schedule=Schedule(group_size=8, trajectories_per_wave=64, n_updates=10)),
         gpu_config=GpuConfig(groups=(
             GpuGroup(gpus(n=1), (engines("main"), learner())),)),
         seeds=Seeds(master=0),
@@ -243,7 +243,7 @@ class TestCodeHashes(unittest.TestCase):
 
     def test_offline_run_without_gen_or_algo(self) -> None:
         spec = minimal_spec(gen=None, algo=None,
-                            rollouts=RolloutSource("store://parent/rollouts"))
+                            trajectories=TrajectorySource("store://parent/waves"))
         self.assertEqual(set(code_hashes(spec)), {"adapter:lora"})
 
     def test_eval_names_are_covered(self) -> None:
@@ -257,7 +257,7 @@ class TestCodeHashes(unittest.TestCase):
         spec = minimal_spec(algo=AlgoSpec(
             loss="not_registered", post=("verifier", "grpo_advantage"),
             optim=OptimSpec("adamw", lr=1e-5),
-            schedule=Schedule(group_size=8, rollouts_per_wave=64, n_updates=10)))
+            schedule=Schedule(group_size=8, trajectories_per_wave=64, n_updates=10)))
         with self.assertRaises(KeyError) as caught:
             code_hashes(spec)
         self.assertIn("not_registered", str(caught.exception))

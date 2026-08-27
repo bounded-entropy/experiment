@@ -20,7 +20,7 @@ group, and a SampleClient (an LLM judge is just a processor that samples —
 
 Pipelines are ordered: `consumes` must be satisfied by earlier processors
 (checked at Phase 0), columns have one owner, and the resulting postdata is
-stored per update beside the rollouts — columnar, aligned to wave order — then
+stored per update beside the waves — columnar, aligned to wave order — then
 broadcast per token into the TokenBatch, where a loss `requires` the columns it
 uses (grpo requires "advantage"). Deterministic given the seed tree: resume
 recomputes identical postdata.

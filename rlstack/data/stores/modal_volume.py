@@ -2,7 +2,7 @@
 
 A Modal Volume mounted in a container behaves like a local filesystem whose
 writes are STAGED until `volume.commit()` persists them — which maps exactly
-onto our commit protocol: everything an update writes (blobs, rollouts,
+onto our commit protocol: everything an update writes (blobs, waves,
 postdata, the ledger line) is staged on the mount, and committing right after
 the ledger append persists all of it together. A crash before the commit
 loses only work the ledger never sealed, which is precisely what attach-time

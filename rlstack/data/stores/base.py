@@ -8,7 +8,7 @@ reference). Every backend stores the same key tree:
 
     runs/<run_id>/manifest.json                identity (I3), written once
                   ledger.jsonl                 the commit record, append-only
-                  rollouts/<update>.jsonl.gz   sealed waves (trajectory rows)
+                  waves/<update>.jsonl.gz      sealed waves (trajectory rows)
                   postdata/<update>.json       the pipeline's columns per wave
                   adapters/<name>@<v>.bin      delta payloads
                   optim/<name>@<v>.bin         optimizer moments (lockstep)
@@ -34,7 +34,7 @@ from typing import Any
 BLOB_SECTIONS = ("adapters", "optim")
 
 # Sections holding one artifact per update, committed by the ledger.
-UPDATE_SECTIONS = (("rollouts", ".jsonl.gz"), ("postdata", ".json"))
+UPDATE_SECTIONS = (("waves", ".jsonl.gz"), ("postdata", ".json"))
 
 
 class StoreError(RuntimeError):
@@ -225,20 +225,20 @@ class RunHandle:
                 f"ledger update must strictly increase: {update} <= {tail['update']}")
         self.store._append_line(self.ledger_key, _canonical(entry))
 
-    # ---- per-update artifacts: rollouts + postdata --------------------------
+    # ---- per-update artifacts: waves + postdata --------------------------
 
-    def _rollouts_key(self, update: int) -> str:
-        return self._key("rollouts", f"{update:06d}.jsonl.gz")
+    def _wave_key(self, update: int) -> str:
+        return self._key("waves", f"{update:06d}.jsonl.gz")
 
-    def write_rollouts(self, update: int, rows: list[dict[str, Any]]) -> None:
+    def write_wave(self, update: int, rows: list[dict[str, Any]]) -> None:
         """Write one sealed wave's rows atomically (gzip of canonical jsonl)."""
-        self._refuse_committed_overwrite(update, "rollouts")
-        self.store._write(self._rollouts_key(update), _gzip_jsonl(rows))
+        self._refuse_committed_overwrite(update, "waves")
+        self.store._write(self._wave_key(update), _gzip_jsonl(rows))
 
-    def read_rollouts(self, update: int) -> list[dict[str, Any]]:
-        key = self._rollouts_key(update)
+    def read_wave(self, update: int) -> list[dict[str, Any]]:
+        key = self._wave_key(update)
         if not self.store._exists(key):
-            raise FileNotFoundError(f"no rollouts for update {update}: {key}")
+            raise FileNotFoundError(f"no wave for update {update}: {key}")
         raw = gzip.decompress(self.store._read(key)).decode("utf-8")
         return [json.loads(line) for line in raw.split("\n") if line]
 
@@ -264,9 +264,9 @@ class RunHandle:
                 f"{section} {update} are committed by the ledger; the store is append-only")
 
     def list_updates(self) -> list[int]:
-        """Rollout updates present, sorted."""
+        """Wave updates present, sorted."""
         out = []
-        for key in self.store._list(self._key("rollouts")):
+        for key in self.store._list(self._key("waves")):
             update = _parse_update(key, ".jsonl.gz")
             if update is not None:
                 out.append(update)
@@ -310,7 +310,7 @@ class RunHandle:
 
         The ledger is the commit record: work is sealed by its ledger entry and
         nothing else. A torn final ledger line is repaired away; per-update
-        artifacts (rollouts, postdata) beyond the tail are deleted; blob
+        artifacts (waves, postdata) beyond the tail are deleted; blob
         versions above each delta's committed version are deleted; backend
         write debris is swept.
         """

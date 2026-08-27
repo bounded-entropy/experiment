@@ -80,8 +80,8 @@ class ResumeEquivalenceTest(unittest.TestCase):
     # (method, calls that succeed, post) — write_blob is called twice per
     # update (adapters + optim), the others once.
     CRASH_POINTS = [
-        ("write_rollouts", 2, False),   # crash entering update 3's wave write
-        ("write_postdata", 2, False),   # rollouts written, pipeline output not
+        ("write_wave", 2, False),   # crash entering update 3's wave write
+        ("write_postdata", 2, False),   # wave written, pipeline output not
         ("write_blob", 5, False),       # update 3: adapters@3 written, optim@3 not
         ("append_ledger", 2, False),    # update 3 fully staged, never committed
         ("append_ledger", 3, True),     # update 3 committed; crash before sync/next

@@ -1,6 +1,6 @@
 """The data-feed contract: the trainer ALWAYS reads waves from its own run.
 
-A feed's one job is to make update u's rows exist in THIS run's rollouts/ and
+A feed's one job is to make update u's rows exist in THIS run's waves/ and
 hand them back — or say "not yet". Live data is written by the Generator role
 and simply read here; storage-backed data (replay, static) is copied in on
 first request. Either way every run is self-contained, and the trainer's
@@ -15,4 +15,4 @@ class WaveFeed(ABC):
     @abstractmethod
     def obtain(self, update: int) -> list[dict] | None:
         """Update u's trajectory rows, guaranteed present in the run's
-        rollouts/ — or None when they don't exist yet (live only)."""
+        waves/ — or None when they don't exist yet (live only)."""

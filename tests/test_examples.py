@@ -26,7 +26,7 @@ from rlstack import (
     OptimSpec,
     PolicySpec,
     Role,
-    RolloutSource,
+    TrajectorySource,
     Schedule,
     PostProcessor,
     Rollout,
@@ -103,13 +103,13 @@ def example_1() -> ExperimentSpec:
             },
         ),
         gen=GenSpec(env="math_single_turn", tasks=TASKS),
-        rollouts=RolloutSource("live"),
+        trajectories=TrajectorySource("live"),
         algo=AlgoSpec(
             loss="grpo",
             post=("verifier", "grpo_advantage"),
             optim=OptimSpec("adamw", lr=1e-5, betas=(0.9, 0.95),
                             overrides={"head": {"lr": 3e-6}}),
-            schedule=Schedule(group_size=8, rollouts_per_wave=512, n_updates=300),
+            schedule=Schedule(group_size=8, trajectories_per_wave=512, n_updates=300),
         ),
         eval=EvalSpec(tasks=HELD_OUT, every=10, pool="eval", post=("verifier",)),
         gpu_config=GpuConfig(groups=(
@@ -223,7 +223,7 @@ class TestExample4DataPath(unittest.TestCase):
     def test_seal_post_flatten_pack(self) -> None:
         import asyncio
 
-        # One group of 4 rollouts of one task — the group is the scope a
+        # One group of 4 trajectories of one task — the group is the scope a
         # partial loss contribution (here, the GRPO baseline) is computed over.
         wave = Wave([Group("t0", [
             one_rollout("t0", "42", 1.0), one_rollout("t0", "41", 0.0),
@@ -269,7 +269,7 @@ class TestExample5MultiNode(unittest.TestCase):
                               bank={"pi": lora("layers.0-31.self_attn.*", r=32)}),
             gen=GenSpec(env="tool_use", tasks=TASKS),
             algo=replace(example_1().algo,
-                         schedule=Schedule(group_size=8, rollouts_per_wave=512,
+                         schedule=Schedule(group_size=8, trajectories_per_wave=512,
                                            n_updates=300, max_policy_lag=1)),
             gpu_config=GpuConfig(groups=(
                 GpuGroup(gpus(n=16, nodes=2), (engines("main", tp=2, n=8),)),

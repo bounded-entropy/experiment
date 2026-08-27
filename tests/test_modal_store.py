@@ -34,7 +34,7 @@ class ModalVolumeStoreTest(unittest.TestCase):
         self.assertGreaterEqual(created, 1)
 
         # an update's staged work: no commits until the ledger line
-        run.write_rollouts(1, [{"task": "t0"}])
+        run.write_wave(1, [{"task": "t0"}])
         run.write_postdata(1, {"reward": [1.0]})
         run.write_blob("adapters", "pi", 1, b"delta")
         run.write_blob("optim", "pi", 1, b"moments")
