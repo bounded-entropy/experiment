@@ -18,11 +18,16 @@ app = modal.App("rlstack")
 
 store_volume = modal.Volume.from_name("rlstack-store", create_if_missing=True)
 
-# TODO(I7): pin the resolved vllm/torch/transformers versions after the first
-# green run — run_arith prints them; unpinned only until then.
+# I7: pinned to the versions the first green run resolved and printed
+# (2026-08-27, run 442bcf59b515). torch==2.13.0 is the default PyPI Linux
+# wheel, which reports itself as 2.13.0+cu130.
 image = (
     modal.Image.debian_slim(python_version="3.12")
-    .pip_install("vllm", "transformers", "safetensors", "numpy")
+    .pip_install("vllm==0.28.0", "torch==2.13.0", "transformers==5.16.1",
+                 "safetensors", "numpy")
+    # debian_slim has no nvcc: FlashInfer's JIT sampling kernels cannot
+    # build in-container, so force vLLM's native torch sampler instead
+    .env({"VLLM_USE_FLASHINFER_SAMPLER": "0"})
     .add_local_python_source("rlstack", "rlstack_engine")
     .add_local_dir("tests", remote_path="/root/tests")
 )

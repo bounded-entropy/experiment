@@ -444,6 +444,40 @@ specs; backends (local/modal/skypilot) and GPU topology are semantics-neutral.
       invariant, stated). NAMING: daemon base class is Daemon (rlstack.Role
       stays the message-role enum). 327 tests green.
 
+28. FIRST REAL RUN GREEN (2026-08-27, one Modal L4, Qwen3-0.6B + LoRA r=16 +
+    GRPO): run 442bcf59b515 (seed 17, rewards .500/.812/.812/.875, held-out
+    eval 0.75@2 → 0.9375@4) and pinned-image confirmation 7a5fc6461d7d
+    (seed 18, rewards .375/.438/.750/.938). What real metal forced to change
+    — TWO fixes, NEITHER in the predicted files:
+    (a) the ~/Coding mirror's rlstack/inference/__init__.py was STALE (still
+        imported inference.rewards, deleted in #24) — mirror drift, fixed;
+    (b) vLLM 0.28's default sampler is FlashInfer with JIT-compiled kernels
+        — needs nvcc at runtime, which debian_slim lacks, so EngineCore died
+        at the FIRST sample step (RuntimeError: Could not find nvcc). Fix is
+        deploy-only: VLLM_USE_FLASHINFER_SAMPLER=0 in the image env (native
+        torch sampler; per-request seeds unaffected).
+    vllm_engine.py and torch_learner.py ran UNCHANGED on first contact:
+    AsyncLLMEngine is the V1 AsyncLLM alias in 0.28, generate(prompt, params,
+    request_id, lora_request=) holds, logprobs=0 dict indexing holds,
+    TokensPrompt/LoRARequest/peft-merge all held; punica path confirmed real
+    (PunicaWrapperGPU, triton lora kernels JIT once per shape — latency blip
+    only). I7 PINS (in deploy/modal_app.py): vllm==0.28.0, torch==2.13.0
+    (default PyPI Linux wheel, reports 2.13.0+cu130), transformers==5.16.1.
+    LOGPROB_GAP CALIBRATION on this stack: ledger gap (max over microbatches
+    of masked means) sits at 0.022–0.033 — ABOVE the ~1e-2 folklore, but
+    update 1's wave in both runs sampled at v0 where B=0 makes trainer and
+    sampler mathematically identical, and it measured 0.025/0.033 THERE ⇒
+    that band is the vLLM-FA2-vs-HF-sdpa bf16 kernel floor for this 0.6B
+    config, not misalignment; it stays flat as the LoRA trains. The alarm is
+    GROWTH above the update-1 floor, not the floor itself.
+    Watch items from the logs (not bugs today): transformers 5 shims
+    torch_dtype with a deprecation (switch to dtype= eventually); vLLM
+    deprecates raw prompts to InputProcessor in favor of Renderer.render_*
+    (touches the TokensPrompt path); ModalVolumeStore's blocking
+    volume.commit() inside the async loop draws an AsyncUsageWarning (works;
+    .aio() is the clean fix but that is a data/-layer change, deliberately
+    not hotfixed).
+
 ## Open threads (do NOT treat as settled; flag when your answer touches them)
 
 - Identity rings: should GpuConfig (and EvalSpec) leave the run_id hash and become
