@@ -1574,6 +1574,16 @@ specs; backends (local/modal/skypilot) and GPU topology are semantics-neutral.
 
 ## Open threads (do NOT treat as settled; flag when your answer touches them)
 
+- PLANNED (Samarth-approved, queued behind #48 landing): the OPD stress test
+  — Phase A: MATH levels 3-5, numeric-answer subset, few-shot raw-completion
+  prompts (no chat template — the v0 constraint), three-host 8B<-32B topology,
+  50-100 updates, lag=1, eval/10; pre-registered success: reverse-KL trends
+  down, verifier reward non-degrading vs a teacher-baseline probe, gap at the
+  kernel floor. Deliberately runs with INLINE teacher scoring to measure the
+  scorer-daemon bottleneck at scale (daemon build comes after, informed by
+  the number). Phase B after A: a two-turn solve->revise @environment (one
+  file) exercising multi-turn seal/flatten + cross-turn teacher scoring.
+
 - TODO (Samarth, settled intent): DELETE RunSignals.notify() and run the
   blackboard on the poll leg alone — the store predicate is already the only
   truth, notify is a latency hint, and removing it makes in-process and
