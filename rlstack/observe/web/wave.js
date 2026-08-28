@@ -10,24 +10,27 @@
 
 import {C, brief, el, esc, getJSON, note, raw, section} from "./dom.js";
 import {histogramCard} from "./charts.js";
-import {ctx, legend, route, runPath, syncSwitcher} from "./nav.js";
+import {apiRun, ctx, drawAmbiguity, legend, route, runPath, syncSwitcher}
+  from "./nav.js";
 
 const FINISH_COLOR = {stop: C.rail, eos: C.feed, length: C.warn};
 
 export async function drawWave() {
-  const path = runPath(route.runId) + "/wave/" + route.update;
   const [wave, runs] = await Promise.all([
-    getJSON("/api" + path), getJSON("/api/runs")]);
-  syncSwitcher(runs || []);
+    getJSON(apiRun(route.runId, "/wave/" + route.update, route.folder)),
+    getJSON("/api/runs")]);
   const holder = document.getElementById("page");
   holder.innerHTML = "";
+  if (wave && wave.ambiguous) { drawAmbiguity(route.runId, wave.ambiguous); return; }
+  syncSwitcher(runs || []);
   if (!wave) {
-    ctx(`<a href="${runPath(route.runId)}" class="nav">${esc(route.runId)}</a>`);
+    ctx(`<a href="${runPath(route.runId, route.folder)}" class="nav">`
+      + `${esc(route.runId)}</a>`);
     holder.textContent = "no such sealed wave";
     return;
   }
   const s = wave.summary;
-  ctx(`<a href="${runPath(route.runId)}" style="color:#5fb2ff">${esc(route.runId)}</a>`
+  ctx(`<a href="${runPath(route.runId, route.folder)}" style="color:#5fb2ff">${esc(route.runId)}</a>`
     + `<span>wave ${wave.update}</span>`
     + `<span class="meta">${s.trajectories} trajectories · ${s.groups} groups`
     + ` · ${s.tokens} generated tokens</span>`

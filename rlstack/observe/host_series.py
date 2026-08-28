@@ -26,6 +26,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 
 from rlstack.data.stores.base import Store
+from rlstack.observe.locate import Root, rooted
 from rlstack.observe.views import hosts_data, runs_data
 
 # What the named readings above already render. Everything else numeric an
@@ -58,21 +59,23 @@ UPDATE_PHASES = ("collect", "post", "train", "seal")
 FLEET_POINTS = 600   # the fleet plot is a shape; the host page carries it all
 
 
-def journals_for(stores: Sequence[Store], host: str) -> list[tuple[Store, list[dict]]]:
-    """Every store that journals this host, with its events. A host name is
-    unique per store, not globally, so the observer shows all of them."""
+def journals_for(roots: Sequence[Store | Root], host: str) -> list[tuple[Root, list[dict]]]:
+    """Every root that journals this host, with its events. A host name is
+    unique per store, not globally, so the observer shows all of them — and
+    the folder is what tells two same-named hosts apart."""
     out = []
-    for store in stores:
-        events = store.read_host_log(host)
+    for root in rooted(roots):
+        events = root.store.read_host_log(host)
         if events:
-            out.append((store, events))
+            out.append((root, events))
     return out
 
 
-def host_series(stores: Sequence[Store], host: str) -> dict | None:
-    """One host's page, from its journal alone. None when no store in this
-    set has ever journaled that host."""
-    journals = journals_for(stores, host)
+def host_series(roots: Sequence[Store | Root], host: str) -> dict | None:
+    """One host's page, from its journal alone. None when no root in this
+    set has ever journaled that host; when several do, their events are read
+    as one history and the page names every folder it drew from."""
+    journals = journals_for(roots, host)
     if not journals:
         return None
     events = sorted((event for _, evs in journals for event in evs),
@@ -81,7 +84,8 @@ def host_series(stores: Sequence[Store], host: str) -> dict | None:
     latest = boots[-1] if boots else {}
     return {
         "host": host,
-        "journal_stores": [store.describe() for store, _ in journals],
+        "folders": [root.folder for root, _ in journals],
+        "journal_stores": [root.store.describe() for root, _ in journals],
         "events": len(events),
         "boots": boots,
         "engines": latest.get("engines", []),
@@ -284,27 +288,35 @@ def numbers_under(prefix: str, value) -> list[tuple[str, float]]:
 # the global reading
 # ---------------------------------------------------------------------------
 
-def fleet_data(stores: Sequence[Store]) -> dict:
+def fleet_data(roots: Sequence[Store | Root]) -> dict:
     """What is true of the FLEET rather than of one experiment: every host as
     the hosts view renders it, joined with its residencies and its utilization
     shape, plus the runs view's placement. One window spans every timeline, so
-    lanes on one page are comparable."""
+    lanes on one page are comparable.
+
+    The fleet spans EVERY discovered root — placement is a fact about metal,
+    not about folders — but a row is per (folder, host), read from that
+    root's journal alone: two folders may journal the same host name, and
+    merging their lanes would invent a residency neither recorded."""
+    known = rooted(roots)
     hosts = []
-    for row in hosts_data(stores):
-        events = sorted((event for _, evs in journals_for(stores, row["host"])
-                         for event in evs), key=lambda e: e.get("t") or 0.0)
-        boots = boot_facts(events)
-        latest = boots[-1] if boots else {}
-        host = dict(row)                      # whatever the hosts view names
-        host["tenancy"] = tenancy_lanes(events)
-        host["util"] = thin(busiest_device(events), FLEET_POINTS)
-        host["regimes"] = latest.get("regimes", [])
-        host["partition"] = latest.get("partition")
-        hosts.append(host)
+    for root in known:
+        for row in hosts_data([root]):
+            events = sorted(root.store.read_host_log(row["host"]),
+                            key=lambda e: e.get("t") or 0.0)
+            boots = boot_facts(events)
+            latest = boots[-1] if boots else {}
+            host = dict(row)                  # whatever the hosts view names
+            host["tenancy"] = tenancy_lanes(events)
+            host["util"] = thin(busiest_device(events), FLEET_POINTS)
+            host["regimes"] = latest.get("regimes", [])
+            host["partition"] = latest.get("partition")
+            hosts.append(host)
     return {
         "hosts": hosts,
-        "runs": runs_data(stores),
-        "stores": [store.describe() for store in stores],
+        "runs": runs_data(known),
+        "stores": [root.store.describe() for root in known],
+        "folders": [root.folder for root in known],
         "window": fleet_window(hosts),
     }
 

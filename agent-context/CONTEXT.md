@@ -2417,6 +2417,88 @@ specs; backends (local/modal/skypilot) and GPU topology are semantics-neutral.
     postdata cadence first). Also unbuilt: paging a wave beyond the first 256
     trajectories, and prev/next navigation between waves.
 
+58. THE ORGANIZATION PLANE: FOLDERS, ANNOTATIONS, AND A SUBSTRING (settled,
+    Samarth-directed and specified in his own words: "starting a run in a
+    folder means nothing more than passing that root when constructing the
+    store"; annotations are "flavortext"; search is "basic substring, nothing
+    fancier"). Entirely inside data/stores/base.py, observe/ and the CLI. The
+    RUNNER IS UNTOUCHED — nothing there needed changing, which is the whole
+    point of the design.
+    - A FOLDER IS A STORE ROOT, CHOSEN AT BIRTH, NEVER MOVED. A run's
+      organizational location IS the directory its store was constructed with
+      (<top>/opd/math/l3-5 as the root; the run lives at <root>/runs/<id>).
+      There is no rename verb and no move verb, and there never will be: a
+      move would mean rewriting a store's key tree under a live tenant, and
+      the thing gained — a different string in a UI — is not worth a byte of
+      that risk. Filing happens when you type the store path, once.
+    - DISCOVERY, ONE RULE, ONE FILE (observe/locate.py, which now owns
+      locators AND roots): the reader takes a TOP directory; a directory
+      holding runs/, hosts/, fleet/ or annotations.jsonl IS a root; the
+      descent STOPS at each one (everything below a root is that store's key
+      tree, not more folders); a top that is itself a root — or holds none —
+      is the DEGENERATE case, one Root whose folder is "". That degenerate
+      case is the deployed observer's /store mount, and it is byte-for-byte
+      the old behavior: bare links, no folder tree, no query string.
+      deploy/modal_app.py is unchanged, because ui_app still accepts bare
+      Stores and reads them as Root("", store). With several tops, each top's
+      own name prefixes its folders and two tops of the same name are
+      REFUSED — a folder is an address, and one address must name one root.
+    - ANNOTATIONS ARE FLAVORTEXT, AND THE FILE SAYS SO BY WHERE IT LIVES.
+      <store root>/annotations.jsonl, BESIDE runs/ and never inside it:
+      append-only, one row per line, {"t", "run_id", + only the fields
+      passed} out of name / tags / note. Reading merges LATEST-WINS PER
+      FIELD (a later row's "tags" replaces the whole list; a row carrying
+      only a note leaves an earlier name standing). Never hashed, never read
+      by an experiment, never written by the runner. THE PROOF is in
+      tests/test_resume.py, where it belongs: annotate an arith run and its
+      run directory's sha256 map is unchanged — and unchanged again after a
+      re-attach, because crash recovery sweeps inside runs/ and the file is
+      not there. Three verbs on the Store ABC (annotations_key /
+      annotate_run / read_annotations) over the existing byte verbs, so
+      ModalVolumeStore gets them free (plus one line: an annotation commits
+      the volume, like the journals).
+    - ADDRESSING, THE ONE AMBIGUITY, RULED ON: identity is content, so the
+      same spec submitted under two folders yields THE SAME run_id in both
+      (the demo store reproduced this on the first try). A run is therefore
+      addressed by (folder, run_id): every link the index emits carries
+      ?root=<folder>, and a bare /run/<id> resolves against all roots — the
+      unique holder wins, and when several hold it the API answers
+      {"run_id", "ambiguous": [folders]} at 200 and the page LISTS THE
+      FOLDERS AS LINKS. It never silently picks one. (200 and not a 4xx
+      because "this id names two runs, here they are" is a successful
+      answer to the question asked — the disambiguation page, not an error.)
+    - THE OBSERVER STAYS READ-ONLY. No POST route, no write from the page;
+      annotations are written by `python -m rlstack tag <store-root> <run_id>
+      [--name] [--tag ...] [--note]` and merely rendered here — a test greps
+      observe/ for `annotate_run` to keep it that way. The index groups runs
+      under a collapsible folder tree, leads with the NAME (hex id demoted to
+      secondary, on the run page and in the switcher too), draws tag chips,
+      and filters on a search box the poll cannot clear (the box is built
+      once; only the tree is redrawn). The `runs` view gained the same two
+      columns, folder headers and --grep. Fleet and host pages aggregate
+      across every root, and a host name is qualified by its folder when two
+      roots journal it.
+    - THE SEARCH IS A SUBSTRING AND NOTHING FANCIER: case-insensitive, over
+      name + tags + note + run_id, stated in views.matches and mirrored by
+      runs.js (the page filters rows it already has, so typing costs no
+      request). No query language, no ranking, no index.
+    583 tests green (35 new in tests/test_organization.py, plus the
+    resume-equivalence proof): the verbs and their merge, discovery over
+    nested roots / the degenerate case / no descent into a root / the
+    multi-top prefix and its refusal, the same id in two folders as two rows,
+    annotations riding with their own root, every run route answering the
+    ambiguity, ?root= resolving and 404ing, and the CLI tag round-trip. The
+    UI was driven in a browser over a two-folder demo store (tree, search,
+    chips, ambiguity page, folder-qualified hosts) and over one root alone to
+    prove the degenerate case renders bare links exactly as before.
+    DELIBERATELY LEFT OUT: the runs index is still JOURNAL-DRIVEN (a run that
+    never attached to a host does not appear, and so cannot be seen even if
+    annotated) — changing that changes what "the runs view" has always meant
+    and belongs to its own decision; annotations are per-root, so an
+    annotation does not follow a run_id into another folder (correct: they
+    are different experiments); and there is no tag autocomplete, no tag
+    index, and no way to remove one tag but the whole list.
+
 ## Open threads (do NOT treat as settled; flag when your answer touches them)
 
 - TODO (Samarth, settled intent — future, nothing now): BUNDLE LRU EVICTION

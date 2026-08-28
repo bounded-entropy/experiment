@@ -33,14 +33,17 @@ SCHEMA = fake_qwen_schema(4, base="Qwen/Qwen3-0.6B")
 
 
 def call(app, path: str):
-    """Minimal WSGI invocation; returns (status, headers, body bytes)."""
+    """Minimal WSGI invocation; returns (status, headers, body bytes). A "?"
+    splits the query the way a server would — #58's ?root=<folder> rides
+    there, not in the path."""
     captured = {}
 
     def start_response(status, headers):
         captured["status"] = status
         captured["headers"] = dict(headers)
 
-    environ = {"PATH_INFO": path, "REQUEST_METHOD": "GET",
+    path, _, query = path.partition("?")
+    environ = {"PATH_INFO": path, "QUERY_STRING": query, "REQUEST_METHOD": "GET",
                "wsgi.input": BytesIO(), "wsgi.errors": BytesIO()}
     body = b"".join(app(environ, start_response))
     return captured["status"], captured["headers"], body
