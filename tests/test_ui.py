@@ -1,10 +1,12 @@
-"""The observer UI (rlstack.observe.series / .ui): graphs with zero core
-interference.
+"""The observer UI (rlstack.observe.series / .host_series / .ui): graphs with
+zero core interference.
 
 Claims under test: run_series is a pure function of peeks (dictionary +
-ledger + eval summaries joined per update); the WSGI app serves the page and
-the JSON API from store bytes alone; and the page's panel data carries the
-loss-walkback priority (feeds_loss) so the UI never re-derives a declaration.
+ledger + eval summaries joined per update); host_series is a pure function of
+one host journal (birth facts, tenancy, gpu channels, and the open numeric
+slot); the WSGI app serves the page and the JSON API from store bytes alone;
+and the page's panel data carries the loss-walkback priority (feeds_loss) so
+the UI never re-derives a declaration.
 """
 
 from __future__ import annotations
@@ -15,7 +17,13 @@ import unittest
 from io import BytesIO
 
 from common import arith_spec, arith_store
-from rlstack import FakeEngine, FakeLearner, fake_qwen_schema, run_experiment
+from rlstack import (
+    FakeEngine, FakeLearner, LocalStore, fake_qwen_schema, run_experiment,
+)
+from rlstack.observe.host_series import (
+    fleet_data, host_series, metric_series, tenancy_lanes,
+)
+from rlstack.observe.page import PAGE
 from rlstack.observe.panels import PanelError, evaluate, missing_args, panel_args
 from rlstack.observe.series import run_series
 from rlstack.observe.ui import ui_app
@@ -98,7 +106,40 @@ class UiTest(unittest.TestCase):
         app = ui_app([self.store])
         call(app, f"/api/run/{self.report.run_id}")
         call(app, "/api/runs")
+        call(app, "/api/hosts")
         self.assertTrue(staged.exists())
+
+    def test_the_switcher_reads_the_runs_api(self) -> None:
+        """The run page's dropdown is /api/runs — every field its option
+        label prints must be in that payload, or switching is blind."""
+        self.store.append_host_event("l4-a", {
+            "event": "attach", "t": 10.0, "run_id": self.report.run_id,
+            "pools": ["policy"], "n_updates": 4, "store": self.store.describe()})
+        app = ui_app([self.store])
+        _, _, body = call(app, "/api/runs")
+        row = json.loads(body)[0]
+        for field in ("run_id", "status", "committed", "target", "hosts"):
+            self.assertIn(field, row)
+        self.assertEqual(row["run_id"], self.report.run_id)
+        self.assertIn('title: "switch experiment"', PAGE)     # the dropdown
+
+    def test_the_page_carries_the_hover_and_switch_machinery(self) -> None:
+        """Hover is a page fact (the API carries the numbers, the page
+        reveals them); so are the switcher and the two host routes."""
+        _, _, body = call(ui_app([self.store]), "/")
+        page = body.decode("utf-8")
+        for machinery in ("showTip", "getScreenCTM", "function raw(",
+                          "syncSwitcher", "drawFleet", "drawHost",
+                          "journaled metrics", "placement"):
+            self.assertIn(machinery, page)
+
+    def test_the_api_carries_every_number_the_hover_reveals(self) -> None:
+        _, _, body = call(ui_app([self.store]), f"/api/run/{self.report.run_id}")
+        payload = json.loads(body)
+        point = payload["updates"][0]
+        self.assertIsInstance(point["update"], int)
+        self.assertIsInstance(point["post"]["reward"], float)
+        self.assertIsInstance(payload["eval"][0]["means"]["reward"], float)
 
 
 if __name__ == "__main__":
@@ -173,3 +214,160 @@ class DerivedSeriesTest(unittest.TestCase):
         series = run_series(self.store, self.report.run_id)
         self.assertEqual(series["derived"][0]["name"], "excess")
         self.assertEqual(len(series["derived"][0]["points"]), 4)
+
+
+HOST_JOURNAL = [
+    {"event": "host-up", "t": 100.0, "engines": ["Qwen/Qwen3-0.6B"],
+     "partition": {"gpuset": "L4:2", "devices": [0, 1], "memory": 0.9},
+     "regimes": [{"name": "policy", "kind": "inference",
+                  "base": "Qwen/Qwen3-0.6B", "shape": 2}],
+     "store": "modal://rlstack-store"},
+    {"event": "attach", "t": 110.0, "run_id": "aaa", "pools": ["policy"],
+     "remotes": [], "n_updates": 4, "store": "modal://rlstack-store"},
+    {"event": "stats", "t": 120.0,
+     "gpus": [{"util": 40, "mem_used": 1000, "mem_total": 23000},
+              {"util": 10, "mem_used": 500, "mem_total": 23000}]},
+    {"event": "stats", "t": 150.0,
+     "gpus": [{"util": 80, "mem_used": 2000, "mem_total": 23000},
+              {"util": 20, "mem_used": 700, "mem_total": 23000}]},
+    # an event NO reading knows about — the throughput slot, standing in for
+    # the emission #50 designs but does not build
+    {"event": "throughput", "t": 155.0, "tokens_per_s": 812.5,
+     "pool": {"requests": 12}, "sleeping": False, "labels": ["policy"]},
+    {"event": "detach", "t": 160.0, "run_id": "aaa", "status": "done",
+     "updates_completed": 4},
+    {"event": "attach", "t": 170.0, "run_id": "bbb", "pools": ["policy"],
+     "remotes": ["teacher"], "n_updates": 8, "store": "modal://rlstack-store"},
+]
+
+
+class HostPageTest(unittest.TestCase):
+    """Host-by-host analysis: everything the page shows comes out of
+    hosts/<name>/log.jsonl — birth facts (#43's partition + regimes),
+    residencies, gpu channels, and the open numeric slot."""
+
+    def setUp(self) -> None:
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.store = LocalStore(tmp.name)
+        for event in HOST_JOURNAL:
+            self.store.append_host_event("l4-a", event)
+
+    def test_birth_facts_come_from_host_up(self) -> None:
+        host = host_series([self.store], "l4-a")
+        self.assertEqual(host["engines"], ["Qwen/Qwen3-0.6B"])
+        self.assertEqual(host["partition"]["gpuset"], "L4:2")
+        self.assertEqual(host["regimes"][0]["kind"], "inference")
+        self.assertEqual(len(host["boots"]), 1)
+        self.assertEqual((host["first_seen"], host["last_seen"]), (100.0, 170.0))
+        self.assertEqual(host["journal_stores"], [self.store.describe()])
+
+    def test_a_host_older_than_partitions_renders_without_them(self) -> None:
+        self.store.append_host_event("old", {"event": "host-up", "t": 1.0,
+                                             "engines": ["*"]})
+        host = host_series([self.store], "old")
+        self.assertIsNone(host["partition"])
+        self.assertEqual(host["regimes"], [])
+
+    def test_tenancy_pairs_attach_with_detach(self) -> None:
+        lanes = tenancy_lanes(HOST_JOURNAL)
+        self.assertEqual([lane["run_id"] for lane in lanes], ["aaa", "bbb"])
+        done, running = lanes
+        self.assertEqual((done["attached"], done["detached"]), (110.0, 160.0))
+        self.assertEqual((done["status"], done["updates_completed"]), ("done", 4))
+        self.assertIsNone(running["detached"])        # still on the host
+        self.assertEqual(running["status"], "running")
+        self.assertEqual(running["remotes"], ["teacher"])
+
+    def test_a_run_that_attached_twice_is_two_residencies(self) -> None:
+        lanes = tenancy_lanes([
+            {"event": "attach", "t": 1.0, "run_id": "aaa"},
+            {"event": "detach", "t": 2.0, "run_id": "aaa", "status": "failed"},
+            {"event": "attach", "t": 3.0, "run_id": "aaa"},
+        ])
+        self.assertEqual([(lane["attached"], lane["detached"]) for lane in lanes],
+                         [(1.0, 2.0), (3.0, None)])
+        self.assertEqual(lanes[0]["status"], "failed")
+
+    def test_gpu_channels_are_per_device_series(self) -> None:
+        gpus = host_series([self.store], "l4-a")["gpus"]
+        self.assertEqual([g["device"] for g in gpus], [0, 1])
+        self.assertEqual(gpus[0]["util"], [[120.0, 40], [150.0, 80]])
+        self.assertEqual(gpus[1]["mem_used"], [[120.0, 500], [150.0, 700]])
+        self.assertEqual(gpus[0]["mem_total"], 23000)
+
+    def test_unclaimed_numeric_fields_become_generic_series(self) -> None:
+        """THE THROUGHPUT SLOT: an event no reading recognizes is plotted
+        anyway, keyed <event>.<field> — nested numbers included, bools and
+        lists excluded (a flag is not a series)."""
+        metrics = {m["key"]: m for m in metric_series(HOST_JOURNAL)}
+        self.assertEqual(metrics["throughput.tokens_per_s"]["points"],
+                         [[155.0, 812.5]])
+        self.assertEqual(metrics["throughput.pool.requests"]["points"],
+                         [[155.0, 12.0]])
+        self.assertEqual(metrics["throughput.tokens_per_s"]["event"], "throughput")
+        self.assertNotIn("throughput.sleeping", metrics)     # a bool is a flag
+        self.assertNotIn("throughput.labels", metrics)       # a list is a facet
+
+    def test_the_named_readings_claim_their_own_fields(self) -> None:
+        """What the tenancy/gpu readings already render never doubles as a
+        generic metric — the slot is for facts nothing else shows."""
+        keys = {m["key"] for m in metric_series(HOST_JOURNAL)}
+        for claimed in ("attach.n_updates", "detach.updates_completed",
+                        "stats.gpus", "host-up.partition.memory"):
+            self.assertNotIn(claimed, keys)
+
+    def test_host_series_is_none_for_an_unknown_host(self) -> None:
+        self.assertIsNone(host_series([self.store], "nope"))
+
+
+class FleetPageTest(unittest.TestCase):
+    """The global reading: placement and load across hosts; per-run facts
+    stay on the run pages."""
+
+    def setUp(self) -> None:
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.store = LocalStore(tmp.name)
+        for event in HOST_JOURNAL:
+            self.store.append_host_event("l4-a", event)
+        self.store.append_host_event("l4-b", {
+            "event": "host-up", "t": 200.0, "engines": ["Qwen/Qwen3-32B"],
+            "partition": {"gpuset": "L4:4", "devices": [0, 1, 2, 3],
+                          "memory": 0.9},
+            "regimes": [{"name": "teacher", "kind": "inference",
+                         "base": "Qwen/Qwen3-32B", "shape": 4}]})
+        self.store.append_host_event("l4-b", {
+            "event": "attach", "t": 210.0, "run_id": "bbb", "pools": ["teacher"],
+            "n_updates": 8, "store": "modal://rlstack-store"})
+
+    def test_fleet_joins_hosts_runs_and_one_window(self) -> None:
+        fleet = fleet_data([self.store])
+        by_host = {h["host"]: h for h in fleet["hosts"]}
+        self.assertEqual(sorted(by_host), ["l4-a", "l4-b"])
+        self.assertEqual([lane["run_id"] for lane in by_host["l4-a"]["tenancy"]],
+                         ["aaa", "bbb"])
+        self.assertEqual(by_host["l4-a"]["util"], [[120.0, 40], [150.0, 80]])
+        self.assertEqual(by_host["l4-b"]["regimes"][0]["name"], "teacher")
+        self.assertEqual(fleet["window"], [100.0, 210.0])
+        # a run resident on two hosts is a FLEET fact, and renders as one
+        placed = {run["run_id"]: run["hosts"] for run in fleet["runs"]}
+        self.assertEqual(sorted(placed["bbb"]), ["l4-a", "l4-b"])
+
+    def test_wsgi_serves_the_host_routes(self) -> None:
+        app = ui_app([self.store])
+        status, _, body = call(app, "/api/hosts")
+        self.assertEqual(status, "200 OK")
+        self.assertEqual(len(json.loads(body)["hosts"]), 2)
+
+        status, _, body = call(app, "/api/host/l4-a")
+        self.assertEqual(status, "200 OK")
+        self.assertEqual(json.loads(body)["host"], "l4-a")
+
+        status, _, _ = call(app, "/api/host/nope")
+        self.assertEqual(status, "404 Not Found")
+
+        for page in ("/hosts", "/host/l4-a"):
+            status, headers, _ = call(app, page)
+            self.assertEqual(status, "200 OK")     # same document, JS routes
+            self.assertIn("text/html", headers["Content-Type"])
