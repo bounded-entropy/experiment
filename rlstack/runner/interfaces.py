@@ -22,6 +22,7 @@ from rlstack.data.trajectory import Message
 from rlstack.policy.adapters.base import Mechanism
 from rlstack.policy.compile import Bundle
 from rlstack.policy.siteschema import SiteMeta
+from rlstack.runner.meters import TrafficMeter
 from rlstack.spec.specs import ExperimentSpec, SamplingSpec
 
 
@@ -106,6 +107,14 @@ class Engine(Protocol):
     spans. Sharding is a build fact like reachability (#43): a pool declaring
     tp=4 binds only onto an engine built tp=4 (pool-shape-mismatch), and
     switching shards means handing different metal, never editing a spec."""
+
+    meter: TrafficMeter
+    """Where this engine counts the traffic it serves: prompt tokens at
+    submission, decoded tokens in its own token loop, time to first token.
+    One meter per HOST — a host wires its own into every engine it owns
+    (Host.wire_meter) and drains it once per stats tick. An engine nobody
+    adopted counts into the private meter it was born with, which nothing
+    drains and nothing reads."""
 
     def sample_tokens(
         self,

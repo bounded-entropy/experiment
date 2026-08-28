@@ -13,6 +13,11 @@ any daemon reading the commit can pin its bundle_id immediately. The post phase
 admits the ENGINES its pipeline declared (judges sample) and the gradient
 admits the LEARNER — so on an alternating host the common no-judge update costs
 one switch.
+
+Those boundaries are also the update's four measured phases — collect / post /
+train / seal — lapped into an UpdateClock and journaled to the HOST after the
+commit. Durations are wall clock, so they live in the host journal and nowhere
+near a run directory.
 """
 
 from __future__ import annotations
@@ -28,6 +33,7 @@ from rlstack.registry import ADAPTERS
 from rlstack.runner.traffic import Routes
 from rlstack.runner.arbiter import GpuArbiter
 from rlstack.runner.interfaces import Engine, Learner, TrainStats
+from rlstack.runner.meters import HostJournal, UpdateClock
 from rlstack.runner.post import run_pipeline
 from rlstack.runner.daemons.base import Daemon
 from rlstack.runner.signals import RunSignals
@@ -42,9 +48,11 @@ class Trainer(Daemon):
                  post_residents: tuple[Engine, ...],
                  routes_at: Callable[[Bundle], Routes],
                  initial_bundle: Bundle,
-                 initial_version: dict[str, int]) -> None:
+                 initial_version: dict[str, int],
+                 journal: HostJournal | None = None) -> None:
         super().__init__(signals, arbiter, run)
         self.tenant = tenant
+        self.journal = journal
         self.post_residents = post_residents
         self.spec = spec
         self.schedule = spec.algo.schedule
@@ -72,8 +80,10 @@ class Trainer(Daemon):
 
     async def run_forever(self) -> None:
         for update in range(self.committed() + 1, self.schedule.n_updates + 1):
+            clock = UpdateClock()
             rows = await self.signals.wait_for(lambda: self.next_rows(update))
             wave = wave_from_rows(rows)
+            clock.collected()
 
             # judges sample: admit the engines the pipeline declared
             async with self.arbiter.admit_all(self.post_residents):
@@ -81,6 +91,7 @@ class Trainer(Daemon):
                     self.spec.algo.post, wave, self.routes_at(self.bundle),
                     self.sampling, self.spec.seeds.master, update)
             self.run.write_postdata(update, postdata)
+            clock.posted()
 
             tokenize = self.engine.tokenize
             flats = [flatten(t, tokenize) for t in wave.trajectories]
@@ -94,6 +105,7 @@ class Trainer(Daemon):
                             self.learner.forward_backward(self.tenant, batch))
                 self.learner.optim_step(self.tenant)
                 emitted = self.learner.emit(self.tenant)
+            clock.trained()
 
             self.version = bump(self.version, self.trainable)
             self.bundle = compile_bundle(emitted.adapters, self.version,
@@ -112,7 +124,21 @@ class Trainer(Daemon):
                 "post": _column_means(postdata),
                 "train": _train_summary(stats),
             })
+            clock.sealed()
+            self.journal_update(clock, update)
             await self.signals.notify()
+
+    # ---- the emission (observability; never a run-directory byte) -----------
+
+    def journal_update(self, clock: UpdateClock, update: int) -> None:
+        """One `update` event on the HOST's journal: how long this update took
+        and where the time went. Wall clock may never enter a run directory —
+        resume-equivalence is byte-identical run dirs — so the ledger line
+        above carries the update's FACTS and this line carries its DURATION,
+        in the one place durations are allowed. A run on no host emits
+        nothing."""
+        if self.journal is not None:
+            self.journal.append(clock.row(self.tenant, update))
 
 
 def _column_means(columns) -> dict[str, float]:

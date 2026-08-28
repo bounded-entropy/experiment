@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import random
 import re
+import time
 from dataclasses import dataclass
 from collections.abc import AsyncIterator, Mapping, Sequence
 
@@ -22,6 +23,7 @@ from rlstack.policy.adapters.base import Mechanism
 from rlstack.policy.compile import Bundle
 from rlstack.policy.siteschema import SiteMeta
 from rlstack.runner.interfaces import Emitted, FinishEvent, TokenEvent, TrainStats
+from rlstack.runner.meters import TrafficMeter
 from rlstack.spec.canonical import content_hash
 from rlstack.spec.specs import ExperimentSpec, SamplingSpec
 
@@ -50,6 +52,11 @@ class FakeEngine:
         self.plugins = plugins
         self.bundle_log: list[str] = []       # every add_bundle, in order
         self._known: set[str] = set()
+        # the same traffic seam the real engine has, so the whole emission
+        # plane is exercisable without a GPU. Token counts stay a pure
+        # function of the inputs; only the TTFT gap is wall clock, and it
+        # reaches the host journal alone — never a run directory.
+        self.meter = TrafficMeter()
 
     # ---- Engine protocol ----------------------------------------------------
 
@@ -89,6 +96,7 @@ class FakeEngine:
         if bundle_id not in self._known:
             raise RuntimeError(f"bundle {bundle_id!r} was never registered")
         context = "".join(m.content for m in messages)
+        self.meter.opened_request(len(context) + len(token_ids))
         return tuple(
             -0.2 - 0.5 * (int(content_hash({
                 "bundle": bundle_id, "ctx": context,
@@ -107,13 +115,20 @@ class FakeEngine:
             raise RuntimeError(f"bundle {bundle_id!r} was never registered")
         rng = random.Random(seed)
         text = self._completion(messages[-1].content, rng)
+        # char-level metal: one token per character, so the prompt's token
+        # count is its length — known before the first token, as on real metal
+        self.meter.opened_request(sum(len(m.content) for m in messages))
+        submitted = time.time()
 
         emitted = ""
         for ch in text:
             if len(emitted) >= sampling.max_tokens:
                 yield FinishEvent("length")
                 return
+            if not emitted:
+                self.meter.first_token_after(time.time() - submitted)
             emitted += ch
+            self.meter.decoded(1)
             extras = {"adapter_draw": rng.randrange(4)} if self.record_draws else {}
             yield TokenEvent(token_id=ord(ch), logprob=-(0.2 + rng.random() / 2),
                              text_delta=ch, extras=extras)
