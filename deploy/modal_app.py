@@ -15,11 +15,15 @@ pins are the ones every other deploy keeps in sync with.
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import modal
 
 from probe import arith_tasks
 
 app = modal.App("rlstack")
+
+REPO = Path(__file__).resolve().parent.parent
 
 store_volume = modal.Volume.from_name("rlstack-store", create_if_missing=True)
 
@@ -34,6 +38,11 @@ image = (
     # build in-container, so force vLLM's native torch sampler instead
     .env({"VLLM_USE_FLASHINFER_SAMPLER": "0"})
     .add_local_python_source("probe", "rlstack", "rlstack_engine")
+    # add_local_python_source ships .py files ONLY (ignore=NON_PYTHON_FILES),
+    # so the observer UI's static assets need their own mount beside the
+    # package they belong to — without this the deployed ui() serves 404s.
+    .add_local_dir(REPO / "rlstack" / "observe" / "web",
+                   remote_path="/root/rlstack/observe/web")
     .add_local_dir("tests", remote_path="/root/tests")
 )
 

@@ -67,6 +67,17 @@ def _gzip_jsonl(rows: list[dict[str, Any]]) -> bytes:
     return buffer.getvalue()
 
 
+def wave_key(run_id: str, update: int) -> str:
+    """Where one update's sealed wave lives. One tree: the handle writes it
+    and the observer's peek reads it through the same name."""
+    return f"runs/{run_id}/waves/{update:06d}.jsonl.gz"
+
+
+def postdata_key(run_id: str, update: int) -> str:
+    """Where one update's postprocessor columns live, beside its wave."""
+    return f"runs/{run_id}/postdata/{update:06d}.json"
+
+
 class Store(ABC):
     """The key tree and its orchestration over a backend's six byte verbs."""
 
@@ -192,6 +203,27 @@ class Store(ABC):
                 except json.JSONDecodeError:
                     pass
         return out
+
+    def peek_wave(self, run_id: str, update: int) -> list[dict[str, Any]] | None:
+        """One sealed wave's trajectory rows WITHOUT attaching. The observer's
+        one door onto experiment CONTENT (#57): SEALED artifacts only — an
+        update the ledger committed can never be rewritten, so reading it is
+        as safe as reading the ledger. None when that update has no wave."""
+        try:
+            raw = gzip.decompress(self._read(wave_key(run_id, update)))
+        except FileNotFoundError:
+            return None
+        return [json.loads(line) for line in raw.decode("utf-8").split("\n") if line]
+
+    def peek_postdata(self, run_id: str, update: int) -> dict[str, list] | None:
+        """The pipeline's columns for one sealed wave, in wave order, WITHOUT
+        attaching. None when that update has no postdata."""
+        try:
+            payload = json.loads(
+                self._read(postdata_key(run_id, update)).decode("utf-8"))
+        except FileNotFoundError:
+            return None
+        return payload["columns"]
 
     def peek_eval_summaries(self, run_id: str) -> list[dict[str, Any]]:
         """Every completed eval summary for a run, WITHOUT attaching —
@@ -361,7 +393,7 @@ class RunHandle:
     # ---- per-update artifacts: waves + postdata --------------------------
 
     def _wave_key(self, update: int) -> str:
-        return self._key("waves", f"{update:06d}.jsonl.gz")
+        return wave_key(self.run_id, update)
 
     def write_wave(self, update: int, rows: list[dict[str, Any]]) -> None:
         """Write one sealed wave's rows atomically (gzip of canonical jsonl)."""
@@ -376,7 +408,7 @@ class RunHandle:
         return [json.loads(line) for line in raw.split("\n") if line]
 
     def _postdata_key(self, update: int) -> str:
-        return self._key("postdata", f"{update:06d}.json")
+        return postdata_key(self.run_id, update)
 
     def write_postdata(self, update: int, columns: Mapping[str, list[float]]) -> None:
         """The postprocessor pipeline's columns for one wave, in wave order —

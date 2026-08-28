@@ -23,7 +23,7 @@ from rlstack import (
 from rlstack.observe.host_series import (
     fleet_data, host_series, metric_series, tenancy_lanes,
 )
-from rlstack.observe.page import PAGE
+from rlstack.observe.page import asset, document
 from rlstack.observe.panels import PanelError, evaluate, missing_args, panel_args
 from rlstack.observe.series import run_series
 from rlstack.observe.ui import ui_app
@@ -79,7 +79,7 @@ class UiTest(unittest.TestCase):
         status, headers, body = call(app, "/")
         self.assertEqual(status, "200 OK")
         self.assertIn("text/html", headers["Content-Type"])
-        self.assertIn(b"feeds the loss", body)
+        self.assertIn(b"/web/app.js", body)      # the document loads the modules
 
         status, _, body = call(app, f"/run/{self.report.run_id}")
         self.assertEqual(status, "200 OK")          # same document, JS routes
@@ -122,17 +122,27 @@ class UiTest(unittest.TestCase):
         for field in ("run_id", "status", "committed", "target", "hosts"):
             self.assertIn(field, row)
         self.assertEqual(row["run_id"], self.report.run_id)
-        self.assertIn('title: "switch experiment"', PAGE)     # the dropdown
+        # the dropdown itself lives in the nav module
+        self.assertIn('title: "switch experiment"',
+                      asset("nav.js")[0].decode("utf-8"))
 
-    def test_the_page_carries_the_hover_and_switch_machinery(self) -> None:
-        """Hover is a page fact (the API carries the numbers, the page
-        reveals them); so are the switcher and the two host routes."""
-        _, _, body = call(ui_app([self.store]), "/")
-        page = body.decode("utf-8")
-        for machinery in ("showTip", "getScreenCTM", "function raw(",
-                          "syncSwitcher", "drawFleet", "drawHost",
-                          "journaled metrics", "placement"):
-            self.assertIn(machinery, page)
+    def test_the_modules_carry_the_hover_and_switch_machinery(self) -> None:
+        """Hover is a page fact (the API carries the numbers, the modules
+        reveal them); so are the switcher and the two host routes. The
+        document is now a loader, so each claim is checked where it lives."""
+        for module, machinery in (
+                ("charts.js", ("showTip", "getScreenCTM", "stacked", "histogramCard")),
+                ("dom.js", ("export function raw(", "poll")),
+                ("nav.js", ("syncSwitcher", "wavePath")),
+                ("fleet.js", ("drawFleet", "placement", "fleet throughput")),
+                ("host.js", ("drawHost", "journaled metrics", "throughput")),
+                ("run.js", ("feeds the loss", "logprob_gap", "sealed waves")),
+                ("wave.js", ("drawWave", "distribution")),
+        ):
+            source = asset(module)[0].decode("utf-8")
+            for claim in machinery:
+                self.assertIn(claim, source, f"{module} lost {claim!r}")
+        self.assertIn(b"/web/style.css", document())
 
     def test_the_api_carries_every_number_the_hover_reveals(self) -> None:
         _, _, body = call(ui_app([self.store]), f"/api/run/{self.report.run_id}")

@@ -62,6 +62,9 @@ The one reader is Samarth, six months from now, mid-experiment. Optimize for
    observe/        the observer: read-only derivations over stores and
                    journals (views, store locators) — never attaches, never
                    writes; imports the data layer and nothing else
+   observe/web/    the UI's static assets (index.html, style.css, ES modules),
+                   served by observe/ui.py — the one folder holding non-.py
+                   files: no build step, no CDN, no framework
    deploy/         deployment only (I5): images, volumes, venue wiring —
                    nothing semantics-bearing lives here
    rlstack_engine/ (sibling package) code that ships in the ENGINE image:
