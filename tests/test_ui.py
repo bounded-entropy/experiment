@@ -27,6 +27,7 @@ from rlstack.observe.page import PAGE
 from rlstack.observe.panels import PanelError, evaluate, missing_args, panel_args
 from rlstack.observe.series import run_series
 from rlstack.observe.ui import ui_app
+from rlstack.observe.views import partition_metal, render_hosts
 
 SCHEMA = fake_qwen_schema(4, base="Qwen/Qwen3-0.6B")
 
@@ -218,8 +219,8 @@ class DerivedSeriesTest(unittest.TestCase):
 
 HOST_JOURNAL = [
     {"event": "host-up", "t": 100.0, "engines": ["Qwen/Qwen3-0.6B"],
-     "partition": {"gpuset": "L4:2", "devices": [0, 1], "memory": 0.9},
-     "regimes": [{"name": "policy", "kind": "inference",
+     "partition": {"metal": "L4:2", "devices": [0, 1], "memory": 0.9},
+     "regimes": [{"name": "policy", "capability": "inference",
                   "base": "Qwen/Qwen3-0.6B", "shape": 2}],
      "store": "modal://rlstack-store"},
     {"event": "attach", "t": 110.0, "run_id": "aaa", "pools": ["policy"],
@@ -256,8 +257,8 @@ class HostPageTest(unittest.TestCase):
     def test_birth_facts_come_from_host_up(self) -> None:
         host = host_series([self.store], "l4-a")
         self.assertEqual(host["engines"], ["Qwen/Qwen3-0.6B"])
-        self.assertEqual(host["partition"]["gpuset"], "L4:2")
-        self.assertEqual(host["regimes"][0]["kind"], "inference")
+        self.assertEqual(host["partition"]["metal"], "L4:2")
+        self.assertEqual(host["regimes"][0]["capability"], "inference")
         self.assertEqual(len(host["boots"]), 1)
         self.assertEqual((host["first_seen"], host["last_seen"]), (100.0, 170.0))
         self.assertEqual(host["journal_stores"], [self.store.describe()])
@@ -331,6 +332,10 @@ class FleetPageTest(unittest.TestCase):
         self.store = LocalStore(tmp.name)
         for event in HOST_JOURNAL:
             self.store.append_host_event("l4-a", event)
+        # l4-b is journaled in the PRE-#55 spelling on purpose: partition
+        # "gpuset" (now "metal") and regime "kind" (now "capability"). Journals
+        # are append-only history, so both spellings live on the volume forever
+        # and the observer must read either — see the tolerance test below.
         self.store.append_host_event("l4-b", {
             "event": "host-up", "t": 200.0, "engines": ["Qwen/Qwen3-32B"],
             "partition": {"gpuset": "L4:4", "devices": [0, 1, 2, 3],
@@ -353,6 +358,17 @@ class FleetPageTest(unittest.TestCase):
         # a run resident on two hosts is a FLEET fact, and renders as one
         placed = {run["run_id"]: run["hosts"] for run in fleet["runs"]}
         self.assertEqual(sorted(placed["bbb"]), ["l4-a", "l4-b"])
+
+    def test_a_pre_rename_journal_still_names_its_metal(self) -> None:
+        """#55 renamed Partition.gpuset -> .metal, and a journal is history: a
+        host booted before the rename still says "gpuset" on the volume. The
+        observer reads either spelling, so an old host renders its metal
+        instead of a blank."""
+        self.assertEqual(partition_metal({"gpuset": "L4:4"}), "L4:4")
+        self.assertEqual(partition_metal({"metal": "L4:2"}), "L4:2")
+        rendered = render_hosts([self.store])
+        self.assertIn("L4:4", rendered)     # l4-b, journaled as "gpuset"
+        self.assertIn("L4:2", rendered)     # l4-a, journaled as "metal"
 
     def test_wsgi_serves_the_host_routes(self) -> None:
         app = ui_app([self.store])

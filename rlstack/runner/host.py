@@ -42,17 +42,20 @@ class HostError(RuntimeError):
 
 @dataclass(frozen=True)
 class Partition:
-    """The irreducible carved share of metal a host is born onto: the KIND of
-    GPU it is made of ("L4", "H100"), the device indices, and the memory
-    fraction it owns on each (vLLM's gpu_memory_utilization is a reservation,
-    torch's set_per_process_memory_fraction a cap; both honor this number).
-    Memory partitions honestly; SMs still time-share across partition
-    boundaries — a stated cost, visible in latency, not hidden by this record.
-    `gpu` is descriptive, never decisive: the carve carries the kind down from
-    the Metal it drew on, because a fraction alone cannot tell 0.5 of an L4
-    from 0.5 of an H100."""
+    """The irreducible carved share of metal a host is born onto: the NAME of
+    the Metal it was carved from, the KIND of GPU it is made of ("L4",
+    "H100"), the device indices, and the memory fraction it owns on each
+    (vLLM's gpu_memory_utilization is a reservation, torch's
+    set_per_process_memory_fraction a cap; both honor this number). Memory
+    partitions honestly; SMs still time-share across partition boundaries — a
+    stated cost, visible in latency, not hidden by this record.
+    `metal` is a registered Metal's NAME, never a GpuSet: a GpuSet is pure
+    device demand inside a spec, and this record is a provider fact. `gpu` is
+    descriptive, never decisive: the carve carries the kind down from the
+    Metal it drew on, because a fraction alone cannot tell 0.5 of an L4 from
+    0.5 of an H100."""
 
-    gpuset: str
+    metal: str
     devices: tuple[int, ...]
     memory: float = 1.0
     gpu: str = ""
@@ -61,7 +64,7 @@ class Partition:
         """The partition as a JSON row — ONE home for the shape the host-up
         event journals, status() reports over the wire, and the observer's
         hosts view reads back."""
-        return {"gpuset": self.gpuset, "gpu": self.gpu,
+        return {"metal": self.metal, "gpu": self.gpu,
                 "devices": list(self.devices), "memory": self.memory}
 
 
@@ -73,15 +76,15 @@ class Regime:
     birth and never changes them after."""
 
     name: str
-    kind: str                       # "inference" | "training"
+    capability: str                 # "inference" | "training"
     base: str | None
     shape: int = 1
 
     def __post_init__(self) -> None:
-        if self.kind not in ("inference", "training"):
+        if self.capability not in ("inference", "training"):
             raise ValueError(
-                f"Regime.kind must be 'inference' or 'training', "
-                f"got {self.kind!r}")
+                f"Regime.capability must be 'inference' or 'training', "
+                f"got {self.capability!r}")
 
 
 @dataclass
@@ -120,8 +123,8 @@ class Host:
             "event": "host-up", "t": time.time(),
             "engines": [engine.base or "*" for engine in self.engines],
             "partition": partition.row() if partition is not None else None,
-            "regimes": [{"name": r.name, "kind": r.kind, "base": r.base,
-                         "shape": r.shape} for r in regimes],
+            "regimes": [{"name": r.name, "capability": r.capability,
+                         "base": r.base, "shape": r.shape} for r in regimes],
             "store": store.describe()})
 
     # ---- birth facts, one named method per rule -----------------------------
@@ -145,7 +148,7 @@ class Host:
         attested here, never mutated after — so a deploy handing the wrong
         metal dies at construction, not mid-run."""
         for regime in self.regimes:
-            if regime.kind == "inference":
+            if regime.capability == "inference":
                 if self.engine_for(regime.base, regime.shape) is None:
                     raise HostError(
                         f"host {self.name!r} declares regime {regime.name!r} "
@@ -167,7 +170,7 @@ class Host:
         alternation IS the host, switched by its own arbiter."""
         group = f"host:{self.name}" if len(self.regimes) > 1 else None
         for regime in self.regimes:
-            obj = (self.learner if regime.kind == "training"
+            obj = (self.learner if regime.capability == "training"
                    else self.engine_for(regime.base, regime.shape))
             # fraction 0.0, not None: a later tenant's declared fraction is
             # a carve hint and must never be adopted into this host's load
@@ -299,10 +302,10 @@ class Host:
             await asyncio.sleep(every)
 
     def status(self) -> dict:
-        """The GpuSet as this host sees it: the partition it was born onto
-        (kind of GPU, devices, fraction — as a row, so a status crosses the
-        wire unchanged), state (arbiter residency), declared load, and the
-        tenant roster."""
+        """The metal as this host sees it: the partition it was born onto
+        (the Metal's name, kind of GPU, devices, fraction — as a row, so a
+        status crosses the wire unchanged), state (arbiter residency),
+        declared load, and the tenant roster."""
         return {
             "host": self.name,
             "engines": [engine.base or "*" for engine in self.engines],

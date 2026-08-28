@@ -45,13 +45,23 @@ def _progress(store: Store, run_id: str) -> tuple[int, object]:
 # hosts
 # ---------------------------------------------------------------------------
 
+def partition_metal(partition: dict) -> str:
+    """The Metal name off a journaled partition, old spelling or new.
+
+    Partition.metal was `gpuset` before the #55 rename, and journals on the
+    volume are append-only history: an observer that only knew the new key
+    would render every pre-rename host blank. Reading both is the whole cost of
+    keeping that history legible."""
+    return partition.get("metal") or partition.get("gpuset") or "?"
+
+
 def _metal(partition: dict | None) -> str:
     """One journaled partition as the line an operator reads: how much of
     what, and where. A partition carries its gpu kind as a birth fact (#49) —
     without it a fraction cannot tell half an L4 from half an H100."""
     if not partition:
         return "unpartitioned"
-    return (f"{partition.get('gpu') or '?'} {partition['gpuset']}"
+    return (f"{partition.get('gpu') or '?'} {partition_metal(partition)}"
             f"[{','.join(str(d) for d in partition['devices'])}]"
             f" @ {partition['memory']:.2f}")
 

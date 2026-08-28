@@ -80,7 +80,7 @@ class FleetTest(unittest.TestCase):
     def test_demands_read_capability_off_the_spec(self) -> None:
         demands = demands_of(self.judged_spec())
         self.assertEqual(
-            [(d.pool, d.kind, d.base, d.shape) for d in demands],
+            [(d.pool, d.capability, d.base, d.shape) for d in demands],
             [("main", "inference", "Qwen/Qwen3-0.6B", 1),
              ("judge", "inference", "Qwen/Qwen3-32B", 2),
              (None, "training", "Qwen/Qwen3-0.6B", 1)])
@@ -114,7 +114,7 @@ class FleetTest(unittest.TestCase):
             GpuGroup(gpus(n=1), (pool("main"), learner()), sharing="sleep"),)))
         plan = fleet.place(spec)
         self.assertEqual(len(plan.steps), 1)
-        self.assertEqual([r.kind for r in plan.steps[0].regimes],
+        self.assertEqual([r.capability for r in plan.steps[0].regimes],
                          ["inference", "training"])
         placement = fleet.apply(plan)
         host = placement["main"]
@@ -204,7 +204,7 @@ class FleetTest(unittest.TestCase):
         return replace(spec, policy=replace(spec.policy, base=base))
 
     def test_two_carves_differing_only_by_base_are_two_hosts(self) -> None:
-        """#51a, the campaign's repro. A regime is named by kind and shape,
+        """#51a, the campaign's repro. A regime is named by capability and shape,
         never by base, so a second base's learner used to carve the SAME name
         and REPLACE a live host: its metal stayed resident and its tenants
         stayed bound while its 0.20 silently returned to the residual — an
@@ -215,7 +215,7 @@ class FleetTest(unittest.TestCase):
             self.partitioned_spec("Qwen/Qwen3-0.6B", 0.30, 0.20, 1)))
         self.assertAlmostEqual(fleet.residual("node-a")[0], 0.50)
         trainer = next(h for h in fleet.hosts.values()
-                       if any(r.kind == "training" for r in h.regimes))
+                       if any(r.capability == "training" for r in h.regimes))
 
         fleet.apply(fleet.place(
             self.partitioned_spec("Qwen/Qwen3-0.6B-Base", 0.15, 0.125, 2)))
@@ -223,7 +223,7 @@ class FleetTest(unittest.TestCase):
         self.assertIs(fleet.hosts[trainer.name], trainer)   # nothing replaced
         self.assertEqual(
             sorted(r.base for h in fleet.hosts.values() for r in h.regimes
-                   if r.kind == "training"),
+                   if r.capability == "training"),
             ["Qwen/Qwen3-0.6B", "Qwen/Qwen3-0.6B-Base"])
         self.assertAlmostEqual(fleet.residual("node-a")[0], 0.225)
         names = [e["host"] for e in self.store.read_fleet_log()
@@ -267,7 +267,7 @@ class FleetTest(unittest.TestCase):
             ups = [e for e in self.store.read_host_log(name)
                    if e["event"] == "host-up"]
             self.assertEqual(len(ups), 1)
-            self.assertEqual(ups[0]["partition"]["gpuset"], "node-a")
+            self.assertEqual(ups[0]["partition"]["metal"], "node-a")
         text = render_hosts([self.store])
         for name in carved:
             self.assertIn(f"host {name}", text)
@@ -322,7 +322,7 @@ class FleetTest(unittest.TestCase):
                          ["carve", "carve", "carve"])
         # the runner ran beside the learner; main and judge crossed the wire
         learner_host = next(h for h in fleet.hosts.values()
-                            if any(r.kind == "training" for r in h.regimes))
+                            if any(r.capability == "training" for r in h.regimes))
         attach = [e for e in self.store.read_host_log(learner_host.name)
                   if e["event"] == "attach"][0]
         self.assertEqual(attach["remotes"], ["judge", "main"])

@@ -111,6 +111,11 @@ function clock(t) {
   return new Date(t * 1000).toLocaleTimeString([], {hour:"2-digit",
       minute:"2-digit", second:"2-digit", hour12:false});
 }
+// #55 renamed Partition.gpuset -> .metal and Regime.kind -> .capability, but a
+// journal is append-only history: pre-rename hosts still say the old words, so
+// both readers take either spelling rather than blanking an older host.
+function partMetal(p) { return (p && (p.metal || p.gpuset)) || "?"; }
+function regimeCapability(r) { return r.capability || r.kind || "?"; }
 function dur(seconds) {
   if (seconds === null || seconds === undefined) return "—";
   if (seconds < 90) return seconds.toFixed(0) + "s";
@@ -517,9 +522,9 @@ async function drawFleet() {
     row.append(el("td", {}, `<a href="/host/${encodeURIComponent(h.host)}">${esc(h.host)}</a>`));
     row.append(el("td", {}, esc(h.engines.join(", ") || "?")));
     row.append(el("td", {}, (h.regimes || []).map(r =>
-        esc(`${r.name}:${r.kind}×${r.shape}`)).join(" ") || "<span class='k'>—</span>"));
+        esc(`${r.name}:${regimeCapability(r)}×${r.shape}`)).join(" ") || "<span class='k'>—</span>"));
     row.append(el("td", {}, h.partition
-        ? esc(`${h.partition.gpuset} [${(h.partition.devices || []).join(",")}] `
+        ? esc(`${partMetal(h.partition)} [${(h.partition.devices || []).join(",")}] `
               + `mem ${h.partition.memory}`)
         : "<span class='k'>—</span>"));
     row.append(el("td", {}, `<span class="${h.running.length ? "live" : "k"}">`
@@ -558,11 +563,11 @@ async function drawHost() {
   holder.append(el("h2", {}, "the host <span>as it attested itself at birth</span>"));
   const facts = el("table", {});
   const partition = host.partition
-    ? `${esc(host.partition.gpuset)} devices [${(host.partition.devices || []).join(", ")}]`
+    ? `${esc(partMetal(host.partition))} devices [${(host.partition.devices || []).join(", ")}]`
       + ` · memory fraction ${esc(host.partition.memory)}`
     : "<span class='k'>not journaled (a host older than #43's partitions)</span>";
   const regimes = host.regimes.length
-    ? host.regimes.map(r => esc(`${r.name} = ${r.kind} × ${r.base ?? "*"} × ${r.shape}`)).join("<br>")
+    ? host.regimes.map(r => esc(`${r.name} = ${regimeCapability(r)} × ${r.base ?? "*"} × ${r.shape}`)).join("<br>")
     : "<span class='k'>not journaled (a host older than #43's regimes)</span>";
   facts.innerHTML =
     `<tr><th>partition</th><td>${partition}</td></tr>`

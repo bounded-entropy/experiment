@@ -252,7 +252,7 @@ class ShapeAndRegimeTest(unittest.TestCase):
                     store=self.store,
                     partition=Partition("node-a", (0, 1), 0.5, "L4"),
                     regimes=(Regime("main-tp2", "inference", None, 2),))
-        row = {"gpuset": "node-a", "gpu": "L4", "devices": [0, 1],
+        row = {"metal": "node-a", "gpu": "L4", "devices": [0, 1],
                "memory": 0.5}
         up = [e for e in self.store.read_host_log("stamped")
               if e["event"] == "host-up"][-1]

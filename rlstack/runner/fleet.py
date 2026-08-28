@@ -1,7 +1,7 @@
 """The Fleet: the inventory of Metal and hosts, and the placement ladder over them.
 
-An experiment declares capability DEMANDS — what, never where: kind, base and
-shard shape read straight off its gpu_config, with the declared fraction as a
+An experiment declares capability DEMANDS — what, never where: capability, base
+and shard shape read straight off its gpu_config, with the declared fraction as a
 carve hint. Placement climbs three rungs, one currency and one decider each
 (I12): JOIN a host that already serves the capability (automatic; the target
 host's own arbiter decides, and fractions are ignored because the weights
@@ -70,12 +70,12 @@ def fraction_for_gb(gb: float, metal: Metal) -> float:
 @dataclass(frozen=True)
 class Demand:
     """One member's capability demand, read off the spec: WHAT is needed
-    (kind, base, shard shape), never WHERE. `memory` is the carve hint —
+    (capability, base, shard shape), never WHERE. `memory` is the carve hint —
     it sizes a new partition at rung two and is ignored on a join. `pool`
     None is the learner member."""
 
     pool: str | None
-    kind: str                       # "inference" | "training"
+    capability: str                 # "inference" | "training"
     base: str
     shape: int
     memory: float
@@ -137,13 +137,13 @@ def demands_of(spec: ExperimentSpec) -> tuple[Demand, ...]:
         for member in group.members:
             if isinstance(member, PoolMember):
                 out.append(Demand(
-                    pool=member.name, kind="inference",
+                    pool=member.name, capability="inference",
                     base=member.base or spec.policy.base, shape=member.tp,
                     memory=member.fraction if member.fraction is not None else 1.0,
                     group=gi, sharing=group.sharing))
             else:
                 out.append(Demand(
-                    pool=None, kind="training", base=spec.policy.base,
+                    pool=None, capability="training", base=spec.policy.base,
                     shape=member.fsdp,
                     memory=member.fraction if member.fraction is not None else 1.0,
                     group=gi, sharing=group.sharing))
@@ -170,10 +170,11 @@ def placement_units(demands: Sequence[Demand]) -> tuple[tuple[Demand, ...], ...]
 def regime_of(demand: Demand) -> Regime:
     """The regime a carve births for one demand — named by capability, so a
     carved host's name reads as what it serves."""
-    if demand.kind == "inference":
-        return Regime(name=f"{demand.pool}-tp{demand.shape}", kind="inference",
+    if demand.capability == "inference":
+        return Regime(name=f"{demand.pool}-tp{demand.shape}",
+                      capability="inference",
                       base=demand.base, shape=demand.shape)
-    return Regime(name=f"learner-fsdp{demand.shape}", kind="training",
+    return Regime(name=f"learner-fsdp{demand.shape}", capability="training",
                   base=demand.base, shape=demand.shape)
 
 
@@ -227,7 +228,7 @@ class Fleet:
         free = [1.0] * self.metal[metal_name].devices
         for host in self.hosts.values():
             part = host.partition
-            if part is None or part.gpuset != metal_name:
+            if part is None or part.metal != metal_name:
                 continue
             for device in part.devices:
                 free[device] -= part.memory
@@ -237,7 +238,7 @@ class Fleet:
 
     def find_join(self, unit: tuple[Demand, ...]) -> Host | None:
         """Rung one: ONE host whose regimes cover every demand in the unit.
-        Coverage is capability equality — same kind, base, and shape; a
+        Coverage is capability equality — same capability, base, and shape; a
         fraction never enters (the weights already live there)."""
         for name in sorted(self.hosts):
             host = self.hosts[name]
@@ -247,7 +248,8 @@ class Fleet:
 
     @staticmethod
     def _covers(host: Host, demand: Demand) -> bool:
-        return any(regime.kind == demand.kind and regime.base == demand.base
+        return any(regime.capability == demand.capability
+                   and regime.base == demand.base
                    and regime.shape == demand.shape
                    for regime in host.regimes)
 
@@ -325,8 +327,8 @@ class Fleet:
         """The name a carved host is born with: the metal it came from, the
         devices it owns, the regimes it wears, and a per-fleet CARVE ORDINAL.
 
-        The ordinal is not decoration. A regime's name carries kind and shape
-        but not base, so two carves that differ only by base would otherwise
+        The ordinal is not decoration. A regime's name carries capability and
+        shape but not base, so two carves that differ only by base would otherwise
         produce one name — and the base cannot go in the name either, because
         a base is "Qwen/Qwen3-0.6B" and a host name is a journal path segment
         that may hold no "/" (Host attests it). No separator here is "/" for
@@ -341,14 +343,14 @@ class Fleet:
         automatic: residual-only by construction (plan_carve drew from
         residual), never mutating an existing host (a NEW Host is born with
         its capability), journaled — legibility by record, not by approval.
-        The born partition is STAMPED with the metal's kind: the fraction says
-        how much, the kind says of what."""
+        The born partition is STAMPED with the metal's GPU kind: the fraction
+        says how much, the kind says of what."""
         metal = self.metal[step.metal]
         partition = Partition(step.metal, step.devices, step.memory, metal.gpu)
         engines: list[Engine] = []
         carved_learner: Learner | None = None
         for regime in step.regimes:
-            if regime.kind == "inference":
+            if regime.capability == "inference":
                 engines.append(self.engine_factory(regime, partition))
             else:
                 carved_learner = self.learner_factory(regime, partition)
@@ -361,8 +363,9 @@ class Fleet:
             "event": "carve", "t": time.time(), "host": name,
             "metal": step.metal, "gpu": metal.gpu,
             "devices": list(step.devices), "memory": step.memory,
-            "regimes": [{"name": r.name, "kind": r.kind, "base": r.base,
-                         "shape": r.shape} for r in step.regimes]})
+            "regimes": [{"name": r.name, "capability": r.capability,
+                         "base": r.base, "shape": r.shape}
+                        for r in step.regimes]})
         return host
 
     # ---- submit -------------------------------------------------------------

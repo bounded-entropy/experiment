@@ -58,7 +58,7 @@ image = (
 
 BASE = "Qwen/Qwen3-0.6B"
 # a SECOND base is what makes a second inference partition addressable at all:
-# capability is (kind, base, shape), so two hosts serving one base at one tp
+# capability is (capability, base, shape), so two hosts serving one base at one tp
 # are interchangeable and the ladder always joins the first (see FINDINGS)
 ALT_BASE = "Qwen/Qwen3-0.6B-Base"
 STORE = "modal://rlstack-store"
@@ -138,7 +138,7 @@ class Partitioned:
 
         print(f"  [build] engine {regime.name}: {regime.base} tp={regime.shape} "
               f"gpu_memory_utilization={partition.memory} "
-              f"on {partition.gpu} {partition.gpuset}{list(partition.devices)}")
+              f"on {partition.gpu} {partition.metal}{list(partition.devices)}")
         engine = VllmEngine(regime.base,
                             gpu_memory_utilization=partition.memory,
                             max_model_len=MAX_LEN, max_bundles=8,
@@ -286,7 +286,7 @@ def training_host(fleet, base: str):
     fleet's dict while its metal stayed resident."""
     return next(host for host in fleet.hosts.values()
                 for regime in host.regimes
-                if regime.kind == "training" and regime.base == base)
+                if regime.capability == "training" and regime.base == base)
 
 
 def preview_ladder(store) -> dict:
