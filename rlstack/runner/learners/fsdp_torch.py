@@ -7,6 +7,13 @@ not sharded — a tenant installs after the wrap, so they live whole on every
 rank and each rank steps its own copy. This build therefore buys MEMORY, not
 throughput: the ranks recompute the same microbatch rather than splitting one.
 
+THE LOAD IS SHARDED TOO, and that is what makes the width real: the base
+arrives on the CPU and each decoder block is moved to the device only to be
+sharded on the next line, so a rank's load peak is bounded by ITS SHARD rather
+than by the checkpoint. Loading whole and sharding after — what this did until
+#58 — capped a learner at whatever base fits on ONE card no matter what `fsdp`
+said, which is a ceiling exactly where the width was supposed to remove one.
+
 THE WIDTH-INDEPENDENCE INVARIANT: emit()/load() bytes must not depend on
 `fsdp`. It holds by construction — the only sharded thing is the frozen base,
 which is never emitted — and `attest_emit_is_width_free` proves it at every
@@ -93,20 +100,76 @@ class FsdpTorchLearner(TorchLearner):
         the grouping that lets one all-gather overlap the previous block's
         compute. Nothing trainable is inside — tenants install after this — so
         no gradient is ever reduce-scattered and every rank keeps whole
-        deltas."""
+        deltas.
+
+        TWO RULES, one per phase, and a rank's memory is bounded by both:
+
+        A RANK'S LOAD PEAK IS BOUNDED BY ITS SHARD, NOT BY THE BASE. The base
+        arrives on the CPU (see load_the_frozen_base_sharded) and each block is
+        moved to the device only to be sharded on the next line, so the largest
+        thing a device ever holds whole is ONE decoder block — not the
+        checkpoint. Before this, load-then-shard put the entire base on one
+        device first, which silently capped a learner at whatever base fits on
+        a SINGLE card whatever `fsdp` said: a 14B in bf16 is 27.5 GiB and an L4
+        has 22, so the width that existed to make it fit never got the chance
+        to.
+
+        A RANK'S PARAMETER FOOTPRINT IN THE FORWARD IS ONE BLOCK'S UNSHARD,
+        NEVER THE MODEL. That is what the per-block grouping plus
+        reshard_after_forward buys; it is spelled out rather than left to a
+        default because it is the difference between ~1.4 GiB of unshard
+        buffers and 27.5 GiB. It bounds PARAMETERS only, and #58 measured that
+        parameters were never the thing that filled the card: one ~1000-token
+        document's saved activations are, and they are bounded by neither of
+        these rules nor by microbatch_tokens, which cannot go below one
+        document (flatten.pack: "a single document longer than
+        microbatch_tokens gets its own oversized batch").
+        """
         from torch.distributed.fsdp import fully_shard
 
         mesh = self.ranks.mesh()
         for block in self.frozen_blocks():
-            fully_shard(block, mesh=mesh)
+            block.to(self.device)          # one block whole: the peak's bound
+            fully_shard(block, mesh=mesh, reshard_after_forward=True)
+        self.move_what_no_block_owns()
         fully_shard(self._model, mesh=mesh)
         self.attest_base_is_sharded()
-        # The load is whole-then-shard, so the peak was the WHOLE base and
-        # torch's caching allocator is still holding it. A co-resident engine
-        # reserves from the driver, not from that cache, so the difference
-        # between the peak and the shard has to go back — on an 8B base that
-        # is 8 GiB, and without this the sampler beside us cannot start.
+        # Each move left its whole-tensor staging in torch's caching allocator.
+        # A co-resident engine reserves from the driver, not from that cache,
+        # so the difference between the peak and the shard has to go back or
+        # the sampler beside us cannot start.
         torch.cuda.empty_cache()
+
+    def move_what_no_block_owns(self) -> None:
+        """Move the tensors no decoder block owns — the input embedding, the
+        untied output head, the final norm — onto the device, AND TOUCH
+        NOTHING ELSE.
+
+        `self._model.to(device)` would be the obvious call and it reaches too
+        far: Module._apply walks EVERY parameter in the tree, including the
+        blocks this method's caller has already sharded, and swaps each one's
+        `.data` while fully_shard's FSDPParam bookkeeping still aliases the
+        storage it made at wrap time. Nothing here depends on what that would
+        do — the point is that it is not this method's business. The move is
+        by hand, over the leaves still on the CPU; a sharded parameter is
+        already on its device and is skipped by that test alone, so this never
+        has to know what FSDP did.
+
+        STATED PLAINLY BECAUSE IT WAS FIRST WRITTEN DOWN WRONG (#58): swapping
+        this in for `self._model.to(device)` changed the measured forward peak
+        by NOTHING — 21.47 GiB of 22.03, to the byte. It is the tidier of two
+        working spellings, not a fix for anything. What actually filled that
+        card is one document's forward (see the entry), and no arrangement of
+        this method moves it.
+        """
+        for module in self._model.modules():
+            for name, param in list(module._parameters.items()):
+                if param is not None and param.device.type == "cpu":
+                    module._parameters[name] = torch.nn.Parameter(
+                        param.data.to(self.device), requires_grad=False)
+            for name, buffer in list(module._buffers.items()):
+                if buffer is not None and buffer.device.type == "cpu":
+                    module._buffers[name] = buffer.to(self.device)
 
     def frozen_blocks(self) -> list[torch.nn.Module]:
         """The units FSDP shards: the base's decoder blocks, named
@@ -227,15 +290,41 @@ class FsdpTorchLearner(TorchLearner):
 
     def _ensure_base(self, base: str) -> None:
         """TorchLearner's rule (one learner, one base) plus this build's: the
-        base is loaded whole, then SHARDED, before any tenant is installed on
-        it. Order matters both ways — sharding after the load because
-        fully_shard shards real tensors, and before the first install because
-        a delta installed into an unsharded tree would be swept into an FSDP
-        parameter group and emitted as a shard."""
-        fresh = self._model is None
-        super()._ensure_base(base)
-        if fresh:
-            self.shard_the_frozen_base()
+        base is loaded onto the CPU, then SHARDED ONTO THE DEVICE, before any
+        tenant is installed on it. Order matters both ways — sharding after the
+        load because fully_shard shards real tensors, and before the first
+        install because a delta installed into an unsharded tree would be swept
+        into an FSDP parameter group and emitted as a shard.
+
+        A learner that already holds a base takes the base class's path, which
+        is where the one-learner-one-base refusal lives; only the FRESH load
+        differs here, because only the fresh load touches device memory.
+        """
+        if self._model is not None:
+            super()._ensure_base(base)      # the one-base rule, unchanged
+            return
+        self.load_the_frozen_base_sharded(base)
+
+    def load_the_frozen_base_sharded(self, base: str) -> None:
+        """The fresh load, arriving on the CPU so the device never holds the
+        base whole.
+
+        This is TorchLearner._ensure_base's body with ONE thing removed: the
+        `.to(device)`. The unsharded build has to make that move — it has one
+        device and the whole base has to fit on it — but for this build it was
+        the thing that made `fsdp` a lie at the only moment it mattered, so the
+        move belongs to shard_the_frozen_base, which does it a block at a time.
+        Everything else is the base class's: frozen, in eval (replay is exact
+        recompute, so never dropout), and the base recorded before any tenant.
+        """
+        from transformers import AutoModelForCausalLM
+
+        model = AutoModelForCausalLM.from_pretrained(base, torch_dtype=self.dtype)
+        model.requires_grad_(False)
+        model.eval()
+        self._model = model
+        self._base = base
+        self.shard_the_frozen_base()
 
 
 def lead_fsdp_learner(width: int, *, dtype: torch.dtype = torch.bfloat16,
