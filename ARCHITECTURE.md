@@ -390,10 +390,20 @@ static trajectory datasets are named (`cas://<sha>/...`).
 `rlstack/data/stores/base.py`
 
 **Journal** — `hosts/<name>/log.jsonl` and `fleet/log.jsonl`: append-only
-observability. Placement, boots, tenancies, gpu samples and carves land here,
-deliberately outside run manifests so placement stays out of identity.
-Correctness never reads a journal; torn tails are tolerated.
+observability. Placement, boots, tenancies, gpu samples, traffic windows,
+update timings and carves land here, deliberately outside run manifests so
+placement stays out of identity. Correctness never reads a journal; torn tails
+are tolerated.
 `rlstack/data/stores/base.py`, `rlstack/runner/host.py`, `rlstack/runner/fleet.py`
+
+**Emission plane** — the measurement side of observability: a `TrafficMeter`
+the host's engines and arbiter count into (prefill and decode tokens, time to
+first token, admission wait, in-flight), drained once per stats tick into one
+windowed `traffic` event, and an `UpdateClock` the Trainer laps at its four
+phase boundaries into one `update` event per commit. Every number is wall
+clock, so every number lives in a host journal and none may enter a run
+directory.
+`rlstack/runner/meters.py`, `rlstack/observe/host_series.py`
 
 **Peek** — a read-only store read (`peek_manifest`, `peek_ledger`,
 `peek_dictionary`, `peek_eval_summaries`). Observers must never `open_run`:
