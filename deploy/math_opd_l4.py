@@ -30,15 +30,14 @@ THE TASK SET (deterministic, content-addressed):
 
 THE PROMPT (raw completion, the engine's v0 contract — no chat template):
     three worked exemplars, each ending "The answer is <n>." and terminated by
-    <|endoftext|>, then the problem. The terminator is the load-bearing part:
+    an eos token, then the problem. THE TERMINATOR IS THE LOAD-BEARING PART:
     the environment (math_single_turn) passes NO stop strings, so a completion
     runs to max_tokens unless the model emits an eos id — and the verifier
-    reads the LAST number in it, which would then be from whatever the model
-    invented after answering. <|endoftext|> is Qwen3's pretraining document
-    separator AND one of its two generation-config eos ids (151643), so a
-    few-shot prompt that separates exemplars with it teaches the model to end
-    its own document exactly where its answer ends. `baseline` measures
-    whether that worked (finish=eos share) before any GPU-hour is committed.
+    reads the LAST number in it, which would then come from whatever the model
+    invented after answering. See DOCUMENT_END for which of Qwen3's two eos
+    ids works and the measurement that settled it; `baseline` reports the
+    finish-reason mix, so the scaffold is judged before any GPU-hour is
+    committed to a run.
 
 TOPOLOGY (#47's, unchanged except max_model_len):
     teacher    Qwen3-32B tp=4 on L4:4, frozen, inference regime only
@@ -109,7 +108,16 @@ MATH_SUBJECTS = ("algebra", "counting_and_probability", "geometry",
                  "precalculus")
 LEVELS = ("Level 3", "Level 4", "Level 5")
 
-DOCUMENT_END = "<|endoftext|>"   # Qwen3 id 151643: document separator AND eos
+# The exemplar terminator, and the most load-bearing string in this file.
+# Both Qwen3 checkpoints list TWO eos ids (151645 <|im_end|>, 151643
+# <|endoftext|>), so either stops a vLLM request — but only one of them is a
+# token the model was ever trained to PREDICT. Measured, not assumed:
+# <|endoftext|> (the pretraining document separator) was tried first and the
+# 8B ignored it in 50/50 completions, reproducing the Problem/Solution format
+# perfectly while never emitting the separator between blocks — which is what
+# a target masked out of the pretraining loss looks like from the outside.
+# <|im_end|> is the token post-training spends its whole life predicting.
+DOCUMENT_END = "<|im_end|>"      # Qwen3 id 151645
 
 EXEMPLARS = (
     ("What is the value of $3^2 + 4\\cdot 2 - 5$?",
@@ -129,14 +137,23 @@ INTEGER = re.compile(r"^-?\d+$")
 def few_shot_prompt(problem, style):
     """The raw-completion scaffold, in the two shapes worth measuring.
 
-    Both show the same three worked exemplars and both end each exemplar with
-    <|endoftext|> so the model learns where a document stops. They differ in
-    what the target invites:
+    Both show the same three worked exemplars and both terminate each one, so
+    they differ in exactly one thing — what the target invites:
 
-        "direct"  the prompt ends "The answer is" — the answer is the very
-                  next token, which is the shape the plan pre-registered.
-        "cot"     the prompt ends "Solution:" — the model works the problem
-                  the way the exemplars do and says the answer at the end.
+        "cot"     the prompt ends "Solution:", so the target block is
+                  IDENTICAL IN SHAPE to the three above it: the model works
+                  the problem, says "The answer is <n>." and terminates.
+        "direct"  the prompt ends "The answer is", so the answer is the very
+                  next token — the shape the plan pre-registered.
+
+    MEASURED, same 50 held-out tasks, same greedy 8B, same verifier
+    (::baseline --students-only): cot 0.500 accuracy, 35/50 clean eos, 287
+    tokens mean; direct 0.040 accuracy, 9/50 eos, 421 tokens. Both halves of
+    that gap are the same cause — a target block that does not match the
+    exemplars is not a pattern the model completes, so it neither reasons nor
+    stops. direct's answer-first guess IS right 18% of the time (the
+    first-number diagnostic), but it then keeps writing and the verifier's
+    last-number rule reads whatever it invented next. cot is the default.
 
     Style is a property of the TASK FILE (it is inside the prompt text), so
     the two are different content-addressed task sets and therefore different
@@ -290,7 +307,7 @@ def serve_one_partition(name, base, tp, memory):
 
 
 @app.cls(image=image, gpu="L4:4", volumes=VOLUMES, timeout=14400,
-         scaledown_window=300, max_containers=1, cpu=8.0, memory=65536)
+         scaledown_window=1800, max_containers=1, cpu=8.0, memory=65536)
 @modal.concurrent(max_inputs=64)
 class TeacherHost:
     """32B across four L4s, frozen. It trains nothing and owns no learner: a
@@ -325,7 +342,7 @@ class TeacherHost:
 
 
 @app.cls(image=image, gpu="L4:2", volumes=VOLUMES, timeout=14400,
-         scaledown_window=300, max_containers=1, cpu=8.0, memory=32768)
+         scaledown_window=1800, max_containers=1, cpu=8.0, memory=32768)
 @modal.concurrent(max_inputs=64)
 class StudentHost:
     """The sampler: 8B at tp=2, serving this run's LoRA bundles. A separate
@@ -516,7 +533,7 @@ def math_opd_spec(store, *, style, n_updates, n_train, n_heldout, eval_every,
 
 @app.function(image=image, volumes=VOLUMES, timeout=1800, cpu=4.0,
               memory=8192)
-def tasks(style: str = "direct", n_train: int = 512, n_heldout: int = 128
+def tasks(style: str = "cot", n_train: int = 512, n_heldout: int = 128
           ) -> dict:
     """Build both task files, measure them, and say what the filter cost.
 
@@ -568,7 +585,7 @@ def tasks(style: str = "direct", n_train: int = 512, n_heldout: int = 128
     check("every prompt is under the cap", longest <= PROMPT_TOKEN_CAP,
           f"longest {longest} <= {PROMPT_TOKEN_CAP}")
     ids = tokenizer.encode(DOCUMENT_END, add_special_tokens=False)
-    check("the exemplar terminator is one eos id", ids == [151643],
+    check("the exemplar terminator is one eos id", ids == [151645],
           f"{DOCUMENT_END!r} -> {ids}")
 
     print(f"\n[example prompt]\n{rows[0]['prompt']}\n[/example] answer="
@@ -625,9 +642,15 @@ async def measure_pool(label, pool_engine, task_list, max_tokens):
     generated = [len(turn.token_ids) for turn in turns]
     first = sum(float(_first_number_matches(traj)) for traj in trajectories)
     accuracy = sum(rewards) / len(rewards)
+    # A completion cut off at max_tokens scores 0 whatever the model knew, so
+    # the two numbers answer different questions: `accuracy` is what the run
+    # will see, `finished` is what the model can do inside the budget.
+    finished = [r for r, t in zip(rewards, turns) if t.finish != "length"]
     print(f"\n[{label}] verifier accuracy {accuracy:.3f} over {len(rewards)} "
           f"tasks")
     print(f"    finish reasons     {dict(finish)}")
+    print(f"    accuracy | finished {sum(finished) / len(finished):.3f} "
+          f"over {len(finished)} that were not truncated")
     print(f"    generated tokens   mean {sum(generated) / len(generated):.0f}  "
           f"max {max(generated)}")
     print(f"    first-number rule  {first / len(rewards):.3f} "
@@ -636,6 +659,8 @@ async def measure_pool(label, pool_engine, task_list, max_tokens):
         print(f"    --- {traj.task.id} answer={traj.task.meta['answer']}\n"
               f"    {traj.turns[0].message.content[:300]!r}")
     return {"accuracy": round(accuracy, 4),
+            "accuracy_if_finished": round(sum(finished) / len(finished), 4)
+            if finished else None,
             "first_number": round(first / len(rewards), 4),
             "finish": dict(finish),
             "mean_generated": round(sum(generated) / len(generated), 1),
@@ -652,7 +677,7 @@ def _first_number_matches(traj):
 
 @app.function(image=image, volumes=VOLUMES, timeout=7200, cpu=4.0,
               memory=16384)
-def baseline(style: str = "direct", n_tasks: int = 100,
+def baseline(style: str = "cot", n_tasks: int = 100,
              max_tokens: int = MAX_TOKENS, students_only: bool = False) -> dict:
     """The ceiling and the floor every later reward curve is read against.
 
@@ -913,9 +938,9 @@ def three_host_run(spec, *, label, n_updates):
 
 @app.function(image=image, gpu="L4:2", volumes=VOLUMES, timeout=14400,
               cpu=8.0, memory=65536)
-def shakeout(n_updates: int = 10, style: str = "direct", master: int = 91,
-             max_tokens: int = MAX_TOKENS, microbatch_tokens: int = 1024
-             ) -> dict:
+def shakeout(n_updates: int = 8, eval_every: int = 4, style: str = "cot",
+             master: int = 91, max_tokens: int = MAX_TOKENS,
+             microbatch_tokens: int = 1024) -> dict:
     """Ten updates of the real three-host run, for the five questions.
 
         the window    does an 8B tp=2 sampler and a 32B tp=4 teacher both
@@ -929,12 +954,16 @@ def shakeout(n_updates: int = 10, style: str = "direct", master: int = 91,
                       distance on these completions)?
         the rails     is logprob_gap still at the kernel floor when the
                       documents are 40x longer than #47's?
+
+    Eight updates, not ten: eight L4s bill for the whole run, and the answers
+    above are all visible by update three — the budget is better spent holding
+    a retry in reserve, because first contact usually finds something.
     """
     from rlstack import ModalVolumeStore
 
     store = ModalVolumeStore("/store", volume=store_volume, locator=STORE)
     spec = math_opd_spec(store, style=style, n_updates=n_updates,
-                         n_train=512, n_heldout=32, eval_every=5,
+                         n_train=512, n_heldout=32, eval_every=eval_every,
                          master=master, max_tokens=max_tokens,
                          microbatch_tokens=microbatch_tokens)
     store_volume.commit()
@@ -947,7 +976,7 @@ def shakeout(n_updates: int = 10, style: str = "direct", master: int = 91,
 
 @app.function(image=image, gpu="L4:2", volumes=VOLUMES, timeout=28800,
               cpu=8.0, memory=65536)
-def full(n_updates: int = 60, style: str = "direct", master: int = 47,
+def full(n_updates: int = 60, style: str = "cot", master: int = 47,
          max_tokens: int = MAX_TOKENS, microbatch_tokens: int = 1024,
          go: bool = False) -> dict:
     """The Phase A run: 50-100 updates, lag=1, eval every 10 on held-out MATH.
