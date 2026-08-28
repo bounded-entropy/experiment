@@ -2142,6 +2142,111 @@ specs; backends (local/modal/skypilot) and GPU topology are semantics-neutral.
       "each tenant needs exclusive install" (install is additive; the true
       reason is the tenant could never be REMOVED).
 
+56. THE OBSERVER'S SECOND OVERHAUL: FILES, WAVES, AND THE TWO AGGREGATES
+    (settled, Samarth-directed: new charts, a redrawn GPU panel — "very ugly
+    rn" — and a wave/trajectory browser with a chat-style reader; explicitly
+    NO React, NO build step, NO CDN, NO node toolchain). Entirely inside
+    observe/ plus two peek verbs on the Store, one mount line in
+    deploy/modal_app.py and the rule-8 extension. Built against #55's emission
+    contract, whose plane is a sibling worktree: nothing here waits on it.
+    - THE PAGE IS FILES NOW. page.py was 645 lines of HTML+CSS+JS inside a
+      Python string; it is now the READER of rlstack/observe/web/ —
+      index.html, style.css and nine native ES modules (app · nav · dom ·
+      charts · runs · run · fleet · host · wave) the browser loads itself.
+      THE RULE, stated so a later session does not undo it: no build step, no
+      bundler, no CDN, no framework — a module is added by writing a file and
+      importing it. observe/web/ is the package's ONE folder of non-.py files
+      (STYLE.md rule 8 gains that line; test_architecture.py enforces both
+      halves: the document ships, and nothing non-.py lives elsewhere). ui.py
+      serves /web/<file> with its content type, an asset is ONE file name
+      (web/ is flat, so no path is ever walked), and every page route still
+      returns the same document. The JSON API stays the contract between
+      Python and the page.
+    - THE CHARTER AMENDMENT. The observer's rule was "journals + peeks, never
+      experiment content". It now also reads SEALED, content-addressed
+      artifacts — and nothing else. Sealed IS the whole of the licence: an
+      update the ledger committed is immutable (the store refuses to
+      overwrite it), so reading it can neither race a writer nor perturb a
+      run. Never live state, never an attach, never a write. Mechanically
+      this needed peek_wave / peek_postdata beside peek_ledger, because
+      read_wave lives on RunHandle and open_run DISCARDS unsealed work — an
+      observer that "just opened the run" would delete a live tenant's staged
+      wave. wave_key/postdata_key became module functions so the handle and
+      the peek name the same key. observe/waves.py is the reading.
+    - THE WAVE BROWSER. The run page lists the ledger's tail (20) and each
+      wave is a page: /run/<id>/wave/<n>, fetched lazily, never preloaded,
+      and never polled (sealed bytes do not change). It carries the
+      distributions computed server-side — reward and every other scalar
+      column, generation length, the finish mix over turns (stop vs length is
+      the truncation that quietly costs reward), and for OPD-style runs the
+      SAMPLED KL the bytes already contain: behavior logprobs minus the
+      teacher_logprobs column over the same tokens, in flatten order. Below
+      them the trajectories, grouped as they were trained (the Group is the
+      scope a postprocessor saw), each expandable into a chat reader:
+      role-labelled bubbles, generated ones marked (a Turn is one request —
+      one pinned bundle, one seed, one contiguous KV) with tokens, finish,
+      seed and mean behavior logprob, and a fact row of the postdata columns,
+      bundle_id and policy_version. Record shapes come from
+      data/trajectory.py; message identity is matched by id(), as flatten and
+      the teacher scorer match it.
+    - THE TWO AGGREGATES (observe/aggregate.py, the reading true of neither
+      one host nor one run): inference partitions summed as tokens/s over
+      every serving host, training partitions summed as updates/s over every
+      run. THE BUCKET RULE: per bucket, each host's MEAN of its own per-window
+      rates, summed across hosts — a host that sampled twice does not count
+      twice. And a bucket is never narrower than the fact it summarizes: the
+      inference width is floored by the widest declared window_s, the
+      training width by the pooled median gap between updates (N runs
+      stepping every T land one update every T/N, exactly the width at which
+      the sum reads N/T). Found by driving it: one shared width made the
+      fleet line SAW between one host and two, and read 0.29 updates/s where
+      the truth was 0.0071.
+    - STEP ECONOMICS, FIRST-CLASS. The run page carries steps/s and a
+      per-update duration bar DECOMPOSED into collect · post · train · seal,
+      hover naming each phase's seconds. This is the scorer-economics
+      instrument: inline teacher scoring shows up as `post` eating the bar.
+      Beside it, PARITY: logprob_gap is promoted out of the rails into its
+      own section with a zero reference line, because it is the standing
+      alarm (#25's certificate, running).
+    - THE GPU REDRAW. One card per device instead of two charts of all of
+      them: a utilization rail over an HBM rail, the device total drawn as a
+      labelled reference line, the footer reading "now 82% · 15.9 GiB of
+      22.5 GiB". Every non-sampled journal event is a MOMENT marked on both
+      rails — boot, attach, detach, and sleep/wake the day the arbiter
+      journals them (the reading is schema-tolerant: any event kind that is
+      not stats/traffic/update becomes a marker) — because a memory curve
+      that falls off a cliff is only explained by the moment beside it. The
+      host page also grows the six traffic rails (tokens/s, requests/s,
+      in-flight, ttft and admission wait), and the open metrics slot now
+      plots only what no reading above claims.
+    - HOVER SURVIVED THE REWRITE, including for DERIVED points: an aggregate
+      point's tooltip carries the journaled counts it was summed from
+      ("1093 prefill tokens · 2 host(s) · 3 sample(s)"). A poll still never
+      redraws under the cursor, and a scroll now clears the tooltip with it.
+    - MERGE SEAMS for #55, both at the top of observe/aggregate.py and marked:
+      traffic_channels (the six named channels, computed here from raw
+      traffic events) is replaced by host_series.metric_series's named
+      channels, and run_timing by host_series.run_timing — one line each.
+    - DEPLOY, VERIFIED: add_local_python_source ships .py files ONLY
+      (ignore=NON_PYTHON_FILES — checked against the installed modal 1.5.4:
+      index.html/app.js/style.css all return True, ui.py False), so
+      deploy/modal_app.py gains ONE add_local_dir of observe/web/ at an
+      absolute path off __file__. No other deploy file serves the UI
+      (partition_l4.py::observe uses the terminal renderers). The local
+      venue reads the same files through importlib.resources, verified by
+      serving `python -m rlstack ui` over a demo store and driving every page.
+    526 tests green (22 new in tests/test_observer.py plus the rule-8 test:
+    the assets and the module graph, the wave listing and detail, wave-order
+    alignment, the distributions and the sampled KL, the four routes and
+    their 404s, "reading a wave never sweeps unsealed work", the six channels,
+    run_timing's phases, moments, and the two aggregates incl. the bucket
+    floor).
+    DELIBERATELY DEFERRED (still the "named next" of #50): token-level
+    drill-down, cross-run curve comparison, and distributions anywhere but
+    the wave page (a run-level histogram over waves wants the scorer daemon's
+    postdata cadence first). Also unbuilt: paging a wave beyond the first 256
+    trajectories, and prev/next navigation between waves.
+
 ## Open threads (do NOT treat as settled; flag when your answer touches them)
 
 - TODO (Samarth, settled intent — future, nothing now): BUNDLE LRU EVICTION
