@@ -53,7 +53,7 @@ continue is in the repo.
   The identity move is ACCEPTED: registry strings + class sources hash
   into run_id, so pre-rename stores are read-only history (the observer
   tolerates old journal keys; one regression test pins that).
-- 504 tests green on fakes (torch-gated skips run in the image). Real
+- 547 tests green on fakes (torch-gated skips run in the image). Real
   metal is PROVEN through the stress matrix (deploy/stress_l4.py): seven
   concurrent tenants — grpo/ppo/gspo/sft/sdft/replay_distill/self_anchor,
   live + replay + static sources, a judge pool, lag=2 — on one Modal L4
@@ -85,8 +85,9 @@ continue is in the repo.
 - Experiments are tenants submitted to hosts, each with its own run store
   (one experiment, one store, for life). The GpuArbiter owns admission;
   leases are gone. The observer (rlstack/observe/, `python -m rlstack
-  {hosts,runs,gpu,ui}`) reads journals + peeks only — never experiment
-  content; the UI renders each run from its own dictionary.json.
+  {hosts,runs,gpu,ui}`) reads journals + peeks only — since #57 the peeks
+  include SEALED per-update artifacts (peek_wave/peek_postdata), never
+  live state; the UI renders each run from its own dictionary.json.
 - The loss is pure math (#38): requires names data columns only; post
   processors produce everything else (token_level = per-token channel; a
   processor may score through any declared pool, cross-base included).
@@ -99,9 +100,17 @@ continue is in the repo.
   are unique + journal-safe, factories receive the Partition, VllmEngine
   has an honest sleep seam (#52). Adapter lowerings are ONE contract per
   (kind, side) (#48: demands/attach/apply/align + reaches; vllm_engine.py
-  is a mechanism-blind bus). The observer has host pages + hover + the
-  open metrics slot (#50). Evaluator samples concurrently with
+  is a mechanism-blind bus). Evaluator samples concurrently with
   order-independent bytes; rank teardown is bounded (#53).
+- OBSERVABILITY IS LIVE (#56/#57 on top of #50): hosts journal windowed
+  `traffic` events (tokens/s, TTFT, admission wait, inflight — counted at
+  seams we own, drained on the stats tick) and per-update `update` events
+  (the four phases: collect/post/train/seal) — wall clock lives ONLY in
+  host journals, never a run dir (resume-equivalence holds, sha-proven).
+  The UI is rlstack/observe/web/ (native ES modules, no build step): step
+  economics, logprob_gap as the parity rail, fleet aggregates, redrawn GPU
+  cards, and the wave browser — sealed waves one click deep, trajectories
+  as chat.
 
 ## Quick commands
 
@@ -147,11 +156,9 @@ modal run deploy/fsdp_l4.py                     # the FSDP ladder on 2xL4
 - Async post daemon ("scorer"), pool-annotated flow graph, eval `terminal`
   bit, S3Store, generation-only runs (algo=None: needs a committing Sealer
   daemon + wave-shape knobs out of Schedule) — designed in CONTEXT, not
-  built. The UI (observe/ui.py + page.py + host_series.py, #50): graphs
-  with loss-walkback priority, hover raw values, host pages off the
-  journals (fleet placement timeline, per-device gpu series, the
-  schema-tolerant metrics slot — nothing emits into it yet), run
-  dropdown. Named next: distributions, token drill-down, cross-run curve
-  comparison, host throughput emission (design in #50).
+  built. UI named next (#57 shipped throughput emission, per-wave
+  distributions, and the wave browser): token drill-down, cross-run curve
+  comparison, and vLLM-internal occupancy (KV cache / scheduler —
+  version-coupled, only if the seam-level numbers prove insufficient).
 - Open threads listed at the foot of CONTEXT.md (identity rings, schedule
   split, Wave/ArchiveContext typing).
