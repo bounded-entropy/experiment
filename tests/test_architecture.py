@@ -58,6 +58,18 @@ class TestMembrane(unittest.TestCase):
             self.assertFalse(bad, f"{file} imports {sorted(bad)} — the "
                                   f"observer reads committed bytes only")
 
+    def test_observe_web_is_the_only_home_of_static_assets(self) -> None:
+        """rule 8: observe/web/ holds the UI as real files (index.html,
+        style.css, native ES modules) and is the package's ONE folder of
+        non-.py files — no build step, no CDN, nothing generated. Everywhere
+        else under rlstack/ is Python."""
+        web = PACKAGE / "observe" / "web"
+        self.assertTrue((web / "index.html").is_file(), "the document must ship")
+        stray = sorted(str(path.relative_to(PACKAGE)) for path in PACKAGE.rglob("*")
+                       if path.is_file() and path.suffix not in (".py", ".pyc")
+                       and web not in path.parents)
+        self.assertFalse(stray, f"non-python files outside observe/web/: {stray}")
+
     def test_data_imports_no_other_rlstack_package(self) -> None:
         """The membrane is dumb: no specs, no registries, no worlds."""
         for file, imports in imports_by_region("data").items():
