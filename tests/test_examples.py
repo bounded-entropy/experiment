@@ -13,7 +13,7 @@ from dataclasses import replace
 from typing import Any
 
 from rlstack import (
-    ADAPTERS,
+    ADAPTER_TYPES,
     AdapterSpec,
     AlgoSpec,
     EvalSpec,
@@ -155,7 +155,7 @@ class TestExample2PPO(unittest.TestCase):
     def test_the_entire_diff_is_a_bank_entry_and_an_algo(self) -> None:
         exp = example_1()
         bank = dict(exp.policy.bank)
-        bank["critic"] = AdapterSpec(kind="value_head", site="final_hidden",
+        bank["critic"] = AdapterSpec(adapter_type="value_head", site="final_hidden",
                                      init={"hidden": 4096})
         exp2 = replace(
             exp,
@@ -186,10 +186,10 @@ class TestExample3SoftPromptAttnBias(unittest.TestCase):
         validate_or_raise(exp, SCHEMA_35B)
 
     def test_only_attn_bias_touches_the_engine(self) -> None:
-        self.assertEqual(ADAPTERS.get("attn_bias").instance.engine_plugin,
+        self.assertEqual(ADAPTER_TYPES.get("attn_bias").instance.engine_plugin,
                          "rlstack_engine.side_attention")
         for name in ("lora", "soft_prompt", "value_head"):
-            self.assertIsNone(ADAPTERS.get(name).instance.engine_plugin)
+            self.assertIsNone(ADAPTER_TYPES.get(name).instance.engine_plugin)
 
 
 # --- Example 4 — environments: the data path through the membrane ------------

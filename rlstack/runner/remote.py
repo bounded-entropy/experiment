@@ -99,7 +99,7 @@ def encode_bundle(bundle: Bundle) -> dict:
             "policy_version": dict(bundle.policy_version),
             "payloads": {name: _b64(data)
                          for name, data in bundle.payloads.items()},
-            "kinds": dict(bundle.kinds)}
+            "adapter_types": dict(bundle.adapter_types)}
 
 
 def decode_bundle(row: dict) -> Bundle:
@@ -107,7 +107,7 @@ def decode_bundle(row: dict) -> Bundle:
                   policy_version=row["policy_version"],
                   payloads={name: _unb64(text)
                             for name, text in row["payloads"].items()},
-                  kinds=row["kinds"])
+                  adapter_types=row["adapter_types"])
 
 
 def encode_sites(sites: Sequence[SiteMeta]) -> list[dict]:

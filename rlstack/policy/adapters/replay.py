@@ -6,9 +6,9 @@ replay forward is a wiring bug and never a fallback to whoever went last. The
 trainer-side twin of the engine's per-token adapter index (I8).
 
 The plan rides ON THE MODEL because the model is the one handle install_replay
-receives, so routing reaches every wired lowering without widening the kind
-contract. torch is imported at module scope: this file loads from the kinds'
-compute halves and the learner, never from the package root.
+receives, so routing reaches every wired lowering without widening the adapter
+type contract. torch is imported at module scope: this file loads from the
+adapter types' compute halves and the learner, never from the package root.
 """
 
 from __future__ import annotations
@@ -92,7 +92,7 @@ class RowPlan:
 def row_plan(model: Any) -> RowPlan:
     """The model's one row plan, created by whoever asks first.
 
-    Both sides ask here — the learner to route a forward, a kind's
+    Both sides ask here — the learner to route a forward, an adapter type's
     install_replay to hand the plan to the sites it wires — so the table is
     per loaded base and exactly one function knows where it lives.
     """

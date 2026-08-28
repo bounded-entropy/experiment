@@ -118,7 +118,7 @@ class LoopTest(unittest.TestCase):
         from rlstack import AdapterSpec, SpecError
         spec = arith_spec(self.train, policy=PolicySpec(
             base="Qwen/Qwen3-0.6B",
-            bank={"latent": AdapterSpec(kind="soft_prompt", site="final_hidden",
+            bank={"latent": AdapterSpec(adapter_type="soft_prompt", site="final_hidden",
                                         init={"n": 8, "d": 64})}))
         with self.assertRaises(SpecError) as caught:
             self.run_spec(spec)

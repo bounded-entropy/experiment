@@ -24,7 +24,7 @@ from rlstack.data.flatten import broadcast, flatten, pack
 from rlstack.data.stores.base import RunHandle, bump
 from rlstack.data.trajectory import wave_from_rows
 from rlstack.policy.compile import Bundle, compile_bundle
-from rlstack.registry import ADAPTERS
+from rlstack.registry import ADAPTER_TYPES
 from rlstack.runner.traffic import Routes
 from rlstack.runner.arbiter import GpuArbiter
 from rlstack.runner.interfaces import Engine, Learner, TrainStats
@@ -58,8 +58,8 @@ class Trainer(Daemon):
         bank = spec.policy.bank
         self.trainable = sorted(n for n, a in bank.items() if a.trainable)
         self.servable = sorted(n for n, a in bank.items()
-                               if ADAPTERS.get(a.kind).instance.serving is not None)
-        self.kinds = {n: bank[n].kind for n in self.servable}
+                               if ADAPTER_TYPES.get(a.adapter_type).instance.serving is not None)
+        self.adapter_types = {n: bank[n].adapter_type for n in self.servable}
 
     # ---- the acquisition condition (override to change the alternation) -----
 
@@ -97,7 +97,7 @@ class Trainer(Daemon):
 
             self.version = bump(self.version, self.trainable)
             self.bundle = compile_bundle(emitted.adapters, self.version,
-                                         self.servable, self.kinds)
+                                         self.servable, self.adapter_types)
             for name in self.trainable:
                 self.run.write_blob("adapters", name, self.version[name],
                                     emitted.adapters[name])

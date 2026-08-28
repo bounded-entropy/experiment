@@ -17,7 +17,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from rlstack.registry import ADAPTERS, LOSSES, POST
+from rlstack.registry import ADAPTER_TYPES, LOSSES, POST
 from rlstack.spec.specs import ExperimentSpec
 
 # Rollout facts every trajectory records regardless of the bank (I6).
@@ -182,19 +182,19 @@ def flow_graph(spec: ExperimentSpec) -> FlowGraph:
             consumers=(f"loss:{loss}",) if record in requires else (),
             feeds_loss=record in requires, stored=True, granularity="token"))
     for entry, adapter_spec in sorted(spec.policy.bank.items()):
-        if adapter_spec.kind not in ADAPTERS:
+        if adapter_spec.adapter_type not in ADAPTER_TYPES:
             continue
-        kind = ADAPTERS.get(adapter_spec.kind).instance
-        for record in kind.records:
+        adapter_type = ADAPTER_TYPES.get(adapter_spec.adapter_type).instance
+        for record in adapter_type.records:
             nodes.append(FlowNode(
                 name=record, kind="record", phase="wave",
-                producer=f"adapter:{adapter_spec.kind}",
+                producer=f"adapter:{adapter_spec.adapter_type}",
                 consumers=(f"loss:{loss}",) if record in requires else (),
                 feeds_loss=record in requires, stored=True))
-        for provided in sorted(kind.provides):
+        for provided in sorted(adapter_type.provides):
             nodes.append(FlowNode(
                 name=provided, kind="provided", phase="forward",
-                producer=f"adapter:{adapter_spec.kind}",
+                producer=f"adapter:{adapter_spec.adapter_type}",
                 consumers=(f"loss:{loss}",) if provided in requires else (),
                 feeds_loss=provided in requires, stored=False))
 

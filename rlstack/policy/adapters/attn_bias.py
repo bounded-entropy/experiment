@@ -3,10 +3,10 @@ row), over the sites a soft prompt exports.
 
 HALF BUILT, ON PURPOSE. The replay lowering is real and proven; the rollout
 lowering demands a PLUGIN whose seams the pinned build does not have — so no
-build serves this kind, every engine honestly reports NONE for SIDE_ATTENTION,
-and a spec carrying an attn_bias is refused at Phase 0 rather than served
-wrong. That refusal is the feature: a kind is served when its mechanism is
-proven, not when its class exists.
+build serves this adapter type, every engine honestly reports NONE for
+SIDE_ATTENTION, and a spec carrying an attn_bias is refused at Phase 0 rather
+than served wrong. That refusal is the feature: an adapter type is served when
+its mechanism is proven, not when its class exists.
 
 Its site (queries -> prompt[:n]) is not a base-model site, so an attn_bias
 without a soft prompt in the bank dies at Phase 0 with site-no-match.
@@ -14,12 +14,12 @@ without a soft prompt in the bank dies at Phase 0 with site-no-match.
 
 from __future__ import annotations
 
-from rlstack.policy.adapters.base import Adapter, Mechanism, adapter
+from rlstack.policy.adapters.base import AdapterType, Mechanism, adapter_type
 from rlstack.policy.siteschema import SiteMeta
 
 
-@adapter("attn_bias")
-class AttnBias(Adapter):
+@adapter_type("attn_bias")
+class AttnBias(AdapterType):
     serving = Mechanism.SIDE_ATTENTION
     engine_plugin = "rlstack_engine.side_attention"
 

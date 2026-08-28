@@ -1,9 +1,9 @@
 """TorchLearner: the Learner protocol on real metal, multi-tenant.
 
 ONE frozen base shared by every tenant — the memory asymmetry that makes
-tenancy affordable — with per-tenant params built and installed by each kind's
-own compute half, and one optimizer per (tenant, entry) so optim blobs map 1:1
-onto the store's optim/<name>@v.
+tenancy affordable — with per-tenant params built and installed by each adapter
+type's own compute half, and one optimizer per (tenant, entry) so optim blobs
+map 1:1 onto the store's optim/<name>@v.
 
 Tenancy is ADDITIVE INSTALL + ROW ROUTING, the trainer-side twin of the
 engine's punica path (I8): a tenant's deltas stay wired for as long as it is
@@ -31,7 +31,7 @@ import torch
 from rlstack.data.flatten import TokenBatch
 from rlstack.policy.adapters.replay import ReplayRows, row_plan
 from rlstack.policy.siteschema import SiteMeta
-from rlstack.registry import ADAPTERS, LOSSES
+from rlstack.registry import ADAPTER_TYPES, LOSSES
 from rlstack.runner.interfaces import Emitted, TrainStats
 from rlstack.spec.specs import ExperimentSpec
 from rlstack.training.losses import PolicyOutputs
@@ -44,15 +44,15 @@ def _init_seed(master: int, entry: str) -> int:
 
 @dataclass
 class _Tenant:
-    """One tenant's state on this learner: params, kinds, optimizers, and the
-    SLOT a forward's rows route to — its installed deltas keyed the way a site
-    asks for them (site path -> the params holding it)."""
+    """One tenant's state on this learner: params, adapter types, optimizers,
+    and the SLOT a forward's rows route to — its installed deltas keyed the way a
+    site asks for them (site path -> the params holding it)."""
 
     loss_fn: object
     trainable: list[str]
     entries: list[str]                                  # install order
     params: dict[str, object] = field(default_factory=dict)
-    kinds: dict[str, object] = field(default_factory=dict)
+    adapter_types: dict[str, object] = field(default_factory=dict)
     sites: dict[str, tuple[SiteMeta, ...]] = field(default_factory=dict)
     optimizers: dict[str, torch.optim.Optimizer] = field(default_factory=dict)
     slot: dict[str, Any] = field(default_factory=dict)
@@ -85,14 +85,14 @@ class TorchLearner:
             entries=list(spec.policy.bank),
         )
         for entry, adapter_spec in spec.policy.bank.items():
-            kind = ADAPTERS.get(adapter_spec.kind).instance
+            adapter_type = ADAPTER_TYPES.get(adapter_spec.adapter_type).instance
             init = dict(adapter_spec.init)
             init.setdefault("seed", _init_seed(spec.seeds.master, entry))
-            params = kind.params(resolved_sites[entry], init)
+            params = adapter_type.params(resolved_sites[entry], init)
             state.params[entry] = params
-            state.kinds[entry] = kind
+            state.adapter_types[entry] = adapter_type
             state.sites[entry] = resolved_sites[entry]
-            kind.install_replay(self._model, params, resolved_sites[entry])
+            adapter_type.install_replay(self._model, params, resolved_sites[entry])
             self._claim_slot(state, resolved_sites[entry], params)
             if entry in state.trainable:
                 overrides = dict(spec.algo.optim.overrides.get(entry, {}))
@@ -125,7 +125,7 @@ class TorchLearner:
 
     def emit(self, tenant: str) -> Emitted:
         state = self._tenant(tenant)
-        adapters = {entry: state.kinds[entry].emit(state.params[entry])
+        adapters = {entry: state.adapter_types[entry].emit(state.params[entry])
                     for entry in state.params}
         optim = {entry: _state_bytes(state.optimizers[entry])
                  for entry in state.trainable}
@@ -139,7 +139,7 @@ class TorchLearner:
         before any load, never after it."""
         state = self._tenant(tenant)
         for entry, payload in adapters.items():
-            state.kinds[entry].load(state.params[entry], payload)
+            state.adapter_types[entry].load(state.params[entry], payload)
         if optim:
             for entry, payload in optim.items():
                 state.optimizers[entry].load_state_dict(_state_from(payload))
@@ -177,12 +177,12 @@ class TorchLearner:
             state.slot[meta.path] = params
 
     def _remove(self, tenant: str) -> None:
-        """Unwire a tenant: every kind's uninstall_replay, install order
+        """Unwire a tenant: every adapter type's uninstall_replay, install order
         reversed. Its params objects survive untouched — what leaves the tree
         is the routability of its deltas, not the deltas."""
         state = self._tenants.pop(tenant)
         for entry in reversed(state.entries):
-            state.kinds[entry].uninstall_replay(
+            state.adapter_types[entry].uninstall_replay(
                 self._model, state.params[entry], state.sites[entry])
 
     def _tenant(self, tenant: str) -> _Tenant:

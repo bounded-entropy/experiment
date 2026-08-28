@@ -19,7 +19,7 @@ from typing import Callable
 from rlstack.data.stores.base import RunHandle, Store
 from rlstack.data.trajectory import Group, Task, Trajectory, Wave
 from rlstack.policy.compile import Bundle, compile_bundle
-from rlstack.registry import ADAPTERS
+from rlstack.registry import ADAPTER_TYPES
 from rlstack.runner.traffic import EnginePoolClient, Routes
 from rlstack.runner.interfaces import Engine
 from rlstack.runner.arbiter import GpuArbiter
@@ -43,8 +43,8 @@ class Evaluator(Daemon):
         self.engine = engine
         bank = spec.policy.bank
         self.servable = sorted(n for n, a in bank.items()
-                               if ADAPTERS.get(a.kind).instance.serving is not None)
-        self.kinds = {n: bank[n].kind for n in self.servable}
+                               if ADAPTER_TYPES.get(a.adapter_type).instance.serving is not None)
+        self.adapter_types = {n: bank[n].adapter_type for n in self.servable}
         self.env_name = spec.eval.env or (spec.gen.env if spec.gen else None)
         if self.env_name is None:
             raise ValueError("eval on a run without gen must set eval.env")
@@ -83,7 +83,7 @@ class Evaluator(Daemon):
         versions = {name: int(v) for name, v in entry["versions"].items()}
         payloads = {name: self.run.read_blob("adapters", name, versions[name])
                     for name in self.servable}
-        bundle = compile_bundle(payloads, versions, self.servable, self.kinds)
+        bundle = compile_bundle(payloads, versions, self.servable, self.adapter_types)
         if bundle.bundle_id != entry["bundle_id"]:
             raise RuntimeError(
                 f"recompiled bundle {bundle.bundle_id} != committed "

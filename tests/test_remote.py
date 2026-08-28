@@ -115,7 +115,7 @@ class WireTest(unittest.TestCase):
     def test_bundle_bytes_survive_base64(self) -> None:
         self.remote.add_bundle(Bundle(
             "bundle:y", {"pi": 1}, payloads={"pi": b"\x00\xff raw bytes"},
-            kinds={"pi": "lora"}))
+            adapter_types={"pi": "lora"}))
         self.assertIn("bundle:y", self.engine.bundle_log)
 
     def test_build_facts_cross_the_wire(self) -> None:
@@ -181,7 +181,7 @@ class VerbSplitTest(unittest.TestCase):
     def test_the_admission_free_verbs_ride_ask(self) -> None:
         self.pool.add_bundle(Bundle("bundle:x", {"pi": 0},
                                     payloads={"pi": b"\x00\xff"},
-                                    kinds={"pi": "lora"}))
+                                    adapter_types={"pi": "lora"}))
         self.pool.reachability(())
         self.pool.tokenize("ab")
         self.assertEqual(self.recorder.asked,

@@ -6,7 +6,7 @@ import unittest
 from dataclasses import replace
 from typing import Any
 
-from rlstack.policy.adapters import Adapter, Mechanism, adapter
+from rlstack.policy.adapters import AdapterType, Mechanism, adapter_type
 from rlstack.policy.siteschema import fake_qwen_schema
 from rlstack.registry import loss
 from rlstack.runner.fakes import FakeEngine
@@ -58,8 +58,8 @@ class _AlsoReward(PostProcessor):
     async def process(self, group: Any, data: Any, llm: Any) -> Any: ...
 
 
-@adapter("val_recording_adapter")
-class _RecordingAdapter(Adapter):
+@adapter_type("val_recording_adapter")
+class _RecordingAdapter(AdapterType):
     """Trainer-only adapter whose rollout lowering records per-token draws."""
 
     serving = None
@@ -118,17 +118,17 @@ class TestHappyPath(unittest.TestCase):
         (value_head provides "values") — the forward is not metal routing."""
         spec = clean_spec(policy=PolicySpec(
             base="Qwen/Qwen3-1.7B",
-            bank={"v": AdapterSpec(kind="value_head", site="value_head")}),
+            bank={"v": AdapterSpec(adapter_type="value_head", site="value_head")}),
             algo=replace(clean_spec().algo, loss="val_needs_values"))
         self.assertEqual(
             [i for i in validate(spec, SCHEMA)
              if i.code == "unsatisfied-requires"], [])
 
-    def test_trainer_only_kind_validates(self) -> None:
+    def test_trainer_only_adapter_type_validates(self) -> None:
         spec = clean_spec(policy=PolicySpec(
             base="Qwen/Qwen3-1.7B",
             bank={"pi": lora("layers.0-3.self_attn.*", r=16),
-                  "critic": AdapterSpec(kind="value_head", site="final_hidden")}))
+                  "critic": AdapterSpec(adapter_type="value_head", site="final_hidden")}))
         self.assertEqual(validate(spec, SCHEMA), [])
 
 
@@ -154,9 +154,9 @@ class TestUnknownNames(unittest.TestCase):
                                         post=("nope",)))
         self.assertIn("unknown-post", codes(spec))
 
-    def test_unknown_adapter_kind(self) -> None:
+    def test_unknown_adapter_type(self) -> None:
         spec = clean_spec(policy=PolicySpec(
-            base="Qwen/Qwen3-1.7B", bank={"x": AdapterSpec(kind="nope", site="final_hidden")}))
+            base="Qwen/Qwen3-1.7B", bank={"x": AdapterSpec(adapter_type="nope", site="final_hidden")}))
         self.assertIn("unknown-adapter", codes(spec))
 
 
@@ -171,7 +171,7 @@ class TestDeclarationWiring(unittest.TestCase):
             algo=replace(clean_spec().algo, loss="val_needs_values"),
             policy=PolicySpec(base="Qwen/Qwen3-1.7B", bank={
                 "pi": lora("layers.0-3.self_attn.*", r=16),
-                "critic": AdapterSpec(kind="value_head", site="final_hidden")}))
+                "critic": AdapterSpec(adapter_type="value_head", site="final_hidden")}))
         self.assertEqual(validate(spec, SCHEMA), [])
 
     def test_requires_satisfied_by_a_base_record(self) -> None:
@@ -179,16 +179,16 @@ class TestDeclarationWiring(unittest.TestCase):
         spec = clean_spec(algo=replace(clean_spec().algo, loss="val_needs_behavior"))
         self.assertEqual(validate(spec, SCHEMA), [])
 
-    def test_requires_satisfied_by_a_kinds_recorded_column(self) -> None:
+    def test_requires_satisfied_by_an_adapter_types_recorded_column(self) -> None:
         spec = clean_spec(
             algo=replace(clean_spec().algo, loss="val_needs_draws"),
             policy=PolicySpec(base="Qwen/Qwen3-1.7B", bank={
                 "pi": lora("layers.0-3.self_attn.*", r=16),
-                "router": AdapterSpec(kind="val_recording_adapter",
+                "router": AdapterSpec(adapter_type="val_recording_adapter",
                                       site="final_hidden")}))
         self.assertEqual(validate(spec, SCHEMA), [])
 
-    def test_recorded_column_missing_without_its_kind(self) -> None:
+    def test_recorded_column_missing_without_its_adapter_type(self) -> None:
         spec = clean_spec(algo=replace(clean_spec().algo, loss="val_needs_draws"))
         self.assertEqual(codes(spec), {"unsatisfied-requires"})
 
@@ -233,13 +233,13 @@ class TestSites(unittest.TestCase):
         # value_head wants an unweighted boundary; q_proj is a weighted matrix.
         spec = clean_spec(policy=PolicySpec(
             base="Qwen/Qwen3-1.7B",
-            bank={"critic": AdapterSpec(kind="value_head",
+            bank={"critic": AdapterSpec(adapter_type="value_head",
                                         site="layers.0.self_attn.q_proj")}))
         self.assertEqual(codes(spec), {"site-predicate-failed"})
 
     def test_lora_predicate_rejects_a_boundary(self) -> None:
         spec = clean_spec(policy=PolicySpec(
-            base="Qwen/Qwen3-1.7B", bank={"pi": AdapterSpec(kind="lora", site="final_hidden",
+            base="Qwen/Qwen3-1.7B", bank={"pi": AdapterSpec(adapter_type="lora", site="final_hidden",
                                               init={"r": 8})}))
         self.assertIn("site-predicate-failed", codes(spec))
 
@@ -251,7 +251,7 @@ class TestSites(unittest.TestCase):
     def test_soft_prompt_resolves_at_its_own_export(self) -> None:
         """prompt[:8] is not a base site — the soft prompt entry creates it."""
         spec = clean_spec(policy=PolicySpec(
-            base="Qwen/Qwen3-1.7B", bank={"latent": AdapterSpec(kind="soft_prompt",
+            base="Qwen/Qwen3-1.7B", bank={"latent": AdapterSpec(adapter_type="soft_prompt",
                                                   site="prompt[:8]",
                                                   init={"n": 8, "d": 64})}))
         self.assertEqual(validate(spec, SCHEMA), [])
@@ -261,15 +261,15 @@ class TestSites(unittest.TestCase):
         soft prompt in the bank, nobody exports it — site-no-match."""
         alone = clean_spec(policy=PolicySpec(
             base="Qwen/Qwen3-1.7B",
-            bank={"readout": AdapterSpec(kind="attn_bias",
+            bank={"readout": AdapterSpec(adapter_type="attn_bias",
                                          site="queries -> prompt[:8]")}))
         self.assertEqual(codes(alone), {"site-no-match"})
 
         together = clean_spec(policy=PolicySpec(
             base="Qwen/Qwen3-1.7B",
-            bank={"latent": AdapterSpec(kind="soft_prompt", site="prompt[:8]",
+            bank={"latent": AdapterSpec(adapter_type="soft_prompt", site="prompt[:8]",
                                         init={"n": 8, "d": 64}),
-                  "readout": AdapterSpec(kind="attn_bias",
+                  "readout": AdapterSpec(adapter_type="attn_bias",
                                          site="queries -> prompt[:8]")}))
         self.assertEqual(validate(together, SCHEMA), [])
 
@@ -290,7 +290,7 @@ class TestReachability(unittest.TestCase):
         # soft_prompt at final_hidden: the SPEC is fine (site resolves, the
         # predicate passes) — but no build reaches model.norm via prompt_embeds.
         spec = self.spec_with({"latent": AdapterSpec(
-            kind="soft_prompt", site="final_hidden", init={"n": 8, "d": 64})})
+            adapter_type="soft_prompt", site="final_hidden", init={"n": 8, "d": 64})})
         self.assertEqual(validate(spec, SCHEMA), [])
         self.assertEqual(self.reachability_codes(spec, FakeEngine()),
                          {"site-unreachable"})
@@ -300,18 +300,18 @@ class TestReachability(unittest.TestCase):
 
     def test_plugin_mechanisms_need_the_plugin_installed(self) -> None:
         spec = self.spec_with({
-            "latent": AdapterSpec(kind="soft_prompt", site="prompt[:8]",
+            "latent": AdapterSpec(adapter_type="soft_prompt", site="prompt[:8]",
                                   init={"n": 8, "d": 64}),
-            "readout": AdapterSpec(kind="attn_bias", site="queries -> prompt[:8]")})
+            "readout": AdapterSpec(adapter_type="attn_bias", site="queries -> prompt[:8]")})
         bare = FakeEngine()
         self.assertEqual(self.reachability_codes(spec, bare), {"site-unreachable"})
         patched = FakeEngine(plugins=frozenset({Mechanism.SIDE_ATTENTION}))
         self.assertEqual(self.reachability_codes(spec, patched), set())
 
-    def test_trainer_only_kinds_are_never_checked(self) -> None:
+    def test_trainer_only_adapter_types_are_never_checked(self) -> None:
         spec = self.spec_with({
             "pi": lora("layers.0-3.self_attn.*", r=16),
-            "critic": AdapterSpec(kind="value_head", site="final_hidden")})
+            "critic": AdapterSpec(adapter_type="value_head", site="final_hidden")})
         self.assertEqual(self.reachability_codes(spec, FakeEngine()), set())
 
 

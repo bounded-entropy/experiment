@@ -8,31 +8,31 @@ from rlstack import Bundle, Mechanism, compile_bundle, group_by_mechanism
 
 
 class CompileBundleTest(unittest.TestCase):
-    def test_kinds_label_only_shipped_payloads(self) -> None:
+    def test_adapter_types_label_only_shipped_payloads(self) -> None:
         bundle = compile_bundle(
             payloads={"pi": b"delta", "critic": b"head"},
             policy_version={"pi": 3, "critic": 3},
             servable=["pi"],
-            kinds={"pi": "lora", "critic": "value_head"})
+            adapter_types={"pi": "lora", "critic": "value_head"})
         self.assertEqual(set(bundle.payloads), {"pi"})
-        self.assertEqual(bundle.kinds, {"pi": "lora"})
+        self.assertEqual(bundle.adapter_types, {"pi": "lora"})
         # the version map still pins BOTH — trainer-only deltas version too
         self.assertEqual(set(bundle.policy_version), {"pi", "critic"})
 
-    def test_kinds_do_not_move_the_bundle_id(self) -> None:
-        """Identity is versions ⊕ payload digests; the kind labels are routing
+    def test_adapter_types_do_not_move_the_bundle_id(self) -> None:
+        """Identity is versions ⊕ payload digests; the adapter-type labels are routing
         metadata carried alongside, not new identity input."""
-        with_kinds = compile_bundle({"pi": b"d"}, {"pi": 1}, ["pi"],
-                                    kinds={"pi": "lora"})
+        with_adapter_types = compile_bundle({"pi": b"d"}, {"pi": 1}, ["pi"],
+                                    adapter_types={"pi": "lora"})
         without = compile_bundle({"pi": b"d"}, {"pi": 1}, ["pi"])
-        self.assertEqual(with_kinds.bundle_id, without.bundle_id)
+        self.assertEqual(with_adapter_types.bundle_id, without.bundle_id)
 
 
 class GroupByMechanismTest(unittest.TestCase):
     def test_payloads_route_to_their_serving_mechanism(self) -> None:
         bundle = Bundle("bundle:x", {"q": 1, "k": 1, "latent": 1},
                         payloads={"q": b"qq", "k": b"kk", "latent": b"E"},
-                        kinds={"q": "lora", "k": "lora",
+                        adapter_types={"q": "lora", "k": "lora",
                                "latent": "soft_prompt"})
         grouped = group_by_mechanism(bundle)
         self.assertEqual(grouped[Mechanism.PUNICA], {"q": b"qq", "k": b"kk"})
@@ -45,7 +45,7 @@ class GroupByMechanismTest(unittest.TestCase):
 
     def test_trainer_only_payload_is_a_compile_error(self) -> None:
         bundle = Bundle("bundle:x", {"critic": 1}, payloads={"critic": b"h"},
-                        kinds={"critic": "value_head"})
+                        adapter_types={"critic": "value_head"})
         with self.assertRaises(ValueError):
             group_by_mechanism(bundle)
 

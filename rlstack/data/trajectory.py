@@ -52,11 +52,11 @@ class Turn:
     """One request inside a trajectory, and everything recorded at the seal (I6).
 
     A Turn is one REQUEST: one pinned bundle, one seed, one contiguous KV. The
-    bank's kinds record their own facts at whatever granularity they need —
-    `token_extras` per generated token (the adapter index drawn at each token),
-    `turn_extras` per request (the latent drawn for a probabilistic soft
-    prompt). Recorded, never re-derived: replay must reproduce them exactly, so
-    they are sealed as data.
+    bank's adapter types record their own facts at whatever granularity they
+    need — `token_extras` per generated token (the adapter index drawn at each
+    token), `turn_extras` per request (the latent drawn for a probabilistic
+    soft prompt). Recorded, never re-derived: replay must reproduce them
+    exactly, so they are sealed as data.
     """
 
     message: Message

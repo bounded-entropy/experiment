@@ -22,7 +22,7 @@ MANIFEST: dict[str, Any] = {
     "run_id": "run-abc",
     "spec_hash": "3fa9c2",
     "base": "Qwen/Qwen3-8B",
-    "bank": {"attn": {"kind": "lora", "r": 16}},
+    "bank": {"attn": {"adapter_type": "lora", "r": 16}},
     "backend": "local",
 }
 

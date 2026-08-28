@@ -7,8 +7,8 @@ folders are the architecture:
   spec/            the contract — declarative values, identity, the flow
                    graph, the submit gate
   registry.py      the index: name -> typed record (declaration + compute)
-  client.py        the pool interface both worlds may type against
-  policy/          the bridge: sites + adapters/ (one file per kind per side)
+  client.py        the pool interface both worlds may type against policy/
+  the bridge: sites + adapters/ (one file per adapter type per side)
                    + bundle compile
   inference/       the sampling world — Rollout, environments/
   training/        the gradient world — post/ processors, losses/
@@ -30,13 +30,13 @@ from rlstack.spec.specs import (
     attn_bias, gpus, learner, lora, pool, soft_prompt,
 )
 from rlstack.registry import (
-    ADAPTERS, ENVS, LOSSES, POST,
+    ADAPTER_TYPES, ENVS, LOSSES, POST,
     LossDef, Registry,
     code_hashes, loss, source_hash,
 )
 from rlstack.client import PoolClient
 from rlstack.policy.siteschema import SiteMeta, SiteSchema, fake_qwen_schema, resolve
-from rlstack.policy.adapters import Adapter, AdapterDef, Mechanism, adapter
+from rlstack.policy.adapters import AdapterType, AdapterTypeDef, Mechanism, adapter_type
 from rlstack.inference.rollout import Rollout
 from rlstack.inference.environments import (
     Environment, EnvironmentDef, environment,       # registers builtin envs
@@ -60,7 +60,7 @@ from rlstack.data.stores import (
     Store, StoreError, bump,
 )
 from rlstack.policy.compile import (
-    Bundle, compile_bundle, group_by_kind, group_by_mechanism,
+    Bundle, compile_bundle, group_by_adapter_type, group_by_mechanism,
 )
 from rlstack.runner.interfaces import (
     Emitted, Engine, FinishEvent, Learner, TokenEvent, TrainStats,

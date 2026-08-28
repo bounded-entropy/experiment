@@ -292,7 +292,7 @@ class AlignmentTest(unittest.TestCase):
         self.assertIsNone(idle.rows.grad)
 
     def test_a_lora_co_tenant_sees_its_own_base(self) -> None:
-        """Both kinds installed on one base: the soft-prompt tenant's forward
+        """Both adapter types installed on one base: the soft-prompt tenant's forward
         must not pick up the lora tenant's delta, and vice versa."""
         model = self.learner._model
         prompt = a_state(3, 51)

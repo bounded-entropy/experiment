@@ -1,19 +1,19 @@
-"""Adapter KINDS on one engine: soft prompts served beside LoRA (#46).
+"""Adapter TYPES on one engine: soft prompts served beside LoRA (#46).
 
     modal run deploy/adapters_l4.py::parity      # ~5 min, one L4
     modal run deploy/adapters_l4.py::adapters    # ~25 min, one L4
 
-Two questions, one venue (Qwen3-0.6B on a single L4). PARITY asks each kind's
+Two questions, one venue (Qwen3-0.6B on a single L4). PARITY asks each adapter type's
 rollout-lowering-against-replay-lowering question with score_tokens: the
 engine's own logprob per token under a pinned bundle, against the trainer's
 batched replay of the same document under the same params — for lora, for
 soft_prompt, and for a bank carrying both, so the soft prompt's numbers are
 read against the punica floor rather than against zero. The proof is a SHIFT
 TEST rather than a tolerance, the aligned gap against the gap one position of
-shift gives, because a miscount of a kind's virtual rows (counted twice, not
+shift gives, because a miscount of an adapter type's virtual rows (counted twice, not
 at all, or trimmed at the wrong end) moves every position by one and cannot
-survive that comparison at any row magnitude. ADAPTERS then submits three GRPO
-tenants of different kinds to one Host with staggered joins, sharing one
+survive that comparison at any row magnitude. ADAPTER_TYPES then submits three GRPO
+tenants of different types to one Host with staggered joins, sharing one
 engine and one multi-tenant learner; success is every tenant finishing with
 its logprob_gap at the kernel floor, which is the cross-contamination rail a
 wrong prefix or a wrong adapter would blow up.
@@ -92,7 +92,7 @@ def parity() -> dict:
     from rlstack.policy.adapters.replay import ReplayRows, row_plan
     from rlstack.policy.compile import compile_bundle
     from rlstack.policy.siteschema import hf_schema, resolve
-    from rlstack.registry import ADAPTERS
+    from rlstack.registry import ADAPTER_TYPES
     from rlstack.runner.engines.vllm_engine import VllmEngine
     from rlstack.runner.learners.torch_learner import TorchLearner, _doc_spans
     from rlstack.spec.specs import soft_prompt as soft_prompt_spec
@@ -101,14 +101,14 @@ def parity() -> dict:
           f"transformers={transformers.__version__}")
 
     engine = VllmEngine(BASE, gpu_memory_utilization=0.45, max_model_len=512,
-                        max_lora_rank=RANK, serves=("lora", "soft_prompt"))
+                        max_rank=RANK, serves=("lora", "soft_prompt"))
     learner = TorchLearner()
     learner._ensure_base(BASE)
     model = learner._model
 
     schema = hf_schema(BASE)
     weighted = resolve(schema.sites, PATTERN)
-    boundary = ADAPTERS.get("soft_prompt").instance.exports(
+    boundary = ADAPTER_TYPES.get("soft_prompt").instance.exports(
         soft_prompt_spec(f"prompt[:{N_ROWS}]", n=N_ROWS, d=WIDTH))[:1]
     print(f"[sites] {len(weighted)} weighted by {PATTERN!r}; boundary "
           f"{boundary[0].name!r} at {boundary[0].path!r}")
@@ -189,17 +189,17 @@ def parity() -> dict:
     for std, state in prompts.items():
         banks[f"soft_prompt@{std}"] = ({boundary[0].path: state},
                                        {"sp": soft_prompt_torch.emit(state)})
-    kinds = {"pi": "lora", "sp": "soft_prompt"}
+    adapter_types = {"pi": "lora", "sp": "soft_prompt"}
 
     bundles = {}
     for name, (_, payloads) in banks.items():
         bundle = compile_bundle(payloads, {n: 0 for n in payloads},
-                                servable=payloads, kinds=kinds)
+                                servable=payloads, adapter_types=adapter_types)
         engine.add_bundle(bundle)
         bundles[name] = bundle
         print(f"[bundle] {name}: {bundle.bundle_id} "
               f"payloads={sorted(bundle.payloads)}")
-    check("a bank of two kinds registers with BOTH consumers",
+    check("a bank of two adapter types registers with BOTH consumers",
           set(engine.attachments(bundles["both"].bundle_id))
           == {"lora", "soft_prompt"},
           f"{sorted(engine.attachments(bundles['both'].bundle_id))}")
@@ -352,15 +352,15 @@ def parity() -> dict:
 
 
 # ---------------------------------------------------------------------------
-# the acceptance test: three kinds, one engine
+# the acceptance test: three adapter types, one engine
 # ---------------------------------------------------------------------------
 
 def make_spec(store, *, bank_kinds: tuple[str, ...], master: int,
               n_updates: int, lr: float = 1e-4):
-    """One tenant's spec: GRPO on arithmetic, with the named kinds in its bank.
+    """One tenant's spec: GRPO on arithmetic, with the named adapter types in its bank.
 
     Everything except the BANK is identical across tenants, so a difference in
-    the ledger is a difference in the adapter kind and nothing else.
+    the ledger is a difference in the adapter type and nothing else.
     """
     from rlstack import (
         AlgoSpec, EvalSpec, ExperimentSpec, GenSpec, GpuConfig, GpuGroup,
@@ -448,7 +448,7 @@ def adapters(n_updates: int = 8, seeds: int = 410) -> dict:
 
     # ONE engine, built with both levers; ONE multi-tenant learner
     engine = VllmEngine(BASE, gpu_memory_utilization=0.40, max_model_len=512,
-                        max_loras=8, max_lora_rank=RANK,
+                        max_bundles=8, max_rank=RANK,
                         serves=("lora", "soft_prompt"))
     host = Host("l4-adapters", engines=(engine,), learner=TorchLearner(),
                 store=store)
@@ -491,9 +491,9 @@ def adapters(n_updates: int = 8, seeds: int = 410) -> dict:
             out[name] = report_run(store, rep.run_id, name, n_updates)
         print("\n[host status]", host.status())
         served = engine.residency()
-        check("one engine served every kind",
+        check("one engine served every adapter type",
               served["lora"] > 0 and served["soft_prompt"] > 0,
-              f"bundles attached per kind on one engine: {served}")
+              f"bundles attached per adapter type on one engine: {served}")
         return out
 
     out = asyncio.run(main())

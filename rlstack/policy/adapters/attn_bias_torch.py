@@ -11,8 +11,8 @@ The rollout half is refused on the pinned build (attn_bias_vllm.py), so nothing
 here is reachable from a run; this is what a serving path would have to agree
 with once one exists.
 
-torch is imported at module scope — this file loads only from the kind's
-methods (STYLE rule 7).
+torch is imported at module scope — this file loads only from the adapter
+type's methods (STYLE rule 7).
 """
 
 from __future__ import annotations
@@ -93,9 +93,9 @@ class AttnBiasState:
 def routed_bias(rows: ReplayRows) -> torch.Tensor | None:
     """[rows, heads, n] — each row's bias — or None when no slot carries one.
 
-    The same shape of rule as the other kinds: rows of ONE forward may carry
-    different biases, but they may not disagree about whether there IS one, nor
-    about the rectangle's size.
+    The same shape of rule as the other adapter types: rows of ONE forward may
+    carry different biases, but they may not disagree about whether there IS
+    one, nor about the rectangle's size.
     """
     present = [BIAS_PATH in slot for slot in rows.slots]
     if not any(present):
@@ -148,7 +148,7 @@ def additive_mask(bias: torch.Tensor, attention: torch.Tensor,
 
 
 # ---------------------------------------------------------------------------
-# the bodies the AttnBias kind's methods call
+# the bodies the AttnBias adapter type's methods call
 # ---------------------------------------------------------------------------
 
 def build(sites: tuple[SiteMeta, ...], init: dict) -> AttnBiasState:

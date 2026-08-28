@@ -3,12 +3,12 @@ multi-LoRA lever — and wrapped around a Linear on the replay side."""
 
 from __future__ import annotations
 
-from rlstack.policy.adapters.base import Adapter, Mechanism, adapter
+from rlstack.policy.adapters.base import AdapterType, Mechanism, adapter_type
 from rlstack.policy.siteschema import SiteMeta
 
 
-@adapter("lora")
-class Lora(Adapter):
+@adapter_type("lora")
+class Lora(AdapterType):
     serving = Mechanism.PUNICA
 
     def site_ok(self, meta: SiteMeta) -> bool:

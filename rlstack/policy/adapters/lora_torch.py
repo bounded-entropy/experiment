@@ -6,7 +6,7 @@ applies the same math, and init is B = 0, which makes version 0 of every delta
 the base model on both sides. The wrapper is ROW-AWARE: install is additive, so
 every tenant at a site joins the one wrapper standing there, and which (A, B) a
 row gets is read from the forward's row plan. torch is imported at module scope
-— this file loads only from the kind's methods (STYLE rule 7).
+— this file loads only from the adapter type's methods (STYLE rule 7).
 """
 
 from __future__ import annotations

@@ -130,7 +130,7 @@ def fake_qwen_schema(n_layers: int, *, base: str) -> SiteSchema:
     The CPU stand-in compiler — the same shape hf_schema reads off a real
     checkpoint, hand-built so Phase-0 validation has real material. Note what is
     absent: prompt[:n] and its attention rectangle are NOT base sites; a soft
-    prompt in the bank exports them (Adapter.exports).
+    prompt in the bank exports them (AdapterType.exports).
     """
     sites: list[SiteMeta] = []
     for n in range(n_layers):

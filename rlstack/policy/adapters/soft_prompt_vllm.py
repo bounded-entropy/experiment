@@ -35,7 +35,7 @@ EMBED_BOUNDARY = "model.embed_tokens"   # the path a soft prompt exports at
 class SoftPromptRollout(RolloutLowering):
     """Learned rows served as the prompt's first positions."""
 
-    kind = "soft_prompt"
+    adapter_type = "soft_prompt"
     mechanism = Mechanism.PROMPT_EMBEDS
     claims = ("prompt",)               # it shapes the prompt FORM, so it owns it
 
@@ -46,8 +46,8 @@ class SoftPromptRollout(RolloutLowering):
         return BuildDemands(engine_args={"enable_prompt_embeds": True})
 
     def reaches(self, meta: SiteMeta) -> bool:
-        """One boundary, the one this kind exports at: the served model's
-        embedding table. Nothing else is a place a row can enter."""
+        """One boundary, the one this adapter type exports at: the served
+        model's embedding table. Nothing else is a place a row can enter."""
         return meta.path == EMBED_BOUNDARY
 
     def attach(self, bundle_id: str,

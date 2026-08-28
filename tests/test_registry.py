@@ -6,10 +6,10 @@ import unittest
 from typing import Any
 
 from rlstack.inference.environments.base import Environment, EnvironmentDef, environment
-from rlstack.policy.adapters import Adapter, AdapterDef, Mechanism, adapter
+from rlstack.policy.adapters import AdapterType, AdapterTypeDef, Mechanism, adapter_type
 from rlstack.training.post.base import PostDef, PostProcessor, postprocessor
 from rlstack.registry import (
-    ADAPTERS,
+    ADAPTER_TYPES,
     ENVS,
     LOSSES,
     POST,
@@ -134,19 +134,19 @@ class TestDecorators(unittest.TestCase):
         self.assertIsInstance(edef.instance, MyEnv)
 
     def test_adapter_registers_class_and_instance(self) -> None:
-        @adapter("test_dec_adapter")
-        class MyAdapter(Adapter):
+        @adapter_type("test_dec_adapter")
+        class MyAdapter(AdapterType):
             serving = None
 
-        adef = ADAPTERS.get("test_dec_adapter")
-        self.assertIsInstance(adef, AdapterDef)
+        adef = ADAPTER_TYPES.get("test_dec_adapter")
+        self.assertIsInstance(adef, AdapterTypeDef)
         self.assertIs(adef.cls, MyAdapter)
         self.assertIsInstance(adef.instance, MyAdapter)
 
 
 class TestAdapters(unittest.TestCase):
     def test_base_defaults(self) -> None:
-        base = Adapter()
+        base = AdapterType()
         self.assertIsNone(base.engine_plugin)
         self.assertIsNone(base.serving)
         self.assertEqual(base.provides, frozenset())
@@ -154,35 +154,35 @@ class TestAdapters(unittest.TestCase):
         self.assertTrue(base.site_ok(None))  # type: ignore[arg-type]
 
     def test_compute_halves_are_not_implemented_yet(self) -> None:
-        kind = Adapter()
-        for call in (lambda: kind.params((), {}),
-                     lambda: kind.install_replay(None, None, ()),
-                     lambda: kind.emit(None),
-                     lambda: kind.parity(None)):
+        plain = AdapterType()
+        for call in (lambda: plain.params((), {}),
+                     lambda: plain.install_replay(None, None, ()),
+                     lambda: plain.emit(None),
+                     lambda: plain.parity(None)):
             with self.assertRaises(NotImplementedError):
                 call()
 
     def test_builtin_serving_surfaces(self) -> None:
-        self.assertEqual(ADAPTERS.get("lora").instance.serving, Mechanism.PUNICA)
-        self.assertEqual(ADAPTERS.get("soft_prompt").instance.serving,
+        self.assertEqual(ADAPTER_TYPES.get("lora").instance.serving, Mechanism.PUNICA)
+        self.assertEqual(ADAPTER_TYPES.get("soft_prompt").instance.serving,
                          Mechanism.PROMPT_EMBEDS)
-        self.assertEqual(ADAPTERS.get("attn_bias").instance.serving,
+        self.assertEqual(ADAPTER_TYPES.get("attn_bias").instance.serving,
                          Mechanism.SIDE_ATTENTION)
-        self.assertIsNone(ADAPTERS.get("value_head").instance.serving)
+        self.assertIsNone(ADAPTER_TYPES.get("value_head").instance.serving)
 
-    def test_every_registered_kind_uses_the_closed_serving_vocabulary(self) -> None:
-        for name in ADAPTERS.names():
-            serving = ADAPTERS.get(name).instance.serving
+    def test_every_registered_adapter_type_uses_the_closed_serving_vocabulary(self) -> None:
+        for name in ADAPTER_TYPES.names():
+            serving = ADAPTER_TYPES.get(name).instance.serving
             self.assertTrue(serving is None or isinstance(serving, Mechanism),
                             f"{name}: serving {serving!r} is not a Mechanism")
 
     def test_only_attn_bias_ships_engine_code(self) -> None:
         with_plugin = [name for name in ("lora", "soft_prompt", "attn_bias", "value_head")
-                       if ADAPTERS.get(name).instance.engine_plugin is not None]
+                       if ADAPTER_TYPES.get(name).instance.engine_plugin is not None]
         self.assertEqual(with_plugin, ["attn_bias"])
 
     def test_value_head_provides_values(self) -> None:
-        self.assertEqual(ADAPTERS.get("value_head").instance.provides, {"values"})
+        self.assertEqual(ADAPTER_TYPES.get("value_head").instance.provides, {"values"})
 
     def test_site_predicates(self) -> None:
         from rlstack.policy.siteschema import fake_qwen_schema
@@ -192,15 +192,15 @@ class TestAdapters(unittest.TestCase):
         weighted = schema.resolve("layers.0.self_attn.q_proj")[0]
         boundary = schema.resolve("final_hidden")[0]
         # prompt[:8] is not a base site: the soft prompt entry exports it
-        virtual = ADAPTERS.get("soft_prompt").instance.exports(
+        virtual = ADAPTER_TYPES.get("soft_prompt").instance.exports(
             soft_prompt("prompt[:8]", n=8, d=64))[0]
 
-        self.assertTrue(ADAPTERS.get("lora").instance.site_ok(weighted))
-        self.assertFalse(ADAPTERS.get("lora").instance.site_ok(boundary))
-        self.assertTrue(ADAPTERS.get("soft_prompt").instance.site_ok(virtual))
-        self.assertFalse(ADAPTERS.get("soft_prompt").instance.site_ok(weighted))
-        self.assertTrue(ADAPTERS.get("value_head").instance.site_ok(boundary))
-        self.assertFalse(ADAPTERS.get("value_head").instance.site_ok(weighted))
+        self.assertTrue(ADAPTER_TYPES.get("lora").instance.site_ok(weighted))
+        self.assertFalse(ADAPTER_TYPES.get("lora").instance.site_ok(boundary))
+        self.assertTrue(ADAPTER_TYPES.get("soft_prompt").instance.site_ok(virtual))
+        self.assertFalse(ADAPTER_TYPES.get("soft_prompt").instance.site_ok(weighted))
+        self.assertTrue(ADAPTER_TYPES.get("value_head").instance.site_ok(boundary))
+        self.assertFalse(ADAPTER_TYPES.get("value_head").instance.site_ok(weighted))
 
 
 def minimal_spec(**overrides: Any) -> ExperimentSpec:
@@ -228,7 +228,7 @@ class TestCodeHashes(unittest.TestCase):
             set(hashes),
             {"loss:grpo", "postprocessor:verifier",
              "postprocessor:grpo_advantage", "environment:noop_env",
-             "adapter:lora"},
+             "adapter_type:lora"},
         )
         for digest in hashes.values():
             self.assertEqual(len(digest), 64)
@@ -236,7 +236,7 @@ class TestCodeHashes(unittest.TestCase):
     def test_offline_run_without_gen_or_algo(self) -> None:
         spec = minimal_spec(gen=None, algo=None,
                             trajectories=TrajectorySource("store://parent/waves"))
-        self.assertEqual(set(code_hashes(spec)), {"adapter:lora"})
+        self.assertEqual(set(code_hashes(spec)), {"adapter_type:lora"})
 
     def test_eval_names_are_covered(self) -> None:
         spec = minimal_spec(eval=EvalSpec(tasks="cas://y/heldout.jsonl",

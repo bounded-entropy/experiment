@@ -58,9 +58,9 @@ class EvalSpec:
 @dataclass(frozen=True)
 class AdapterSpec:
     """One adapter: a configured bank entry — one typed intervention of one
-    registered kind at one site pattern."""
+    registered adapter type at one site pattern."""
 
-    kind: str                     # registered @adapter: "lora", "soft_prompt", ...
+    adapter_type: str             # registered @adapter_type: "lora", "soft_prompt", ...
     site: str                     # canonical name, resolved against the SiteSchema
     init: Mapping[str, object] = field(default_factory=dict)
     trainable: bool = True
@@ -305,18 +305,18 @@ def learner(fsdp: int = 1, fraction: float | None = None) -> LearnerMember:
 
 def lora(site: str, r: int, tie: bool = False) -> AdapterSpec:
     """Per-matrix low-rank delta; tie= shares one (A, B) across all matched sites."""
-    return AdapterSpec(kind="lora", site=site, init={"r": r, "tie": tie})
+    return AdapterSpec(adapter_type="lora", site=site, init={"r": r, "tie": tie})
 
 
 def soft_prompt(site: str, n: int, d: int) -> AdapterSpec:
     """n virtual tokens of width d, served through the native prompt_embeds
     mechanism."""
-    return AdapterSpec(kind="soft_prompt", site=site, init={"n": n, "d": d})
+    return AdapterSpec(adapter_type="soft_prompt", site=site, init={"n": n, "d": d})
 
 
 def attn_bias(site: str, **init: object) -> AdapterSpec:
-    """Learned bias on an attention-score rectangle: the one kind served by a
-    mechanism of ours (side_attention, an engine plugin) rather than a native
-    one. Its replay half is proven; its rollout half is not, on the pinned
-    engine build."""
-    return AdapterSpec(kind="attn_bias", site=site, init=init)
+    """Learned bias on an attention-score rectangle: the one adapter type served
+    by a mechanism of ours (side_attention, an engine plugin) rather than a
+    native one. Its replay half is proven; its rollout half is not, on the
+    pinned engine build."""
+    return AdapterSpec(adapter_type="attn_bias", site=site, init=init)

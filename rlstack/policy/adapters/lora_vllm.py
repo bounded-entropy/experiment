@@ -1,12 +1,12 @@
 """LoRA's rollout lowering: punica, the native multi-LoRA lever.
 
-What this kind pays and what it buys: demands enable_lora plus its sizing;
-attach merges the bank's fragments (disjoint keys, the one-delta-per-site rule)
-into one peft adapter dir and registers it as a LoRARequest, whose int id is
-per BUILD and allocated here because this lowering is the only thing that hands
-them out; apply contributes the lora_request keyword, which is what lets
-requests pinning different bundles batch together; align contributes nothing,
-because a weight delta occupies no prompt positions.
+What this adapter type pays and what it buys: demands enable_lora plus its
+sizing; attach merges the bank's fragments (disjoint keys, the
+one-delta-per-site rule) into one peft adapter dir and registers it as a
+LoRARequest, whose int id is per BUILD and allocated here because this lowering
+is the only thing that hands them out; apply contributes the lora_request
+keyword, which is what lets requests pinning different bundles batch together;
+align contributes nothing, because a weight delta occupies no prompt positions.
 
 vLLM and torch are imported at module scope — this file loads only from
 Lora.rollout_lowering, never from the package root (STYLE rule 7).
@@ -30,7 +30,7 @@ from rlstack.policy.siteschema import SiteMeta
 class LoraRollout(RolloutLowering):
     """Per-matrix low-rank deltas, served by vLLM's own punica kernels."""
 
-    kind = "lora"
+    adapter_type = "lora"
     mechanism = Mechanism.PUNICA
     claims = ("lora_request",)
 

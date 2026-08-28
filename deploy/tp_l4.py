@@ -51,10 +51,10 @@ def perturbed_lora_bundle(schema, *, seed: int, scale: float, version: int):
     import torch
 
     from rlstack.policy.compile import compile_bundle
-    from rlstack.registry import ADAPTERS
+    from rlstack.registry import ADAPTER_TYPES
 
     sites = schema.resolve("layers.*.self_attn.*")
-    lora = ADAPTERS.get("lora").instance
+    lora = ADAPTER_TYPES.get("lora").instance
     params = lora.params(sites, {"r": 16, "seed": seed})
     generator = torch.Generator().manual_seed(seed)
     for path, b in params.b.items():
@@ -235,7 +235,7 @@ def run_probe(base: str, tp: int, gpu_memory_utilization: float) -> dict:
           f"transformers={transformers.__version__} "
           f"cuda_devices={torch.cuda.device_count()}")
     engine = VllmEngine(base, tp=tp, gpu_memory_utilization=gpu_memory_utilization,
-                        max_model_len=512, max_loras=8, max_lora_rank=16)
+                        max_model_len=512, max_bundles=8, max_rank=16)
     print(f"[build] {base} tp={engine.tp} on {torch.cuda.device_count()} devices")
     asyncio.run(probe(engine, hf_schema(base)))
 

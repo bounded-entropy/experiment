@@ -3,7 +3,7 @@
 This module is the MECHANISM only — a `Registry` is a dict with a helpful
 KeyError and a duplicate rule, and each entry is a typed record pairing the
 DECLARATION (the fields Phase 0 reads) with the COMPUTE (the function or class
-itself). The registered things live with their worlds — adapter kinds in
+itself). The registered things live with their worlds — adapter types in
 policy/adapters/, environments in inference/, postprocessors and losses in
 training/, yours wherever you define them — so a name exists iff the module
 defining it was imported. `code_hashes` collects the source hash of everything
@@ -84,9 +84,9 @@ class Registry:
 ENVS = Registry("environment")      # EnvironmentDef (inference/environments/base.py)
 POST = Registry("postprocessor")    # PostDef (training/post/base.py)
 LOSSES = Registry("loss")           # LossDef (below)
-ADAPTERS = Registry("adapter")      # AdapterDef (policy/adapters/base.py):
-                                    # one registered KIND per entry, which an
-                                    # AdapterSpec names by string
+ADAPTER_TYPES = Registry("adapter_type")  # AdapterTypeDef (policy/adapters/base.py):
+                                    # one registered ADAPTER TYPE per entry,
+                                    # which an AdapterSpec names by string
 
 
 # ---------------------------------------------------------------------------
@@ -155,6 +155,6 @@ def code_hashes(spec: ExperimentSpec) -> dict[str, str]:
             add(POST, name)
 
     for adapter in spec.policy.bank.values():
-        add(ADAPTERS, adapter.kind)
+        add(ADAPTER_TYPES, adapter.adapter_type)
 
     return out

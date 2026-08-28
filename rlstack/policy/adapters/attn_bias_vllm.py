@@ -4,9 +4,9 @@ Its mechanism is a PLUGIN — ours, not a lever vLLM maintains — and the pinne
 build does not plumb the dense attention LSE the plugin was designed against,
 so probe() fails for the true reason (rlstack_engine.side_attention names the
 missing symbols). The consequences reach a spec through the same door as every
-other kind: no build serves this kind, reachability reports NONE for the
-attention-score rectangle, and a spec carrying an attn_bias is refused at
-Phase 0 rather than served wrong.
+other adapter type: no build serves this adapter type, reachability reports
+NONE for the attention-score rectangle, and a spec carrying an attn_bias is
+refused at Phase 0 rather than served wrong.
 
 The plugin is named by STRING and never imported — rlstack_engine ships in the
 engine image and the import direction is one-way.
@@ -31,13 +31,14 @@ class AttnBiasRollout(RolloutLowering):
     """Soft prompt + bias, served jointly by the side-attention plugin — the
     lowering no build in this repo can pay for."""
 
-    kind = "attn_bias"
+    adapter_type = "attn_bias"
     mechanism = Mechanism.SIDE_ATTENTION
     claims = ()          # unreachable, so it claims nothing of any request yet
 
     def demands(self) -> BuildDemands:
         """A plugin in the engine image, installed and probed at boot. No build
-        here installs one, so asking to serve this kind refuses at construction
+        here installs one, so asking to serve this adapter type refuses at
+        construction
         — the honest form of a blocked mechanism."""
         return BuildDemands(plugin=PLUGIN)
 
@@ -49,9 +50,10 @@ class AttnBiasRollout(RolloutLowering):
     def attach(self, bundle_id: str, payloads: Mapping[str, bytes]) -> Any:
         raise NotImplementedError(
             f"{PLUGIN} is not installed on this build (#46: vllm 0.28.0 hands "
-            f"back no dense LSE) — this kind is unreachable, not attachable")
+            f"back no dense LSE) — this adapter type is unreachable, not "
+            f"attachable")
 
     def apply(self, attached: Any, request: Request) -> Levers:
         raise NotImplementedError(
             f"{PLUGIN} is not installed on this build — nothing ever attaches, "
-            f"so no request carries this kind's levers")
+            f"so no request carries this adapter type's levers")

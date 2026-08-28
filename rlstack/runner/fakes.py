@@ -173,7 +173,7 @@ class FakeLearner:
         all_names = sorted(spec.policy.bank)
         init = content_hash({
             "master": spec.seeds.master,
-            "bank": {name: spec.policy.bank[name].kind for name in all_names},
+            "bank": {name: spec.policy.bank[name].adapter_type for name in all_names},
             "sites": {name: [m.name for m in resolved_sites[name]]
                       for name in all_names},
         })

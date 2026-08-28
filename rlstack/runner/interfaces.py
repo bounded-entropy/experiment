@@ -32,7 +32,8 @@ from rlstack.spec.specs import ExperimentSpec, SamplingSpec
 @dataclass(frozen=True)
 class TokenEvent:
     """One generated token. `extras` is the per-token recording channel: a
-    kind's engine plugin deposits sampling-time facts here (e.g. the adapter
+    adapter type's engine plugin deposits sampling-time facts here (e.g. the
+    adapter
     index drawn for this token), and they seal into Turn.token_extras."""
 
     token_id: int

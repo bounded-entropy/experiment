@@ -5,9 +5,9 @@ among themselves, so their K/V at every layer depend on nothing but the prompt
 rows and are precomputed once per bundle at load(). Per layer the stock kernel
 runs over the real tokens untouched (returning its LSE), each query's biased
 attention over the n side positions is a dense matmul, and the two partials
-combine exactly by log-sum-exp arithmetic. One plugin, two kinds: `consumes`
-names both and load() receives both entries' payloads, because a mechanism
-compiles its adapters JOINTLY.
+combine exactly by log-sum-exp arithmetic. One plugin, two adapter types:
+`consumes` names both and load() receives both entries' payloads, because a
+mechanism compiles its adapters JOINTLY.
 
 NOT PROVEN, AND THE PROBE SAYS SO. The lifecycle below — banks, slots, salt —
 is real; attend() is not. On the pinned build the registration seam and the

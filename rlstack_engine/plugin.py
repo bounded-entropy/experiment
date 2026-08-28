@@ -10,8 +10,8 @@ plus a per-token slot index, never a global singleton), cache_salt (a plugin
 that changes hidden states MUST make bundle identity visible to the prefix
 cache), and attend (the per-layer merge, written against BatchView only).
 
-That a plugin's rollout lowering agrees numerically with its kind's replay
-lowering is the parity certificate's job, keyed by build fingerprint.
+That a plugin's rollout lowering agrees numerically with its adapter type's
+replay lowering is the parity certificate's job, keyed by build fingerprint.
 """
 
 from __future__ import annotations

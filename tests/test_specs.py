@@ -210,12 +210,12 @@ class TestDefaults(unittest.TestCase):
                          ((0.9, 0.95), 0.0, {}))
 
     def test_adapter_spec(self) -> None:
-        a = AdapterSpec(kind="lora", site="layers.*.mlp.*")
+        a = AdapterSpec(adapter_type="lora", site="layers.*.mlp.*")
         self.assertEqual((dict(a.init), a.trainable), ({}, True))
 
     def test_mapping_defaults_are_not_shared(self) -> None:
-        a = AdapterSpec(kind="lora", site="x")
-        b = AdapterSpec(kind="lora", site="x")
+        a = AdapterSpec(adapter_type="lora", site="x")
+        b = AdapterSpec(adapter_type="lora", site="x")
         self.assertIsNot(a.init, b.init)
 
     def test_backend_profile_stays_outside_the_spec(self) -> None:
@@ -238,22 +238,22 @@ class TestSugar(unittest.TestCase):
 
     def test_lora(self) -> None:
         a = lora("layers.*.mlp.*", r=16)
-        self.assertEqual((a.kind, a.site, dict(a.init)),
+        self.assertEqual((a.adapter_type, a.site, dict(a.init)),
                          ("lora", "layers.*.mlp.*", {"r": 16, "tie": False}))
 
     def test_soft_prompt(self) -> None:
         a = soft_prompt("prompt[:8]", n=8, d=2048)
-        self.assertEqual((a.kind, dict(a.init)), ("soft_prompt", {"n": 8, "d": 2048}))
+        self.assertEqual((a.adapter_type, dict(a.init)), ("soft_prompt", {"n": 8, "d": 2048}))
 
     def test_attn_bias(self) -> None:
         a = attn_bias("queries -> prompt[:8]", param="bounded_sigmoid", cap="ln(64)")
-        self.assertEqual(a.kind, "attn_bias")
+        self.assertEqual(a.adapter_type, "attn_bias")
         self.assertEqual(a.init["param"], "bounded_sigmoid")
 
     def test_sugar_matches_longhand(self) -> None:
         self.assertEqual(
             lora("layers.0-15.self_attn.*", r=16),
-            AdapterSpec(kind="lora", site="layers.0-15.self_attn.*",
+            AdapterSpec(adapter_type="lora", site="layers.0-15.self_attn.*",
                         init={"r": 16, "tie": False}),
         )
 

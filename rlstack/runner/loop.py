@@ -20,7 +20,7 @@ from dataclasses import dataclass
 from rlstack.data.stores.base import Store
 from rlstack.policy.compile import Bundle, compile_bundle
 from rlstack.policy.siteschema import SiteSchema, resolve
-from rlstack.registry import ADAPTERS, POST, code_hashes
+from rlstack.registry import ADAPTER_TYPES, POST, code_hashes
 from rlstack.runner.daemons import Daemon, Evaluator, Generator, Trainer
 from rlstack.runner.interfaces import Engine, Learner
 from rlstack.runner.arbiter import GpuArbiter
@@ -132,8 +132,8 @@ async def run_experiment_async(
     bank = spec.policy.bank
     trainable = sorted(name for name, a in bank.items() if a.trainable)
     servable = sorted(name for name, a in bank.items()
-                      if ADAPTERS.get(a.kind).instance.serving is not None)
-    kinds = {name: bank[name].kind for name in servable}
+                      if ADAPTER_TYPES.get(a.adapter_type).instance.serving is not None)
+    adapter_types = {name: bank[name].adapter_type for name in servable}
     resolved = {name: resolve(space, a.site) for name, a in bank.items()}
     learner.install(rid, spec, resolved)
     if arbiter is None:
@@ -158,7 +158,8 @@ async def run_experiment_async(
                     trainable=trainable, store=store, learner=learner)
 
     emitted = learner.emit(rid)
-    bundle = compile_bundle(emitted.adapters, policy_version, servable, kinds)
+    bundle = compile_bundle(emitted.adapters, policy_version, servable,
+                            adapter_types)
     engine_map["main"].add_bundle(bundle)
 
     # non-policy pools serve their own base; register a base bundle once each

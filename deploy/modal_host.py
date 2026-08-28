@@ -81,7 +81,7 @@ class ServedHost:
         store = ModalVolumeStore("/store", volume=store_volume, locator=STORE)
         engine = VllmEngine(self.base, tp=self.tp,
                             gpu_memory_utilization=0.60, max_model_len=512,
-                            max_loras=8, max_lora_rank=16)
+                            max_bundles=8, max_rank=16)
         # the vLLM engine itself materializes inside the running loop, on the
         # first admitted verb (AsyncLLMEngine wants a loop) — the enter hook
         # builds everything that does not

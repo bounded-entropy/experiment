@@ -91,7 +91,7 @@ def run_arith(n_updates: int = 4, trajectories_per_wave: int = 16,
 
     host = Host("l4-arith", engines=(
         VllmEngine(BASE, gpu_memory_utilization=0.45, max_model_len=512,
-                   max_lora_rank=16),),
+                   max_rank=16),),
         learner=TorchLearner(), store=store)
     async def submit_with_stats():
         stats = asyncio.get_running_loop().create_task(host.run_stats(30.0))

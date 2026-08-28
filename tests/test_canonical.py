@@ -83,10 +83,11 @@ class TestCanonicalJsonShape(unittest.TestCase):
     def test_golden_small_dataclass(self) -> None:
         # Golden string: byte-for-byte stability is the whole point of canonical JSON.
         self.assertEqual(
-            canonical_json(AdapterSpec(kind="lora", site="layers.0.self_attn.q",
+            canonical_json(AdapterSpec(adapter_type="lora", site="layers.0.self_attn.q",
                                        init={"tie": False, "r": 8})),
-            '{"__type__":"AdapterSpec","init":{"r":8,"tie":false},'
-            '"kind":"lora","site":"layers.0.self_attn.q","trainable":true}',
+            '{"__type__":"AdapterSpec","adapter_type":"lora",'
+            '"init":{"r":8,"tie":false},'
+            '"site":"layers.0.self_attn.q","trainable":true}',
         )
 
     def test_golden_nested_dataclass_and_tuple(self) -> None:
@@ -122,7 +123,7 @@ class TestCanonicalJsonShape(unittest.TestCase):
             '"n":1,"name":"main","tp":1},{"__type__":"LearnerMember",'
             '"fraction":null,"fsdp":1}],"sharing":"concurrent"}]},"init":null,'
             '"policy":{"__type__":"PolicySpec","bank":{"pi":{"__type__":'
-            '"AdapterSpec","init":{"r":16,"tie":false},"kind":"lora",'
+            '"AdapterSpec","adapter_type":"lora","init":{"r":16,"tie":false},'
             '"site":"layers.*.mlp.*","trainable":true}},"base":"Qwen/Qwen3-1.7B"},'
             '"seeds":{"__type__":"Seeds","master":0},"tier":"lab",'
             '"trajectories":{"__type__":"TrajectorySource","source":"live"}}',
@@ -198,7 +199,7 @@ class TestCanonicalJsonRejections(unittest.TestCase):
                     canonical_json(value)
 
     def test_nan_rejected_deep_inside_a_spec(self) -> None:
-        spec = AdapterSpec(kind="lora", site="s", init={"scale": float("nan")})
+        spec = AdapterSpec(adapter_type="lora", site="s", init={"scale": float("nan")})
         with self.assertRaises(TypeError):
             canonical_json(spec)
 

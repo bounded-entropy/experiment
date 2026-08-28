@@ -141,8 +141,8 @@ class Partitioned:
               f"on {partition.gpu} {partition.gpuset}{list(partition.devices)}")
         engine = VllmEngine(regime.base,
                             gpu_memory_utilization=partition.memory,
-                            max_model_len=MAX_LEN, max_loras=8,
-                            max_lora_rank=16, tp=regime.shape,
+                            max_model_len=MAX_LEN, max_bundles=8,
+                            max_rank=16, tp=regime.shape,
                             enable_sleep_mode=self.sleepy)
         self.engines[regime.name] = engine
         return engine

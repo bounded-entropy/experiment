@@ -14,8 +14,8 @@ lets a lora-only tenant and a soft-prompt tenant share one learner. A soft
 prompt has no identity element (n virtual positions change the forward at
 version 0 by construction), so init is small, seeded, and part of the policy.
 
-torch is imported at module scope — this file loads only from the kind's
-methods (STYLE rule 7).
+torch is imported at module scope — this file loads only from the adapter
+type's methods (STYLE rule 7).
 """
 
 from __future__ import annotations
@@ -142,10 +142,10 @@ class PromptBoundary:
 
         The bias's site (queries -> prompt[:n]) exists only because a soft
         prompt exported it, so the boundary that owns those positions is where
-        a bias on them is applied — but the arithmetic stays with the kind
-        (attn_bias_torch). Without a bias in the routed slot this returns the
-        padding mask it was handed, unchanged and untouched: a base that never
-        carries an attn_bias never pays for one.
+        a bias on them is applied — but the arithmetic stays with the adapter
+        type (attn_bias_torch). Without a bias in the routed slot this returns
+        the padding mask it was handed, unchanged and untouched: a base that
+        never carries an attn_bias never pays for one.
         """
         from rlstack.policy.adapters import attn_bias_torch
 
@@ -216,7 +216,7 @@ def _entry_seed(seed: int, path: str) -> int:
 
 
 # ---------------------------------------------------------------------------
-# the bodies the SoftPrompt kind's methods call
+# the bodies the SoftPrompt adapter type's methods call
 # ---------------------------------------------------------------------------
 
 def build(sites: tuple[SiteMeta, ...], init: dict) -> SoftPromptState:
@@ -292,10 +292,10 @@ def load(state: SoftPromptState, payload: bytes) -> None:
 def merge_rows(payloads: Mapping[str, bytes]) -> torch.Tensor:
     """Fuse the bank's row blocks into ONE [n, d] block, in bank order.
 
-    The prompt_embeds twin of lora_torch.merge_fragments: a kind attaches its
-    entries JOINTLY, so two soft prompts in one bank are two segments of one
-    virtual prompt, concatenated deterministically. They are positions in one
-    sequence, so their widths must agree.
+    The prompt_embeds twin of lora_torch.merge_fragments: an adapter type
+    attaches its entries JOINTLY, so two soft prompts in one bank are two
+    segments of one virtual prompt, concatenated deterministically. They are
+    positions in one sequence, so their widths must agree.
     """
     blocks = [st_load(payloads[name])[ROWS_KEY] for name in sorted(payloads)]
     widths = sorted({int(block.shape[1]) for block in blocks})

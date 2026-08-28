@@ -82,7 +82,7 @@ class SlotTableTest(unittest.TestCase):
 
 
 class SideAttentionLifecycleTest(unittest.TestCase):
-    """The composite mechanism: one plugin, both adapter kinds' payloads."""
+    """The composite mechanism: one plugin, both adapter types' payloads."""
 
     def test_declares_the_joint_consumption(self) -> None:
         self.assertEqual(SideAttention.mechanism, Mechanism.SIDE_ATTENTION)

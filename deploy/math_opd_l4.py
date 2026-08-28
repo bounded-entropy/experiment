@@ -277,8 +277,8 @@ def serve_one_partition(name, base, tp, memory):
 
     store = ModalVolumeStore("/store", volume=store_volume, locator=STORE)
     engine = VllmEngine(base, tp=tp, gpu_memory_utilization=memory,
-                        max_model_len=MAX_MODEL_LEN, max_loras=8,
-                        max_lora_rank=16, serves=("lora",))
+                        max_model_len=MAX_MODEL_LEN, max_bundles=8,
+                        max_rank=16, serves=("lora",))
     host = Host(name, engines=(engine,), learner=None, store=store,
                 partition=Partition("modal-l4", tuple(range(tp)), memory),
                 regimes=(Regime(f"serve-tp{tp}", "inference", base, tp),))

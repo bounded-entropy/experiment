@@ -1,6 +1,7 @@
 """rlstack_engine — code that ships in the ENGINE image, not in the client.
 
-The package a kind's rollout lowering names by string when its mechanism is a
+The package an adapter type's rollout lowering names by string when its
+mechanism is a
 PLUGIN: the plugin contract, the typed view a plugin sees of a batch, slot
 bookkeeping, and the certificate vocabulary. Its charter is narrow on purpose —
 only code that patches engine internals belongs here. The import direction is

@@ -22,7 +22,7 @@ from typing import Sequence
 from rlstack.policy.adapters.base import Mechanism
 from rlstack.policy.siteschema import SiteMeta, SiteSchema, resolve
 from rlstack.registry import (
-    ADAPTERS,
+    ADAPTER_TYPES,
     ENVS,
     LOSSES,
     POST,
@@ -101,16 +101,16 @@ def check_names_are_registered(spec: ExperimentSpec, schema: SiteSchema) -> list
         for i, name in enumerate(spec.eval.post):
             look(POST, name, "unknown-post", f"eval.post[{i}]")
     for entry_name, adapter in spec.policy.bank.items():
-        look(ADAPTERS, adapter.kind, "unknown-adapter",
-             f"policy.bank.{entry_name}.kind")
+        look(ADAPTER_TYPES, adapter.adapter_type, "unknown-adapter",
+             f"policy.bank.{entry_name}.adapter_type")
     return issues
 
 
 def check_loss_requires_are_provided(spec: ExperimentSpec, schema: SiteSchema) -> list[ValidationIssue]:
     """Every string the loss requires is PROVIDED (a training-forward tensor,
-    from the base forward or a kind's replay lowering), RECORDED (a
-    sampling-time fact: a base column or a kind's `records`), or PRODUCED by
-    the post pipeline — a query on the flow graph. The loss is pure math
+    from the base forward or an adapter type's replay lowering), RECORDED (a
+    sampling-time fact: a base column or an adapter type's `records`), or
+    PRODUCED by the post pipeline — a query on the flow graph. The loss is pure math
     (I9): requires names data columns, never work the runner must plan."""
     if spec.algo is None or spec.algo.loss not in LOSSES:
         return []
@@ -156,12 +156,13 @@ def site_space(spec: ExperimentSpec, schema: SiteSchema) -> tuple[SiteMeta, ...]
     The schema is a pure function of the base checkpoint; a bank entry may
     CREATE sites the checkpoint does not have (a soft prompt exports its
     prompt[:n] positions). Resolution — here and at Phase 1 — runs against
-    the union. Unknown kinds contribute nothing (unknown-adapter reports them).
+    the union. Unknown adapter types contribute nothing (unknown-adapter reports
+    them).
     """
     exported: list[SiteMeta] = []
     for adapter in spec.policy.bank.values():
-        if adapter.kind in ADAPTERS:
-            exported.extend(ADAPTERS.get(adapter.kind).instance.exports(adapter))
+        if adapter.adapter_type in ADAPTER_TYPES:
+            exported.extend(ADAPTER_TYPES.get(adapter.adapter_type).instance.exports(adapter))
     return schema.sites + tuple(exported)
 
 
@@ -187,21 +188,22 @@ def check_sites_resolve(spec: ExperimentSpec, schema: SiteSchema) -> list[Valida
     return issues
 
 
-def check_kinds_accept_their_sites(spec: ExperimentSpec, schema: SiteSchema) -> list[ValidationIssue]:
-    """Every matched site passes its kind's site_ok predicate."""
+def check_adapter_types_accept_their_sites(
+        spec: ExperimentSpec, schema: SiteSchema) -> list[ValidationIssue]:
+    """Every matched site passes its adapter type's site_ok predicate."""
     space = site_space(spec, schema)
     issues = []
     for entry_name, adapter in spec.policy.bank.items():
-        if adapter.kind not in ADAPTERS:
+        if adapter.adapter_type not in ADAPTER_TYPES:
             continue
-        kind = ADAPTERS.get(adapter.kind).instance
+        adapter_type = ADAPTER_TYPES.get(adapter.adapter_type).instance
         rejected = [m.name for m in resolve(space, adapter.site)
-                    if not kind.site_ok(m)]
+                    if not adapter_type.site_ok(m)]
         if rejected:
             issues.append(_issue(
                 "site-predicate-failed", f"policy.bank.{entry_name}.site",
-                f"kind {adapter.kind!r} rejects {len(rejected)} matched site(s): "
-                f"{', '.join(rejected[:4])}"))
+                f"adapter type {adapter.adapter_type!r} rejects {len(rejected)} "
+                f"matched site(s): {', '.join(rejected[:4])}"))
     return issues
 
 
@@ -211,21 +213,21 @@ def check_sites_reachable_on(
     pool: str,
     reachability: Mapping[str, Mechanism],
 ) -> list[ValidationIssue]:
-    """A served kind's mechanism must be how `pool`'s engine reaches every
-    matched site.
+    """A served adapter type's mechanism must be how `pool`'s engine reaches
+    every matched site.
 
     Reachability is a BUILD fact — kernel coverage, fusion maps, installed
     plugins — not a property of the model graph, so this check is NOT in
     CHECKS: the runner asks each serving pool's engine for its self-reported
     inventory (Engine.reachability) at Phase 0 and calls this with the answer.
-    Trainer-only kinds (serving None) are never served: nothing to check.
+    Trainer-only adapter types (serving None) are never served: nothing to check.
     """
     space = site_space(spec, schema)
     issues = []
     for entry_name, adapter in spec.policy.bank.items():
-        if adapter.kind not in ADAPTERS:
+        if adapter.adapter_type not in ADAPTER_TYPES:
             continue
-        serving = ADAPTERS.get(adapter.kind).instance.serving
+        serving = ADAPTER_TYPES.get(adapter.adapter_type).instance.serving
         if serving is None:
             continue
         unreachable = [m.name for m in resolve(space, adapter.site)
@@ -233,8 +235,8 @@ def check_sites_reachable_on(
         if unreachable:
             issues.append(_issue(
                 "site-unreachable", f"policy.bank.{entry_name}.site",
-                f"kind {adapter.kind!r} is served via {serving!r} but the "
-                f"{pool!r} engine build does not reach {len(unreachable)} "
+                f"adapter type {adapter.adapter_type!r} is served via {serving!r} "
+                f"but the {pool!r} engine build does not reach {len(unreachable)} "
                 f"matched site(s) that way: {', '.join(unreachable[:4])}"))
     return issues
 
@@ -526,7 +528,7 @@ CHECKS = (
     check_post_pipelines_are_wired,
     check_schema_describes_the_base,
     check_sites_resolve,
-    check_kinds_accept_their_sites,
+    check_adapter_types_accept_their_sites,
     check_groups_exist,
     check_pool_names_are_unique,
     check_sleep_groups_have_one_learner,

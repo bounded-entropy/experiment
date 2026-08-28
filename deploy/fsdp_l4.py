@@ -135,7 +135,7 @@ def sealed_bytes_are_width_free(store, run_id: str, spec, schema) -> None:
     a resume on other metal, a warm start, and every add_bundle depend on."""
     from rlstack.policy.compile import compile_bundle
     from rlstack.policy.siteschema import resolve
-    from rlstack.registry import ADAPTERS
+    from rlstack.registry import ADAPTER_TYPES
     from rlstack.runner.learners.torch_learner import TorchLearner
     from rlstack.spec.validate import site_space
 
@@ -159,13 +159,13 @@ def sealed_bytes_are_width_free(store, run_id: str, spec, schema) -> None:
     check("sealed adapter bytes reload into an UNSHARDED learner unchanged",
           all(again.adapters[name] == sealed[name] for name in names),
           f"{[len(sealed[n]) for n in names]} bytes")
-    kinds = {name: spec.policy.bank[name].kind for name in names}
+    adapter_types = {name: spec.policy.bank[name].adapter_type for name in names}
     servable = [name for name in names
-                if ADAPTERS.get(kinds[name]).instance.serving is not None]
+                if ADAPTER_TYPES.get(adapter_types[name]).instance.serving is not None]
     check("and compile to the same bundle id",
-          compile_bundle(again.adapters, versions, servable, kinds).bundle_id
-          == compile_bundle(sealed, versions, servable, kinds).bundle_id,
-          compile_bundle(sealed, versions, servable, kinds).bundle_id)
+          compile_bundle(again.adapters, versions, servable, adapter_types).bundle_id
+          == compile_bundle(sealed, versions, servable, adapter_types).bundle_id,
+          compile_bundle(sealed, versions, servable, adapter_types).bundle_id)
 
 
 # ---------------------------------------------------------------------------
@@ -218,7 +218,7 @@ def run_fsdp(base: str, width: int, n_updates: int, kill_after: float,
     schema = hf_schema(base)
     spec = fsdp_spec(store, base, width=width, n_updates=n_updates, master=57)
     engine = VllmEngine(base, tp=1, gpu_memory_utilization=gpu_memory_utilization,
-                        max_model_len=512, max_loras=8, max_lora_rank=16)
+                        max_model_len=512, max_bundles=8, max_rank=16)
 
     print(f"\n== claim 1: the width is a birth fact ==========================")
     learner = lead_fsdp_learner(width)

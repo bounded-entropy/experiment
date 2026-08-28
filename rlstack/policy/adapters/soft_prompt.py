@@ -9,13 +9,13 @@ the same rows at the same place.
 
 from __future__ import annotations
 
-from rlstack.policy.adapters.base import Adapter, Mechanism, adapter
+from rlstack.policy.adapters.base import AdapterType, Mechanism, adapter_type
 from rlstack.policy.siteschema import SiteMeta
 from rlstack.spec.specs import AdapterSpec
 
 
-@adapter("soft_prompt")
-class SoftPrompt(Adapter):
+@adapter_type("soft_prompt")
+class SoftPrompt(AdapterType):
     serving = Mechanism.PROMPT_EMBEDS
 
     def site_ok(self, meta: SiteMeta) -> bool:

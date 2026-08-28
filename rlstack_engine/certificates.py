@@ -1,7 +1,7 @@
 """Parity certificates: a mechanism is never trusted on assumption (I7).
 
-An engine's inventory says a build CLAIMS a lever; a certificate says the
-lever, on this build, numerically agrees with the kind's replay lowering. The
+An engine's inventory says a build CLAIMS a lever; a certificate says the lever,
+on this build, numerically agrees with the adapter type's replay lowering. The
 key is the point — it includes the build fingerprint, so a version bump, a
 different attention backend or a quantization flip misses the cache and parity
 re-runs before any wave is sampled.
@@ -24,7 +24,7 @@ class CertificateKey:
 
     build_fingerprint: str
     base: str
-    kind: str                     # the registered kind AdapterSpec.kind names
+    adapter_type: str             # the registered adapter type AdapterSpec names
     mechanism: Mechanism
 
 

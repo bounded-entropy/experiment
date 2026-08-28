@@ -19,8 +19,9 @@ from rlstack.data.trajectory import DataError, Trajectory
 class Flat:
     """One trajectory as tokens — everything flatten() captures in one pass.
 
-    token_extras carries the per-token columns the bank's kinds recorded at
-    rollout (e.g. adapter draws); injected positions hold None in each column.
+    token_extras carries the per-token columns the bank's adapter types
+    recorded at rollout (e.g. adapter draws); injected positions hold None in
+    each column.
     """
 
     token_ids: tuple[int, ...]

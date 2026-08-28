@@ -5,12 +5,12 @@ provides."""
 
 from __future__ import annotations
 
-from rlstack.policy.adapters.base import Adapter, adapter
+from rlstack.policy.adapters.base import AdapterType, adapter_type
 from rlstack.policy.siteschema import SiteMeta
 
 
-@adapter("value_head")
-class ValueHead(Adapter):
+@adapter_type("value_head")
+class ValueHead(AdapterType):
     serving = None
     provides = frozenset({"values"})
 
