@@ -101,8 +101,19 @@ modal run deploy/fsdp_l4.py                     # the FSDP ladder on 2xL4
   designed it); streamed sample replies + a local tokenizer beside
   RemotePool; kill/resume of the three-host OPD run (mechanism proven,
   wire untested); the trainer-side cross-tenant batching determinism rule.
+- Adapter unruns (#46): soft prompt at tp>1; a soft-prompt tenant over the
+  RemotePool wire; an opsd tenant through score_tokens-under-soft-prompt.
+  Open ruling for Samarth: per-kind lr scaling (a kind's sensible lr ~
+  1/sqrt(param count); a mixed-kind bank with empty OptimSpec.overrides is
+  arguably a validate warning — the soft-prompt collapse at lr=1e-2 is the
+  evidence, CONTEXT #46).
 - Parity certificates designed (#25, rlstack_engine/certificates.py) but
-  unwired — logprob_gap is the running alarm. side_attention numerics are B3+.
+  unwired — logprob_gap is the running alarm.
+- side_attention rollout half: NOT PROVEN, honestly blocked — vllm 0.28.0
+  has no LSE seam on the dense FlashAttention path (#46; the plugin's probe
+  names the missing symbols; reachability reports NONE). Replay half IS
+  proven (4-D attention mask). Unblocks: FlexAttention score_mod, or a
+  vllm bump that plumbs return_softmax_lse.
 - Async post daemon ("scorer"), pool-annotated flow graph, eval `terminal`
   bit, S3Store, generation-only runs (algo=None: needs a committing Sealer
   daemon + wave-shape knobs out of Schedule) — designed in CONTEXT, not

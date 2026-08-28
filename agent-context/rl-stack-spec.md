@@ -545,6 +545,20 @@ the engine image, its cache_salt poisoning KV reuse across bundles. An
 attn_bias without a soft prompt in the bank dies at submit (site-no-match
 against the export). The parity certificate keyed by build fingerprint is the
 I7 obligation; until wired, side_attention numerics stay behind the probe.
+STATUS (#46, metal-checked): soft_prompt is PROVEN end to end — serving is a
+BUILD FACT (VllmEngine(prompt_embeds=True); a build not asked for it reports
+NONE at the boundary), replay rides the #44 row seam, and the control is
+exact (rows that ARE real tokens' embeddings serve and replay bit-identically
+to those tokens). attn_bias: the REPLAY half is proven (the bias rides a 4-D
+attention mask, bit-identical to 2-D on the pinned transformers); the ROLLOUT
+half is NOT PROVEN — vllm 0.28.0 exposes no LSE seam on its dense
+FlashAttention path, so the plugin's probe names the missing symbols and
+reachability honestly reports NONE. FlexAttention's score_mod is the seam
+that would unblock it. #46 also generalized the replay side of I2: a replay
+lowering may be a BOUNDARY (hooks around the base's forward — prepend rows,
+widen the mask, trim the logits) rather than a site wrapper; its obligation
+is ALIGNMENT — forward_backward's logprobs stay [len(batch)] against
+batch.token_ids, and virtual positions never leak above the boundary.
 
 ### Example 4 — Environments (and where scoring went)
 
