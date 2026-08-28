@@ -1707,6 +1707,80 @@ specs; backends (local/modal/skypilot) and GPU topology are semantics-neutral.
           makes the register-time default silently kind-dependent, and the
           A100 40/80 split shows why a stated number beats a lookup.
 
+50. THE OBSERVER OVERHAUL: HOVER, HOST PAGES, RUN SWITCHING (settled,
+    Samarth-directed: "make UI much nicer. keep nice color scheme +
+    minimality, except allow for hover to reveal raw numbers, allow for
+    host-by-host analysis in addition to experiment by experiment, allow for
+    experiment switching in dropdown, start thinking (minimally) about how
+    hosts can expose metrics like throughput (but dont implement yet)... plot
+    what is global"). Entirely inside observe/ + tests/test_ui.py: no core
+    touch, no runner emission, palette and minimality unchanged.
+    - THE SECOND READING (observe/host_series.py): the per-HOST reading, the
+      way series.py is the per-RUN one, over hosts/<name>/log.jsonl alone.
+      Four named readings, one per kind of fact the journal carries:
+      boot_facts (host-up's birth attestation — engines, and for #43-era
+      hosts the Partition and Regimes; older journals carry neither and the
+      page SAYS so rather than inventing one), tenancy_lanes (attach/detach
+      paired into residencies — a run that attached twice is two, an open
+      attach is still resident), gpu_channels (stats as per-device util and
+      memory series), metric_series (the slot, below). fleet_data is the
+      GLOBAL join: views.hosts_data + views.runs_data + each host's lanes
+      and utilization shape under one shared time window.
+    - PLOT WHAT IS GLOBAL: placement, residency, load and timelines render
+      on /hosts and /host/<name>; per-run curves stay on /run/<id>. Routes
+      and API doubled (/hosts, /host/<name>, /api/hosts, /api/host/<name>);
+      the run page cross-links the hosts it ran on, the index's host column
+      links to their journals, and a host's tenancy table links back to the
+      runs — the placement graph is navigable from either end.
+    - HOVER IS THE RAW NUMBER: every chart carries a crosshair, per-series
+      markers, and a tooltip with each series' value at FULL logged
+      precision (the card's own "now" stays four digits, axis labels stay
+      compact) — the dashed eval overlay included, labelled @u<n> when its
+      nearest point is not the crosshair's update. Timeline bars hover too
+      (run, status, from/to, duration, pools). A poll never redraws under
+      the cursor.
+    - THE SWITCHER: a <select> over /api/runs on the run page, rebuilt only
+      when the run list itself changes, so an open dropdown never closes
+      under the user mid-poll.
+    - CHARTS ARE MEASURED: each plot draws at its container's own pixel
+      width (viewBox == css px), so nothing letterboxes at any card width;
+      and a gap in a host's samples wider than 4x that journal's own median
+      cadence BREAKS the line instead of bridging it — downtime is not a
+      straight line between two live points (the gpu view's dark_gaps rule,
+      drawn).
+    - THE THROUGHPUT SLOT — DESIGN ONLY, NOTHING EMITTED: metric_series
+      plots any numeric field an event carries that the named readings do
+      not claim, keyed <event>.<field> (nested dicts flattened with dots;
+      bools are flags and lists are facets, neither is a series). HOW A HOST
+      WOULD EMIT, when we build it: exactly as run_stats already does — one
+      more async journal loop on the Host, started beside the submissions
+      and cancelled with them, appending {"event": "throughput", "t": ...,
+      <numeric fields>} to its own hosts/<name>/log.jsonl, sampled from what
+      the metal already knows (vLLM's engine statistics — prompt and
+      generation tokens/s, running and waiting requests, kv-cache usage —
+      and the learner's tokens and microbatches per second). It stays
+      observability: never read by correctness, never in identity, and
+      per-HOST rather than per-tenant (a shared engine's throughput is a
+      property of the metal; a tenant's share is a run fact the ledger
+      already carries). The UI needs no change to show it — the day such a
+      line lands, the host page grows a card.
+    - page.py split out of ui.py: THE document (one self-contained
+      HTML+CSS+JS page, four routes) is its own file; ui.py is the routes.
+      views.py untouched.
+    486 tests green (13 new in test_ui.py: host-journal fixtures, tenancy
+    pairing incl. re-attach, per-device channels, the schema-tolerant slot
+    with its claimed-field table, the fleet join, the routes and their 404s,
+    the switcher payload, the hover machinery). VERIFIED DEPLOYED beside the
+    volume (modal deploy, same URL): /api/hosts renders 14 hosts and 31
+    experiments over a 55,000s window; modal-math-teacher-32b shows
+    partition modal-l4 [0,1,2,3] mem 0.9 with regime serve-tp4 = inference x
+    Qwen3-32B x 4; l4-fsdp2 shows 14 boots and 14 residencies including
+    resume pairs of one run_id; modal-math-opd-shakeout renders two devices
+    x 26 stats samples with one failed and one LIVE residency (remote pools
+    main+teacher); the pre-#43 hosts (l4-stress, l4-arith, l4-adapters)
+    render with partition None and no regimes, as designed; and metrics is
+    [] on every host — the slot is open and nothing emits into it yet.
+
 ## Open threads (do NOT treat as settled; flag when your answer touches them)
 
 - PLANNED (Samarth-approved, queued behind #48 landing): the OPD stress test
