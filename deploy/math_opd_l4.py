@@ -1,9 +1,11 @@
 """OPD at task scale: an 8B student distilled from a 32B teacher on MATH.
 
-    modal run deploy/math_opd_l4.py::tasks       # build the task set, report it
-    modal run deploy/math_opd_l4.py::baseline    # the ceiling and the floor
-    modal run deploy/math_opd_l4.py::shakeout    # ~10 updates of the real thing
-    modal run deploy/math_opd_l4.py::full --go   # the 50-100 update run (GATED)
+    modal run deploy/math_opd_l4.py::tasks        # build the task set, report it
+    modal run deploy/math_opd_l4.py::baseline     # the ceiling and the floor
+    modal run deploy/math_opd_l4.py::shakeout     # a few updates of the real thing
+    modal run deploy/math_opd_l4.py::report       # a finished run, out of its store
+    modal run deploy/math_opd_l4.py::score_clock  # what the teacher costs, alone
+    modal run deploy/math_opd_l4.py::full --go    # the 50-100 update run (GATED)
 
 deploy/opd_l4.py proved the PLUMBING of on-policy distillation (#47): three
 per-capability hosts, a live 32B teacher scoring the student's own draws, four
@@ -48,6 +50,44 @@ TOPOLOGY (#47's, unchanged except max_model_len):
     KV at 49,664 tokens, so 2048 per sequence is affordable — `shakeout`
     is where that stops being arithmetic and becomes an observation.
 
+WHAT THE METAL SAID (2026-08-28; ::tasks, ::baseline, ::shakeout run
+d43141929dc2 at 6 updates, ::score_clock). The full run has NOT been run.
+
+    THE TASK SET   7,500 train rows -> 5,586 at levels 3-5 -> 2,925 the
+                   verifier can check (52.4%); test 5,000 -> 3,669 -> 1,892
+                   (51.6%). Prompts are 211-543 tokens (median 249), so
+                   prompt + 512 sits at 1,055 of the 2,048 window.
+    THE WINDOW     max_model_len 2048 costs the teacher nothing: 16.63 GiB of
+                   weights per device and 3.03 GiB of KV = 49,664 tokens —
+                   #47's number exactly, at four times the window, because KV
+                   capacity is a memory fact and the window is a per-sequence
+                   one. The student holds 8.27 GiB and 150,224 tokens of KV.
+    THE BASELINE   greedy, 100 held-out tasks: untrained 8B student 0.600,
+                   32B teacher 0.520. The teacher is BELOW the student, and
+                   the reason is visible in the completions — the 32B leaves
+                   the few-shot register for its post-trained one ("Okay,
+                   let's try to tackle this problem step by step") and
+                   truncates more often (39/100 vs 31/100 at 512 tokens).
+    THE LEDGER     reward .125/.000/.562/.812/.188/.750, loss (= per-token
+                   reverse KL) +.1043/.0739/.0576/.0846/.0716/.0568 nats,
+                   gap .0160-.0393, ~100s per update after the first.
+                   32,155 teacher-scored tokens, token-aligned in every
+                   update; teacher mean logprob -0.3077 against the student's
+                   -0.2335. Held-out eval (32 tasks, temperature 1.0) 0.531
+                   at update 3 and 0.281 at update 6 — two points, n=32.
+    THE RAILS      logprob_gap 0.0160-0.0393 with documents 40x longer than
+                   #47's: the kernel floor, unmoved.
+    THE CLOCK      and it is the answer this file was built for: inline
+                   teacher scoring costs ~8s of a ~100s update — 16 prefills
+                   over 5,485 tokens, median 0.94s each, span 8.0s, teacher
+                   busy 15.4s. The span is group_size x per-prefill latency
+                   (run_pipeline gathers over GROUPS and walks trajectories
+                   within one sequentially), so it scales with group_size,
+                   not with wave size. At this shape the async scorer daemon
+                   would buy back under a tenth of an update — and the L4:4
+                   teacher sits idle for the other 92%, which is the real
+                   economics and a different fix.
+
 Deployment only (I5): wiring and measurement. Image pins are modal_app.py's
 plus pyarrow, added as its own layer so the pinned vllm/torch layer is reused
 byte-for-byte from cache.
@@ -81,6 +121,11 @@ image = (
     .env({"VLLM_USE_FLASHINFER_SAMPLER": "0",
           "VLLM_WORKER_MULTIPROC_METHOD": "spawn",
           "OMP_NUM_THREADS": "1",
+          # ragged documents mean every microbatch is a different shape, and
+          # a caching allocator that cannot grow a segment strands the
+          # difference: the learner's first OOM reported 2.32 GiB reserved
+          # but unallocated out of 22. torch's own suggested remedy.
+          "PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:True",
           "HF_HOME": "/hf"})
     .add_local_python_source("probe", "rlstack", "rlstack_engine")
 )
@@ -419,42 +464,51 @@ class ScoreClock:
     def ask(self, verb: str, payload: dict) -> dict:
         return self.inner.ask(verb, payload)
 
-    def report(self, boundaries):
-        """Per update: the scoring calls that fell inside its wall-clock
-        window, their token count, and the span from the first score's start
-        to the last one's end — the time the gradient actually waited."""
-        rows = []
-        for update, (opened, closed) in sorted(boundaries.items()):
-            inside = [s for s in self.scores if opened <= s["start"] < closed]
-            if not inside:
-                continue
-            rows.append({
-                "update": update,
-                "calls": len(inside),
-                "tokens": sum(s["tokens"] for s in inside),
-                "span_s": round(max(s["end"] for s in inside)
-                                - min(s["start"] for s in inside), 1),
-                "busy_s": round(sum(s["end"] - s["start"] for s in inside), 1),
-                "update_s": round(closed - opened, 1),
-            })
-        return rows
+    def one_update(self, update, opened, closed):
+        """The scoring calls that fell inside one update's wall-clock window:
+        their token count, the SPAN from the first score's start to the last
+        one's end (the time the gradient actually waited), and the summed
+        per-call latency (the teacher's own busy time, which exceeds the span
+        because the pipeline scores its groups concurrently)."""
+        inside = [s for s in self.scores if opened <= s["start"] < closed]
+        if not inside:
+            return None
+        return {
+            "update": update,
+            "calls": len(inside),
+            "tokens": sum(s["tokens"] for s in inside),
+            "span_s": round(max(s["end"] for s in inside)
+                            - min(s["start"] for s in inside), 1),
+            "busy_s": round(sum(s["end"] - s["start"] for s in inside), 1),
+            "update_s": round(closed - opened, 1),
+        }
 
 
 class LedgerWatch:
-    """When each update was committed, from the driver's own clock.
+    """When each update was committed, from the driver's own clock — and the
+    place every per-update number is PRINTED AS IT LANDS.
 
-    The ledger records what an update DID, never when — so the wall-clock
+    The ledger records what an update DID, never when, so the wall-clock
     boundary between updates has to be observed. It PEEKS (the observer's
     read-only verb): open_run would attach, and attaching sweeps unsealed
-    work out from under a live run. This is what turns ScoreClock's intervals
-    into per-update numbers.
+    work out from under a live run.
+
+    Printing here rather than at the end is not cosmetic. A driver that
+    reports only after its last update reports nothing at all if the
+    container dies during teardown — which is exactly how the first
+    six-update shakeout lost its whole summary (the fsdp child outlived
+    learner.stop(), the interpreter's exit hung joining it, and Modal's
+    30-second shutdown grace killed the container). Every number this file
+    exists to measure is now in the log the moment it is true.
     """
 
-    def __init__(self, store, run_id, started):
+    def __init__(self, store, run_id, started, clock=None):
         self.store = store
         self.run_id = run_id
         self.previous = started
+        self.clock = clock
         self.boundaries = {}
+        self.timing = []
 
     async def watch_until_cancelled(self, every=2.0):
         import asyncio
@@ -465,9 +519,32 @@ class LedgerWatch:
                 update = int(entry["update"])
                 if update not in self.boundaries:
                     now = time.time()
-                    self.boundaries[update] = (self.previous, now)
+                    opened = self.previous
+                    self.boundaries[update] = (opened, now)
                     self.previous = now
+                    print(f"[commit] update {update} after {now - opened:.0f}s:"
+                          f"  reward {entry['post']['reward']:.3f}"
+                          f"  loss {entry['train']['loss']:+.4f}"
+                          f"  gap {entry['train']['logprob_gap']:.4f}"
+                          f"  grad {entry['train']['grad_norm']:.3f}"
+                          f"  tokens {entry['train']['tokens']}", flush=True)
+                    self._report_scoring(update, opened, now)
             await asyncio.sleep(every)
+
+    def _report_scoring(self, update, opened, closed):
+        """The inline-teacher-scoring line for one update — the measurement
+        this whole file was built to take."""
+        if self.clock is None:
+            return
+        row = self.clock.one_update(update, opened, closed)
+        if row is None:
+            return
+        self.timing.append(row)
+        share = 100.0 * row["span_s"] / row["update_s"] if row["update_s"] else 0
+        print(f"[scoring] update {update}: {row['calls']} teacher scores over "
+              f"{row['tokens']} tokens — span {row['span_s']}s of the update's "
+              f"{row['update_s']}s ({share:.0f}%), teacher busy "
+              f"{row['busy_s']}s", flush=True)
 
 
 # ---------------------------------------------------------------------------
@@ -476,7 +553,7 @@ class LedgerWatch:
 
 def math_opd_spec(store, *, style, n_updates, n_train, n_heldout, eval_every,
                   master, max_tokens=MAX_TOKENS, group_size=8,
-                  trajectories_per_wave=16, microbatch_tokens=1024,
+                  trajectories_per_wave=16, microbatch_tokens=512,
                   max_policy_lag=1, lr=1e-4):
     """One on-policy-distillation experiment over MATH, declared and no more.
 
@@ -486,12 +563,18 @@ def math_opd_spec(store, *, style, n_updates, n_train, n_heldout, eval_every,
     tp=4 teacher, an fsdp=2 learner) which placement satisfies with three
     per-capability hosts.
 
-    microbatch_tokens is 1024, not #47's 2048: the trainer's batched forward
-    pads rows to the LONGEST document in a microbatch and materializes a
-    float32 log-softmax over the vocabulary at every position, so a wave of
-    512-token completions is a different memory regime from a wave of
-    12-token ones. It is the one engineering knob (Schedule's own word) and
-    changes no estimator.
+    microbatch_tokens is 512, not #47's 2048, and the metal chose the number.
+    pack() bounds a microbatch by its token SUM, but the trainer's batched
+    forward pads rows to the LONGEST document in it — a ratio the docstring
+    of _batched_logprobs names and #47 never paid, because twelve-token
+    completions are not ragged. MATH completions are: 50 to 512 generated
+    tokens on a ~250-token prompt. At 1024 a microbatch of five documents
+    padded out to ~3,500 positions and the fsdp=2 learner died in the
+    forward with 19.36 of 22.03 GiB allocated (rank 1, o_proj). At 512
+    almost every microbatch is ONE document, so padded positions ≈ real
+    tokens: less memory AND less wasted compute, at the price of more
+    passes. It is the one engineering knob (Schedule's own word) and it
+    changes no estimator — the gradient is identical either way.
     """
     from rlstack import (
         AlgoSpec, EvalSpec, ExperimentSpec, GenSpec, GpuConfig, GpuGroup,
@@ -646,10 +729,11 @@ async def measure_pool(label, pool_engine, task_list, max_tokens):
     # the two numbers answer different questions: `accuracy` is what the run
     # will see, `finished` is what the model can do inside the budget.
     finished = [r for r, t in zip(rewards, turns) if t.finish != "length"]
+    conditional = sum(finished) / len(finished) if finished else float("nan")
     print(f"\n[{label}] verifier accuracy {accuracy:.3f} over {len(rewards)} "
           f"tasks")
     print(f"    finish reasons     {dict(finish)}")
-    print(f"    accuracy | finished {sum(finished) / len(finished):.3f} "
+    print(f"    accuracy | finished {conditional:.3f} "
           f"over {len(finished)} that were not truncated")
     print(f"    generated tokens   mean {sum(generated) / len(generated):.0f}  "
           f"max {max(generated)}")
@@ -659,8 +743,7 @@ async def measure_pool(label, pool_engine, task_list, max_tokens):
         print(f"    --- {traj.task.id} answer={traj.task.meta['answer']}\n"
               f"    {traj.turns[0].message.content[:300]!r}")
     return {"accuracy": round(accuracy, 4),
-            "accuracy_if_finished": round(sum(finished) / len(finished), 4)
-            if finished else None,
+            "accuracy_if_finished": round(conditional, 4) if finished else None,
             "first_number": round(first / len(rewards), 4),
             "finish": dict(finish),
             "mean_generated": round(sum(generated) / len(generated), 1),
@@ -852,8 +935,11 @@ def three_host_run(spec, *, label, n_updates):
 
     started = time.time()
 
+    rid = experiment_identity(spec, schema)
+    print(f"[run] {rid} — {n_updates} updates", flush=True)
+
     async def submit_with_instruments():
-        watch = LedgerWatch(store, experiment_identity(spec, schema), started)
+        watch = LedgerWatch(store, rid, started, clock)
         watching = asyncio.get_running_loop().create_task(
             watch.watch_until_cancelled())
         stats = asyncio.get_running_loop().create_task(host.run_stats(30.0))
@@ -864,10 +950,10 @@ def three_host_run(spec, *, label, n_updates):
         finally:
             watching.cancel()
             stats.cancel()
-        return report, watch.boundaries
+        return report, watch.timing
 
     try:
-        report, boundaries = asyncio.run(submit_with_instruments())
+        report, timing = asyncio.run(submit_with_instruments())
     finally:
         learner.stop()
     elapsed = time.time() - started
@@ -885,18 +971,14 @@ def three_host_run(spec, *, label, n_updates):
               f"  grad {entry['train']['grad_norm']:.3f}"
               f"  tokens {entry['train']['tokens']}")
 
-    print("\n[inline teacher scoring — the number this run exists to measure]")
-    timing = clock.report(boundaries)
-    for row in timing:
-        share = (100.0 * row["span_s"] / row["update_s"]
-                 if row["update_s"] else float("nan"))
-        print(f"  update {row['update']}: {row['calls']} scores, "
-              f"{row['tokens']} tokens, span {row['span_s']}s of the update's "
-              f"{row['update_s']}s ({share:.0f}%), busy {row['busy_s']}s")
+    # the per-update lines were printed as they landed (LedgerWatch); this is
+    # the average, which is the number the scorer-daemon decision turns on
     if timing:
-        print(f"  mean per update: span "
+        print(f"\n[inline teacher scoring] mean per update: span "
               f"{sum(r['span_s'] for r in timing) / len(timing):.1f}s of "
-              f"{sum(r['update_s'] for r in timing) / len(timing):.1f}s")
+              f"{sum(r['update_s'] for r in timing) / len(timing):.1f}s, "
+              f"teacher busy {sum(r['busy_s'] for r in timing) / len(timing):.1f}s "
+              f"over {sum(r['tokens'] for r in timing) // len(timing)} tokens")
 
     updates = [int(e["update"]) for e in entries]
     check("ledger complete", updates == list(range(1, n_updates + 1)),
@@ -932,16 +1014,16 @@ def three_host_run(spec, *, label, n_updates):
 
 
 # ---------------------------------------------------------------------------
-# leg 3: the shakeout — ten updates that answer the questions the full run
-# would otherwise discover expensively
+# leg 3: the shakeout — the few updates that answer the questions the full
+# run would otherwise discover expensively
 # ---------------------------------------------------------------------------
 
 @app.function(image=image, gpu="L4:2", volumes=VOLUMES, timeout=14400,
               cpu=8.0, memory=65536)
 def shakeout(n_updates: int = 8, eval_every: int = 4, style: str = "cot",
              master: int = 91, max_tokens: int = MAX_TOKENS,
-             microbatch_tokens: int = 1024) -> dict:
-    """Ten updates of the real three-host run, for the five questions.
+             microbatch_tokens: int = 512) -> dict:
+    """A short run of the real three-host thing, for the five questions.
 
         the window    does an 8B tp=2 sampler and a 32B tp=4 teacher both
                       serve at max_model_len=2048, with a prompt of ~450
@@ -977,7 +1059,7 @@ def shakeout(n_updates: int = 8, eval_every: int = 4, style: str = "cot",
 @app.function(image=image, gpu="L4:2", volumes=VOLUMES, timeout=28800,
               cpu=8.0, memory=65536)
 def full(n_updates: int = 60, style: str = "cot", master: int = 47,
-         max_tokens: int = MAX_TOKENS, microbatch_tokens: int = 1024,
+         max_tokens: int = MAX_TOKENS, microbatch_tokens: int = 512,
          go: bool = False) -> dict:
     """The Phase A run: 50-100 updates, lag=1, eval every 10 on held-out MATH.
 
@@ -992,11 +1074,18 @@ def full(n_updates: int = 60, style: str = "cot", master: int = 47,
     measured per-update wall time. Pass --go when that decision is made:
 
         modal run deploy/math_opd_l4.py::full --go --n-updates 60
+
+    WHAT THE SHAKEOUT PRICES IT AT: ~100s per update, so 60 updates is about
+    1h45 of eight L4s and 100 updates about 3h. n_heldout is 64 here and the
+    evaluator walks its tasks SEQUENTIALLY (one wave of n_samples at a time,
+    rlstack/runner/daemons/evaluator.py) — mid-run evals hide inside training,
+    but the LAST one is a tail of roughly n_heldout x 20s with nothing left to
+    overlap. Drop n_heldout to 32 to halve that tail.
     """
     from rlstack import ModalVolumeStore
 
     if not go:
-        raise SystemExit(
+        raise RuntimeError(
             "deploy/math_opd_l4.py::full is gated: it burns eight L4s for "
             "hours. Read ::shakeout's per-update timing, choose n_updates "
             "against it, then re-run with --go.")
@@ -1007,6 +1096,140 @@ def full(n_updates: int = 60, style: str = "cot", master: int = 47,
                          microbatch_tokens=microbatch_tokens)
     store_volume.commit()
     return three_host_run(spec, label="full", n_updates=n_updates)
+
+
+@app.function(image=image, volumes=VOLUMES, timeout=1800, cpu=4.0,
+              memory=16384)
+def report(n_updates: int = 6, eval_every: int = 3, style: str = "cot",
+           master: int = 91, max_tokens: int = MAX_TOKENS,
+           microbatch_tokens: int = 512) -> dict:
+    """Read a finished run back out of its store, on a CPU container.
+
+    IDENTITY IS COMPUTED, NEVER TYPED (I3): this takes the same arguments the
+    run took and DERIVES the same run_id, so no id has to be copied from a log
+    — which is the whole reason it exists. The first six-update shakeout's
+    driver was killed during teardown and its summary never reached the log;
+    everything in that summary except the driver's own stopwatch was already
+    sealed in the store, and this is how it comes back.
+    """
+    from rlstack import ModalVolumeStore
+    from rlstack.policy.siteschema import hf_schema
+    from rlstack.runner.loop import experiment_identity
+
+    store = ModalVolumeStore("/store", volume=store_volume, locator=STORE)
+    spec = math_opd_spec(store, style=style, n_updates=n_updates,
+                         n_train=512, n_heldout=32, eval_every=eval_every,
+                         master=master, max_tokens=max_tokens,
+                         microbatch_tokens=microbatch_tokens)
+    rid = experiment_identity(spec, hf_schema(STUDENT))
+    print(f"[run] {rid}")
+
+    entries = store.peek_ledger(rid)
+    for entry in entries:
+        print(f"  update {entry['update']}: reward {entry['post']['reward']:.3f}"
+              f"  loss {entry['train']['loss']:+.4f}"
+              f"  ratio {entry['train']['mean_ratio']:.4f}"
+              f"  gap {entry['train']['logprob_gap']:.4f}"
+              f"  grad {entry['train']['grad_norm']:.3f}"
+              f"  tokens {entry['train']['tokens']}"
+              f"  microbatches {entry['train']['microbatches']}")
+    updates = [int(e["update"]) for e in entries]
+    run = store.open_run(rid)
+    column = teacher_column_report(run, updates)
+    completions = completion_report(run, updates)
+    for summary in store.peek_eval_summaries(rid):
+        print(f"    eval@{summary['update']}  {summary}")
+    node = [c for c in store.peek_dictionary(rid)["columns"]
+            if c["name"] == "teacher_logprobs" and c["phase"] == "post"][0]
+    check("the run describes its own teacher channel",
+          node["granularity"] == "token" and node["feeds_loss"]
+          and "loss:opd" in node["consumers"], json.dumps(node))
+    failed = [(n, d) for n, ok, d in CHECKS if not ok]
+    return {"run_id": rid, "updates": len(updates),
+            "rewards": [e["post"]["reward"] for e in entries],
+            "losses": [e["train"]["loss"] for e in entries],
+            "gaps": [e["train"]["logprob_gap"] for e in entries],
+            "evals": store.peek_eval_summaries(rid),
+            **column, **completions, "failed": failed}
+
+
+@app.function(image=image, volumes=VOLUMES, timeout=5400, cpu=4.0,
+              memory=16384)
+def score_clock(updates: str = "3,6", n_updates: int = 6, eval_every: int = 3,
+                style: str = "cot", master: int = 91,
+                max_tokens: int = MAX_TOKENS, microbatch_tokens: int = 512
+                ) -> dict:
+    """Time the INLINE teacher scoring of a finished run's real waves, with
+    only the teacher host live. The measurement this file exists to take.
+
+    It is not a simulation of the post phase, it IS the post phase: the sealed
+    wave is read back out of the store, and run_pipeline drives the registered
+    `teacher_logprobs` processor over it through a RemotePool — the same
+    groups, the same flatten-order walk, the same one-prefill-per-turn against
+    the same 32B. The only thing missing is the student and the learner, and
+    the teacher is dedicated during the real post phase anyway, so nothing
+    contends for it there either.
+
+    Four L4s for four minutes instead of eight for forty: the cheap way to
+    ask what an update's gradient waits for, and the input to whether the
+    async scorer daemon is worth building.
+    """
+    import asyncio
+    import time
+
+    from rlstack import (
+        Bundle, ModalVolumeStore, RemotePool, SamplingSpec, run_pipeline,
+        wave_from_rows,
+    )
+    from rlstack.policy.siteschema import hf_schema
+    from rlstack.runner.loop import experiment_identity
+
+    store = ModalVolumeStore("/store", volume=store_volume, locator=STORE)
+    spec = math_opd_spec(store, style=style, n_updates=n_updates,
+                         n_train=512, n_heldout=32, eval_every=eval_every,
+                         master=master, max_tokens=max_tokens,
+                         microbatch_tokens=microbatch_tokens)
+    rid = experiment_identity(spec, hf_schema(STUDENT))
+    run = store.open_run(rid)
+    print(f"[run] {rid}")
+
+    clock = ScoreClock(ModalTransport(TeacherHost()))
+    teacher = RemotePool(clock, base=TEACHER, tp=4)
+    bundle = Bundle("bundle:score-clock", {})
+    teacher.add_bundle(bundle)
+    routes = {"main": (teacher, bundle), "teacher": (teacher, bundle)}
+    sampling = SamplingSpec(temperature=1.0, top_p=1.0, max_tokens=max_tokens)
+
+    rows = []
+    for update in [int(u) for u in updates.split(",")]:
+        wave = wave_from_rows(run.read_wave(update))
+        before = len(clock.scores)
+        started = time.time()
+        columns = asyncio.run(run_pipeline(
+            ("teacher_logprobs",), wave, routes, sampling, master, update))
+        span = time.time() - started
+        calls = clock.scores[before:]
+        scored = sum(len(v) for v in columns["teacher_logprobs"])
+        latencies = sorted(round(c["end"] - c["start"], 2) for c in calls)
+        print(f"[scoring] update {update}: {len(wave.groups)} groups x "
+              f"{len(wave) // len(wave.groups)} trajectories, {len(calls)} "
+              f"prefills, {scored} scored tokens")
+        print(f"    span {span:.1f}s   teacher busy "
+              f"{sum(c['end'] - c['start'] for c in calls):.1f}s   "
+              f"per prefill min {latencies[0]}s median "
+              f"{latencies[len(latencies) // 2]}s max {latencies[-1]}s")
+        rows.append({"update": update, "span_s": round(span, 1),
+                     "prefills": len(calls), "scored_tokens": scored,
+                     "busy_s": round(sum(c["end"] - c["start"]
+                                         for c in calls), 1),
+                     "median_prefill_s": latencies[len(latencies) // 2]})
+
+    mean_span = sum(r["span_s"] for r in rows) / len(rows)
+    check("inline teacher scoring is a measurable share of an update",
+          mean_span > 0, f"mean span {mean_span:.1f}s per update")
+    print(f"\n[teacher host] {TeacherHost().status.remote()}")
+    return {"run_id": rid, "updates": rows, "mean_span_s": round(mean_span, 1),
+            "failed": [(n, d) for n, ok, d in CHECKS if not ok]}
 
 
 @app.function(image=image, timeout=600)
