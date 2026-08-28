@@ -56,9 +56,9 @@ export async function drawFleet() {
     row.append(el("td", {}, `<a href="${link(h)}">${esc(label(h))}</a>`));
     row.append(el("td", {}, esc(h.engines.join(", ") || "?")));
     row.append(el("td", {}, (h.regimes || []).map(r =>
-        esc(`${r.name}:${r.kind}×${r.shape}`)).join(" ") || "<span class='k'>—</span>"));
+        esc(`${r.name}:${r.capability ?? r.kind}×${r.shape}`)).join(" ") || "<span class='k'>—</span>"));
     row.append(el("td", {}, h.partition
-        ? esc(`${h.partition.gpuset} [${(h.partition.devices || []).join(",")}] `
+        ? esc(`${h.partition.metal ?? h.partition.gpuset} [${(h.partition.devices || []).join(",")}] `
               + `mem ${h.partition.memory}`)
         : "<span class='k'>—</span>"));
     row.append(el("td", {}, `<span class="${h.running.length ? "live" : "k"}">`

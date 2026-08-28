@@ -46,13 +46,13 @@ function drawBirth(host) {
   const holder = document.getElementById("page");
   holder.append(el("h2", {}, "the host <span>as it attested itself at birth</span>"));
   const partition = host.partition
-    ? `${esc(host.partition.gpu || "?")} ${esc(host.partition.gpuset)} devices `
+    ? `${esc(host.partition.gpu || "?")} ${esc(host.partition.metal ?? host.partition.gpuset)} devices `
       + `[${(host.partition.devices || []).join(", ")}]`
       + ` · memory fraction ${esc(host.partition.memory)}`
     : "<span class='k'>not journaled (a host older than #43's partitions)</span>";
   const regimes = host.regimes.length
     ? host.regimes.map(r =>
-        esc(`${r.name} = ${r.kind} × ${r.base ?? "*"} × ${r.shape}`)).join("<br>")
+        esc(`${r.name} = ${r.capability ?? r.kind} × ${r.base ?? "*"} × ${r.shape}`)).join("<br>")
     : "<span class='k'>not journaled (a host older than #43's regimes)</span>";
   holder.append(el("table", {},
     `<tr><th>partition</th><td>${partition}</td></tr>`
