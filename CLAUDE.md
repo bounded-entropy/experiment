@@ -9,7 +9,10 @@ continue is in the repo.
 1. **STYLE.md** — binding. Eight rules; rule 8's folder tree IS the
    architecture, enforced by `tests/test_architecture.py`. Deviations are
    review findings.
-2. **agent-context/CONTEXT.md** — the decision log. Chronological, numbered;
+2. **ARCHITECTURE.md** — the universal vocabulary reference (#54): every
+   noun and verb defined once; docstrings speak it, and a word used with a
+   different meaning is a finding.
+3. **agent-context/CONTEXT.md** — the decision log. Chronological, numbered;
    later entries supersede earlier ones (#28–#48 cover the current shape:
    the trajectory/wave rename, the loss zoo + stress matrix, the GpuArbiter,
    the multi-tenant Learner, the Host, the operational CLI + observe/, the
@@ -17,11 +20,14 @@ continue is in the repo.
    verb + real opsd, the observer UI + custom panels, #43: the fleet —
    hosts as atomic partitions, join/carve/acquire, the wire — #44: the
    trainer's punica, #45: TP/transport/FSDP on metal, #46: soft prompts +
-   the side_attention refusal, #47: real OPD, and #48: the Lowering — one
-   contract per (kind, side)). If code and an early entry disagree, the
-   code plus the latest entry win.
-3. **agent-context/rl-stack-spec.md** — the spec canon, v3 (folded through
-   #43). Invariants I1–I12. Deltas after the fold-in live in CONTEXT.md.
+   the side_attention refusal, #47: real OPD, #48: the Lowering — one
+   contract per (adapter type, side) — #54: ARCHITECTURE.md + the docstring
+   recode, and #55: the vocabulary rename). If code and an early entry
+   disagree, the code plus the latest entry win.
+4. **agent-context/rl-stack-spec.md** — the spec canon, v3 (folded through
+   #43). Invariants I1–I12. Deltas after the fold-in live in CONTEXT.md
+   (incl. #55's terminology: the spec text still says gpuset/kind/llm in
+   places — swap at the v4 fold).
 
 ## Working norms (Samarth's, stated across sessions)
 
@@ -38,7 +44,16 @@ continue is in the repo.
 
 ## State at handover
 
-- 503 tests green on fakes (torch-gated skips run in the image). Real
+- THE VOCABULARY IS RENAMED (#54/#55): ARCHITECTURE.md is the universal
+  reference and docstrings speak it. "Kind" (for adapters) is dead — the
+  registered class is AdapterType (`@adapter_type`, ADAPTER_TYPES,
+  AdapterSpec.adapter_type); Regime/Demand say `capability`;
+  Partition.gpuset → `.metal`; the PoolClient param is `client` (not llm);
+  TokenBatch.post → `.postdata`; VllmEngine takes max_bundles/max_rank.
+  The identity move is ACCEPTED: registry strings + class sources hash
+  into run_id, so pre-rename stores are read-only history (the observer
+  tolerates old journal keys; one regression test pins that).
+- 504 tests green on fakes (torch-gated skips run in the image). Real
   metal is PROVEN through the stress matrix (deploy/stress_l4.py): seven
   concurrent tenants — grpo/ppo/gspo/sft/sdft/replay_distill/self_anchor,
   live + replay + static sources, a judge pool, lag=2 — on one Modal L4
@@ -118,7 +133,7 @@ modal run deploy/fsdp_l4.py                     # the FSDP ladder on 2xL4
   wire untested); the trainer-side cross-tenant batching determinism rule.
 - Adapter unruns (#46): soft prompt at tp>1; a soft-prompt tenant over the
   RemotePool wire; an opsd tenant through score_tokens-under-soft-prompt.
-  Open ruling for Samarth: per-kind lr scaling (a kind's sensible lr ~
+  Open ruling for Samarth: per-adapter-type lr scaling (a type's sensible lr ~
   1/sqrt(param count); a mixed-kind bank with empty OptimSpec.overrides is
   arguably a validate warning — the soft-prompt collapse at lr=1e-2 is the
   evidence, CONTEXT #46).
