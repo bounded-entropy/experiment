@@ -1,23 +1,15 @@
-"""Learned bias on an attention-score rectangle — the one adapter served by
-OUR mechanism: stock kernels untouched, the biased prompt-segment attention
-computed densely and merged by exact LSE arithmetic. Ships as an engine plugin
-(rlstack_engine.side_attention, jointly consuming the soft prompt's rows) on
-the rollout side, and a score-level patch on the replay side.
+"""Learned bias on an attention-score rectangle: one scalar per (head, prompt
+row), over the sites a soft prompt exports.
 
-Its site (queries -> prompt[:n]) is not a base-model site: the soft prompt
-EXPORTS it, so an attn_bias without a soft prompt in the bank dies at Phase 0
-with site-no-match.
+HALF BUILT, ON PURPOSE. The replay lowering is real and proven; the rollout
+lowering demands a PLUGIN whose seams the pinned build does not have — so no
+build serves this kind, every engine honestly reports NONE for SIDE_ATTENTION,
+and a spec carrying an attn_bias is refused at Phase 0 rather than served
+wrong. That refusal is the feature: a kind is served when its mechanism is
+proven, not when its class exists.
 
-HALF BUILT, ON PURPOSE (#46). The REPLAY lowering is real and proven
-(attn_bias_torch: the bias rides the 4-D attention mask, which the stock
-attention already adds to the scores). The ROLLOUT lowering exists as a
-declaration only (attn_bias_vllm): its demands() name a PLUGIN, and the seams
-that plugin was designed against do not exist on vllm 0.28.0 — so
-rlstack_engine.side_attention still refuses at probe, no build serves this
-kind, and every engine honestly reports NONE for SIDE_ATTENTION. This kind
-therefore cannot pass Phase 0's reachability check and no run can use it yet.
-That refusal is the feature: a kind is served when its mechanism is proven,
-not when its class exists.
+Its site (queries -> prompt[:n]) is not a base-model site, so an attn_bias
+without a soft prompt in the bank dies at Phase 0 with site-no-match.
 """
 
 from __future__ import annotations

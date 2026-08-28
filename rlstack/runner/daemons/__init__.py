@@ -1,17 +1,16 @@
 """Daemons: one per GPU responsibility, synchronized only via the store.
 
-    base.py      — Daemon: the shape (await condition → lease → work →
+    base.py      — Daemon: the shape (await condition → admit → work →
                    write store → notify)
-    generator.py — writes waves/<w> at the newest bundle, throttled by the
-                   lag buffer
-    trainer.py   — awaits waves/<u>, runs post + fwd/bwd + commit,
-                   publishes the bundle
+    generator.py — writes waves/<w> at the newest committed bundle, bounded
+                   by the lag buffer
+    trainer.py   — awaits waves/<u>, runs post + fwd/bwd + commit, publishes
+                   the bundle
     evaluator.py — awaits ledger commits on the eval modulus, writes eval/<u>
 
-plan_daemons (runner/loop.py) derives the set from the spec: live trajectories →
-a Generator exists; eval declared → an Evaluator exists; the Trainer always.
-The daemons' condition methods (may_generate / next_rows / due_updates)
-are the overridable seam for custom alternation policies.
+plan_daemons (runner/loop.py) derives the set from the spec. Each daemon's
+condition method is the named, overridable seam for a custom alternation
+policy.
 """
 
 from rlstack.runner.daemons.base import Daemon

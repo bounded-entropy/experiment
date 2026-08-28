@@ -1,30 +1,18 @@
 """Per-host series assembly: one host's journal read as the fleet sees it.
 
-series.py is the per-EXPERIMENT reading (a run's dictionary joined with its
-ledger); this is the per-HOST one, and its only input is the observability
-journal, hosts/<name>/log.jsonl — which correctness never reads. Four named
-readings, one per kind of fact a journal carries:
+series.py is the per-EXPERIMENT reading; this is the per-HOST one, and its only
+input is hosts/<name>/log.jsonl — which correctness never reads. Four named
+readings, one per kind of fact a journal carries: boot_facts (the birth
+attestation — engines, and for newer hosts the Partition and Regimes; older
+journals carry neither and the page SAYS so rather than inventing one),
+tenancy_lanes (attach/detach paired into residencies), gpu_channels (stats as
+per-device util and memory series), and metric_series — the open throughput
+slot, which plots any numeric field an event carries that the other three do
+not claim, and into which nothing in runner/ emits yet.
 
-    boot_facts      host-up's birth attestation: engines, and — newer hosts
-                    only — the Partition and Regimes a host IS (#43). Older
-                    journals carry neither and render without them.
-    tenancy_lanes   attach/detach paired into residencies: who occupied this
-                    host, from when to when, and how it ended.
-    gpu_channels    the stats events as one util/memory channel per device.
-    metric_series   THE THROUGHPUT SLOT (#50): every numeric field an event
-                    carries that the three readings above do not claim
-                    becomes a generic per-host series keyed <event>.<field>.
-                    Schema-tolerant on purpose — the day a host journals
-                    {"event": "throughput", "t": ..., "tokens_per_s": 812.4}
-                    the UI plots it with no change here. Nothing in runner/
-                    emits such an event yet; the emission is designed in
-                    CONTEXT #50, not built.
-
-fleet_data is the GLOBAL reading: views.hosts_data joined with each host's
-tenancy lanes and utilization shape, plus views.runs_data — placement, load
-and timelines are fleet facts; progress and curves stay per-run facts on the
-run page. Pure functions of journals; the region's never-attach, never-write
-rule applies.
+fleet_data is the GLOBAL reading: hosts_data and runs_data joined with each
+host's lanes and utilization under one shared time window, because placement
+and load are fleet facts while progress and curves stay per-run facts.
 """
 
 from __future__ import annotations
@@ -85,9 +73,9 @@ def host_series(stores: Sequence[Store], host: str) -> dict | None:
 
 
 def boot_facts(events: Sequence[dict]) -> list[dict]:
-    """Each host-up as the host attested itself at birth. A Partition and
-    Regimes are what a host IS (#43) — journaled since, so an old host's
-    boot carries None and the page says so rather than inventing one."""
+    """Each host-up as the host attested itself at birth. A Partition and its
+    Regimes are what a host IS (I12); a boot journaled before they were
+    carries None, and the page says so rather than inventing one."""
     return [{"t": event.get("t"),
              "engines": list(event.get("engines", [])),
              "partition": event.get("partition"),
@@ -97,9 +85,9 @@ def boot_facts(events: Sequence[dict]) -> list[dict]:
 
 
 def tenancy_lanes(events: Sequence[dict]) -> list[dict]:
-    """attach/detach paired into residencies, in attach order. A run that
-    attached twice (resume, sleep-sharing) is two residencies; an attach
-    still open renders detached=None — that tenant is on the host now."""
+    """attach/detach paired into residencies, in attach order. A tenant that
+    attached twice (resume, an alternating host) is two residencies; an
+    attach still open renders detached=None — it is on the host now."""
     lanes: list[dict] = []
     open_lane: dict[str, dict] = {}
     for event in events:
@@ -197,10 +185,10 @@ def numbers_under(prefix: str, value) -> list[tuple[str, float]]:
 # ---------------------------------------------------------------------------
 
 def fleet_data(stores: Sequence[Store]) -> dict:
-    """What is true of the FLEET rather than of one experiment: every host
-    as the hosts view renders it, joined with its residencies and its
-    utilization shape, plus the runs view's placement. The window is the
-    span all timelines share, so lanes on one page are comparable."""
+    """What is true of the FLEET rather than of one experiment: every host as
+    the hosts view renders it, joined with its residencies and its utilization
+    shape, plus the runs view's placement. One window spans every timeline, so
+    lanes on one page are comparable."""
     hosts = []
     for row in hosts_data(stores):
         events = sorted((event for _, evs in journals_for(stores, row["host"])

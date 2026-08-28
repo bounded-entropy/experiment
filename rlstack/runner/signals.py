@@ -1,10 +1,10 @@
-"""RunSignals: the await half of the blackboard.
+"""RunSignals: the awaitable half of the blackboard.
 
-Roles never call each other — they write the store, and they wait on
-predicates OVER the store. This object is only the wake-up plumbing: the
-store stays the single source of truth (a predicate re-reads it on every
-check), and the periodic timeout means a writer outside this process (the
-Phase-C multi-process future) is noticed too, just more slowly.
+Daemons never call each other — they write the store and wait on predicates
+OVER the store. This object is only wake-up plumbing: the store stays the
+single source of truth (a predicate re-reads it on every check) and notify is a
+latency hint, so the periodic timeout is what makes a writer in another process
+visible too, just more slowly.
 """
 
 from __future__ import annotations
@@ -21,7 +21,7 @@ class RunSignals:
         self._poll_seconds = poll_seconds
 
     async def notify(self) -> None:
-        """Call after writing the store; wakes every waiting role."""
+        """Call after writing the store; wakes every waiting daemon."""
         async with self._condition:
             self._condition.notify_all()
 

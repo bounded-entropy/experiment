@@ -1,7 +1,8 @@
-"""The inference world: rollouts and environments. May sample; runs before
-the seal. Rewards live in training/post/ (decision #24).
+"""The inference world: the Rollout and the environments that build one.
 
-Must never import rlstack.training (enforced by tests/test_architecture.py).
+Everything here runs before the seal and may sample. Rewards, judges and
+advantages are postprocessors (training/post/), never environments. Must never
+import rlstack.training (enforced by tests/test_architecture.py).
 """
 
 from rlstack.inference import rollout  # noqa: F401

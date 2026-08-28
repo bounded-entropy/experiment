@@ -1,37 +1,18 @@
-"""The rollout seam: what one adapter kind contributes to ONE engine request.
+"""The rollout lowering contract: what one kind contributes to ONE engine request.
 
-The trainer batches documents into a padded forward and indexes the installed
-deltas per ROW (adapters/replay.py); the engine batches requests that pin
-different bundles and indexes its levers per REQUEST — the same bridge, the
-other side of it (I2, I8). This module is the serving half: one RolloutLowering
-per kind, built once per engine build, so no mechanism knowledge has to live in
-the engine at all.
+The trainer routes installed deltas per ROW of a padded forward
+(adapters/replay.py); the engine routes its levers per REQUEST — the same
+bridge, the other side of it. One RolloutLowering per (kind, build), and its
+verbs: demands (what the build must pay), reaches (what that payment buys at a
+site), attach (make one bundle's state resident, additively), apply (this
+kind's contribution to one request), align (prompt positions it occupies,
+SUMMED across a bundle's kinds). A `claims` declaration lets add_bundle refuse
+two kinds claiming one request lever while the bundle is still just an id.
 
-FOUR VERBS, read off what serving a mechanism actually costs (#48, completing
-the #3 rule that every kind ships BOTH lowerings):
-
-    demands   what the BUILD must pay before this kind can be served — engine
-              args, a plugin's presence. A build that cannot pay does not
-              serve the kind, and says so at construction rather than at the
-              first request.
-    attach    make one bundle's state resident: payloads -> the object apply
-              and align read. ADDITIVE and once per bundle, the mirror of
-              install_replay (I8).
-    apply     contribute to ONE unit of work — a request here, a row of the
-              padded forward on the trainer side. The units DIFFER by side
-              (our plan batches the trainer; vLLM's scheduler batches the
-              engine) and the contract does not pretend they are the same.
-    align     how many prompt positions this kind's state occupies, so an
-              answer read off the prompt (score_tokens) is found where the
-              real tokens actually start. SUMMED across a bundle's kinds.
-
-The engine that owns these is a BUS: it loops the bundle's kinds, calls the
-verbs, merges the levers and sums the alignments. "Native vs plugin" stops
-being a category — it is a demands() difference and nothing else.
-
-torch and vLLM are deliberately absent here: this file is the contract, each
-kind's own *_vllm.py is the compute, and a kind imports its heavy half lazily
-(STYLE rule 7 — the lora_torch precedent).
+The engine that owns these is a BUS — it loops the kinds, calls the verbs,
+merges the levers and sums the alignments — so "native vs plugin" is a
+demands() difference and nothing else. This file is the contract; each kind's
+own *_vllm.py is the compute.
 """
 
 from __future__ import annotations
@@ -51,8 +32,8 @@ class ServingBuild:
 
     Everything here is fixed before the first bundle arrives and never changes
     afterwards — which is the point: reachability, sizing and dtype are BUILD
-    facts (#25b, #43), so a lowering reads them once at construction instead of
-    asking the engine mid-flight.
+    facts, so a lowering reads them once at construction instead of asking the
+    engine mid-flight.
     """
 
     base: str                  # the checkpoint this metal serves
@@ -119,17 +100,17 @@ class Levers:
 class Alignment:
     """How much of the prompt is NOT the request's own tokens.
 
-    `positions` is what this kind's state occupies in front of them, so the
-    answer geometry above (score_tokens' scored suffix) is the sum of every
-    attached kind's positions plus the context length — the rollout twin of the
-    replay boundary's logit trim (#46).
+    `positions` is what this kind's state occupies in front of them, so an
+    answer read off the prompt (score_tokens' scored suffix) starts at the sum
+    of every attached kind's positions plus the context length — the rollout
+    twin of the replay boundary's logit trim.
     """
 
     positions: int = 0
 
 
 class RolloutLowering:
-    """One kind's half of the bridge on the ENGINE side (#3's rollout lowering).
+    """One kind's half of the bridge on the ENGINE side.
 
     Subclass per (kind, engine family), set the three class attributes,
     implement the verbs; the kind's declaration half builds one per engine
@@ -138,7 +119,7 @@ class RolloutLowering:
     else.
     """
 
-    kind: ClassVar[str]                      # the registered adapter kind
+    kind: ClassVar[str]                      # the registered kind it serves
     mechanism: ClassVar[Mechanism]           # the lever it serves through
     claims: ClassVar[tuple[str, ...]] = ()   # request parts apply() writes:
     #                                          "prompt", or a generate() keyword
@@ -151,14 +132,14 @@ class RolloutLowering:
         raise NotImplementedError
 
     def reaches(self, meta: SiteMeta) -> bool:
-        """Does the payment above buy this site? The engine's reachability
-        inventory is the union of its served kinds' answers (I7, #25b)."""
+        """Does the payment above buy this site? An engine's reachability
+        inventory is the union of its served kinds' answers (I7)."""
         raise NotImplementedError
 
     def attach(self, bundle_id: str, payloads: Mapping[str, bytes]) -> Any:
         """Make one bundle's state resident and return it; the engine holds it
-        and hands it back to apply and align. All of THIS kind's payloads
-        arrive together, in bank order — a kind compiles its own jointly."""
+        and hands it back to apply and align. All of THIS kind's payloads arrive
+        together, in bank order — a kind compiles its own entries jointly."""
         raise NotImplementedError
 
     def apply(self, attached: Any, request: Request) -> Levers:
@@ -173,13 +154,13 @@ class RolloutLowering:
 
 def check_levers_compose(bundle_id: str,
                          lowerings: Sequence[RolloutLowering]) -> None:
-    """#48's COMPOSITION RULE: one request carries one prompt form and one
-    value per keyword, so no two of a bundle's kinds may claim the same lever.
+    """THE COMPOSITION RULE: one request carries one prompt form and one value
+    per keyword, so no two of a bundle's kinds may claim the same lever.
 
-    soft_prompt + lora compose because they claim different things. A SECOND
-    prompt-shaping kind does not, and the refusal belongs HERE — at
-    registration, loudly, while the bundle is still just an id — never at
-    sample time, where it would mean a request served the wrong policy.
+    soft_prompt + lora compose because they claim different things; a SECOND
+    prompt-shaping kind does not. The refusal belongs HERE — at add_bundle,
+    loudly, while the bundle is still just an id — never at sample time, where
+    it would mean a request served the wrong policy.
     """
     claimed: dict[str, str] = {}
     for lowering in lowerings:

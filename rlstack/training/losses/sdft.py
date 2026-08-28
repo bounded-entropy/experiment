@@ -10,10 +10,9 @@ from rlstack.training.losses.base import LossResult, PolicyOutputs, rails, token
 
 @loss("sdft", requires=("reward",))
 def sdft(out: PolicyOutputs, batch: Any) -> LossResult:
-    """Self-distillation fine-tuning, v0: reward-weighted behavior cloning on
-    the policy's own samples — clone only what the pipeline scored (rejection
-    sampling as a loss). Requires the "reward" column, weights each token by
-    its trajectory's reward; an all-zero-reward microbatch contributes zero."""
+    """Self-distillation fine-tuning, v0: clone only what the pipeline scored
+    — rejection sampling as a loss. Each token is weighted by its trajectory's
+    "reward"; an all-zero-reward microbatch contributes zero."""
     import torch
 
     lp, mask, behavior = token_tensors(out, batch)

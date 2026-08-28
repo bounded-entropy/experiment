@@ -7,44 +7,24 @@
     modal run deploy/partition_l4.py::observe         # leg 6: the views
     modal run deploy/partition_l4.py                  # all of it, in order
 
-#43 made a Host an ATOMIC PURPOSED PARTITION and #49 gave the partition its
-metal; both were proven on fakes and, on real GPUs, only ever over WHOLE
-devices (#45, #47). This file is the SUB-GPU half's first contact with
-silicon: one L4, carved by the fleet into several hosts that must coexist in
-one container —
-
-    leg 1  a static partition: two vLLM engines (0.30 and 0.15 of the device,
-           each built with gpu_memory_utilization = its partition's memory)
-           plus a training host, carved from one device by the ladder itself
-    leg 2  an ALTERNATING host (main pool + learner, one partition, sleep)
-           whose arbiter wake/evict hooks are REAL for the first time anywhere
-           in this repo: vLLM sleep()/wake_up() and a learner offload
-    leg 3  many tenants joining those partitions fraction-free, each reaching
-           the pools it did not land on over the wire
-    leg 4  a live carve out of what is left, and the acquire refusal on a full
-           device
-    leg 5  kill/resume of one tenant through the fleet
-    leg 6  the observer's views over the journals the campaign wrote
-    leg 7  the overcommit boundary: what a partition sized past the device
-           does, and whether it takes a serving partition down with it
-
-The deliverable is EVIDENCE, so every leg prints the device-wide HBM ledger
-(torch.cuda.mem_get_info sees every process on the device, vLLM's engine-core
-children included) beside the fleet's own arithmetic: a claim about a
-partition can then be checked against the metal it claims.
-
-A FAILING CHECK HERE IS A FINDING, not a broken harness: every check states a
-property the sub-GPU host model claims, and the ones the first campaign could
-not make true are named in CONTEXT #51 with the repro that shows them.
-
-Four of those findings are now fixed in rlstack/ (#52), so the checks that
-were deliberately failing — distinct carve names, a live carve that adds
-rather than replaces, an honest residual, a carved host the observer can name
-— are THE metal regression for the fix, and legs 1 and 2 are the cheap way to
-re-run it. Two findings stand: (e) a training partition's fraction is
-unenforceable in-process, and (f) two hosts of one capability are
-unaddressable — which is why this file still gives its second inference
-partition a different base.
+The sub-GPU half of the atomic purposed partition, on silicon: one L4 carved
+by the fleet's ladder into hosts that must coexist in one container — two
+static inference partitions plus a training one (leg 1); an ALTERNATING host
+whose arbiter wake/evict hooks are real vLLM sleep()/wake_up() and a learner
+offload (leg 2); fraction-free joins onto them, each tenant reaching over the
+wire the pools it did not land on (leg 3); a live carve out of residual and
+the acquire refusal on a full device (leg 4); kill/resume of one tenant
+through the fleet (leg 5); the observer's views over the journals the campaign
+wrote (leg 6); and the overcommit boundary (leg 7). Every leg prints the
+device-wide HBM ledger — torch.cuda.mem_get_info is a driver call, so it sees
+vLLM's engine-core children too — beside the fleet's own arithmetic, so a
+claim about a partition can be checked against the metal it claims, and a
+FAILING CHECK HERE IS A FINDING rather than a broken harness. Two findings
+stand and are not bugs to fix: a training partition's fraction is
+unenforceable in-process (a stated cost of sharing one process), and two hosts
+of one capability are unaddressable, since find_join takes the first covering
+host — which is why this file still gives its second inference partition a
+different base. Results in CONTEXT #51/#52.
 
 Deployment only (I5): wiring and measurement, nothing semantics-bearing.
 Image pins: keep in sync with deploy/modal_app.py.

@@ -1,14 +1,14 @@
 """The seams the runner drives: Engine (inference metal) and Learner (training
-metal), plus the event and result types that cross them.
+metal), plus the events and results that cross them.
 
-The Engine speaks TOKENS — its native unit — as a stream of TokenEvents ending
-in a FinishEvent; a request's bundle is pinned at submission, so registering a
-new bundle never disturbs generation in flight. The EnginePoolClient
-(runner/traffic.py) assembles the stream into a Turn, the membrane's record unit.
-
-Everything real slides in behind these protocols: FakeEngine/FakeLearner for
-dry runs and tests (runner/fakes.py), vLLM and the torch learner in Phase B2/3,
-the resident daemon in Phase C. The runner never knows which it has.
+An Engine speaks TOKENS — a stream of TokenEvents ending in a FinishEvent —
+and every request pins its bundle at submission, so registering a new bundle
+never disturbs generation in flight. A Learner mirrors that on the other side:
+installation is additive and every verb pins a tenant, so nothing about one
+tenant's traffic, install or load disturbs another's (I8). `tp` and `fsdp` are
+BUILD facts the submit gate attests. Everything real slides in behind these
+protocols — fakes, vLLM, the torch learners, a remote pool — and the runner
+never knows which it has.
 """
 
 from __future__ import annotations
@@ -82,22 +82,19 @@ class Emitted:
 # ---------------------------------------------------------------------------
 
 class Engine(Protocol):
-    """Inference metal. One resident engine (pool) behind one interface.
+    """Inference metal: one resident engine serving every tenant behind it.
 
-    MULTI-TENANCY INVARIANT (multi-LoRA generalized to multi-adapter): bundle
-    registration is ADDITIVE — any number of experiments' bundles coexist,
-    every request pins its own bundle at submission, and requests batch
-    together regardless of whose bundle they carry. Every serving Mechanism
-    must therefore be per-request selectable. One resident engine serves many
-    experiments in parallel; nothing about a registration disturbs anyone
-    else's traffic.
+    MULTI-TENANCY INVARIANT (I8): bundle registration is ADDITIVE — any number
+    of tenants' bundles coexist, each request pins its own at submission, and
+    requests batch together regardless of whose bundle they carry, so every
+    serving Mechanism must be per-request selectable and no registration ever
+    disturbs anyone else's traffic.
 
-    REACHABILITY INVARIANT: whether a mechanism reaches a site is a property
-    of this BUILD — kernel coverage, fusion maps, installed plugins — so the
-    engine self-reports it (`reachability`) and the runner checks every served
-    adapter against the answer at Phase 0. An engine must refuse nothing it
-    reported and report nothing it cannot serve; the parity certificate is the
-    numerical proof, per build fingerprint.
+    REACHABILITY INVARIANT: whether a mechanism reaches a site is a property of
+    this BUILD — kernel coverage, fusion maps, installed plugins — so the
+    engine self-reports it (`reachability`) and Phase 0 holds every served
+    adapter against the answer. An engine must refuse nothing it reported and
+    report nothing it cannot serve.
     """
 
     base: str | None
@@ -149,19 +146,16 @@ class Engine(Protocol):
 
 
 class Learner(Protocol):
-    """Training metal. Owns ONE frozen base, many tenants' deltas + optimizers.
+    """Training metal: ONE frozen base, many tenants' deltas + optimizers.
 
-    MULTI-TENANCY INVARIANT (the trainer-side mirror of the Engine's):
-    installation is ADDITIVE — any number of experiments' adapter sets coexist
-    on one loaded base — and every verb PINS a tenant (the run_id). One
-    resident learner serves many experiments; nothing about one tenant's
-    install, step, or load disturbs another's state. The realization (#44) is
-    additive install + row routing — the trainer-side twin of the engine's
-    punica path: every installed tenant's deltas stay wired, and each row of
-    a batched forward carries the slot whose delta applies to it. A verb pins
-    one tenant, so today every forward is the one-slot case; cross-tenant
-    coalescing is a scheduling upgrade behind the same surface, not a kernel
-    change.
+    MULTI-TENANCY INVARIANT (I8, the trainer-side mirror of the Engine's):
+    installation is ADDITIVE — every tenant's adapter set stays wired on the
+    one loaded base — and every verb PINS a tenant (the run_id), so nothing
+    about one tenant's install, step, or load disturbs another's state. The
+    realization is additive install + ROW ROUTING: each row of a batched
+    forward carries the slot whose deltas apply to it. A verb pins one tenant,
+    so today every forward is the one-slot case; cross-tenant coalescing is a
+    scheduling upgrade behind this same surface, not a kernel change.
     """
 
     fsdp: int

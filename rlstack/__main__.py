@@ -1,12 +1,12 @@
-"""rlstack CLI: thin argparse over the observer (rlstack/observe/).
+"""The CLI: thin argparse over the observer (rlstack/observe/).
 
-    python -m rlstack hosts <store-locator> [<store-locator> ...]
-    python -m rlstack runs  <store-locator> [<store-locator> ...]
-    python -m rlstack gpu   <store-locator> [<store-locator> ...]
+    python -m rlstack {hosts,runs,gpu} <store-locator> [<store-locator> ...]
+    python -m rlstack ui <store-locator> ... [--port N] [--panels panels.json]
 
-Locators resolve through observe.store_for — paths and file:// resolve
-where mounted; modal:// tells you to run the reader beside the volume.
-With no locators given, $RLSTACK_STORES (colon-separated) is used.
+Locators resolve through observe.store_for — paths and file:// resolve where
+mounted; modal:// tells you to run the reader beside the volume. With none
+given, $RLSTACK_STORES (colon-separated) is used. Every view is peek-only:
+this entry point reads journals and manifests and never attaches a run.
 """
 
 from __future__ import annotations

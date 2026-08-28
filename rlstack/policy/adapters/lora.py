@@ -1,4 +1,5 @@
-"""Per-matrix low-rank delta; served natively by vLLM multi-LoRA (punica)."""
+"""A per-matrix low-rank delta, served through punica — the engine's own
+multi-LoRA lever — and wrapped around a Linear on the replay side."""
 
 from __future__ import annotations
 

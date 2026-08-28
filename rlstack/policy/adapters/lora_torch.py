@@ -1,17 +1,12 @@
-"""LoRA's compute half — imported lazily by the Lora adapter's methods, so the
-client library stays importable without torch (STYLE rule 7).
+"""LoRA's replay lowering: each matched site's Linear wrapped so its forward
+returns inner(x) + x A^T B^T.
 
-Replay lowering = verb 1 (replace a module): each matched site's Linear is
-wrapped so forward returns inner(x) + x A^T B^T. Scaling is fixed at 1
-(emitted alpha == r), so the engine's peft consumer applies the same math.
-Init is B = 0: version 0 of every delta IS the base model, on both sides.
-
-The wrapper is ROW-AWARE (#44). Installation is additive (I8): every tenant
-installed at a site joins the one wrapper standing there, and which (A, B) a
-row of the padded microbatch gets is read from the forward's row plan
-(adapters/replay.py) — the trainer-side twin of punica's token-indexed slot
-bank. One slot is the degenerate case and keeps the pre-batching expression
-verbatim.
+Scaling is fixed at 1 (emitted alpha == r) so the engine's peft consumer
+applies the same math, and init is B = 0, which makes version 0 of every delta
+the base model on both sides. The wrapper is ROW-AWARE: install is additive, so
+every tenant at a site joins the one wrapper standing there, and which (A, B) a
+row gets is read from the forward's row plan. torch is imported at module scope
+— this file loads only from the kind's methods (STYLE rule 7).
 """
 
 from __future__ import annotations
@@ -47,14 +42,14 @@ class LoraSite(torch.nn.Module):
     """inner(x) + x A^T B^T with (A, B) chosen PER ROW — the module that
     replaces a matched Linear.
 
-    One wrapper serves every state installed at this site, and whose delta a
-    row gets is a property of the batch (the row plan), not of the module
-    tree. `installed` is that roster: it is what makes install additive and
-    what tells uninstall when the last tenant has left and the Linear returns.
+    One wrapper serves every state installed at this site, and whose delta a row
+    gets is a property of the batch (the row plan), not of the module tree.
+    `installed` is that roster: it is what makes install additive and what tells
+    uninstall when the last tenant has left and the Linear returns.
 
     The per-tenant deltas deliberately do NOT register as parameters of the
-    base: the base is shared and frozen, a delta is one tenant's state, and
-    the learner owns it through `params.parameters()`.
+    base: the base is shared and frozen, a delta is one tenant's state, and the
+    learner owns it through `params.parameters()`.
     """
 
     def __init__(self, inner: torch.nn.Module, path: str, plan: RowPlan) -> None:
@@ -102,8 +97,9 @@ class LoraSite(torch.nn.Module):
 
 def _whole_batch_delta(x: torch.Tensor, state: LoraState,
                        path: str) -> torch.Tensor:
-    """Every row on one delta: (x A^T) B^T, the expression swap-install
-    applied, kept verbatim so a single-tenant microbatch is bit-identical."""
+    """Every row on one delta: (x A^T) B^T in one GEMM pair — the plain
+    single-tenant expression, kept verbatim so a uniform microbatch is
+    bit-identical whatever else shares the learner."""
     return (x.to(state.a[path].dtype) @ state.a[path].T) @ state.b[path].T
 
 
@@ -115,8 +111,8 @@ def _per_row_delta(x: torch.Tensor, rows: ReplayRows,
     The rows of `x` ARE the plan's rows, so a site whose activations are not
     [rows, tokens, in] cannot be routed per row and says so. Every slot of a
     MIXED forward must carry this path: the transparent case is uniform-only,
-    because zero-padding one row's delta is the coalescer's admission rule
-    (#44), not a silent fallback here.
+    because zero-padding one row's delta is the coalescer's admission rule, not
+    a silent fallback here.
     """
     missing = [i for i, slot in enumerate(rows.slots) if path not in slot]
     if missing:
@@ -173,8 +169,7 @@ def _leaf(model: torch.nn.Module, path: str) -> tuple[torch.nn.Module, str]:
 
 
 def install(model: torch.nn.Module, state: LoraState) -> None:
-    """Verb 1 at each path: wrap the Linear once, then ADD this state to the
-    site.
+    """Wrap the Linear once at each path, then ADD this state to the site.
 
     Installation is additive (I8): a second tenant at the same site joins the
     LoraSite it finds instead of replacing it, which is exactly what lets one

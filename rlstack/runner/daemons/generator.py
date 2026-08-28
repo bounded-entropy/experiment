@@ -1,12 +1,11 @@
-"""The Generator: free-runs at the newest committed policy, bounded by the lag
+"""The Generator: samples at the newest committed bundle, bounded by the lag
 buffer.
 
-Its condition (`may_generate`) is the whole async-RL policy in one line: wave
-w may be sampled once the trainer has committed update w-1-B, where B =
-Schedule.max_policy_lag. B=0 is strict alternation (wave w waits for version
-w-1 — on-policy); B=1 lets generation run one wave ahead of training. WHICH
-version actually serves each wave is opportunistic within that bound and is
-recorded per turn — never prescribed, never re-derived.
+Its condition (`may_generate`) is the whole async-RL policy in one rule: wave w
+may be sampled once update w-1-B is committed, where B is
+Schedule.max_policy_lag (B=0 is strict alternation). WHICH version actually
+serves each wave is opportunistic within that buffer and is recorded per turn —
+never prescribed, never re-derived.
 """
 
 from __future__ import annotations

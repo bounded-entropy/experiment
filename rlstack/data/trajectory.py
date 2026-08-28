@@ -1,14 +1,10 @@
-"""Trajectories (SPEC.md §2D): sealed episodes — TRAINING data.
+"""The sealed data objects: Task, Trajectory, Turn, Group, Wave, and their rows.
 
-Terminology is load-bearing here. A ROLLOUT (inference/rollout.py) is an
-episode in progress: mutable, inference-world, being filled by an environment
-and its rewards. A TRAJECTORY is what a rollout becomes at the seal: frozen
-training data. The two are different TYPES, so the membrane (I1) is enforced
-by the type system — training code takes Trajectory and cannot receive a
-half-finished rollout by construction.
-
-Recording is loss-independent and happens at the seal (I6): generated token
-ids are the engine's and are NEVER re-tokenized.
+A Trajectory is one sealed episode — frozen training data, what a Rollout
+becomes at the seal. The membrane (I1) is the type system: training code takes
+Trajectory and cannot receive a half-finished rollout by construction.
+Recording is loss-independent and happens at the seal; generated token ids are
+the engine's own and are NEVER re-tokenized.
 """
 
 from __future__ import annotations
@@ -44,7 +40,7 @@ class Message:
 
 @dataclass(frozen=True)
 class Task:
-    """One environment task: a prompt plus open metadata."""
+    """One problem: an id, a prompt, and the metadata a verifier or hint reads."""
 
     id: str
     prompt: str
@@ -53,15 +49,14 @@ class Task:
 
 @dataclass(frozen=True)
 class Turn:
-    """One request's worth of generation, plus everything recorded at that time (I6).
+    """One request inside a trajectory, and everything recorded at the seal (I6).
 
-    A Turn is one REQUEST: one pinned bundle (family), one seed, one contiguous
-    KV. Policy identity within the request is recorded at whatever granularity
-    the bank's kinds require: `token_extras` holds per-token columns (e.g. the
-    adapter index drawn at each token for a stochastic-routing kind) and
-    `turn_extras` holds per-request sampling facts (e.g. the latent drawn for a
-    probabilistic soft prompt). Recorded, never re-derived: replay must
-    reproduce these facts exactly, so they are sealed as data.
+    A Turn is one REQUEST: one pinned bundle, one seed, one contiguous KV. The
+    bank's kinds record their own facts at whatever granularity they need —
+    `token_extras` per generated token (the adapter index drawn at each token),
+    `turn_extras` per request (the latent drawn for a probabilistic soft
+    prompt). Recorded, never re-derived: replay must reproduce them exactly, so
+    they are sealed as data.
     """
 
     message: Message
@@ -96,9 +91,9 @@ class Trajectory:
     """One sealed episode — training data, immutable (I1).
 
     Constructed by Rollout.seal() on the live path, or by trajectory_from_row
-    when reading the store. The record holds ONLY what the policy did (I6):
-    rewards, advantages, judge scores are computed ABOUT it afterwards, by the
-    postprocessing pipeline, and live in postdata — never in here.
+    when reading the store. The record holds ONLY what the policy did: rewards,
+    advantages and judge scores are computed ABOUT it afterwards by the
+    postprocessor pipeline and live in postdata — never in here.
     """
 
     task: Task
@@ -113,22 +108,18 @@ class Trajectory:
 
 
 # ---------------------------------------------------------------------------
-# the training-side units of scope:
-#   Trajectory — one episode
-#   Group      — the trajectories needed to compute one partial contribution
-#                to the loss (a GRPO advantage group, a preference pair, ...)
-#   Wave       — every group needed for one gradient step
+# the training-side units of scope: Trajectory ⊂ Group ⊂ Wave
 # ---------------------------------------------------------------------------
 
 @dataclass(frozen=True, init=False)
 class Group:
-    """All trajectories needed to compute one partial component of the loss.
+    """One partial contribution to the loss, and the scope a postprocessor sees.
 
-    In GRPO, the group is what the advantage baseline is computed over; in a
-    preference loss it would be the compared pair. `key` is ASSIGNED at wave
-    assembly — usually the task id, but nothing derives group membership from
-    task identity, so many groups of one task (test-time training) or groups
-    spanning tasks are equally expressible. Sealed trajectories only (I1).
+    In GRPO the group is what the advantage baseline is computed over; in a
+    preference loss it is the compared pair. `key` is ASSIGNED at wave assembly
+    — usually the task id, but membership is never derived from task identity,
+    so many groups of one task (test-time training) or groups spanning tasks
+    are equally expressible. Sealed trajectories only (I1).
     """
 
     key: str
@@ -153,10 +144,10 @@ class Group:
 
 @dataclass(frozen=True, init=False)
 class Wave:
-    """Every group needed for one gradient step — what an advantage sees (I1).
+    """The data of exactly one update: every group needed for one gradient step.
 
     Trajectory order is the concatenation of groups, and everything downstream
-    (advantage weights, flats, packing) aligns to that order.
+    (postdata columns, flats, packing) aligns to that order.
     """
 
     groups: tuple[Group, ...]

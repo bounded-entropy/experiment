@@ -4,22 +4,15 @@
     modal run deploy/tp_l4.py::tp_probe --tp 1       # the same probes, tp=1
     modal run deploy/tp_l4.py::tp_probe_8b           # Qwen3-8B, tp=2
 
-Sharding is a BUILD fact (#43): `VllmEngine(tp=2)` is a different piece of
-metal, not a different request, and the submit gate attests it. This file is
-that build's first contact with real GPUs, and it checks the three things the
-Engine protocol promises, in order:
-
-    sampling      an engine built tp=2 streams tokens like any other
-    multi-LoRA    two compiled bundles COEXIST on the sharded build and every
-                  request pins its own — the multi-tenancy invariant carried
-                  through punica's per-token adapter indices under TP; the
-                  requests are issued concurrently so vLLM batches them
-                  together, which is the only way the claim is worth making
-    scoring       score_tokens' FIRST metal contact anywhere, at any tp: the
-                  prompt_logprobs suffix is checked token-by-token against
-                  the logprobs SAMPLING reported for those very tokens, so an
-                  off-by-one in the indexing shows up as a gap of nats, not a
-                  gap of rounding
+Sharding is a BUILD fact (#43) — `VllmEngine(tp=2)` is a different piece of
+metal, not a different request, and the submit gate attests it — and this is
+that build's first contact with real GPUs. It checks the three things the
+Engine protocol promises: a sharded build streams tokens like any other; two
+compiled bundles COEXIST on it with every concurrently issued request pinning
+its own, so multi-tenancy carries through punica's per-token adapter indices
+under TP; and score_tokens' prompt_logprobs suffix matches, token by token,
+the logprobs sampling reported for those same tokens, so an off-by-one in the
+indexing shows up as a gap of nats rather than of rounding.
 
 Deployment only (I5): wiring and measurement, nothing semantics-bearing.
 Image pins: keep in sync with deploy/modal_app.py.

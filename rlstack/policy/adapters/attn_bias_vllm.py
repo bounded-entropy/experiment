@@ -1,28 +1,15 @@
-"""attn_bias's ROLLOUT lowering: the one whose demands NO build here can pay
-(#48, #46, I7).
+"""attn_bias's rollout lowering: the one whose demands NO build here can pay.
 
-The kind's replay half is real and proven (attn_bias_torch: an attention mask
-already IS a score-level bias). Its rollout half is a PLUGIN — our own
-mechanism, not a lever vLLM maintains — and the plugin is honestly blocked on
-the pinned build: vllm 0.28.0 does not plumb return_softmax_lse through the
-dense FlashAttention path, so "stock kernel + tiny partition attention + exact
-LSE merge" has no seam short of forking the kernel dispatch (#46 names the
-symbols, and rlstack_engine.side_attention's probe fails on the true one).
+Its mechanism is a PLUGIN — ours, not a lever vLLM maintains — and the pinned
+build does not plumb the dense attention LSE the plugin was designed against,
+so probe() fails for the true reason (rlstack_engine.side_attention names the
+missing symbols). The consequences reach a spec through the same door as every
+other kind: no build serves this kind, reachability reports NONE for the
+attention-score rectangle, and a spec carrying an attn_bias is refused at
+Phase 0 rather than served wrong.
 
-That is what this file says, in the contract's own vocabulary: a rollout
-lowering whose demands() name a PLUGIN, which an engine that installs none
-cannot pay. The consequences are the ones #46 already shipped, now reached
-through the same door as every other kind:
-
-  - no build serves this kind, so reachability reports NONE for the
-    attention-score rectangle and a spec carrying an attn_bias is refused at
-    Phase 0 rather than served wrong;
-  - the plugin is named by STRING, never imported: rlstack_engine ships in the
-    engine image and the import is one-way (rlstack never imports back).
-
-A kind is served when its mechanism is proven, not when its class exists. The
-route that would unblock it is FlexAttention's score_mod (#46), which is a
-registered backend and a metadata builder — deliberately not built here.
+The plugin is named by STRING and never imported — rlstack_engine ships in the
+engine image and the import direction is one-way.
 """
 
 from __future__ import annotations
@@ -41,7 +28,8 @@ ATTN_SCORES = "attn_scores"
 
 
 class AttnBiasRollout(RolloutLowering):
-    """Soft prompt + bias served jointly by the side-attention plugin."""
+    """Soft prompt + bias, served jointly by the side-attention plugin — the
+    lowering no build in this repo can pay for."""
 
     kind = "attn_bias"
     mechanism = Mechanism.SIDE_ATTENTION
@@ -49,8 +37,8 @@ class AttnBiasRollout(RolloutLowering):
 
     def demands(self) -> BuildDemands:
         """A plugin in the engine image, installed and probed at boot. No build
-        in this repo installs one, so asking to serve this kind refuses at
-        construction — the honest form of #46's blocked mechanism."""
+        here installs one, so asking to serve this kind refuses at construction
+        — the honest form of a blocked mechanism."""
         return BuildDemands(plugin=PLUGIN)
 
     def reaches(self, meta: SiteMeta) -> bool:

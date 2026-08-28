@@ -1,33 +1,18 @@
-"""attn_bias's compute half — the REPLAY side, and only that (#46).
+"""attn_bias's replay lowering — the half that CAN be proven today.
 
-The rollout side is NOT BUILT, and the engine keeps reporting NONE for
-SIDE_ATTENTION, so a spec carrying an attn_bias is still refused at Phase 0.
-What blocks it is the pinned build, not the design: the seams #25 named
-(`vllm.attention.backends.registry`, a dense FlashAttention path that hands
-back its LSE) do not exist on vllm 0.28.0 — see rlstack_engine/side_attention.py,
-which now probes for the symbols this build actually has. This file is the half
-that CAN be proven today, and it is what a serving path would have to agree
-with when one exists.
+The rule that makes this side easy: an attention mask already IS a score-level
+bias, so handing the base a 4-D float mask instead of the 2-D padding mask
+patches no kernel. The bias applies to the REAL tokens' rows only — the
+prompt's own positions stay a pure function of the rows, which is what would
+let an engine precompute their K/V once per bundle. Version 0 IS the base:
+theta starts at zero and both parameterizations map zero to zero bias.
 
-THE RULE THAT MAKES THE REPLAY SIDE EASY: an attention mask already IS a
-score-level bias. Hand the base a 4-D float mask instead of the 2-D padding
-mask and the stock attention adds it to the scores — verified on the pinned
-transformers 5.16.1 + Qwen3-0.6B (sdpa): a 4-D mask that merely reproduces the
-causal mask is BIT-IDENTICAL to the 2-D one (max|d| = 0.0), a +2.0 bias on
-three columns moves the logits by 8.7 nats, and a bias on one head alone moves
-them by 2.1. So the replay lowering patches no kernel. The engine has no such
-argument, which is exactly why the rollout side needs a plugin.
+The rollout half is refused on the pinned build (attn_bias_vllm.py), so nothing
+here is reachable from a run; this is what a serving path would have to agree
+with once one exists.
 
-The site is `queries -> prompt[:n]`: the rectangle where the real tokens attend
-to the soft prompt's virtual positions. The bias is one scalar per (head, prompt
-row), broadcast over queries — and it is applied to the REAL tokens' rows only.
-The prompt's own positions stay a pure function of the rows, which is what lets
-an engine precompute their K/V once per bundle (#25); a prompt that attended to
-itself through the bias would depend on the bias too, and that precompute would
-be wrong.
-
-Version 0 IS the base: theta starts at zero and both parameterizations map zero
-to zero bias, the same promise LoRA's B = 0 makes.
+torch is imported at module scope — this file loads only from the kind's
+methods (STYLE rule 7).
 """
 
 from __future__ import annotations
@@ -108,9 +93,9 @@ class AttnBiasState:
 def routed_bias(rows: ReplayRows) -> torch.Tensor | None:
     """[rows, heads, n] — each row's bias — or None when no slot carries one.
 
-    Same shape of rule as the other kinds (#44): rows of ONE forward may carry
-    different biases, but they may not disagree about whether there IS one, and
-    they may not disagree about the rectangle's size.
+    The same shape of rule as the other kinds: rows of ONE forward may carry
+    different biases, but they may not disagree about whether there IS one, nor
+    about the rectangle's size.
     """
     present = [BIAS_PATH in slot for slot in rows.slots]
     if not any(present):
@@ -136,12 +121,12 @@ def additive_mask(bias: torch.Tensor, attention: torch.Tensor,
     `attention` is the boundary's already-widened [rows, length] padding mask,
     so the virtual positions are inside it and `prepended` says how many. The
     blocked entries are finfo.min rather than -inf on purpose: a fully padded
-    query row then softmaxes to something uniform and finite instead of NaN,
-    and nobody reads those positions anyway.
+    query row then softmaxes to something uniform and finite instead of NaN, and
+    nobody reads those positions anyway.
 
-    WHAT IT COSTS, stated: [rows, heads, length, length] materialized, where
-    the ordinary path passes [rows, length]. That is the price of expressing a
-    score bias through the one argument the stock attention takes, and it is not
+    WHAT IT COSTS, stated: [rows, heads, length, length] materialized, where the
+    ordinary path passes [rows, length]. That is the price of expressing a score
+    bias through the one argument the stock attention takes, and it is not
     optimized here — the rollout half this would be certified against does not
     exist yet.
     """
@@ -163,7 +148,7 @@ def additive_mask(bias: torch.Tensor, attention: torch.Tensor,
 
 
 # ---------------------------------------------------------------------------
-# the five members' bodies
+# the bodies the AttnBias kind's methods call
 # ---------------------------------------------------------------------------
 
 def build(sites: tuple[SiteMeta, ...], init: dict) -> AttnBiasState:
@@ -190,10 +175,10 @@ def install(model: torch.nn.Module, state: AttnBiasState) -> None:
     """Placement, and the head-count attestation — nothing else.
 
     There is no module to wrap: the bias reaches the forward through the
-    attention mask, which the prompt boundary owns (soft_prompt_torch), and the
-    boundary finds this state the same way every lowering finds its own — in
-    the row plan's slot. The bank rule already guarantees a soft prompt is in
-    the bank, because the rectangle is a site only that entry exports.
+    attention mask the prompt boundary owns (soft_prompt_torch), and that
+    boundary finds this state the same way every replay lowering finds its own,
+    in the row plan's slot. A soft prompt is guaranteed to be in the bank,
+    because the rectangle is a site only that entry exports.
     """
     heads = int(model.config.num_attention_heads)
     if state.heads != heads:

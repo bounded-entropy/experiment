@@ -1,26 +1,16 @@
 """Custom panels: derived graphs as EXPRESSIONS over what a run already logs.
 
 A panel is {"name": ..., "expr": ...} where expr is arithmetic over column
-names — post columns and rails by bare name (post wins a collision), e.g.
+names — post columns and rails by bare name, post winning a collision.
+Expressions are DATA, not code: parsed with ast, admitting only names, numbers,
++ - * / ** %, unary minus, parentheses and log/exp/sqrt/abs, so panels.json can
+never smuggle behavior into the observer.
 
-    {"name": "gap_per_token", "expr": "logprob_gap / tokens"}
-    {"name": "excess_reward", "expr": "reward - 0.5"}
-    {"name": "log_grad", "expr": "log(grad_norm + 1e-9)"}
-
-Expressions are DATA, not code: parsed with ast, only names, numbers,
-+ - * / ** %, unary minus, parentheses, and the functions log/exp/sqrt/abs
-are allowed — nothing else evaluates, so panels.json can never smuggle
-behavior into the observer.
-
-THE VALIDATION RULE (Samarth's): every argument must be in the pipeline —
-enforced against the run's own dictionary.json (the same flow-graph oracle
-the submit gate queries), NOT at submit: panels live outside identity, so
-adding a graph can never fork a run. A panel whose argument a run lacks
-renders its missing-list instead of a curve.
-
-When the same expression's arguments all exist in the eval summaries, the
-held-out overlay is computed with the same expression — one definition, both
-series.
+THE VALIDATION RULE: every argument must be in the pipeline — enforced against
+each run's own dictionary.json (the same flow-graph oracle the submit gate
+queries) and NOT at submit, because panels live outside identity and adding a
+graph must never fork a run. A panel whose argument a run lacks renders its
+missing-list instead of a curve.
 """
 
 from __future__ import annotations
@@ -78,8 +68,8 @@ def panel_args(expr: str) -> frozenset[str]:
 
 
 def missing_args(expr: str, dictionary: dict | None) -> tuple[str, ...]:
-    """THE validation: arguments not among the run's stored post columns or
-    rails, per its own dictionary.json."""
+    """THE validation: the arguments not among the run's stored post columns
+    or rails, per its own dictionary.json."""
     available = set()
     for column in (dictionary or {}).get("columns", []):
         if column.get("stored") and column.get("phase") in ("post", "train"):

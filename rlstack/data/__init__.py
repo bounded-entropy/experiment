@@ -1,6 +1,8 @@
-"""The membrane: what crosses between the worlds, and nothing else.
+"""The membrane: the data objects that cross between the worlds, and the store.
 
-Dumb, loss-independent, estimator-free. Imports no other rlstack package
+trajectory.py holds the sealed records (Task, Trajectory, Turn, Group, Wave),
+flatten.py their packed forms (Flat, TokenBatch), stores/ the run store.
+Dumb, loss-independent, estimator-free; imports no other rlstack package
 (enforced by tests/test_architecture.py).
 """
 

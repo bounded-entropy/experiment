@@ -1,10 +1,8 @@
-"""Run storage: ONE layout, many backends.
+"""The store: ONE key tree, many backends.
 
-The layout, its invariants, and all orchestration (attach-or-create, the
-append-only ledger, crash recovery) are universal and live HERE, written
-against six abstract byte verbs. A backend — local disk, S3/R2, anything —
-subclasses Store and implements only the verbs (data/stores/local.py is the
-reference). Every backend stores the same key tree:
+The tree and all orchestration — attach-or-create, the append-only ledger,
+crash recovery — live HERE, written against six abstract byte verbs; a backend
+subclasses Store and implements only the verbs (local.py is the reference):
 
     runs/<run_id>/manifest.json                identity (I3), written once
                   dictionary.json              the run's self-description
@@ -16,14 +14,15 @@ reference). Every backend stores the same key tree:
                   optim/<name>@<v>.bin         optimizer moments (lockstep)
                   eval/<update>/...            firewalled measurement output
     cas/<sha256>/blob                          content-addressed objects
-    hosts/<name>/log.jsonl                     host observability journal
-                                               (correctness never reads it)
+    hosts/<name>/log.jsonl                     the host and fleet journals:
+    fleet/log.jsonl                            observability only (correctness
+                                               never reads them)
     panels.json                                user-defined derived graphs
                                                (observer reads; never identity)
 
-Invariants: identity is computed, never typed (I3); writes are atomic; the
-ledger is append-only and strictly increasing; resume = attach + ledger tail;
-work not committed by the ledger is UNSEALED and is discarded on attach.
+Writes are atomic; the ledger is append-only, strictly increasing, and the
+commit bit; resume is attach plus the ledger tail, and work no ledger line
+committed is UNSEALED and is discarded on attach.
 """
 
 from __future__ import annotations
@@ -69,7 +68,7 @@ def _gzip_jsonl(rows: list[dict[str, Any]]) -> bytes:
 
 
 class Store(ABC):
-    """The universal layout over a backend's byte verbs."""
+    """The key tree and its orchestration over a backend's six byte verbs."""
 
     # ---- the byte verbs a backend must provide ------------------------------
 
@@ -101,10 +100,11 @@ class Store(ABC):
     # ---- runs ---------------------------------------------------------------
 
     def open_run(self, run_id: str, manifest: dict[str, Any] | None = None) -> "RunHandle":
-        """Create runs/<run_id>/ (manifest required) or attach (manifest checked).
+        """Attach-or-create: create runs/<run_id>/ (manifest required) or attach
+        to it (the manifest must match — identity is computed, I3).
 
-        Attaching also discards unsealed work: per-update artifacts and blob
-        versions the ledger never committed.
+        Attaching discards unsealed work: per-update artifacts and blob versions
+        no ledger line committed. Observers must peek instead (I10).
         """
         manifest_key = f"runs/{run_id}/manifest.json"
         if not self._exists(manifest_key):
@@ -208,9 +208,8 @@ class Store(ABC):
 
     def read_panels(self) -> list[dict[str, Any]]:
         """User-defined derived-graph declarations (panels.json at the store
-        root): [{"name", "expr"}, ...]. Written by the user (cp locally,
-        `modal volume put` remotely); the observer only reads. Malformed or
-        absent → empty."""
+        root): [{"name", "expr"}, ...]. The user writes them, the observer only
+        reads them; malformed or absent → empty."""
         try:
             payload = json.loads(self._read("panels.json").decode("utf-8"))
         except (FileNotFoundError, json.JSONDecodeError):
@@ -221,13 +220,14 @@ class Store(ABC):
     # ---- host journal (observability ONLY; correctness never reads it) ------
 
     def append_host_event(self, host: str, entry: dict[str, Any]) -> None:
-        """One event line in hosts/<host>/log.jsonl (host-up/attach/detach).
-        Outside every run directory, outside identity, outside recovery.
+        """One journal line in hosts/<host>/log.jsonl (host-up, attach, detach,
+        gpu samples): observability, outside every run directory, outside
+        identity, outside recovery.
 
-        The name is ONE path segment: a "/" in it would shear the key, so the
+        The host name is ONE path segment: a "/" would shear the key and the
         event would land where list_hosts() (which recovers the name with
-        split("/")[1]) never looks (#51b). Host attests this at birth; this is
-        the same rule at the layer that owns the key."""
+        split("/")[1]) never looks. The Host attests this at birth; this is the
+        same rule at the layer that owns the key."""
         assert "/" not in host, (
             f"host name {host!r} contains '/': it is one journal path segment")
         self._append_line(f"hosts/{host}/log.jsonl", _canonical(entry))
@@ -245,8 +245,8 @@ class Store(ABC):
     # ---- fleet journal (observability ONLY; correctness never reads it) -----
 
     def append_fleet_event(self, entry: dict[str, Any]) -> None:
-        """One event line in fleet/log.jsonl (place / carve). The fleet's
-        decision record: carving is automatic BECAUSE it is journaled (#43) —
+        """One journal line in fleet/log.jsonl (place / carve): the fleet's
+        decision record. Carving is automatic BECAUSE it is journaled —
         legibility by record, not by approval. Outside every run directory,
         outside identity, outside recovery."""
         self._append_line("fleet/log.jsonl", _canonical(entry))
@@ -288,10 +288,10 @@ class RunHandle:
         return json.loads(self._manifest_json)
 
     def write_dictionary(self, dictionary: dict[str, Any]) -> None:
-        """The run's self-description, beside the manifest. DERIVED from the
-        spec (never part of identity), deterministic (resume rewrites the
-        same bytes), and the store neither reads nor validates it — the
-        membrane stays dumb; the runner supplies the content."""
+        """The run's self-description beside the manifest (I11): the flow graph
+        serialized, DERIVED and never identity, deterministic (resume rewrites
+        the same bytes). The store neither reads nor validates it — the membrane
+        stays dumb; the runner supplies the content."""
         self.store._write(self._key("dictionary.json"),
                           _canonical(dictionary).encode("utf-8"))
 
@@ -344,7 +344,8 @@ class RunHandle:
             self.store._write(self.ledger_key, raw[:keep])
 
     def append_ledger(self, entry: dict[str, Any]) -> None:
-        """Commit one entry: canonical json line, durable."""
+        """THE commit point: one canonical json line, durable, and the Trainer's
+        alone. `update` must strictly increase — the ledger is append-only."""
         self._repair_ledger()
         if "update" not in entry:
             raise LedgerError("ledger entry must carry an integer 'update'")
@@ -378,7 +379,8 @@ class RunHandle:
         return self._key("postdata", f"{update:06d}.json")
 
     def write_postdata(self, update: int, columns: Mapping[str, list[float]]) -> None:
-        """The pipeline's per-trajectory columns for one wave, in wave order."""
+        """The postprocessor pipeline's columns for one wave, in wave order —
+        stored beside the sealed wave, never inside it."""
         self._refuse_committed_overwrite(update, "postdata")
         self.store._write(self._postdata_key(update),
                           _canonical({"columns": dict(columns)}).encode("utf-8"))
@@ -390,6 +392,8 @@ class RunHandle:
         return json.loads(self.store._read(key).decode("utf-8"))["columns"]
 
     def _refuse_committed_overwrite(self, update: int, section: str) -> None:
+        """An update the ledger committed is immutable; only unsealed work
+        may be rewritten."""
         tail = self.ledger_tail()
         if tail is not None and update <= int(tail["update"]):
             raise StoreError(
@@ -438,13 +442,12 @@ class RunHandle:
     # ---- crash recovery (runs on every attach) ------------------------------
 
     def _discard_unsealed(self) -> None:
-        """Drop everything the ledger never committed.
+        """Drop everything no ledger line committed — work is sealed by its
+        ledger entry and nothing else.
 
-        The ledger is the commit record: work is sealed by its ledger entry and
-        nothing else. A torn final ledger line is repaired away; per-update
-        artifacts (waves, postdata) beyond the tail are deleted; blob
-        versions above each delta's committed version are deleted; backend
-        write debris is swept.
+        A torn final ledger line is repaired away; per-update artifacts (waves,
+        postdata) beyond the tail are deleted; blob versions above each delta's
+        committed version are deleted; backend write debris is swept.
         """
         self._repair_ledger()
         entries = self.read_ledger()

@@ -1,7 +1,7 @@
-"""Adapters: one class per file, all inheriting Adapter (base.py).
+"""Adapter kinds: one registered class per file, all inheriting Adapter (base.py).
 
-The five-member protocol lives on the base; each file here is one intervention
-the policy can carry. Importing this package registers the builtins.
+A file here is one intervention the policy can carry, with both of its
+lowerings beside it. Importing this package registers the builtins.
 """
 
 from rlstack.policy.adapters.base import (  # noqa: F401

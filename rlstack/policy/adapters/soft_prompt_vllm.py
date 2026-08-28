@@ -1,37 +1,18 @@
-"""The soft prompt's ROLLOUT lowering: vLLM 0.28's MIXED embeds prompt
-(#48, #46, #3).
+"""The soft prompt's rollout lowering: vLLM's MIXED embeds prompt.
 
-The mirror of soft_prompt_torch, on the other side of the bridge (I2). The
-replay half prepends the rows at the embedding boundary and cuts the positions
-back off the logits; this half hands the same rows to the engine as the first
-positions of the prompt — and then tells the engine how many positions it took,
-because a virtual row is a position with NO token and every answer read off the
-prompt has to start after them.
+demands enable_prompt_embeds — a build not asked for it reports NONE at the
+embedding boundary, so a soft-prompt tenant is refused at Phase 0 rather than
+served wrong; attach fuses the bank's row blocks into ONE prefix in BANK ORDER;
+apply contributes the mixed prompt (rows, placeholder ids, the per-position
+is_token_ids mask); align contributes n, so an answer read off the prompt is
+found after the rows.
 
-WHY THE MIXED FORM, and it is better than embedding the whole prompt ourselves
-(verified in the pinned image, #46): EmbedsPrompt takes prompt_embeds AND
-prompt_token_ids AND a per-position prompt_is_token_ids mask. The ENGINE embeds
-every position marked True from its OWN table, so the learned rows are the only
-thing we hand over and nothing depends on our copy of the embedding matrix
-matching the served one. The real token ids stay in the request, so prefix-cache
-block hashes, detokenization and prompt_logprobs indexing all see the tokens
-they would see without a soft prompt — and the block hash digests the embeds
-themselves, so two bundles' prefixes can never alias.
-
-The four verbs:
-  demands   enable_prompt_embeds (which on 0.28 also excludes the V2 model
-            runner and moves the embedding layer outside the CUDA graph) — a
-            build that was not asked for it reports NONE at the boundary and
-            refuses a soft-prompt tenant at Phase 0 rather than serving it
-            wrong (#25b, reachability as a build fact).
-  attach    the bank's row blocks fused into ONE prefix, in BANK ORDER
-            (merge_rows), in the served model's dtype.
-  apply     the mixed prompt: rows, placeholder ids, the mask.
-  align     n — the positions the rows occupy.
-
-torch is imported at module scope, so this file loads only from the kind's
-methods (SoftPrompt.rollout_lowering), never from the package root — the
-soft_prompt_torch precedent, STYLE rule 7.
+The mixed form is why nothing depends on our copy of the embedding matrix: the
+engine embeds every position marked as a token id from its OWN table, so the
+learned rows are the only thing handed over, and the real ids stay in the
+request where prefix-cache hashing, detokenization and prompt_logprobs indexing
+can all see them. torch is imported at module scope — this file loads only from
+SoftPrompt.rollout_lowering (STYLE rule 7).
 """
 
 from __future__ import annotations
@@ -59,6 +40,9 @@ class SoftPromptRollout(RolloutLowering):
     claims = ("prompt",)               # it shapes the prompt FORM, so it owns it
 
     def demands(self) -> BuildDemands:
+        """One engine arg, and its stated cost: enable_prompt_embeds also gives
+        up the V2 model runner and moves the embedding layer outside the CUDA
+        graph."""
         return BuildDemands(engine_args={"enable_prompt_embeds": True})
 
     def reaches(self, meta: SiteMeta) -> bool:
@@ -69,13 +53,13 @@ class SoftPromptRollout(RolloutLowering):
     def attach(self, bundle_id: str,
                payloads: Mapping[str, bytes]) -> torch.Tensor:
         """The bank's soft prompts, fused into ONE virtual prefix in the served
-        model's dtype — precomputed once so every request pinning this bundle
+        model's dtype — precomputed once, so every request pinning this bundle
         just concatenates. Two entries are two segments of one virtual prompt
-        and merge in BANK ORDER (#48's composition rule, within a kind).
+        and merge in BANK ORDER.
 
         A width that is not the base's hidden size cannot be an embedding row,
-        so it dies at registration rather than inside the engine core (which the
-        0.28 docs warn will simply crash on a wrong shape).
+        so it dies here at attach rather than inside the engine core, which
+        simply crashes on a wrong shape.
         """
         rows = soft_prompt_torch.merge_rows(payloads)
         width = int(self.build.config.hidden_size)

@@ -1,6 +1,6 @@
 """The mean-baseline estimator as a postprocessor: subtract each group's mean
-reward, nothing else. The value-free PPO pairing — same baseline scope as
-grpo_advantage but no variance rescaling."""
+reward, nothing else. The group IS the baseline scope; ppo's pairing — same
+scope as grpo_advantage, but no variance rescaling."""
 
 from __future__ import annotations
 

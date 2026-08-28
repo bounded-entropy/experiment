@@ -1,13 +1,12 @@
 """The Evaluator: firewalled measurement, subscribed to ledger commits.
 
-Its condition is a modulus over the commit bus: for each due update (every
-N-th), await that ledger entry, pin the bundle it names, run the held-out
-episodes and the EVAL post pipeline, write eval/<u>. Output goes only to the
-eval/ section, which crash recovery never consults; an eval already written
-is skipped on resume, and one lost to a crash is backfilled — the store holds
-everything needed to re-serve ANY committed version (blobs + versions →
-compile_bundle → the same content-addressed id), so pinning never depends on
-what some earlier process happened to register.
+Its condition is a modulus over the commit bus: for each due update, await that
+ledger entry, pin the bundle it names, run the held-out episodes and the eval
+pipeline, write eval/<u>. The firewall is the rule — output goes only to eval/,
+which crash recovery never consults, so an eval already written is skipped on
+resume and one lost to a crash simply backfills. Pinning never depends on what
+some earlier process happened to register: content addressing lets the store
+re-serve ANY committed version exactly.
 """
 
 from __future__ import annotations
@@ -76,11 +75,11 @@ class Evaluator(Daemon):
     # ---- pinning ------------------------------------------------------------
 
     def bundle_for(self, entry: dict) -> Bundle:
-        """Recompile the committed bundle the entry names, from the store.
+        """Recompile the committed bundle the entry names, out of the store.
 
-        Content addressing makes this exact: same blobs, same versions, same
-        bundle_id — and registration is additive-idempotent, so re-adding is
-        free. (v0 limit: a servable-but-frozen delta has no blob to read.)"""
+        Content addressing makes it exact — same blobs, same versions, same
+        bundle_id — and add_bundle is additive-idempotent, so re-adding costs
+        nothing. (v0 limit: a servable-but-frozen delta has no blob to read.)"""
         versions = {name: int(v) for name, v in entry["versions"].items()}
         payloads = {name: self.run.read_blob("adapters", name, versions[name])
                     for name in self.servable}
@@ -121,11 +120,9 @@ class Evaluator(Daemon):
         """Every held-out (task, sample) episode at once, bounded by
         max_inflight — and grouped back in TASK order.
 
-        The held-out tasks are independent, so walking them one at a time made
-        an eval of N tasks N serial round-trips: at MATH lengths that was ten
-        minutes of billed tail with nothing left to overlap it (#53). They are
-        launched together and the engine batches whatever arrives; the
-        semaphore is the same bound the Generator's wave runs under.
+        Held-out tasks are independent, so they are launched together and the
+        engine batches whatever arrives, under the same bound the Generator's
+        wave runs under.
 
         Concurrency may not reach the bytes. Each episode's seed is derived
         from (task.id, sample_index) — fixed before it is scheduled, so WHICH
@@ -153,11 +150,10 @@ class Evaluator(Daemon):
             columns: dict[str, list]) -> tuple[list[dict], dict]:
         """The eval's two files, folded in WAVE order — which is task order.
 
-        The rule this states: every accumulation over a concurrently sampled
-        eval runs over the wave, not over completions. Float addition is not
-        associative, so a mean summed in completion order would be a mean that
-        depends on the scheduler — and eval/ is inside the byte-identity
-        contract that resume-equivalence and the fakes determinism test hold
+        Every accumulation over a concurrently sampled eval runs over the
+        wave, never over completions: float addition is not associative, so a
+        mean summed in completion order would depend on the scheduler, and
+        eval/ is inside the byte-identity contract resume-equivalence holds
         the run to."""
         rows, index = [], 0
         for group in wave.groups:

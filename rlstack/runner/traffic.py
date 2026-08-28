@@ -1,18 +1,10 @@
-"""The runner's pool-traffic side: everything between a pool's engine and
-a sealed wave. Traffic is the I5 word — pools are destinations, and this
-module is what travels: sample traffic (token streams assembled into Turns)
-and score traffic (given tokens, one prefill pass).
+"""The client side of pool traffic: how an episode talks to pools.
 
-Bottom-up: EnginePoolClient is the concrete PoolClient (rlstack/client.py
-protocol) — it drives one engine pool for one episode, assembling TokenEvents
-into Turns, and `pool(name)` hands environments and postprocessors a sibling
-for any other pool under ONE shared seed sequence. `run_episode` is the seal
-point: the Environment produces the Rollout, the seal turns it into a
-Trajectory (I1). `collect_wave` schedules one wave of episodes —
-`trajectories_per_wave / group_size` tasks, group keys ASSIGNED here, one
-Group per task — deterministic given (master, update). `load_tasks` reads a
-cas:// task file. Scoring is none of this module's business: it happens later,
-in the post pipeline (runner/post.py).
+EnginePoolClient drives one pool for one episode — sample assembles a token
+stream into Turns, score is one prefill pass — and `pool(name)` hands a
+sibling for any other declared pool under one shared seed sequence.
+run_episode is the seal point; collect_wave assembles one wave of episodes
+deterministically given (master, update), assigning group keys.
 """
 
 from __future__ import annotations
@@ -35,9 +27,9 @@ Routes = Mapping[str, tuple[Engine, Bundle]]
 
 
 class EnginePoolClient:
-    """One instance per episode per pool; all siblings share ONE seed
-    sequence, so multi-pool traffic is deterministic regardless of which
-    pools an episode touches."""
+    """The concrete PoolClient: one instance per episode per pool, all
+    siblings sharing ONE seed sequence, so multi-pool traffic is deterministic
+    regardless of which pools an episode touches."""
 
     def __init__(self, routes: Routes, sampling: SamplingSpec, episode_seed: int,
                  pool_name: str = "main", _counter: list[int] | None = None) -> None:
@@ -147,9 +139,9 @@ async def collect_wave(
 ) -> Wave:
     """One wave of sealed groups, deterministic given (master, update).
 
-    Group keys are ASSIGNED here — one group per chosen task, keyed by the task
-    id. The Group primitive doesn't require that: a TTT-style wave of many
-    groups over one task just assembles differently at this spot.
+    Group keys are ASSIGNED here — one group per chosen task, keyed by the
+    task id — never derived from the tasks; a wave of many groups over one
+    task is the same primitive assembled differently at this spot.
     """
     if trajectories_per_wave % group_size:
         raise ValueError(

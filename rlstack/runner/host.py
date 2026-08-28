@@ -1,49 +1,21 @@
 """Host: an ATOMIC, PURPOSED PARTITION of GPU capacity — the fleet's unit.
 
-Not a GPU, not a node, not a container (#43): a host is some slice of some
-GPUs (half of one L4 up through sixteen devices across two nodes) dedicated
-to a declared capability, irreducible from a tenant's point of view. One
-node can carry several hosts; one host can span several nodes; partition
-boundaries are logical and the wire contract (runner/remote.py) is per-host
-either way.
+Not a GPU, not a node, not a container: a host is some slice of some GPUs, born
+with its Partition and its Regimes, attesting the metal it was handed against
+them and never growing or reshaping afterward (I12). One regime is a dedicated
+host; several make it ALTERNATE them on its own arbiter group — one host
+wearing masks, never two hosts coordinating. It owns its engines, at most ONE
+multi-tenant learner (never remote — the runner comes to it), its arbiter and
+its journal.
 
-A host's CAPABILITY IS A BIRTH FACT: it is born with its partition and its
-regimes (Regime below — inference or training over one base at one shard
-shape), attests that the metal it was handed matches them, and never grows
-or reshapes afterward. Experiments attach to hosts; only carving creates
-them. A host born with one regime is dedicated; born with several, it
-ALTERNATES them on the same partition — one host wearing masks, switched by
-its own arbiter — never two hosts coordinating.
-
-The experiment ↔ metal relationship gets ONE owner (CONTEXT #35). A Host
-holds the metal: engine objects (each serving a base at a build shape), ONE
-multi-tenant learner (never remote — the runner comes to it), and the
-GpuArbiter — and `await host.submit(spec, schema)` is how an experiment
-reaches it:
-
-    bind      each declared pool onto an owned engine serving that pool's
-              base (exact base first, wildcard fake metal as fallback)
-    fit       refuse a submission whose new residents' declared fractions
-              would push the GpuSet past capacity — honest now, because the
-              host sees every tenant on this metal
-    attest    roster the tenancy in memory (the admission-relevant truth,
-              dies with the host's process) and journal it to the host's
-              JOURNAL store (hosts/<name>/log.jsonl — observability the CLI
-              reads, correctness never consults)
-    run       run_experiment_async under the host's shared arbiter, against
-              the experiment's OWN run store
-
-    STORE OWNERSHIP INVARIANT (Samarth, #37): the run store is a
-    PER-EXPERIMENT binding — one experiment, one store, for life — because
-    run_id is global (I3) but existence is store-scoped: the same spec run
-    against two stores forks history silently. submit() takes the run store
-    explicitly (defaulting to the host's own for convenience); the journal
-    records it per attach; the observer's runs view flags the same run_id
-    seen in two stores as a fork.
-
-Deploy scripts shrink to "build one Host, submit N specs"; the Phase-C
-resident daemon is a Host kept alive behind a submission queue. The CLI over
-the journals: `python -m rlstack hosts <store-root>`.
+`await host.submit(spec, schema, store)` is how an experiment reaches metal:
+BIND each declared pool onto an owned engine serving that base at that shape,
+FIT (refuse past capacity), ATTEST (roster in memory, journal to
+hosts/<name>/log.jsonl — observability only, which correctness never reads),
+and RUN under the shared arbiter against the experiment's OWN run store. That
+last is the rule submit exists to enforce: one experiment, one store, for life
+(I10) — run_id is global but existence is store-scoped, so the same spec
+against two stores forks history silently.
 """
 
 from __future__ import annotations
@@ -70,16 +42,15 @@ class HostError(RuntimeError):
 
 @dataclass(frozen=True)
 class Partition:
-    """The metal a host is born onto: an atomic slice of one GpuSet — the KIND
-    of GPU it is made of ("L4", "H100"), the device indices, and the memory
+    """The irreducible carved share of metal a host is born onto: the KIND of
+    GPU it is made of ("L4", "H100"), the device indices, and the memory
     fraction it owns on each (vLLM's gpu_memory_utilization is a reservation,
     torch's set_per_process_memory_fraction a cap; both honor this number).
     Memory partitions honestly; SMs still time-share across partition
     boundaries — a stated cost, visible in latency, not hidden by this record.
-    `gpu` is descriptive, never decisive (#49): the fleet carves by fraction
-    and carries the kind down from the Metal it carved, so the journal, the
-    status and the observer all say what the metal IS — a fraction alone
-    cannot tell 0.5 of an L4 from 0.5 of an H100."""
+    `gpu` is descriptive, never decisive: the carve carries the kind down from
+    the Metal it drew on, because a fraction alone cannot tell 0.5 of an L4
+    from 0.5 of an H100."""
 
     gpuset: str
     devices: tuple[int, ...]
@@ -89,7 +60,7 @@ class Partition:
     def row(self) -> dict:
         """The partition as a JSON row — ONE home for the shape the host-up
         event journals, status() reports over the wire, and the observer's
-        hosts view reads back (#49)."""
+        hosts view reads back."""
         return {"gpuset": self.gpuset, "gpu": self.gpu,
                 "devices": list(self.devices), "memory": self.memory}
 
@@ -158,10 +129,9 @@ class Host:
     def attest_name(self) -> None:
         """A host's name is a JOURNAL PATH SEGMENT — hosts/<name>/log.jsonl —
         so it may contain no "/": a name that did would journal one directory
-        deeper than Store.list_hosts() looks, and the host would be perfectly
-        alive and completely invisible to the observer, taking its runs and
-        its gpu samples with it (#51b). Refused at birth, where the name is
-        still just a string."""
+        deeper than Store.list_hosts() looks, leaving the host perfectly alive
+        and completely invisible to the observer, its runs and its gpu samples
+        with it. Refused at birth, where the name is still just a string."""
         if "/" in self.name:
             raise HostError(
                 f"host name {self.name!r} contains '/': the name is a journal "
@@ -172,7 +142,7 @@ class Host:
         """A host IS its regimes: each inference regime must be backed by an
         owned engine BUILT at exactly (base, tp=shape); each training regime
         by the learner built at fsdp=shape. Capability is a birth fact —
-        attested here, never mutated after (#43); the deploy handing wrong
+        attested here, never mutated after — so a deploy handing the wrong
         metal dies at construction, not mid-run."""
         for regime in self.regimes:
             if regime.kind == "inference":
@@ -191,9 +161,9 @@ class Host:
 
     def _attach_regimes(self) -> None:
         """A regime-host's residents attach AT BIRTH: the partition is the
-        footprint, so joining tenants' declared fractions never count here
-        (fraction is a carve hint, meaningless on a join — the weights
-        already live, #43). Several regimes share ONE exclusive group: the
+        footprint, so a joining tenant's declared fraction never counts here
+        (a fraction is a carve hint, meaningless on a join — the weights
+        already live). Several regimes share ONE exclusive group: the
         alternation IS the host, switched by its own arbiter."""
         group = f"host:{self.name}" if len(self.regimes) > 1 else None
         for regime in self.regimes:
@@ -242,12 +212,12 @@ class Host:
     def check_fit(self, spec: ExperimentSpec, binding: dict[str, Engine],
                   remotes: frozenset[str] = frozenset()) -> None:
         """Refuse a submission whose NEW residents' declared fractions push
-        the GpuSet past capacity. Already-attached residents add nothing
-        (object-keyed: a shared engine or learner is one footprint), so
-        multi-tenancy over shared metal is free and honestly bounded — and a
-        regime-host's residents attached at birth, so every join is
-        fraction-free by the same rule. Remote pools are another partition's
-        footprint and never count here."""
+        the GpuSet past capacity. Already-attached residents add nothing (the
+        arbiter keys residents by object: a shared engine or learner is one
+        footprint), so multi-tenancy over shared metal is free and honestly
+        bounded — and a regime-host attached its residents at birth, which is
+        what makes every join fraction-free. A remote pool is another
+        partition's footprint and never counts here."""
         addition = 0.0
         seen: set[int] = set()
         for group in spec.gpu_config.groups:
@@ -278,10 +248,11 @@ class Host:
                      store: Store | None = None,
                      max_inflight: int = 64,
                      remotes: Mapping[str, Engine] | None = None) -> RunReport:
-        """Run one experiment on this host's metal. `remotes` maps pool names
-        served by OTHER hosts to their RemotePools (the runner goes to the
-        learner's host and reaches every other partition through the wire —
-        #43); this host binds, fits, and journals only what it serves."""
+        """Run one experiment on this host's metal: bind, fit, attest, run.
+        `remotes` maps pool names served by OTHER hosts to their RemotePools —
+        the runner goes to the learner's host and reaches every other
+        partition over the wire — so this host binds, fits and journals only
+        what it serves."""
         run_store = store if store is not None else self.store
         remote_pools = dict(remotes or {})
         binding = self.bind_pools(spec, remotes=frozenset(remote_pools))

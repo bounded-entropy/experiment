@@ -1,10 +1,10 @@
-"""Shared scaffolding for the metal probes (deploy/*_l4.py and friends).
+"""Shared fixtures for the metal probes (deploy/*_l4.py and friends): the toy
+arithmetic task set, and a PASS/FAIL line tallied into CHECKS.
 
-Fixtures only — nothing semantics-bearing lives in deploy/ (I5). Every probe
-needs the same two helpers, and each used to paste its own copy (review
-finding, post-#47): the toy arithmetic dataset, and a PASS/FAIL line that
-tallies into CHECKS. One definition each, shipped into every app's image the
-same way the packages are (add_local_python_source("probe", ...)).
+One definition of each, shipped into every app's image the same way the
+packages are (add_local_python_source("probe", ...)).
+
+Deployment only (I5): fixtures, nothing semantics-bearing.
 """
 
 from __future__ import annotations

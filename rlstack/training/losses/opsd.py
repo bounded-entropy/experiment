@@ -1,5 +1,5 @@
-"""OPSD — on-policy self-distillation, the real one (supersedes the v0
-stand-in now named self_anchor)."""
+"""OPSD: on-policy self-distillation — the policy distilled from its OWN
+logprobs, rescored under privileged conditioning. No second model."""
 
 from __future__ import annotations
 
@@ -11,10 +11,10 @@ from rlstack.training.losses.base import LossResult, PolicyOutputs, rails, token
 
 @loss("opsd", requires=("hinted_logprobs",))
 def opsd(out: PolicyOutputs, batch: Any) -> LossResult:
-    """Distill the policy toward ITSELF under privileged conditioning:
-    squared error between trainer logprobs and the hinted logprobs the
-    hinted_logprobs post processor scored through the policy pool (one
-    prefill pass per turn — I9: the loss is pure math over a column)."""
+    """Distill the policy toward ITSELF under privileged conditioning: squared
+    error between trainer logprobs and the "hinted_logprobs" token_level
+    column, which the hinted_logprobs processor scored through the policy
+    pool."""
     import torch
 
     lp, mask, behavior = token_tensors(out, batch)

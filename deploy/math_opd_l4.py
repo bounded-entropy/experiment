@@ -7,88 +7,22 @@
     modal run deploy/math_opd_l4.py::score_clock  # what the teacher costs, alone
     modal run deploy/math_opd_l4.py::full --go    # the 50-100 update run (GATED)
 
-deploy/opd_l4.py proved the PLUMBING of on-policy distillation (#47): three
-per-capability hosts, a live 32B teacher scoring the student's own draws, four
-updates on toy arithmetic with twelve-token completions. This file is its
-bigger sibling and changes exactly one thing — THE TASK. Hendrycks MATH at
-levels 3-5, real completions, so that every number the run reports (reward,
-reverse KL, and above all the wall time the INLINE teacher scoring costs per
-update) is a number about a workload someone would actually run.
-
-WHAT THIS RUN EXISTS TO MEASURE. Teacher scoring rides the Trainer's post
-phase inline: an update's gradient waits on a group's worth of sequential 32B
-prefills. On twelve-token completions that is invisible; on MATH completions
-it is a real cost, and the async scorer daemon is the designed fix — so the
-question this file answers is HOW BIG, because that is what decides whether
-the daemon is worth building. It times the wire (`ScoreClock`) and reports
-seconds per update. The answer, below, is smaller than expected.
-
-THE TASK SET (deterministic, content-addressed):
-    levels 3-5, filtered to answers THE EXISTING VERIFIER CAN CHECK — the
-    boxed answer must parse as a plain integer, |answer| < 1000, because
-    training/post/verifier.py matches the LAST number in the completion
-    against str(meta["answer"]) and a comma or a fraction bar defeats that.
-    Nothing in rlstack/ is touched to make MATH fit; the task set is chosen to
-    fit the verifier that exists.
-
-THE PROMPT (raw completion, the engine's v0 contract — no chat template):
-    three worked exemplars, each ending "The answer is <n>." and terminated by
-    an eos token, then the problem. THE TERMINATOR IS THE LOAD-BEARING PART:
-    the environment (math_single_turn) passes NO stop strings, so a completion
-    runs to max_tokens unless the model emits an eos id — and the verifier
-    reads the LAST number in it, which would then come from whatever the model
-    invented after answering. See DOCUMENT_END for which of Qwen3's two eos
-    ids works and the measurement that settled it; `baseline` reports the
-    finish-reason mix, so the scaffold is judged before any GPU-hour is
-    committed to a run.
-
-TOPOLOGY (#47's, unchanged except max_model_len):
-    teacher    Qwen3-32B tp=4 on L4:4, frozen, inference regime only
-    student    Qwen3-8B  tp=2 on L4:2, the sampler
-    learner    Qwen3-8B  fsdp=2 on L4:2, the runner beside it
-    max_model_len 2048 (was 512): a 211-543 token prompt plus 512 generated,
-    with the teacher's prefill of both inside the same window. #47 measured
-    the 32B's KV at 49,664 tokens, so 2048 per sequence looked affordable —
-    `shakeout` is where that stopped being arithmetic and became the
-    observation recorded below.
-
-WHAT THE METAL SAID (2026-08-28; ::tasks, ::baseline, ::shakeout run
-d43141929dc2 at 6 updates, ::score_clock). The full run has NOT been run.
-
-    THE TASK SET   7,500 train rows -> 5,586 at levels 3-5 -> 2,925 the
-                   verifier can check (52.4%); test 5,000 -> 3,669 -> 1,892
-                   (51.6%). Prompts are 211-543 tokens (median 249), so
-                   prompt + 512 sits at 1,055 of the 2,048 window.
-    THE WINDOW     max_model_len 2048 costs the teacher nothing: 16.63 GiB of
-                   weights per device and 3.03 GiB of KV = 49,664 tokens —
-                   #47's number exactly, at four times the window, because KV
-                   capacity is a memory fact and the window is a per-sequence
-                   one. The student holds 8.27 GiB and 150,224 tokens of KV.
-    THE BASELINE   greedy, 100 held-out tasks: untrained 8B student 0.600,
-                   32B teacher 0.520. The teacher is BELOW the student, and
-                   the reason is visible in the completions — the 32B leaves
-                   the few-shot register for its post-trained one ("Okay,
-                   let's try to tackle this problem step by step") and
-                   truncates more often (39/100 vs 31/100 at 512 tokens).
-    THE LEDGER     reward .125/.000/.562/.812/.188/.750, loss (= per-token
-                   reverse KL) +.1043/.0739/.0576/.0846/.0716/.0568 nats,
-                   gap .0160-.0393, ~100s per update after the first.
-                   32,155 teacher-scored tokens, token-aligned in every
-                   update; teacher mean logprob -0.3077 against the student's
-                   -0.2335. Held-out eval (32 tasks, temperature 1.0) 0.531
-                   at update 3 and 0.281 at update 6 — two points, n=32.
-    THE RAILS      logprob_gap 0.0160-0.0393 with documents 40x longer than
-                   #47's: the kernel floor, unmoved.
-    THE CLOCK      and it is the answer this file was built for: inline
-                   teacher scoring costs ~8s of a ~100s update — 16 prefills
-                   over 5,485 tokens, median 0.94s each, span 8.0s, teacher
-                   busy 15.4s. The span is group_size x per-prefill latency
-                   (run_pipeline gathers over GROUPS and walks trajectories
-                   within one sequentially), so it scales with group_size,
-                   not with wave size. At this shape the async scorer daemon
-                   would buy back under a tenth of an update — and the L4:4
-                   teacher sits idle for the other 92%, which is the real
-                   economics and a different fix.
+deploy/opd_l4.py's three-host topology (teacher, student sampler, sharded
+learner), unchanged except for a 2048-token window, with exactly one thing
+different — THE TASK. Hendrycks MATH at levels 3-5, filtered to answers the
+EXISTING verifier can check (a plain integer, |answer| < 1000: nothing in
+rlstack/ is touched to make MATH fit), and real completions instead of twelve
+arithmetic tokens, so every number the run reports is about a workload someone
+would actually run. What it exists to measure is the cost of INLINE teacher
+scoring — an update's gradient waits on a group's worth of sequential 32B
+prefills, and the async scorer daemon is the designed fix, so `score_clock`
+times the wire to decide whether that daemon is worth building. The most
+load-bearing string in the file is the exemplar terminator (see DOCUMENT_END):
+math_single_turn passes NO stop strings, so a completion runs to max_tokens
+unless the model emits an eos id, and the verifier reads the LAST number in
+it — `baseline` reports the finish-reason mix so the scaffold is judged before
+any GPU-hour is committed. Measurements from the task build, the baseline and
+the shakeout are in CONTEXT; `full` has not been run.
 
 Deployment only (I5): wiring and measurement. Image pins are modal_app.py's
 plus pyarrow, added as its own layer so the pinned vllm/torch layer is reused
@@ -1078,11 +1012,12 @@ def full(n_updates: int = 60, style: str = "cot", master: int = 47,
         modal run deploy/math_opd_l4.py::full --go --n-updates 60
 
     WHAT THE SHAKEOUT PRICES IT AT: ~100s per update, so 60 updates is about
-    1h45 of eight L4s and 100 updates about 3h. n_heldout is 64 here and the
-    evaluator walks its tasks SEQUENTIALLY (one wave of n_samples at a time,
-    rlstack/runner/daemons/evaluator.py) — mid-run evals hide inside training,
-    but the LAST one is a tail of roughly n_heldout x 20s with nothing left to
-    overlap. Drop n_heldout to 32 to halve that tail.
+    1h45 of eight L4s and 100 updates about 3h. n_heldout is 64 here, and the
+    evaluator launches every (task, sample) episode at once under its
+    max_inflight semaphore and reduces in task order — so the last eval's
+    tail, the one with no training left to hide inside, is bounded by
+    max_inflight and the engine's batching rather than by n_heldout
+    round-trips (rlstack/runner/daemons/evaluator.py).
     """
     from rlstack import ModalVolumeStore
 

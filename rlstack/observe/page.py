@@ -1,23 +1,12 @@
 """THE document: one self-contained HTML+CSS+JS page, served for every route.
 
-No build step, no CDN, no framework — the whole UI is this string plus the
-JSON the routes in ui.py serve. JS routes on location.pathname, so all four
-pages (runs index, one run, the fleet, one host) are the same bytes:
-
-    /            the run index          <- /api/runs
-    /run/<id>    one experiment         <- /api/run/<id> (+ /api/runs, for the
-                                           switcher and this run's placement)
-    /hosts       the fleet              <- /api/hosts
-    /host/<name> one host's journal     <- /api/host/<name>
-
-Three rendering rules the page obeys:
-  * EVERY plotted point is hoverable — the curve is the shape, the tooltip is
-    the raw number as journaled (eval overlay included, its own x labelled
-    when it differs from the crosshair's).
-  * GLOBAL FACTS ON GLOBAL PAGES: placement, residency, utilization and
-    timelines render on the fleet and host pages; per-run curves stay on the
-    run page.
-  * A poll never yanks a chart out from under the cursor (`hovering`).
+No build step, no CDN, no framework — the whole UI is this string plus the JSON
+the routes in ui.py serve, and JS routes on location.pathname so all four pages
+(runs index, one run, the fleet, one host) are the same bytes. Three rules it
+obeys: every plotted point is hoverable and the tooltip is the raw number as
+journaled; GLOBAL facts render on the global pages (placement, residency,
+utilization, timelines) while per-run curves stay on the run page; and a poll
+never redraws a chart out from under the cursor.
 """
 
 from __future__ import annotations

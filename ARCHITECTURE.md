@@ -322,8 +322,10 @@ more. Rank 0 runs the runner and answers; ranks 1..width-1 exist only to stand
 in the collectives, and rank 0's copy is the truth.
 `rlstack/runner/learners/ranks.py`
 
-**Arbiter** — the physical half of the blackboard: one `GpuArbiter` per GpuSet,
-constructed by whoever owns the metal and shared by every experiment on it.
+**Arbiter** — the physical half of the blackboard: a `GpuArbiter` constructed by
+whoever owns the metal (a Host makes its own unless handed one) and shared by
+every experiment admitted to it. It governs its owner's partition, not the
+device — several sub-GPU hosts on one device each admit independently.
 Scheduling policy lives here and is deliberately outside run identity (I5).
 `rlstack/runner/arbiter.py`
 

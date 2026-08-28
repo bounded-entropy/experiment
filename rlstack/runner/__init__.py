@@ -8,9 +8,9 @@ The map, by responsibility — read top to bottom:
                     plan_daemons — the only orchestration
     daemons/        one file per GPU responsibility (generator / trainer /
                     evaluator), all the same four beats: await condition,
-                    hold lease, work, write + notify
+                    admit residents, work, write + notify
     signals.py      the LOGICAL half of the blackboard: awaitable predicates
-                    over the store — roles never call each other
+                    over the store — daemons never call each other
     arbiter.py      the PHYSICAL half: the GpuArbiter owns admission to the
                     metal — object-keyed residents, exclusive groups from
                     GpuGroup.sharing="sleep", sticky drain-until-blocked
@@ -19,9 +19,14 @@ The map, by responsibility — read top to bottom:
                     (collect_wave)
     post.py         EXECUTES the declared post pipeline per group (the
                     processors themselves are declared in training/post/)
-    host.py         the metal's owner: Host binds submitted specs onto
-                    its engines/learner, checks fit, rosters + journals
-                    tenancies, runs them under its shared arbiter
+    host.py         a host: an atomic purposed partition (Partition +
+                    Regimes) owning its engines, its one learner, its arbiter
+                    and its journal; submit binds / fits / attests / runs
+    fleet.py        the inventory of Metal and hosts, and the placement
+                    ladder over them: join → carve → acquire
+    remote.py       the wire: HostService serves pool verbs on its own metal
+                    under its own arbiter, RemotePool is the whole Engine
+                    protocol over a Transport
     sources/        WaveFeed: where the trainer's waves come from
                     (live / replay / static), one file each
     seeds.py        the seed tree: derive(master, *path)

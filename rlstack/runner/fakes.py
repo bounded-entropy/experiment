@@ -1,13 +1,12 @@
 """Fake metal: a deterministic Engine and Learner behind the real protocols.
 
-Two jobs. In tests, they make the entire runner — identity, seeds, waves, the
-commit protocol, resume — executable and byte-for-byte reproducible with no
-GPU. As `--fake` metal, they dry-run any experiment in seconds before it
-touches real hardware.
-
-Determinism contract: every output is a pure function of (seed, inputs) or of
-the digest state threaded through the learner — never of wall clock, global
-RNG, or scheduling order. The resume-equivalence tests depend on this.
+Stand-ins a caller hands to a Host in place of real metal. They make the whole
+runner — identity, seeds, waves, the commit protocol, resume — executable and
+byte-for-byte reproducible with no GPU, and they dry-run an experiment in
+seconds before it touches hardware. The contract they keep: every output is a
+pure function of (seed, inputs) or of the digest state threaded through the
+learner, never of wall clock, global RNG or scheduling order. Resume-
+equivalence depends on it.
 """
 
 from __future__ import annotations

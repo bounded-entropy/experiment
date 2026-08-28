@@ -1,10 +1,11 @@
-"""Static dataset: a fixed, content-addressed file of sealed trajectories.
+"""Static: a fixed, content-addressed file of sealed trajectories.
 
-The SFT / offline-distillation shape: cas://<sha> resolves to jsonl of
-trajectory rows (as written by trajectory_to_row). Each trajectory is its own
-singleton group — no cross-trajectory context — and update u takes the u-th
-slice of trajectories_per_wave rows, cycling deterministically. Rows are written
-into the run's waves/ on first request: every run is self-contained."""
+The SFT / offline-distillation shape: cas://<sha> resolves to jsonl trajectory
+rows, each its own singleton group (no cross-trajectory context), and update u
+takes the u-th slice of trajectories_per_wave rows, cycling deterministically.
+Rows are written into the run's own waves/ on first request, because every run
+is self-contained.
+"""
 
 from __future__ import annotations
 

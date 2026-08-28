@@ -3,26 +3,20 @@
     modal run deploy/adapters_l4.py::parity      # ~5 min, one L4
     modal run deploy/adapters_l4.py::adapters    # ~25 min, one L4
 
-Two questions, one venue (Qwen3-0.6B on a single L4).
-
-PARITY asks the mandatory kind question (#3): do the rows the ENGINE serves
-and the rows the TRAINER replays produce the same numbers? The instrument is
-score_tokens — the engine's own logprob for each token of a document under a
-pinned bundle — against the trainer's batched replay of the same document under
-the same params. As in #45 the proof is a SHIFT TEST, not a tolerance: the
-aligned gap against the gap a one-position shift gives. An off-by-one in the
-virtual rows (rows counted twice, or not at all, or trimmed at the wrong end)
-moves every position by one and cannot survive that comparison at any row
-magnitude. The same measurement runs for lora, for soft_prompt, and for a bank
-carrying BOTH, so the soft prompt's numbers are read against the punica floor
-this stack has been calibrated at since #28 rather than against zero.
-
-ADAPTERS asks Samarth's question: can GRPO experiments with DIFFERENT adapter
-kinds run concurrently on ONE VllmEngine? Three tenants — lora, soft_prompt,
-and a bank with both — submitted to one Host with staggered joins, sharing one
-engine and one multi-tenant learner. Success is every tenant completing with
-its logprob_gap at the kernel floor: the gap is the cross-contamination alarm,
-and a request served the wrong prefix (or the wrong adapter) blows it up.
+Two questions, one venue (Qwen3-0.6B on a single L4). PARITY asks each kind's
+rollout-lowering-against-replay-lowering question with score_tokens: the
+engine's own logprob per token under a pinned bundle, against the trainer's
+batched replay of the same document under the same params — for lora, for
+soft_prompt, and for a bank carrying both, so the soft prompt's numbers are
+read against the punica floor rather than against zero. The proof is a SHIFT
+TEST rather than a tolerance, the aligned gap against the gap one position of
+shift gives, because a miscount of a kind's virtual rows (counted twice, not
+at all, or trimmed at the wrong end) moves every position by one and cannot
+survive that comparison at any row magnitude. ADAPTERS then submits three GRPO
+tenants of different kinds to one Host with staggered joins, sharing one
+engine and one multi-tenant learner; success is every tenant finishing with
+its logprob_gap at the kernel floor, which is the cross-contamination rail a
+wrong prefix or a wrong adapter would blow up.
 
 Deployment only (I5): wiring and measurement, nothing semantics-bearing.
 Image pins: keep in sync with deploy/modal_app.py.

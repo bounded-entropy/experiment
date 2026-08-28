@@ -1,5 +1,6 @@
-"""Pure check, no sampling: the last number in each trajectory's final turn
-against the task's known answer. The reward, as a postprocessor."""
+"""The reward as a postprocessor, checked rather than sampled: the last number
+in each trajectory's final turn against the task's known answer. No pool
+traffic, so it costs nothing and consumes no randomness."""
 
 from __future__ import annotations
 

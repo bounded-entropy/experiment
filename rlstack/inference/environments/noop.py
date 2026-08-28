@@ -1,4 +1,4 @@
-"""Declaration-only stub environment (useful in specs under test)."""
+"""A declared environment that never runs: a name for specs under test."""
 
 from __future__ import annotations
 

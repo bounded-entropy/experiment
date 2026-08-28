@@ -1,4 +1,5 @@
-"""A flat scalar per trajectory — the degenerate vector (baseline/stub)."""
+"""Reward 1.0 for every trajectory: the degenerate reward column, for tests and
+for pipelines whose signal comes from somewhere else."""
 
 from __future__ import annotations
 

@@ -1,39 +1,17 @@
 """GpuArbiter: the physical resource owns admission; experiments only request.
 
-One arbiter per GpuSet, constructed by whoever owns the metal (deploy today,
-the resident daemon in Phase C) and shared by every experiment attached to
-that metal. This replaces per-experiment leases: two tenants' private mutexes
-coordinate nothing (CONTEXT #34).
-
-The vocabulary:
-
-    RESIDENT   something that occupies evictable GPU memory — an engine
-               object (weights + KV) or a learner object (base + optim).
-               Residents are keyed by OBJECT IDENTITY: ten pools backed by
-               one engine are ONE resident. Pools are names, not footprints.
-    ATTACH     register a resident: its label (for logs), its exclusive
-               group (None = always resident), declared fraction, and
-               wake/evict hooks (vLLM sleep/wake, learner offload).
-    ADMIT      the one verb work wraps itself in: entering the context
-               guarantees the resident is resident — waking it if needed,
-               after the current resident's in-flight work drains.
-
-Alternation only exists inside an exclusive group (GpuGroup.sharing="sleep");
-everything else co-resides and admit() is a plain counter. The scheduling
-policy is sticky drain-until-blocked: the resident keeps serving as long as
-it has work; a switch happens when its in-flight count reaches zero and
-someone else waits. Two knobs bound the pathologies:
-
-    quantum    minimum seconds between switches (hysteresis against thrash
-               when misaligned tenants interleave); 0 = off.
-    max_wait   seconds after which a starving waiter forces a handoff: new
-               admits of the current resident stop being fed so its work
-               drains; None = off (the blackboard's own dataflow bounds
-               starvation whenever max_policy_lag does).
-
-Scheduling policy is deliberately OUTSIDE run identity (I5): it moves
-wall-clock and — under max_policy_lag > 0 — which recorded version served a
-wave, which is already declared non-reproducible (#27).
+An arbiter is constructed by whoever owns the metal — a Host makes its own
+unless handed one — and is shared by every experiment admitted to it, which is
+why per-experiment mutexes died: two tenants' private locks coordinate nothing.
+It governs the partition that owns it, not the device: several sub-GPU hosts on
+one device each admit independently. Alternation exists only inside an
+exclusive group
+(GpuGroup.sharing="sleep", or a host's own group); everything else co-resides
+and admit() is a plain counter — and even inside a group, alternation is about
+memory, never mutual exclusion on work: any amount of work overlaps on the
+resident that is live. Scheduling policy is sticky drain-until-blocked and
+lives deliberately OUTSIDE run identity (I5): it moves wall-clock and, under
+max_policy_lag > 0, which recorded version served a wave.
 """
 
 from __future__ import annotations
@@ -70,6 +48,12 @@ class _Group:
 class GpuArbiter:
     def __init__(self, *, quantum: float = 0.0, max_wait: float | None = None,
                  clock: Callable[[], float] = time.monotonic) -> None:
+        """Two knobs bound drain-until-blocked's pathologies. `quantum` is the
+        minimum seconds between switches — hysteresis against thrash when
+        misaligned tenants interleave (0 = off). `max_wait` is the seconds
+        after which a starving waiter forces a handoff: new admits of the
+        current resident stop being fed so its work drains (None = off, which
+        the blackboard's own dataflow bounds whenever max_policy_lag does)."""
         self.quantum = quantum
         self.max_wait = max_wait
         self.clock = clock
@@ -109,9 +93,10 @@ class GpuArbiter:
         entry.fraction = entry.fraction if entry.fraction is not None else fraction
 
     def declared_load(self) -> float:
-        """Sum of declared fractions over residents that co-reside (free plus
-        one per exclusive group). Reported, not enforced: until the learner
-        is multi-tenant, per-experiment learners are overlapping views."""
+        """Sum of declared fractions over residents that co-reside: the free
+        residents plus the largest member of each exclusive group. Declared,
+        never measured — the host's fit check refuses submissions against this
+        number; nothing polices the metal itself."""
         free = sum(r.fraction or 0.0 for r in self._residents.values()
                    if r.group is None)
         per_group = {}

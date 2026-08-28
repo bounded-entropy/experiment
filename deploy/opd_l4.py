@@ -3,63 +3,22 @@
     modal run deploy/opd_l4.py::probe    # the teacher host ALONE, one score
     modal run deploy/opd_l4.py           # the whole run, three containers
 
-THE SHAPE (#43's per-capability hosts, executed). Nothing here coordinates
-anything: each container is born one atomic purposed partition, and the run
-reaches the two it does not live on through the wire.
-
-    teacher    Qwen3-32B, tp=4 on L4:4 — INFERENCE ONLY, no learner, no
-               adapters (a non-policy pool gets a payload-free bundle, so the
-               frozen base is what serves). 32B in bf16 is ~65 GiB of
-               weights; four L4s is the smallest metal that holds it.
-    student    Qwen3-8B, tp=2 on L4:2 — the sampler. It lives on its OWN
-               partition because #45 measured that it cannot share the
-               learner's: an 8B engine wants its whole 15.3 GiB where the
-               learner's shard already is.
-    learner    Qwen3-8B, FsdpTorchLearner fsdp=2 on L4:2, the runner beside
-               it (the learner is NEVER remote). Both pools are RemotePools
-               over ModalTransport; the store plane rides the volume.
-
-WHAT THE RUN PROVES, in the order the checks assert it:
-    the wire      two containers advertise (base, tp) and answer verbs
-    the vocab     the same token ids the student sampled are scored by a
-                  DIFFERENT model — which is only meaningful because the two
-                  share a tokenizer, so `probe` checks that first
-    the column    teacher_logprobs lands in postdata, one float per generated
-                  token, and the run's own dictionary.json shows it at token
-                  granularity feeding loss:opd
-    the rails     logprob_gap stays at the kernel floor (the STUDENT pool
-                  served exactly the adapters the local trainer recomputed —
-                  the teacher is a different model and never enters this rail)
-
-Cost is the reason the schedule is tiny: eight L4s are live at once, and this
-run exists to prove plumbing, not convergence.
-
-WHAT THE METAL SAID (2026-08-28, run c0f65f24362b, 4 updates, 6/6 checks).
-Loads: the student 8.17 GiB per device in 81s with 10.28 GiB left for KV; the
-teacher 16.5 GiB per device in 52s with 3.03 GiB left (49,664 tokens) — 32B at
-tp=4 fits an L4:4 with room to prefill, which was the open question. Warming
-both partitions CONCURRENTLY took 237s; the four updates took 386s.
-
-    update 1: reward 0.750  loss +0.3559  ratio 0.9968  gap 0.0216
-    update 2: reward 0.500  loss +0.3041  ratio 1.0001  gap 0.0201
-    update 3: reward 0.500  loss +0.3146  ratio 1.0001  gap 0.0185
-    update 4: reward 0.500  loss +0.2848  ratio 0.9974  gap 0.0165
-
-`loss` IS the per-token reverse KL in nats, so that column is the distillation
-signal itself: 0.356 → 0.285 over four steps, i.e. the student moved toward the
-teacher. At update 1 the LoRA is still B=0, so 0.356 nats/token is the bare
-8B-vs-32B distance on these completions. Over all 384 scored tokens the teacher
-mean is -1.3357 and the student's recorded mean -1.0188 (KL +0.3169) — the
-teacher is LESS confident on the student's draws than the student is, which is
-what sampling from the student guarantees.
-
-`gap` is a different rail and stays at 0.0165-0.0216 — the student pool served
-exactly the adapters the local trainer recomputed, across a wire, with a
-sharded learner. #45's scoring floor enters the TEACHER column instead, as
-prefill-vs-decode kernel noise; it is bounded by that same ~0.02 and the
-teacher pool carries no adapter at all, so it is ~6% of a 0.32-nat signal and
-never an alignment error (::probe's shift-free evidence: four nats between the
-true and a wrong continuation).
+Three containers, each born ONE atomic purposed partition and reaching the two
+it does not live on over the wire: a frozen Qwen3-32B teacher at tp=4 on L4:4,
+inference regime only (a non-policy pool gets a payload-free bundle, so the
+base is what serves); a Qwen3-8B student sampler at tp=2 on L4:2, on its own
+partition because an 8B engine wants its whole footprint where the learner's
+shard already is; and a Qwen3-8B FsdpTorchLearner at fsdp=2 on L4:2 with the
+runner beside it, since the learner is never remote. Both pools are RemotePools
+over ModalTransport while the store plane rides the volume, and the checks
+assert, in order: the two served hosts advertise (base, tp) and answer their
+verbs; the student's own sampled token ids are scored by a DIFFERENT model,
+which is only meaningful because the two share a tokenizer (`probe` checks
+that first); teacher_logprobs lands as a token_level postdata column the run's
+own dictionary.json shows feeding loss:opd; and logprob_gap stays at the
+kernel floor, because the student pool served exactly the adapters the local
+trainer recomputed. The schedule is tiny because eight L4s are live at once:
+this run exists to prove plumbing, not convergence — results in CONTEXT #47.
 
 Deployment only (I5): wiring and measurement, nothing semantics-bearing.
 Image pins: keep in sync with deploy/modal_app.py.

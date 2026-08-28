@@ -1,6 +1,6 @@
-"""LocalStore: the layout on a local filesystem, with real durability.
+"""LocalStore: the key tree on a local filesystem, with real durability.
 
-The six verbs, implemented with the tmp+fsync+rename discipline: readers see
+The store's six byte verbs under the tmp+fsync+rename discipline: readers see
 old bytes or new bytes, never a tear; renames are recorded in the parent
 directory; ledger appends are flushed and fsynced.
 """

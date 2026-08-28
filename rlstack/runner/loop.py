@@ -1,18 +1,14 @@
 """The runner: Phase 0 (identity), Phase 1 (idempotent setup), Phase 2 (daemons).
 
 Phase 2 is a blackboard, not a choreography: plan_daemons derives one daemon
-per GPU responsibility from the spec — a Generator iff trajectories are live, the
-Trainer always, an Evaluator iff eval is declared — and they run concurrently,
-synchronized ONLY through the store (signals.py) and admitted onto shared
-metal by the GpuArbiter (arbiter.py). Nobody calls anybody:
+per GPU responsibility from the spec — a Generator iff trajectories are live,
+the Trainer always, an Evaluator iff eval is declared — and they run
+concurrently, synchronized ONLY through the store (signals.py) and admitted
+onto shared metal by the arbiter. Nobody calls anybody: the ledger is the
+commit bus and waves/ the data bus.
 
-    Generator   awaits commit w-1-B      → writes waves/<w>
-    Trainer     awaits waves/<u>      → post, train, blobs, LEDGER (commit)
-    Evaluator   awaits commits (mod N)   → writes eval/<u>
-
-The ledger is the commit bus, waves/ is the data bus, and crash recovery
-(data/stores/) plus the seed tree make the whole thing attachable: resume =
-re-run Phases 0-1, then the daemons pick up from the ledger tail.
+Resume is re-running Phases 0-1 — attach discards everything the ledger never
+committed, and the daemons pick up from the ledger tail.
 """
 
 from __future__ import annotations
@@ -82,14 +78,13 @@ async def run_experiment_async(
         arbiter: GpuArbiter | None = None) -> RunReport:
     """The async form of run_experiment — the multi-tenant entry.
 
-    The multi-tenancy invariant (Engine protocol) is only expressible when
-    several experiments share ONE event loop around one resident engine:
-    gather() any number of these on the same Engine and their bundles coexist,
-    each request pinning its own — and on the same Learner, whose tenants
-    coexist the same way. Pass the metal-owner's shared `arbiter` so colocated
-    tenants alternate under ONE admission authority; None builds a private one
-    (the single-experiment convenience). The Phase-C resident daemon drives
-    this form directly.
+    The multi-tenancy invariant (I8) is only expressible when several
+    experiments share ONE event loop around one resident engine: gather() any
+    number of these on the same Engine and their bundles coexist, each request
+    pinning its own — and on the same Learner, whose tenants coexist the same
+    way. Pass the metal-owner's shared `arbiter` so colocated tenants alternate
+    under ONE admission authority; None builds a private one, the
+    single-experiment convenience.
     """
     if spec.algo is None:
         raise NotImplementedError("B1 runs training specs: algo required")
@@ -245,15 +240,15 @@ def attach_residents(spec: ExperimentSpec, engine_map, learner,
     Object-keyed and idempotent: two pools backed by one engine are ONE
     resident; a second experiment attaching the same engine is a no-op.
     Exclusive groups come from GpuGroup.sharing="sleep" — alternation exists
-    only there. Fractions are declared, reported, not yet enforced (until the
-    learner is multi-tenant, per-experiment fractions are overlapping views).
+    only there. Declared fractions are reported into the arbiter's load, which
+    the host's fit check refuses against; nothing polices the metal itself.
 
     A REMOTE pool attaches as a zero-footprint free resident: its metal is
-    another host's partition, so local admission is bookkeeping (the real
-    admission happens host-side, in HostService, at the serving partition)
-    and its declared fraction is a carve hint that never counts here (#43).
-    A remote pool in a sleep group is refused: alternation is an
-    intra-partition fact — a sleep group's members must all live on one host.
+    another host's partition, so local admission is bookkeeping — the real
+    admission happens host-side, in HostService, at the serving partition —
+    and its declared fraction is a carve hint that never counts here. A remote
+    pool in a sleep group is refused: alternation is an intra-partition fact,
+    so a sleep group's members must all live on one host.
 
     A sleep demand on metal the host ALREADY holds in an alternation group
     (a multi-regime host attached it at birth) is satisfied, not conflicting:

@@ -1,38 +1,19 @@
-"""The Fleet: metal inventory + the join / carve / acquire ladder (#43).
+"""The Fleet: the inventory of Metal and hosts, and the placement ladder over them.
 
-Hosts are atomic purposed partitions (runner/host.py); the fleet is what
-knows all of them, plus the registered Metal they were carved from and the
-RESIDUAL — capacity no partition owns. An experiment declares capability
-demands (what, never where: base + shard shape per member, read straight off
-its gpu_config); placement climbs a three-rung ladder, one currency and one
-decider per rung:
+An experiment declares capability DEMANDS — what, never where: kind, base and
+shard shape read straight off its gpu_config, with the declared fraction as a
+carve hint. Placement climbs three rungs, one currency and one decider each
+(I12): JOIN a host that already serves the capability (automatic; the target
+host's own arbiter decides, and fractions are ignored because the weights
+already live there), CARVE a new host out of RESIDUAL metal (automatic BECAUSE
+journaled, residual-only so a living host is never shrunk or reshaped), or
+ACQUIRE — new metal costs money, so place() names what to buy and submit()
+refuses to run it.
 
-    JOIN      a host already serves the demanded capability. Automatic — the
-              target host's own arbiter is the decider (admission stays with
-              the metal). Declared fractions are IGNORED: the weights
-              already live there; a join's currencies are adapter slots and
-              contention, not memory.
-    CARVE     nothing serves it, but residual metal fits: partition a new
-              host into existence. Automatic, because the residual is
-              nobody's — under three conditions that keep the fleet legible:
-              residual-only (an existing host is NEVER shrunk or reshaped;
-              capability is a birth fact), journaled (fleet/log.jsonl), and
-              the declared fraction finally means something (it sizes the
-              new partition — the carve hint).
-    ACQUIRE   nothing fits: new metal costs money, so a human registers
-              Metal. place() returns the plan naming what to buy; submit()
-              refuses to run it.
-
-Placement units: a sleep group places as ONE unit onto ONE host (alternation
-is an intra-partition fact), carved as a single multi-regime host when no
-host covers it. A concurrent group places PER MEMBER — per-capability hosts,
-so a later experiment wanting just the tp-4 teacher contacts that host and
-nothing else. Concurrent grouping was only ever a colocation hint, and
-colocation is semantics-neutral (I5).
-
-submit() then runs the experiment where the learner landed (the learner is
-never remote — the runner goes to it) and reaches every other partition
-through RemotePools over the wire.
+A sleep group places as ONE unit onto one multi-regime host; concurrent members
+place per member, because colocation is only a hint and is semantics-neutral
+(I5). submit() then runs the experiment where the learner landed — the learner
+is never remote — and reaches every other partition through RemotePools.
 """
 
 from __future__ import annotations
@@ -58,12 +39,10 @@ class FleetError(RuntimeError):
 @dataclass(frozen=True)
 class Metal:
     """Owned metal: one GpuSet the fleet may carve. Registering Metal IS the
-    acquire rung executed — the one that costs money, so the one a human
-    does; everything below it is automatic. `gpu` is the KIND (what was
-    bought) and `vram_gb` one device's VRAM in GB (what a model is measured
-    against — L4=24, A100=40 or 80, H100=80); a carve stamps the kind onto the
-    Partition it births, and fraction_for_gb is the ONE place GB and
-    fraction meet (#49)."""
+    acquire rung executed — the rung that costs money, so the one a human
+    does. `gpu` is the KIND (what was bought) and `vram_gb` one device's VRAM
+    in GB (what a model is measured against — L4=24, A100=40 or 80, H100=80);
+    a carve stamps the kind onto the Partition it births."""
 
     name: str
     gpu: str = "L4"
@@ -72,15 +51,13 @@ class Metal:
 
 
 def fraction_for_gb(gb: float, metal: Metal) -> float:
-    """THE conversion between the unit a human sizes models in (GB of VRAM)
-    and the unit a partition owns (a fraction of ONE device): the carve hint
-    `gb` becomes gb / metal.vram_gb on the target metal. Partition.memory
-    stays a fraction because both substrates take one (vLLM's
-    gpu_memory_utilization, torch's set_per_process_memory_fraction), so this
-    is the only place the two units meet — a GB figure is converted HERE,
-    against the metal it will live on, and never stored (#49). More GB than
-    one device holds is not a smaller fraction, it is bigger metal: that is
-    the acquire rung, so it raises instead of clamping."""
+    """THE meeting point of the unit a human sizes models in (GB of VRAM) and
+    the unit a partition owns (a fraction of ONE device): the carve hint `gb`
+    becomes gb / metal.vram_gb on the target metal. Partition.memory stays a
+    fraction because both substrates take one, so a GB figure is converted
+    HERE, against the metal it will live on, and never stored. More GB than
+    one device holds is not a smaller fraction, it is bigger metal — the
+    acquire rung — so it raises instead of clamping."""
     fraction = gb / metal.vram_gb
     if fraction > 1.0 + 1e-9:
         raise FleetError(
@@ -208,10 +185,9 @@ class Fleet:
 
     A factory is handed BOTH birth facts of the host it is building: the
     Regime (what capability) and the Partition (how much of what metal). The
-    fraction is the whole point of a sub-GPU host and only the carve knows
-    it, so the contract that realizes a partition must be paid it — a
-    factory taking the regime alone has to re-derive the number off the plan
-    (#51c)."""
+    fraction is the whole point of a sub-GPU host and only the carve knows it,
+    so the contract that realizes a partition is paid it rather than left to
+    re-derive it off the plan."""
 
     def __init__(self, metal: Sequence[Metal], *, store: Store,
                  engine_factory: Callable[[Regime, Partition], Engine],
@@ -233,9 +209,8 @@ class Fleet:
         Replacing is never right, even when names are unique by construction
         (carve_name). The replaced host keeps its metal — engines resident,
         tenants bound, arbiter admitting — while dropping out of the dict
-        residual() sums over, so its fraction silently returns to the
-        residual and the next carve is sized against memory that is already
-        gone (#51a)."""
+        residual() sums over, so its fraction silently returns to the residual
+        and the next carve is sized against memory that is already gone."""
         if host.name in self.hosts:
             raise FleetError(
                 f"host {host.name!r} is already registered with this fleet; "
@@ -246,9 +221,9 @@ class Fleet:
     # ---- the inventory ------------------------------------------------------
 
     def residual(self, metal_name: str) -> list[float]:
-        """Free memory per device: what carving may draw from. The residual
-        is NOBODY'S — which is exactly why carving from it needs no
-        approval (#43)."""
+        """Free memory per device — capacity no partition owns. The residual
+        is NOBODY'S, which is exactly why carving from it needs no
+        approval."""
         free = [1.0] * self.metal[metal_name].devices
         for host in self.hosts.values():
             part = host.partition
@@ -352,21 +327,22 @@ class Fleet:
 
         The ordinal is not decoration. A regime's name carries kind and shape
         but not base, so two carves that differ only by base would otherwise
-        produce one name (#51a) — and the base cannot go in the name either,
-        because a base is "Qwen/Qwen3-0.6B" and a host name is a journal path
-        segment that may hold no "/" (#51b, attested by Host). No separator
-        here is "/" for that same reason."""
+        produce one name — and the base cannot go in the name either, because
+        a base is "Qwen/Qwen3-0.6B" and a host name is a journal path segment
+        that may hold no "/" (Host attests it). No separator here is "/" for
+        that same reason."""
         self.carves += 1
         devices = "-".join(str(d) for d in step.devices)
         regimes = "+".join(regime.name for regime in step.regimes)
         return f"{step.metal}:{devices}.{regimes}.c{self.carves}"
 
     def carve(self, step: Carve) -> Host:
-        """Rung two executed. Residual-only by construction (plan_carve drew
-        from residual), never mutates an existing host (a NEW Host is born
-        with its capability), journaled (legibility by record, not by
-        approval — #43). The born partition is STAMPED with the metal's kind:
-        the fraction says how much, the kind says of what (#49)."""
+        """Rung two executed, under the three conditions that make it
+        automatic: residual-only by construction (plan_carve drew from
+        residual), never mutating an existing host (a NEW Host is born with
+        its capability), journaled — legibility by record, not by approval.
+        The born partition is STAMPED with the metal's kind: the fraction says
+        how much, the kind says of what."""
         metal = self.metal[step.metal]
         partition = Partition(step.metal, step.devices, step.memory, metal.gpu)
         engines: list[Engine] = []
@@ -396,8 +372,8 @@ class Fleet:
                      max_inflight: int = 64) -> RunReport:
         """place → apply → run. The runner goes to the learner's host; every
         pool that landed elsewhere is reached through a RemotePool over a
-        LocalTransport (v0: all hosts share this process; the Modal-cls
-        transport slots in behind the same two verbs). The placement is
+        LocalTransport — every host in this process, which the Modal-cls
+        transport replaces behind the same two verbs. The placement is
         journaled under the run's identity before the run opens."""
         plan = self.place(spec)
         placement = self.apply(plan)          # raises FleetError on acquire

@@ -1,24 +1,22 @@
-"""TorchLearner: the Learner protocol on real metal (Phase B2, multi-tenant).
+"""TorchLearner: the Learner protocol on real metal, multi-tenant.
 
-Owns ONE frozen HF base shared by every tenant (the memory asymmetry that
-capped tenancy — CONTEXT #34), per-tenant adapter params built and installed
-by each kind's OWN compute half, and one optimizer per (tenant, entry) so
-optim blobs map 1:1 onto the store's optim/<name>@v.
+ONE frozen base shared by every tenant — the memory asymmetry that makes
+tenancy affordable — with per-tenant params built and installed by each kind's
+own compute half, and one optimizer per (tenant, entry) so optim blobs map 1:1
+onto the store's optim/<name>@v.
 
-Tenancy is ADDITIVE INSTALL + ROW ROUTING (#44) — the trainer-side twin of
-the engine's punica path (I8). A tenant's deltas stay wired into the module
-tree for as long as it is installed; each row of a padded microbatch carries
-the SLOT whose delta applies to it. Every verb pins one tenant, so today all
-rows of a forward carry that tenant's slot: the degenerate one-slot case,
-which applies the same expression swap-install did. Rows carrying different
-slots in ONE forward is the same mechanism with a mixed index — scheduling
-them across tenants is the coalescer's job, not the kernel's.
+Tenancy is ADDITIVE INSTALL + ROW ROUTING, the trainer-side twin of the
+engine's punica path (I8): a tenant's deltas stay wired for as long as it is
+installed, and each row of a padded microbatch carries the slot whose delta
+applies to it. Every verb pins one tenant, so today all rows of a forward carry
+that tenant's slot — the degenerate one-slot case; rows carrying different
+slots in ONE forward is the same mechanism with a mixed index.
 
-v0 choices, stated: ONE padded forward per microbatch (documents left-aligned
-and right-padded, stock HF sdpa, causal attention); determinism is
-best-effort (CUDA kernels are not bit-stable — byte-identical resume stays a
-fakes-suite property; the real-metal invariant is the ledger's logprob_gap
-staying small).
+v0 choices, stated: one padded forward per microbatch (documents left-aligned
+and right-padded, causal attention), and determinism is best-effort — CUDA
+kernels are not bit-stable, so byte-identical resume stays a fakes-suite
+property and the real-metal invariant is the ledger's logprob_gap staying at
+its floor.
 """
 
 from __future__ import annotations
@@ -46,9 +44,9 @@ def _init_seed(master: int, entry: str) -> int:
 
 @dataclass
 class _Tenant:
-    """One experiment's state on this learner: params, kinds, optimizers, and
-    the SLOT a forward's rows route to — this tenant's installed deltas keyed
-    the way a site asks for them (site path -> the params holding it)."""
+    """One tenant's state on this learner: params, kinds, optimizers, and the
+    SLOT a forward's rows route to — its installed deltas keyed the way a site
+    asks for them (site path -> the params holding it)."""
 
     loss_fn: object
     trainable: list[str]
@@ -67,7 +65,7 @@ class TorchLearner:
         self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
         self.dtype = dtype
         self.grad_clip = grad_clip
-        self.fsdp = 1               # build fact (#43): this build is unsharded
+        self.fsdp = 1               # build fact: this build is unsharded
         self._base: str | None = None
         self._model: torch.nn.Module | None = None
         self._tenants: dict[str, _Tenant] = {}
@@ -196,7 +194,7 @@ class TorchLearner:
 
     def _rows_of(self, state: _Tenant, rows: int) -> ReplayRows:
         """Every row of a microbatch pins the verb's tenant: ONE slot, index
-        all zeros. The lowering is per-row either way, so a coalesced
+        all zeros. The replay lowering is per-row either way, so a coalesced
         microbatch is this same record with more slots and a mixed index —
         the sites need no change to serve it."""
         return ReplayRows(slots=(state.slot,),
@@ -208,18 +206,17 @@ class TorchLearner:
         """[len(batch)] logprobs from ONE padded forward: position t scores
         token t given tokens < t.
 
-        Row d is document d, LEFT-ALIGNED and right-padded: causal attention
-        over the padding mask makes each real position's score identical to
-        the document-at-a-time forward this replaced, and the rows are exactly
-        the unit the row plan routes. Position 0 of a document has no prefix;
-        its logprob is 0.0 — flatten guarantees a doc never starts with a
-        trainable token (prompts come first).
+        Row d is document d, LEFT-ALIGNED and right-padded, so causal
+        attention over the padding mask scores each real position exactly as a
+        document-at-a-time forward would — and the rows are exactly the unit
+        the row plan routes. Position 0 of a document has no prefix; its
+        logprob is 0.0, and flatten guarantees a doc never starts with a
+        trainable token.
 
         What padding costs: the logits are rows × LONGEST document, while
         pack() bounds a microbatch by its token SUM. A wave of near-equal
         documents pays nothing; a very ragged one pays that ratio in logit
-        memory. Length-bucketed sub-forwards are the fix when a wave needs
-        one — logged, not built.
+        memory. Length-bucketed sub-forwards are the fix — logged, not built.
         """
         width = max(stop - start for start, stop in spans)
         ids = torch.zeros((len(spans), width), dtype=torch.long,

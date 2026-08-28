@@ -3,28 +3,17 @@
     modal run deploy/modal_host.py                # a whole arith run, remote pool
     modal run deploy/modal_host.py::describe      # what the served host serves
 
-The venue model (Samarth's, settled): POOL TRAFFIC — sample and score, the
-ms-latency RPC — rides a real transport; the STORE PLANE — ledger, waves,
-journals — rides the Modal volume exactly as it already does. So this file
-carries two halves of one wire and nothing else:
-
-    ServedHost      the host-service container: it BUILDS the metal (a
-                    VllmEngine at some (base, tp)), wears it as a Host born
-                    with that Partition and Regime (#43), and exposes its
-                    HostService's two verbs as Modal methods. Admission stays
-                    here, at the partition, in this host's own arbiter — a
-                    remote experiment is one more source of admitted work.
-    ModalTransport  the client end: `call` is `.remote.aio(...)`, `ask` is
-                    `.remote(...)`. That is the whole implementation. It is
-                    thin because HostService already speaks JSON-safe dict
-                    frames and LocalTransport already proved every frame
-                    survives a round trip — the transport carries frames, it
-                    never learns what is in them.
-
-The runner cannot tell this from local metal: the driver below runs a
-complete GRPO run whose "main" pool is a RemotePool over ModalTransport, with
-the learner local to the driver (the learner is NEVER remote — the runner
-goes to it) and both containers' stores on the one volume.
+Two halves of one wire: ServedHost is the serving end — a container that
+builds a VllmEngine at some (base, tp) and wears it as a Host born with that
+Partition and Regime, exposing its HostService's verbs as Modal methods, so
+admission stays at the partition under that host's own arbiter. ModalTransport
+is the client end, and it is thin because HostService already speaks JSON-safe
+dict frames: the transport carries frames and never learns what is in them.
+The driver below runs a complete GRPO run whose "main" pool is a RemotePool
+over that transport with the learner local (the learner is never remote — the
+runner goes to it), which is what proves the runner cannot tell the wire from
+local metal. Pool traffic rides the transport; the store plane rides the
+volume.
 
 Deployment only (I5): venue wiring, nothing semantics-bearing.
 Image pins: keep in sync with deploy/modal_app.py.

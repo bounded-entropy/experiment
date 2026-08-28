@@ -1,5 +1,6 @@
-"""Fakes for the plugin lifecycle — same methodology as runner/fakes.py:
-the contract is executable and testable before any engine exists."""
+"""Fakes for the plugin lifecycle: the contract is executable and testable before
+any engine exists — the same methodology as runner/fakes.py.
+"""
 
 from __future__ import annotations
 

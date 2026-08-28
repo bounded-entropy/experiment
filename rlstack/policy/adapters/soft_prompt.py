@@ -1,18 +1,10 @@
 """Learned virtual prompt rows; served natively via vLLM prompt_embeds.
 
 The one builtin that EXPORTS sites: the base checkpoint has no prompt
-positions — this entry creates them, so their names resolve only when a soft
-prompt is in the bank. Alongside the positions themselves it exports the
-queries -> prompt[:n] attention rectangle, the site an attn_bias attaches to
-(served jointly with this entry by the side_attention plugin).
-
-Its two lowerings prepend the same rows at the same place. ROLLOUT: vLLM
-0.28's mixed embeds prompt — the engine embeds the request's token ids from
-its OWN table and takes only the learned rows from us
-(soft_prompt_vllm.SoftPromptRollout). REPLAY: a boundary around the trainer's forward
-that prepends the rows and cuts the positions back off the logits
-(soft_prompt_torch.PromptBoundary), so the [len(batch)] alignment above it is
-untouched.
+positions, so this entry creates them — its own prompt[:n] positions, and the
+queries -> prompt[:n] attention rectangle an attn_bias attaches to — and those
+names resolve only when a soft prompt is in the bank. Both lowerings prepend
+the same rows at the same place.
 """
 
 from __future__ import annotations

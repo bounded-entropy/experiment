@@ -1,4 +1,4 @@
-"""Losses: one registered function per objective, one file each (mirrors
+"""The loss zoo: one registered function per objective, one file each (mirrors
 training/post/). Importing this package registers the builtins."""
 
 from rlstack.training.losses.base import (  # noqa: F401

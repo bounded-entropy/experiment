@@ -1,10 +1,11 @@
-"""Per-run series assembly: everything the UI's graphs need, from peeks alone.
+"""Per-run series assembly: everything the graphs need, from peeks alone.
 
-One call — run_series(store, run_id) — returns the run's self-description
-(dictionary.json, which carries the loss-walkback panel priority) joined with
-its committed history: per-update post-column means and train rails from the
-ledger, held-out means from the eval summaries, and progress. Pure function
-of committed bytes; never attaches, never writes (the observe/ rule)."""
+run_series(store, run_id) returns the run's self-description (dictionary.json,
+which carries the loss-walkback panel priority) joined with its committed
+history: per-update post-column means and train rails from the ledger,
+held-out means from the eval summaries, and progress. A pure function of
+committed bytes.
+"""
 
 from __future__ import annotations
 
@@ -52,10 +53,10 @@ def run_series(store: Store, run_id: str,
 
 def derived_series(panels: list[dict], dictionary: dict | None,
                    updates: list[dict], evals: list[dict]) -> list[dict]:
-    """Each panel evaluated per update (post ∪ rails namespace, post wins)
-    and — when its arguments all exist there — over the eval means too. A
-    panel with arguments outside this run's pipeline carries its missing
-    list instead of points: the validation rule, rendered."""
+    """Each panel evaluated per update over the rails ∪ post namespace (post
+    wins a collision), and over the eval means too when all its arguments
+    exist there. A panel with an argument outside this run's pipeline carries
+    its missing list instead of points: panels.py's validation, rendered."""
     out = []
     for panel in panels:
         name, expr = str(panel["name"]), str(panel["expr"])

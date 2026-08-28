@@ -1,20 +1,15 @@
 """SiteSchema: the trainer's half of the site treaty, as frozen data.
 
-A schema is a pure function of ONE base checkpoint: every attachment point the
-checkpoint expresses, under its canonical name — which IS the checkpoint's own
-module-tree name (identity plus a prefix), so per-model translation tables do
-not exist on this side. A schema is built once by a COMPILER function
-(`fake_qwen_schema` below; `hf_schema` walks the real module tree in Phase B2)
-and is inert afterwards: plain data, plus ONE concrete resolver implementing
-the one canonical pattern grammar. The grammar is canon — `AdapterSpec.site`
-hashes into run identity, so its meaning cannot vary by backend.
+A schema is a pure function of ONE base checkpoint: every site the checkpoint
+expresses, under its canonical name — which IS the checkpoint's own module-tree
+name, so no per-model translation table exists on this side. A compiler builds
+one (`hf_schema` off the real module tree, `fake_qwen_schema` beside it) and it
+is inert afterwards: plain data plus one resolver for the canonical pattern
+grammar, which is canon because AdapterSpec.site hashes into run identity.
 
-What the schema deliberately does NOT know:
-  - engine reachability — a property of an engine BUILD, not of the model
-    graph; each pool's engine self-reports it (Engine.reachability) and the
-    runner checks it at Phase 0;
-  - adapter-created sites — a soft prompt EXPORTS prompt[:n]; Phase-0
-    resolution runs against schema ∪ bank exports (spec/validate.site_space).
+It deliberately knows neither engine reachability (a BUILD fact each Engine
+self-reports) nor adapter-created sites (Phase 0 resolves against
+schema ∪ bank exports).
 """
 
 from __future__ import annotations
@@ -29,12 +24,11 @@ from rlstack.spec.canonical import content_hash
 
 @dataclass(frozen=True)
 class SiteMeta:
-    """One site: the trainer-attestable facts, nothing else.
+    """One site's frozen metadata: the checkpoint-attestable facts, nothing else.
 
-    `name` is the spec-side address (what a bank entry's pattern matches);
-    `path` is the trainer-side address (where install_replay hooks, an entry
-    in the base's `named_modules()`). Engine reachability is deliberately
-    absent — see the module docstring.
+    `name` is the spec-side address (what a bank entry's site pattern matches);
+    `path` is the trainer-side address (where install_replay hooks, an entry in
+    the base's `named_modules()`). Engine reachability is deliberately absent.
     """
 
     name: str                       # canonical name, e.g. "layers.3.self_attn.q_proj"
@@ -85,8 +79,8 @@ def resolve(sites: Sequence[SiteMeta], pattern: str) -> tuple[SiteMeta, ...]:
     """Sites matching `pattern` under the canonical grammar; empty when none.
 
     Module patterns match module names segment-wise; non-module names match
-    exactly only. This function is THE resolver — validate and the runner use
-    it over schema ∪ bank exports; SiteSchema.resolve delegates here.
+    exactly only. THE resolver: the submit gate and the runner call it over
+    schema ∪ bank exports, and SiteSchema.resolve delegates here.
     """
     if not is_module_name(pattern):
         return tuple(site for site in sites if site.name == pattern)
@@ -100,7 +94,7 @@ def resolve(sites: Sequence[SiteMeta], pattern: str) -> tuple[SiteMeta, ...]:
 
 @dataclass(frozen=True)
 class SiteSchema:
-    """The per-base site catalog: which base it describes, and its sites.
+    """The catalog itself: which base it describes, and its sites.
 
     `base` is checked against `policy.base` at Phase 0 (schema-base-mismatch);
     `fingerprint()` goes into the run manifest, so attaching to a run with a
@@ -133,10 +127,10 @@ _MLP_PROJ = ("gate_proj", "up_proj", "down_proj")
 def fake_qwen_schema(n_layers: int, *, base: str) -> SiteSchema:
     """A Qwen-shaped toy catalog for `base`: weighted projections + boundaries.
 
-    The CPU stand-in compiler: what hf_schema will read off a real checkpoint
-    in Phase B2, hand-built here so Phase-0 validation has real material.
-    Note what is absent: prompt[:n] and its attention rectangle are NOT base
-    sites — a soft prompt in the bank exports them (Adapter.exports).
+    The CPU stand-in compiler — the same shape hf_schema reads off a real
+    checkpoint, hand-built so Phase-0 validation has real material. Note what is
+    absent: prompt[:n] and its attention rectangle are NOT base sites; a soft
+    prompt in the bank exports them (Adapter.exports).
     """
     sites: list[SiteMeta] = []
     for n in range(n_layers):

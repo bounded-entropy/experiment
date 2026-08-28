@@ -1,13 +1,13 @@
-"""Parity certificates: a mechanism is never trusted on assumption.
+"""Parity certificates: a mechanism is never trusted on assumption (I7).
 
 An engine's inventory says a build CLAIMS a lever; a certificate says the
-lever, on this build, numerically agrees with the trainer's replay lowering.
-The key is the point: it includes the build fingerprint, so a version bump, a
-different attention backend, or a quantization flip misses the cache and
-parity re-runs before any wave is sampled.
+lever, on this build, numerically agrees with the kind's replay lowering. The
+key is the point — it includes the build fingerprint, so a version bump, a
+different attention backend or a quantization flip misses the cache and parity
+re-runs before any wave is sampled.
 
-B1 ships the vocabulary and an in-memory cache; B2/B3 give `Certificate`
-real numbers (parity residuals) and a store-backed cache.
+DESIGNED AND UNWIRED: nothing calls these. The parity mechanism actually
+running is the per-update logprob_gap rail.
 """
 
 from __future__ import annotations
@@ -24,7 +24,7 @@ class CertificateKey:
 
     build_fingerprint: str
     base: str
-    kind: str                     # registered adapter name
+    kind: str                     # the registered kind AdapterSpec.kind names
     mechanism: Mechanism
 
 
@@ -32,7 +32,7 @@ class CertificateKey:
 class Certificate:
     key: CertificateKey
     passed: bool
-    detail: str                   # B2: max logprob gap, tolerances, seeds
+    detail: str                   # once wired: max gap, tolerances, seeds
 
 
 class CertificateCache(ABC):

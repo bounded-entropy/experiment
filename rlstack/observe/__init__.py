@@ -1,27 +1,21 @@
 """The observer: read-only derivations over stores and journals.
 
 The region's one rule: NEVER attach, NEVER write. Everything here renders
-committed bytes — host journals, run peeks (manifest / dictionary / ledger)
-— into views. The CLI (python -m rlstack) is text over these; a UI is JSON
-over the same *_data functions; both read the run's own dictionary.json
-instead of re-deriving any declaration.
+committed bytes — host journals and run peeks — into views, and reads each run's
+own dictionary.json rather than re-deriving any declaration.
 
-    locate.py       store_for(locator): a store locator only resolves
-                    somewhere — paths where mounted, s3:// anywhere (later),
-                    modal:// only inside a container beside the volume
-    views.py        hosts/runs/gpu: the *_data functions (structured, for a
-                    UI) and render_* (text, for the CLI)
-    series.py       run_series: one run's dictionary + committed history, the
-                    graphs' data — peeks only
-    host_series.py  the same reading per HOST: boot facts, tenancy lanes, gpu
-                    channels, and the open metric slot — journals only; plus
-                    fleet_data, the global (cross-host) join
-    panels.py       custom derived graphs as expressions-as-data
-    page.py         THE document: one self-contained HTML+CSS+JS page, every
-                    route's response
-    ui.py           the routes: a dependency-free WSGI app (python -m rlstack
-                    ui locally; deploy serves it beside a remote store) —
-                    panel priority is the dictionary's walkback
+    locate.py       store_for(locator): a store is NAMED by a locator and the
+                    reader must run somewhere it resolves
+    views.py        hosts / runs / gpu, each as *_data (structured) and
+                    render_* (terminal text)
+    series.py       run_series: one run's dictionary joined with its committed
+                    history — the graphs' data
+    host_series.py  the per-HOST reading off the journals, plus fleet_data,
+                    the global join
+    panels.py       user-declared derived graphs, as expressions-as-data
+    page.py         THE document: one self-contained page, every route's
+                    response
+    ui.py           the routes: a dependency-free WSGI app
 """
 
 from rlstack.observe.host_series import fleet_data, host_series  # noqa: F401

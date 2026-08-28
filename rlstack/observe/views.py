@@ -1,12 +1,11 @@
 """The three views: hosts / runs / gpu.
 
-Each comes in two layers over the same store bytes: a *_data function
-returning plain structures (what a UI serializes as JSON) and a render_*
-function formatting that as terminal text (what the CLI prints). Pure
-functions of peeks and journals — the region's never-attach, never-write
-rule applies. Operational facts only: identity, placement, status,
-progress, metal statistics. Experiment CONTENT (rewards, curves) is a UI's
-business, driven by each run's own dictionary.json.
+Each comes in two layers over the same store bytes — a *_data function
+returning plain structures (what a UI serializes) and a render_* function
+formatting that as terminal text. Pure functions of peeks and journals, so the
+region's never-attach, never-write rule holds. Operational facts only:
+identity, placement, status, progress, metal statistics. Experiment CONTENT is
+a UI's business, driven by each run's own dictionary.json.
 """
 
 from __future__ import annotations
@@ -47,9 +46,9 @@ def _progress(store: Store, run_id: str) -> tuple[int, object]:
 # ---------------------------------------------------------------------------
 
 def _metal(partition: dict | None) -> str:
-    """A journaled partition row as the one line an operator reads: how much
-    of what, and where. The kind of GPU is a birth fact of the partition
-    (#49) — without it a fraction cannot tell half an L4 from half an H100."""
+    """One journaled partition as the line an operator reads: how much of
+    what, and where. A partition carries its gpu kind as a birth fact (#49) —
+    without it a fraction cannot tell half an L4 from half an H100."""
     if not partition:
         return "unpartitioned"
     return (f"{partition.get('gpu') or '?'} {partition['gpuset']}"
@@ -116,9 +115,9 @@ def runs_data(stores: Sequence[Store]) -> list[dict]:
             row["t"] = max(row["t"], event.get("t", 0.0))
 
     for run_id, row in rows.items():
-        # the store-ownership invariant, checked where all stores are visible:
-        # one experiment, one store — the same run_id existing in two given
-        # stores is a silently forked history and renders as one
+        # I10, checked where every store is visible: one experiment, one store
+        # — the same run_id held by two of them is a silently forked history,
+        # which the observer flags rather than prevents
         holding = [s for s in stores if s.peek_manifest(run_id) is not None]
         row["in_stores"] = [s.describe() for s in holding]
         row["forked"] = len(holding) > 1

@@ -3,24 +3,17 @@
     modal run deploy/fsdp_l4.py               # attest + shard + train + resume
     modal run deploy/fsdp_l4.py::fsdp_8b      # the same at Qwen3-8B
 
-Four claims, in order, each the next one's precondition:
-
-    attest   a host born with Regime(..., "training", base, 2) accepts a
-             learner BUILT fsdp=2 and refuses one built fsdp=1 — capability
-             is a birth fact (#43), and the submit gate says the same thing
-             from the other side (learner-shape-mismatch)
-    shard    after the wrap every base parameter is a DTensor and the base's
-             footprint per device is about half of it: the point of the
-             exercise, measured rather than assumed
-    train    a complete small GRPO run at fsdp=2, rails sane — one shared
-             container holding the sampler engine and the sharded learner as
-             CONCURRENT residents (an FSDP host never alternates: sleep x
-             FSDP is out of scope, so the partition is dedicated to training
-             and the engine simply co-resides)
-    resume   kill mid-run, re-attach with a FRESH chorus, finish; then load
-             the run's sealed blobs into an UNSHARDED TorchLearner and
-             re-emit — the bytes and the compiled bundle id must match, which
-             is the width-independence invariant (#45) end to end
+Four claims, each the next one's precondition. ATTEST: a host born with a
+training Regime at width 2 accepts a learner BUILT fsdp=2 and refuses one
+built fsdp=1, because capability is a birth fact (#43). SHARD: after the wrap
+every base parameter is a DTensor at about half the per-device footprint —
+the point of the exercise, measured rather than assumed. TRAIN: a small GRPO
+run with the sampler engine and the sharded learner CO-RESIDENT (an FSDP host
+never alternates; sleep x FSDP is out of scope, so the partition is dedicated
+to training and the engine simply co-resides). RESUME: kill mid-run, re-attach
+with a FRESH rank chorus, finish — then load the sealed blobs into an
+UNSHARDED TorchLearner and re-emit to the same bytes and the same compiled
+bundle id, which is width-independence end to end.
 
 Deployment only (I5): wiring and measurement, nothing semantics-bearing.
 Image pins: keep in sync with deploy/modal_app.py.

@@ -1,4 +1,4 @@
-"""One sample call, one turn, done (SPEC.md Example 4)."""
+"""One sample call, one turn, done: the smallest complete environment."""
 
 from __future__ import annotations
 

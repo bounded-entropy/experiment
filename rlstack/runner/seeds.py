@@ -1,10 +1,9 @@
 """The seed tree: every random draw in a run derives from Seeds.master.
 
 No module anywhere in the runner touches global RNG state. A seed is
-h(master, *path) where the path names what the seed is for — e.g.
-(master, "rollout", update, task_id, sample_index) — so any part of a run can
-be regenerated in isolation: resume rebuilds an unsealed wave bit-for-bit
-without replaying anything else.
+h(master, *path) where the path names what the seed is for, so any part of a
+run can be regenerated in isolation — resume rebuilds an unsealed wave
+bit-for-bit without replaying anything else.
 """
 
 from __future__ import annotations

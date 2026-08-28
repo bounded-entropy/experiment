@@ -1,10 +1,9 @@
 """SlotTable: which bundle is resident in which bank slot.
 
-The plugin analog of vLLM's LoRA slot management: banks are fixed-capacity
-GPU tensors indexed by slot, so bundles must be assigned slots, found again,
-and evicted. Acquisition is idempotent (add_bundle may be called twice for
-the same bundle); eviction is explicit — the engine adapter decides policy,
-this table only keeps the books.
+Banks are fixed-capacity GPU tensors indexed by slot, so bundles must be
+assigned slots, found again, and evicted. Acquisition is idempotent (add_bundle
+may be called twice for one bundle) and eviction is explicit: the engine
+decides policy, this table only keeps the books.
 """
 
 from __future__ import annotations

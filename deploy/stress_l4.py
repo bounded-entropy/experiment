@@ -2,32 +2,20 @@
 
     modal run deploy/stress_l4.py          # all five stages, two containers
 
-The matrix (Samarth's list, 2026-08):
-  multi-LoRA / multi-tenancy   six experiments share ONE engine concurrently,
-                               each bundle pinned per request; per-tenant
-                               logprob_gap is the cross-contamination alarm
-                               (the trainer recomputes under ITS OWN weights —
-                               a wrong adapter served would blow the gap up)
-  mid-run joins                tenant starts are staggered ~30s apart, so each
-                               joins an engine already serving others
-  the loss zoo                 grpo / ppo / gspo / sdft / self_anchor /
-                               opsd (hinted scoring, live) +
-                               sft (static cas://) +
-                               replay_distill (replay store://),
-                               many optimizer steps each
-  resource sharing, 1 GPU      engine fraction + N resident learners under
-                               concurrent leases; stage 4 runs sharing="sleep"
-                               (the ExclusiveLease alternation) as well
-  policy lag                   self_anchor runs max_policy_lag=2 with a deliberately
-                               slowed trainer (epochs_per_wave=2); realized
-                               per-turn lag is measured from the sealed record
-  resume                       stage 4 cancels mid-run and re-attaches in
-                               process; stage 5 cancels and re-attaches from a
-                               FRESH container (content addressing must
-                               recompile the ledger-tail bundle to the same id
-                               or generation dies loudly)
-  evals                        every tenant evaluates every 5 updates; the
-                               evaluator backfills after both resumes
+The whole loss zoo runs as concurrent tenants of ONE engine and ONE
+multi-tenant learner — grpo, ppo, gspo, sdft, self_anchor and opsd live, sft
+off a content-addressed file, replay_distill off another run's sealed waves,
+plus a tenant whose judge pool is that same engine under a second name — with
+starts staggered ~30s apart so each joins metal already serving others, and
+self_anchor at max_policy_lag=2 against a deliberately slowed trainer. The
+rail is per-tenant logprob_gap: the trainer recomputes under ITS OWN weights,
+so a wrong bundle served blows the gap up. Stage 4 re-runs the group at
+sharing="sleep" — an exclusive group, where the arbiter admits one resident at
+a time and alternates them — and cancels mid-run to re-attach in process;
+stage 5 re-attaches from a FRESH container, where content addressing must
+recompile the ledger-tail bundle to the same id or generation dies loudly.
+Every tenant evaluates on its eval modulus, and the evaluator backfills after
+both resumes.
 
 Deployment only (I5): specs, wiring, measurement. Nothing semantics-bearing.
 Image pins: keep in sync with deploy/modal_app.py.

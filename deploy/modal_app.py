@@ -3,11 +3,14 @@
     modal run deploy/modal_app.py::run_tests    # the whole suite, in-image
     modal run deploy/modal_app.py::run_arith    # the experiment, end to end
 
-Everything semantics-bearing lives in rlstack; this file is DEPLOYMENT ONLY
-(I5): it builds the image, mounts the volume, constructs the spec, and hands
-real metal to run_experiment. The store is a ModalVolumeStore — the volume's
-stage-then-commit semantics map onto the ledger commit point, so this run
-doubles as the Store ABC's second-backend test.
+Builds the image, mounts the volume, constructs the spec, and submits it as a
+tenant to a Host holding real metal; `hosts` and `ui` are the observer over
+the same volume. The store is a ModalVolumeStore, whose stage-then-commit
+semantics map onto the ledger's commit point, so this run doubles as the Store
+ABC's second-backend test.
+
+Deployment only (I5): venue wiring, nothing semantics-bearing. This file's
+pins are the ones every other deploy keeps in sync with.
 """
 
 from __future__ import annotations

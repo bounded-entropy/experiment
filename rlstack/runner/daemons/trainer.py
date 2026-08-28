@@ -1,19 +1,18 @@
-"""The Trainer: awaits data, trains, commits — the only writer of the ledger.
+"""The Trainer: awaits data, trains, commits — the ledger's only writer.
 
-One update's choreography and the commit protocol that makes kill -9 safe at
-any point:
+One update, and the commit protocol that makes kill -9 safe at any point:
 
     await waves/<u> (the feed) → POST PIPELINE → write postdata →
     flatten/broadcast/pack → forward_backward × microbatches × epochs →
     optim_step → bump → write blobs → register bundle → APPEND LEDGER
     (the commit point) → notify
 
-Everything before the ledger line is unsealed: crash recovery discards it on
-attach and it regenerates. The bundle is registered on the engine BEFORE the
-ledger line so any role that reads the commit (generator, evaluator) can pin
-its bundle_id immediately. Under sleep colocation the post pipeline holds the
-ENGINE (judges sample) and the backward holds the LEARNER — the lease's
-sticky resident makes the common no-judge case cost one switch per update.
+Everything before the ledger line is unsealed: attach discards it and it
+regenerates. The bundle is registered on the engine BEFORE the ledger line, so
+any daemon reading the commit can pin its bundle_id immediately. The post phase
+admits the ENGINES its pipeline declared (judges sample) and the gradient
+admits the LEARNER — so on an alternating host the common no-judge update costs
+one switch.
 """
 
 from __future__ import annotations
@@ -65,8 +64,8 @@ class Trainer(Daemon):
     # ---- the acquisition condition (override to change the alternation) -----
 
     def next_rows(self, update: int) -> list[dict] | None:
-        """Data for update u, from this run's own waves/ (the feed makes
-        storage-backed data appear there; the Generator makes live data)."""
+        """Update u's rows, from this run's own waves/ — the feed puts
+        storage-backed data there; the Generator puts live data there."""
         return self.feed.obtain(update)
 
     # ---- the daemon ---------------------------------------------------------

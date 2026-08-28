@@ -1,15 +1,16 @@
-"""Phase-0 joint validation (I4): everything checkable before a GPU is touched.
+"""Phase-0 joint validation: everything checkable before a GPU is touched (I4).
 
-One function per rule, named for what it enforces, run in the order CHECKS lists
-them. Each check is independent and small; together they cover registry
-resolution, declaration wiring (loss.requires vs the bank and pipeline,
-post-pipeline wiring), site resolution against schema ∪ bank exports, topology
-feasibility, and spec coherence. `validate` returns EVERY issue found (never
-just the first); `validate_or_raise` is the submit gate.
+One named function per rule, run in the order CHECKS lists them. Together they
+cover registry resolution, declaration wiring (a loss's requires against the
+bank and the pipeline, the post pipeline's own order), site resolution against
+schema ∪ bank exports, topology feasibility, and spec coherence. `validate`
+returns EVERY issue found, never just the first; `validate_or_raise` is the
+submit gate.
 
-One check deliberately lives OUTSIDE the CHECKS table: site reachability
-(check_sites_reachable_on) needs an engine build's self-reported inventory,
-so the runner runs it at Phase 0 per serving pool.
+Three checks deliberately live OUTSIDE the table because they consult live
+metal rather than spec values — check_sites_reachable_on (reachability is a
+BUILD fact), check_pools_serve_their_base and check_members_match_their_shape.
+The runner calls those at submit, once it holds the engines and the learner.
 """
 
 from __future__ import annotations
@@ -28,9 +29,9 @@ from rlstack.registry import (
 )
 from rlstack.spec.specs import PoolMember, ExperimentSpec, LearnerMember
 
-# The base provides/records sets live with the flow graph (spec/flow.py),
-# the one canonical walk over the data declarations; re-exported here because
-# they are part of the validation vocabulary.
+# The base records set lives with the flow graph (spec/flow.py), the one
+# canonical walk over the data declarations; re-exported here because it is
+# part of the validation vocabulary.
 from rlstack.spec.flow import BASE_RECORDS, flow_graph  # noqa: E402,F401
 
 @dataclass(frozen=True)
@@ -106,11 +107,11 @@ def check_names_are_registered(spec: ExperimentSpec, schema: SiteSchema) -> list
 
 
 def check_loss_requires_are_provided(spec: ExperimentSpec, schema: SiteSchema) -> list[ValidationIssue]:
-    """Every string the loss requires is either PROVIDED (a training-forward
-    field: from the base forward or a kind's replay lowering) or RECORDED (a
-    sampling-time fact: a base column or a kind's `records`) or PRODUCED by
-    the post pipeline. A query on the flow graph (spec/flow.py). The loss is
-    pure math (#38): requires can only name data, never cause metal work."""
+    """Every string the loss requires is PROVIDED (a training-forward tensor,
+    from the base forward or a kind's replay lowering), RECORDED (a
+    sampling-time fact: a base column or a kind's `records`), or PRODUCED by
+    the post pipeline — a query on the flow graph. The loss is pure math
+    (I9): requires names data columns, never work the runner must plan."""
     if spec.algo is None or spec.algo.loss not in LOSSES:
         return []
     graph = flow_graph(spec)
@@ -125,8 +126,7 @@ def check_loss_requires_are_provided(spec: ExperimentSpec, schema: SiteSchema) -
 def check_post_pipelines_are_wired(spec: ExperimentSpec, schema: SiteSchema) -> list[ValidationIssue]:
     """Each post pipeline is internally consistent, in order: every processor's
     `consumes` is produced EARLIER in the same pipeline, and every column has
-    exactly one producer. Both rules are queries on the flow graph
-    (spec/flow.py) — the same walk the run's dictionary.json serializes."""
+    exactly one producer. Both rules are queries on the flow graph."""
     graph = flow_graph(spec)
     issues = []
     phases = []
@@ -150,7 +150,8 @@ def check_post_pipelines_are_wired(spec: ExperimentSpec, schema: SiteSchema) -> 
 
 
 def site_space(spec: ExperimentSpec, schema: SiteSchema) -> tuple[SiteMeta, ...]:
-    """The full site space of this experiment: schema ∪ every entry's exports.
+    """The full site space of this experiment: schema ∪ every bank entry's
+    exports.
 
     The schema is a pure function of the base checkpoint; a bank entry may
     CREATE sites the checkpoint does not have (a soft prompt exports its
@@ -174,7 +175,7 @@ def check_schema_describes_the_base(spec: ExperimentSpec, schema: SiteSchema) ->
 
 
 def check_sites_resolve(spec: ExperimentSpec, schema: SiteSchema) -> list[ValidationIssue]:
-    """Every bank entry's site pattern matches at least one site in the space."""
+    """Every adapter's site pattern matches at least one site in the space."""
     space = site_space(spec, schema)
     issues = []
     for entry_name, adapter in spec.policy.bank.items():
@@ -213,8 +214,8 @@ def check_sites_reachable_on(
     """A served kind's mechanism must be how `pool`'s engine reaches every
     matched site.
 
-    Reachability is a property of an engine BUILD (kernel coverage, fusion
-    maps, installed plugins), not of the model graph — so this check is NOT in
+    Reachability is a BUILD fact — kernel coverage, fusion maps, installed
+    plugins — not a property of the model graph, so this check is NOT in
     CHECKS: the runner asks each serving pool's engine for its self-reported
     inventory (Engine.reachability) at Phase 0 and calls this with the answer.
     Trainer-only kinds (serving None) are never served: nothing to check.
@@ -264,7 +265,8 @@ def check_pool_names_are_unique(spec: ExperimentSpec, schema: SiteSchema) -> lis
 
 
 def check_sleep_groups_have_one_learner(spec: ExperimentSpec, schema: SiteSchema) -> list[ValidationIssue]:
-    """sharing='sleep' means the learner alternates with the engines — exactly one learner."""
+    """sharing='sleep' makes an exclusive group in which the learner alternates
+    with the engines — so exactly one learner."""
     issues = []
     for gi, group in enumerate(spec.gpu_config.groups):
         if group.sharing != "sleep":
@@ -292,10 +294,9 @@ def check_sleep_implies_zero_lag(spec: ExperimentSpec, schema: SiteSchema) -> li
 
 
 def check_fractions_fit(spec: ExperimentSpec, schema: SiteSchema) -> list[ValidationIssue]:
-    """When every member of a group states its memory fraction, they must fit in 1.0.
-
-    (A group with any unstated fraction is left to Phase-1 memory probing.)
-    """
+    """When every member of a group states its memory fraction, they must fit
+    in 1.0. A group with any unstated fraction is left to Phase-1 memory
+    probing."""
     issues = []
     for gi, group in enumerate(spec.gpu_config.groups):
         fractions = [m.fraction for m in group.members]
@@ -329,10 +330,9 @@ def check_traffic_routes_to_declared_pools(spec: ExperimentSpec, schema: SiteSch
 def check_pools_serve_their_base(spec: ExperimentSpec, engine_map) -> list[ValidationIssue]:
     """The deploy hands metal; nothing else guarantees it hands the RIGHT
     metal. Each mapped pool's engine must serve that pool's declared base
-    (PoolMember.base, defaulting to the policy base). Engines with base None
-    (fake metal) serve anything. Outside CHECKS like
-    check_sites_reachable_on: it consults live engine objects, so the loop
-    runs it at submit."""
+    (PoolMember.base, defaulting to the policy base); engines reporting base
+    None — fakes standing in for metal — serve anything. Outside CHECKS
+    because it consults live engine objects, so the loop runs it at submit."""
     declared_base: dict[str, str] = {}
     for group in spec.gpu_config.groups:
         for member in group.members:
@@ -352,12 +352,12 @@ def check_pools_serve_their_base(spec: ExperimentSpec, engine_map) -> list[Valid
 
 def check_members_match_their_shape(spec: ExperimentSpec, engine_map,
                                     learner) -> list[ValidationIssue]:
-    """Sharding is a BUILD fact, not a request (#43): each mapped pool's
-    engine must be BUILT at the pool's declared tensor-parallel width, and
-    the learner at the LearnerMember's declared fsdp width. Switching shards
-    means handing different metal, never a spec that quietly runs unsharded.
-    Like check_pools_serve_their_base, this consults live metal, so the loop
-    runs it at submit."""
+    """Sharding is a BUILD fact, not a request: each mapped pool's engine must
+    be BUILT at the pool's declared tensor-parallel width, and the learner at
+    the LearnerMember's declared fsdp width. Switching shards means handing
+    different metal, never a spec that quietly runs unsharded. Like
+    check_pools_serve_their_base, this consults live metal, so the loop runs
+    it at submit."""
     declared_tp: dict[str, int] = {}
     for group in spec.gpu_config.groups:
         for member in group.members:
@@ -382,10 +382,10 @@ def check_members_match_their_shape(spec: ExperimentSpec, engine_map,
 
 
 def check_post_pools_are_declared(spec: ExperimentSpec, schema: SiteSchema) -> list[ValidationIssue]:
-    """Every pool a pipeline processor samples from (PostDef.pools) must be a
-    declared engine pool — a judge's traffic is vetted at submit, never
-    discovered as a KeyError mid-update. "main" needs no declaring here: the
-    runner requires it unconditionally."""
+    """Every pool a pipeline processor addresses (PostDef.pools) must be a
+    declared pool — a judge's traffic is vetted at submit, never discovered as
+    a KeyError mid-update. "main" needs no declaring here: the runner requires
+    it unconditionally."""
     pools = _declared_pools(spec)
     pipelines = []
     if spec.algo is not None:
@@ -408,10 +408,10 @@ def check_post_pools_are_declared(spec: ExperimentSpec, schema: SiteSchema) -> l
 
 
 def traffic_pools(spec: ExperimentSpec) -> set[str]:
-    """Every pool this spec's traffic can route to at run time: "main" (gen
-    and the pipelines' default client), eval.pool, and each pipeline
-    processor's declared pools. The loop holds the engine map it was handed
-    against this set before any daemon starts."""
+    """Every pool this spec's traffic can address at run time: "main" (gen and
+    the pipelines' default client), eval.pool, and each pipeline processor's
+    declared pools. The loop holds the engine map it was handed against this
+    set before any daemon starts."""
     pools = {"main"}
     if spec.eval is not None:
         pools.add(spec.eval.pool)
@@ -424,13 +424,13 @@ def traffic_pools(spec: ExperimentSpec) -> set[str]:
 
 
 def check_post_pools_can_coreside(spec: ExperimentSpec, schema: SiteSchema) -> list[ValidationIssue]:
-    """A pipeline holds every pool it samples from CO-RESIDENT for its whole
-    run — but two pools in one sharing="sleep" group alternate on the same
-    memory by declaration, so no admission order can satisfy that pipeline.
-    Refused at submit (the arbiter would raise at runtime, later and louder).
-    The algo pipeline's set is its processors' declared pools (the trainer
-    admits exactly those); the eval pipeline additionally holds eval.pool —
-    the evaluator runs episodes and scoring under one admission."""
+    """A pipeline holds every pool it addresses CO-RESIDENT for its whole run —
+    but two pools in one exclusive group alternate on the same memory by
+    declaration, so no admission order can satisfy that pipeline. Refused at
+    submit; the arbiter would raise at runtime, later and louder. The algo
+    pipeline's set is its processors' declared pools (the trainer admits
+    exactly those); the eval pipeline additionally holds eval.pool, since the
+    evaluator runs episodes and scoring under one admission."""
     sleep_group: dict[str, int] = {}
     for gi, group in enumerate(spec.gpu_config.groups):
         if group.sharing != "sleep":
@@ -506,7 +506,8 @@ def check_schedule_is_sane(spec: ExperimentSpec, schema: SiteSchema) -> list[Val
 
 
 def check_warm_start_map_targets_this_bank(spec: ExperimentSpec, schema: SiteSchema) -> list[ValidationIssue]:
-    """WarmStart.map is source-delta-name -> THIS bank's name; the VALUES must exist here."""
+    """WarmStart.map is source-bank-name -> THIS bank's name; the VALUES must
+    name adapters that exist here."""
     if spec.init is None:
         return []
     issues = []
@@ -542,7 +543,8 @@ CHECKS = (
 
 
 def validate(spec: ExperimentSpec, schema: SiteSchema) -> list[ValidationIssue]:
-    """Run every check; an empty list means the spec may be submitted."""
+    """Run every check in CHECKS order; an empty list means the spec may be
+    submitted."""
     issues: list[ValidationIssue] = []
     for check in CHECKS:
         issues.extend(check(spec, schema))
@@ -550,7 +552,7 @@ def validate(spec: ExperimentSpec, schema: SiteSchema) -> list[ValidationIssue]:
 
 
 def validate_or_raise(spec: ExperimentSpec, schema: SiteSchema) -> None:
-    """The submit gate: raise SpecError carrying every issue found."""
+    """The gate itself: raise SpecError carrying every issue found."""
     issues = validate(spec, schema)
     if issues:
         raise SpecError(issues)

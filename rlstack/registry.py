@@ -1,16 +1,14 @@
-"""The registries (SPEC.md §2B): one table per swappable kind, filled at import.
+"""The registries: one table per swappable kind, filled at import.
 
 This module is the MECHANISM only — a `Registry` is a dict with a helpful
 KeyError and a duplicate rule, and each entry is a typed record pairing the
-DECLARATION (the fields Phase-0 validation reads) with the COMPUTE (the function
-itself). The things actually registered live with their worlds: adapters in
+DECLARATION (the fields Phase 0 reads) with the COMPUTE (the function or class
+itself). The registered things live with their worlds — adapter kinds in
 policy/adapters/, environments in inference/, postprocessors and losses in
-training/, and your own wherever you define them — a name exists iff
-the module defining it was imported.
-
-`code_hashes` collects the source hash of everything a spec references; those
-hashes feed run identity (I3): edit a body and the run_id changes; rename a
-file and nothing does.
+training/, yours wherever you define them — so a name exists iff the module
+defining it was imported. `code_hashes` collects the source hash of everything
+a spec references, which is what makes identity computed (I3): edit a body and
+the run_id changes, rename a file and nothing does.
 """
 
 from __future__ import annotations
@@ -40,11 +38,11 @@ def source_hash(obj: object) -> str:
 
 
 class Registry:
-    """Named entries of one kind ("loss", "env", ...).
+    """Named entries of one registry kind ("loss", "environment", ...).
 
     Entries are the typed *Def records. Registering a name twice is an error
-    unless the source is identical (a re-import is a no-op; two different
-    bodies under one name would make identity ambiguous).
+    unless the source is identical: a re-import is a no-op, but two different
+    bodies under one name would make identity ambiguous.
     """
 
     def __init__(self, kind: str) -> None:
@@ -86,7 +84,9 @@ class Registry:
 ENVS = Registry("environment")      # EnvironmentDef (inference/environments/base.py)
 POST = Registry("postprocessor")    # PostDef (training/post/base.py)
 LOSSES = Registry("loss")           # LossDef (below)
-ADAPTERS = Registry("adapter")      # AdapterDef (policy/adapters/base.py)
+ADAPTERS = Registry("adapter")      # AdapterDef (policy/adapters/base.py):
+                                    # one registered KIND per entry, which an
+                                    # AdapterSpec names by string
 
 
 # ---------------------------------------------------------------------------
@@ -99,9 +99,9 @@ class LossDef:
 
     `requires` names DATA COLUMNS only: postdata columns the pipeline
     produced, recorded facts (base or bank), or bank-provided forward
-    tensors. THE INVARIANT (#38): a loss never causes metal work — anything
-    that needs a GPU to compute (judges, teacher scoring, hinted rescoring)
-    is a post processor's job, landing in postdata before the loss runs.
+    tensors. A loss never causes metal work (I9) — anything that needs a GPU
+    to compute (judges, teacher scoring, hinted rescoring) is a
+    postprocessor's job, landing in postdata before the loss runs.
     """
 
     name: str
@@ -111,6 +111,8 @@ class LossDef:
 
 
 def loss(name: str, requires: tuple = ()) -> Callable:
+    """Register a loss under `name`; `requires` must name data columns, so a
+    non-string requirement is refused at registration."""
     def register(fn: Callable) -> Callable:
         bad = [r for r in requires if not isinstance(r, str)]
         if bad:
@@ -131,7 +133,7 @@ def code_hashes(spec: ExperimentSpec) -> dict[str, str]:
     """Source hash of every registered name the spec references.
 
     Keys are "<registry kind>:<name>". An unknown name raises the registry's
-    KeyError — run Phase-0 validation first to report those as issues.
+    KeyError — run the submit gate first to report those as issues instead.
     """
     out: dict[str, str] = {}
 

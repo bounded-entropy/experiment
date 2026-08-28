@@ -1,10 +1,8 @@
 """The Rollout: one episode in progress — inference-world, mutable.
 
-ROLLOUT is inference terminology; TRAJECTORY is training terminology. An
-Environment builds a Rollout by driving sample calls; rewards fill its
-reward_components; then the runner calls .seal() and the episode crosses the
-membrane (I1) as a frozen Trajectory. Nothing on the training side ever sees a
-Rollout.
+An environment builds a Rollout by driving sample calls; the runner then calls
+.seal(), and the episode crosses the membrane (I1) as a frozen Trajectory. The
+membrane is the type system: nothing on the training side can see a Rollout.
 """
 
 from __future__ import annotations
@@ -23,8 +21,8 @@ class Rollout:
     The environment appends to `messages` and `turns` (a Turn's message object
     appears in BOTH — that identity is how flatten later tells generated tokens
     from injected ones). `env_extras` is the environment's open notebook (tool
-    logs, intermediate hints). Scores about the episode are NOT written here —
-    rewards are postprocessing, after the seal.
+    logs, intermediate hints). Scores about the episode are NOT written here:
+    rewards are postdata, computed after the seal.
     """
 
     task: Task
@@ -38,7 +36,7 @@ class Rollout:
         return "".join(m.content for m in self.messages)
 
     def seal(self) -> Trajectory:
-        """Cross the membrane: the episode is finished → frozen training data."""
+        """The seal: the episode is finished, so it becomes frozen training data."""
         return Trajectory(
             task=self.task,
             messages=tuple(self.messages),

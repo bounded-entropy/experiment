@@ -1,5 +1,7 @@
-"""Trainer-only scalar head over a hidden boundary; never served — it versions
-and stores like any delta, but the engine never hears about it."""
+"""A trainer-only scalar head at a hidden boundary: it has no rollout lowering
+at all, so a bundle pins its version like any other delta but never ships a
+payload for it. What it contributes is `values`, a tensor the replay forward
+provides."""
 
 from __future__ import annotations
 

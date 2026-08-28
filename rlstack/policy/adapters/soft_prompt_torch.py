@@ -1,27 +1,21 @@
-"""The soft prompt's compute half — imported lazily by the SoftPrompt adapter's
-methods, so the client library stays importable without torch (STYLE rule 7).
+"""The soft prompt's replay lowering: a BOUNDARY around the base's forward.
 
-Replay lowering = a BOUNDARY around the base's forward. The n learned rows are
-prepended to the embedded batch, the padding mask grows by n ones, and the
-positions they added are cut back off the logits before they leave. That last
-step is the rule this file exists to enforce: forward_backward returns
-[len(batch)] logprobs aligned to batch.token_ids, and a virtual row is a
-position with NO token — so it must not survive the boundary. Virtual
-positions exist between embed and logits and nowhere else, which is why
-flatten, pack and the learner's gather need no knowledge of them at all.
+The n learned rows are prepended to the embedded batch, the padding mask grows
+by n, and the positions they added are CUT BACK OFF THE LOGITS before they
+leave. That trim is the rule this file exists to enforce: forward_backward
+returns [len(batch)] logprobs aligned to batch.token_ids, and a virtual row is
+a position with NO token. Virtual positions exist between embed and logits and
+nowhere else, so flatten, pack and the learner's gather need no knowledge of
+them.
 
-The boundary is ROW-AWARE (#44), exactly as LoraSite is: installation is
-additive (I8), every tenant installed on one base joins the one boundary
-standing there, and which block of rows a document carries is read from the
-forward's row plan (adapters/replay.py). A row whose slot holds no soft prompt
-takes no virtual positions — the boundary is transparent for it, which is what
-lets a lora-only tenant and a soft-prompt tenant share one learner.
+The boundary is row-aware exactly as LoraSite is: install is additive, and a
+row whose slot holds no soft prompt takes no virtual positions — which is what
+lets a lora-only tenant and a soft-prompt tenant share one learner. A soft
+prompt has no identity element (n virtual positions change the forward at
+version 0 by construction), so init is small, seeded, and part of the policy.
 
-A soft prompt has NO identity element. A LoRA's version 0 (B = 0) IS the base;
-n virtual positions change the forward at version 0 by construction. Init is
-therefore small, seeded, and part of the policy: `init_std` defaults to 0.02,
-the initializer_range transformers gives the embedding matrix itself, so
-version 0 is a real reproducible policy rather than a pretence of the base.
+torch is imported at module scope — this file loads only from the kind's
+methods (STYLE rule 7).
 """
 
 from __future__ import annotations
@@ -56,18 +50,19 @@ class SoftPromptState:
 
 
 class PromptBoundary:
-    """The base's edge, owned by the soft prompts installed on it.
-
-    ONE boundary per loaded base serves every installed state — the mirror of
-    LoraSite, and for the same reason: whose rows a document carries is a
-    property of the batch (the row plan), not of the module tree. `installed`
-    is that roster; it is what makes install additive and what tells uninstall
-    when the last tenant has left and the hooks come off.
+    """The base's edge, owned by the soft prompts installed on it — and the
+    thing that enforces ALIGNMENT.
 
     Two hooks, one rule each: the rows go IN at the embedding boundary
     (prepend_rows), and the positions they added come OUT before the logits
-    (trim_virtual_positions) — so nothing above the boundary can tell they were
-    ever there.
+    (trim_virtual_positions), so nothing above the boundary can tell a virtual
+    position was ever there.
+
+    ONE boundary per loaded base serves every installed state — the mirror of
+    LoraSite, and for the same reason: whose rows a document carries is a
+    property of the batch (the row plan), not of the module tree. `installed` is
+    that roster; it makes install additive and tells uninstall when the last
+    tenant has left and the hooks come off.
 
     The per-tenant rows deliberately do NOT register as parameters of the base:
     the base is shared and frozen, a soft prompt is one tenant's state, and the
@@ -161,7 +156,7 @@ class PromptBoundary:
                                              dtype)
 
     def trim_virtual_positions(self, module, args, kwargs, output):
-        """The rows leave before the logits do.
+        """THE ALIGNMENT RULE: the virtual positions leave before the logits do.
 
         The caller gets exactly one logit row per input token, so
         forward_backward's [len(batch)] alignment to batch.token_ids never sees
@@ -195,9 +190,9 @@ def _per_row_rows(rows: ReplayRows, path: str,
     """Rows on different soft prompts: gather each row's block out of the slot
     stack — punica's shape, one block per row instead of one (A, B) per row.
 
-    The slots must agree on n (a slot without a soft prompt counts as 0):
-    virtual positions shift every position id after them, so rows of ONE padded
-    forward cannot disagree on how many there are.
+    The slots must agree on n (a slot without a soft prompt counts as 0),
+    because virtual positions shift every position id after them and rows of ONE
+    padded forward cannot disagree on how many there are.
     """
     widths = sorted({0 if path not in slot else slot[path].n
                      for slot in rows.slots})
@@ -221,15 +216,15 @@ def _entry_seed(seed: int, path: str) -> int:
 
 
 # ---------------------------------------------------------------------------
-# the five members' bodies
+# the bodies the SoftPrompt kind's methods call
 # ---------------------------------------------------------------------------
 
 def build(sites: tuple[SiteMeta, ...], init: dict) -> SoftPromptState:
     """n rows of width d, N(0, init_std) seeded per site.
 
-    A soft prompt matches exactly the one site it exported (prompt[:n]); a
-    pattern that pulled in two boundaries would be two policies wearing one
-    version number, so it is refused here rather than averaged.
+    A soft prompt matches exactly the one site it exported (prompt[:n]): a
+    pattern pulling in two boundaries would be two policies wearing one version
+    number, so it is refused here rather than averaged.
     """
     if len(sites) != 1:
         raise ValueError(
@@ -295,12 +290,12 @@ def load(state: SoftPromptState, payload: bytes) -> None:
 
 
 def merge_rows(payloads: Mapping[str, bytes]) -> torch.Tensor:
-    """Fuse the bank's row blocks into ONE [n, d] block, entry-name order.
+    """Fuse the bank's row blocks into ONE [n, d] block, in bank order.
 
-    The prompt_embeds twin of lora_torch.merge_fragments: a mechanism compiles
-    its adapters JOINTLY, so two soft prompts in one bank are two segments of
-    one virtual prompt, concatenated in a deterministic order. They are
-    positions in one sequence, so their widths must agree.
+    The prompt_embeds twin of lora_torch.merge_fragments: a kind attaches its
+    entries JOINTLY, so two soft prompts in one bank are two segments of one
+    virtual prompt, concatenated deterministically. They are positions in one
+    sequence, so their widths must agree.
     """
     blocks = [st_load(payloads[name])[ROWS_KEY] for name in sorted(payloads)]
     widths = sorted({int(block.shape[1]) for block in blocks})

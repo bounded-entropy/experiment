@@ -1,28 +1,14 @@
-"""The observer UI: a local wandb over the store, with zero core interference.
+"""The observer UI: the routes over the store, with zero core interference.
 
-One stdlib WSGI app (no dependencies, no build step, no CDN) served two ways:
-locally (`python -m rlstack ui <store-locator>`) or beside a remote store
-(deploy wraps ui_app in a Modal web endpoint with the volume mounted). This
-file is the ROUTES; page.py is the one document they all serve, and it polls
-the JSON API every few seconds — live monitoring is just committed state read
-again.
+One stdlib WSGI app — no dependencies, no build step — served either locally or
+beside a remote store, with page.py as the one document every route returns and
+the JSON API polled every few seconds, so live monitoring is just committed
+state read again. Two readings, two families of route: per EXPERIMENT, where
+panel priority IS the run's own dictionary.json with the loss walkback first
+(I11); and per HOST, off the journal alone. The UI never re-derives a
+declaration and never reads anything but peeks and journals.
 
-Two readings, two families of route. Per EXPERIMENT: panel priority IS the
-flow graph (I11) — the run's own dictionary.json orders its page, columns
-that feed the loss (the walkback) first. Per HOST: the journal alone —
-placement, tenancy, gpu statistics, and any other numeric an event carries
-(host_series.py). The UI never re-derives a declaration and never reads
-anything but peeks and journals.
-
-Routes:
-    /                     run index (from the host journals)
-    /run/<run_id>         the graphs page
-    /hosts                the fleet: placement, load, host list
-    /host/<name>          one host, from hosts/<name>/log.jsonl alone
-    /api/runs             runs_data as JSON
-    /api/run/<run_id>     run_series as JSON
-    /api/hosts            fleet_data as JSON
-    /api/host/<name>      host_series as JSON
+    /  /run/<id>  /hosts  /host/<name>       and /api/ beside each
 """
 
 from __future__ import annotations

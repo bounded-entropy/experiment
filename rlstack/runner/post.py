@@ -1,16 +1,12 @@
 """EXECUTION of the post pipeline: per group, after the seal, before the loss.
-The processors themselves are DECLARED in training/post/ (one class per file);
-this module only runs a declared pipeline in order.
 
-For each group, the declared processors run in pipeline order; each sees the
-columns its predecessors produced for that group and a PoolClient (judges
-sample; `llm.pool(name)` reaches any engine pool). Outputs are validated
-against the declaration — exactly the `produces` names, one float per
-trajectory — and concatenated into wave-order columns, which the loop stores
-as postdata and broadcasts into the TokenBatch.
-
-Deterministic: each (group, processor) gets its own seed from the tree, so
-resume recomputes byte-identical postdata.
+The processors themselves are DECLARED in training/post/; this module only runs
+a declared pipeline in order. Each processor sees the columns its predecessors
+produced for that group and a PoolClient, and its output is validated against
+its declaration — exactly the `produces` names, one float per trajectory —
+before being concatenated into wave-order columns. Deterministic: each (group,
+processor) draws its own seed from the tree, so resume recomputes byte-
+identical postdata.
 """
 
 from __future__ import annotations

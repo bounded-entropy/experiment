@@ -1,22 +1,16 @@
 """The flow graph: THE canonical walk over a spec's data declarations.
 
-One constructor — flow_graph(spec) — builds the graph of every named data
-artifact a run will contain: pipeline columns (postdata/, eval/), recorded
-facts (waves/, I6), forward-recomputed tensors, and the standing rails
-(ledger train summary). Edges are the declarations verbatim: PostDef
-produces/consumes, LossDef requires, adapter records/provides.
+flow_graph(spec) builds the graph of every named artifact a run will contain —
+pipeline columns, recorded facts, forward-recomputed tensors, the standing
+rails — with edges taken from the declarations verbatim (produces / consumes /
+requires). Everything that reasons over those declarations queries THIS object:
+the submit gate's pipeline checks and the run's own dictionary.json (I11) are
+two consumers of one walk, so the graph cannot drift from the semantics without
+validation failing with it, and a new declaration kind gets a node here once.
 
-Everything that reasons over these declarations queries THIS object, by
-design: the submit gate's pipeline checks (validate.py) and the run's
-self-description (dictionary.json, written at run creation, what a UI
-renders) are two consumers of one walk — the graph cannot drift from the
-semantics without validation failing with it. A new declaration kind gets a
-node or edge here ONCE and every consumer sees it.
-
-Unknown registered names contribute nothing (check_names_are_registered
-reports them). The loss is pure math (#38): its requires may only name
-nodes of this graph — post columns, records, bank-provided forward tensors
-— never a pass the runner would have to plan.
+The loss is pure math: its `requires` may only name nodes of this graph — post
+columns, records, bank-provided forward tensors — never a pass the runner would
+have to plan.
 """
 
 from __future__ import annotations
@@ -43,7 +37,8 @@ class FlowNode:
 
     kind: "column" (a post pipeline output) | "record" (a sampling-time
     fact, frozen at the seal) | "provided" (a training-forward tensor,
-    recomputed each pass) | "rail" (a loss's standing report).
+    recomputed each pass) | "rail" (a loss's standing report) | "stat"
+    (trainer bookkeeping in the same ledger summary).
     phase: where it lives — "post" (postdata/<u>), "eval" (eval/<u>),
     "wave" (per token in waves/<u>), "forward" (never stored), "train"
     (the ledger's train summary).
@@ -63,8 +58,8 @@ class FlowNode:
 
 @dataclass(frozen=True)
 class FlowGraph:
-    """The spec's data artifacts plus the queries validate and the
-    dictionary are built from. Node order is pipeline order."""
+    """One spec's data artifacts, in pipeline order, plus the queries the
+    submit gate and dictionary.json are built from."""
 
     nodes: tuple[FlowNode, ...]
     loss: str | None
@@ -122,8 +117,9 @@ class FlowGraph:
     # ---- the run's self-description -----------------------------------------
 
     def to_json(self) -> dict:
-        """dictionary.json: what this run's store will contain and why —
-        a UI walks this instead of re-deriving any declaration."""
+        """dictionary.json: what this run's store will contain and why.
+        Derived, never identity — a UI walks it instead of re-deriving any
+        declaration, so it needs no registry and cannot skew."""
         return {
             "columns": [{
                 "name": n.name, "kind": n.kind, "phase": n.phase,

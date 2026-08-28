@@ -1,31 +1,20 @@
 """Batched replay parity on real metal: rows carrying their own delta must
-equal swap-install, one document at a time.
+equal the swap-install they replaced, one document at a time.
 
     modal run deploy/batch_parity.py::parity      # ~4 minutes on one L4
 
-The claim under test (#44) is a numerical one, so the reference is literally
-the code that was replaced: `SwapInstallLinear` below is the pre-#44
-LoraLinear body verbatim, wired the pre-#44 way (one tenant in the tree at a
-time), driven by the pre-#44 forward (one document per call). Three
-comparisons against it, on Qwen3-0.6B:
-
-    base          the padded forward with no deltas — is the batching itself
-                  faithful, before any adapter is in the picture
-    uniform       one tenant, every row on its slot — the degenerate case the
-                  whole loop runs today
-    mixed         TWO tenants' deltas in ONE forward, rows split between them
-                  — the mechanism, and what swap-install cannot express
-
-Each runs at two widths, which separates the two things that could be wrong.
-ONE ROW PER FORWARD isolates everything #44 added — the row plan, the per-row
-gather, the padding mask argument — with no batch dimension in play, and is
-therefore asserted BIT FOR BIT in both dtypes. THE FULL PADDED BATCH adds the
-batch dimension itself, whose reduction order bf16 cannot reproduce; it is
-compared within a tolerance, and the base row (no adapters anywhere) shows how
-much of that spread was already there before this change.
-
-The whole thing runs twice, in float32 (where the tolerance is tight enough to
-be a proof) and in bfloat16 (the dtype the loop actually trains in).
+The row plan (#44) makes a numerical claim, so the reference is literally the
+code it replaced: `SwapInstallLinear` below is the pre-#44 LoraLinear body
+verbatim, one tenant in the tree at a time, driven one document per call.
+Three comparisons against it on Qwen3-0.6B — no deltas at all, one tenant on
+every row, and TWO tenants' deltas in ONE forward — each run at two widths,
+which separates the two things that could be wrong. ONE ROW PER FORWARD
+isolates the row plan, the per-row gather and the padding mask with no batch
+dimension in play, and is therefore asserted BIT FOR BIT in both dtypes; THE
+FULL PADDED BATCH adds a reduction order bf16 cannot reproduce, so it is
+compared within a tolerance that the no-delta row calibrates. Everything runs
+in float32, where the tolerance is tight enough to be a proof, and in
+bfloat16, the dtype the loop actually trains in.
 
 Deployment only (I5): wiring and measurement, nothing semantics-bearing.
 Image pins: keep in sync with deploy/modal_app.py.

@@ -1,10 +1,13 @@
-"""The loss contract: one registered function per objective, one file each.
+"""The loss contract: pure math over named columns (I9).
 
-A loss is microbatch-scope and differentiable: pure fn(PolicyOutputs,
-TokenBatch) -> LossResult, with declared `requires` naming the postdata
-columns and planned passes its math reads. The learner runs the forward and
-builds PolicyOutputs; the loss owns only the objective. torch is imported
-inside bodies (rule 7): declarations validate without it.
+A loss is microbatch-scope and differentiable — fn(PolicyOutputs, TokenBatch)
+-> LossResult — and its declared `requires` names DATA COLUMNS ONLY: postdata
+columns the pipeline produced, recorded facts, or bank-provided forward
+tensors. A loss can never cause metal work; anything that needs a GPU (judges,
+teacher scoring, hinted rescoring) is a postprocessor's job and lands in
+postdata before the loss runs. The learner runs the forward and builds
+PolicyOutputs; the loss owns only the objective, and reports the rails beside
+it. torch is imported inside bodies (rule 7): declarations validate without it.
 
     @loss("my_loss", requires=("advantage",))
     def my_loss(out, batch) -> LossResult:
@@ -31,12 +34,12 @@ class PolicyOutputs:
 
 @dataclass
 class LossResult:
-    """The objective plus the rails every loss must report."""
+    """The objective plus the two rails every loss must report."""
 
     loss: Any                     # scalar torch.Tensor, ready to backward
     mean_ratio: float             # masked mean of exp(lp - behavior_lp)
     logprob_gap: float            # masked mean |lp - behavior_lp| — the
-                                  # silent-off-policy / parity alarm
+                                  # trainer/sampler mismatch alarm
 
 
 def token_tensors(out: PolicyOutputs, batch: Any):
@@ -52,8 +55,10 @@ def token_tensors(out: PolicyOutputs, batch: Any):
 
 
 def rails(lp, mask, behavior) -> tuple[float, float]:
-    """The two rails every loss reports: masked mean IS ratio, and the masked
-    mean |trainer − behavior| logprob gap (the silent-off-policy alarm)."""
+    """The two rails every loss reports: the masked mean IS ratio, and the
+    masked mean |trainer − behavior| logprob gap — the trainer/sampler mismatch
+    alarm, whose floor is the bf16 kernel difference and whose GROWTH above
+    that floor is the signal."""
     import torch
 
     with torch.no_grad():

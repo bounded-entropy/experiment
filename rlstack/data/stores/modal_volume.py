@@ -1,14 +1,13 @@
-"""ModalVolumeStore: the run store on a mounted Modal Volume.
+"""ModalVolumeStore: the store on a mounted Modal Volume.
 
-A Modal Volume mounted in a container behaves like a local filesystem whose
-writes are STAGED until `volume.commit()` persists them — which maps exactly
-onto our commit protocol: everything an update writes (blobs, waves,
-postdata, the ledger line) is staged on the mount, and committing right after
-the ledger append persists all of it together. A crash before the commit
-loses only work the ledger never sealed, which is precisely what attach-time
-recovery (`_discard_unsealed`) assumes.
+A mounted Volume behaves like a local filesystem whose writes are STAGED until
+`volume.commit()` persists them, which maps onto the commit point exactly: an
+update's blobs, wave, postdata and ledger line all stage on the mount, and
+committing right after the ledger append persists them together. A crash
+before that loses only work no ledger line sealed — precisely what attach-time
+recovery (`_discard_unsealed`) already assumes.
 
-The volume object is passed in (duck-typed: anything with .commit()), so this
+The volume object is passed in and only `.commit()` is called on it, so this
 module needs no modal import and the fakes suite can exercise the commit
 discipline with a recorder.
 """
@@ -19,7 +18,7 @@ from rlstack.data.stores.local import LocalStore
 
 
 class ModalVolumeStore(LocalStore):
-    """LocalStore over the volume mount + commit at the durable points."""
+    """LocalStore over the volume mount, committing at the durable points."""
 
     def __init__(self, root, volume=None, locator: str | None = None) -> None:
         super().__init__(root)

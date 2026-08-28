@@ -1,7 +1,7 @@
 """Environments: one class per file, all inheriting Environment (base.py).
 
-The contract: `async run(llm, task) -> Rollout`. Importing this package
-registers the builtins.
+The contract is `async run(llm, task) -> Rollout`; a name exists iff the module
+defining it was imported, and importing this package registers the builtins.
 """
 
 from rlstack.inference.environments.base import (  # noqa: F401

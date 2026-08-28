@@ -1,23 +1,17 @@
 """EnginePlugin: one serving mechanism the stock engine lacks.
 
-A native mechanism (punica, prompt_embeds, logits) is a lever the engine's own
-maintainers keep working — multi-tenant, cache-correct, graph-captured, TP-
-sharded — across versions. A plugin must RE-EARN each of those properties at a
-seam the engine never promised to keep stable. Each earned property is one
-named method of the contract:
+A native lever is one the engine's own maintainers keep working — multi-tenant,
+cache-correct, graph-captured, TP-sharded — across versions. A plugin must
+RE-EARN each of those at a seam the engine never promised to keep stable, so
+each earned property is one named method: probe (the seams exist on THIS build,
+so a failure lands at boot and never mid-run), install (claim the seam),
+load/evict (payloads into per-slot banks, multi-tenant from day one — banks
+plus a per-token slot index, never a global singleton), cache_salt (a plugin
+that changes hidden states MUST make bundle identity visible to the prefix
+cache), and attend (the per-layer merge, written against BatchView only).
 
-    probe        the seams exist on THIS build (I7: die at boot, never mid-run)
-    install      claim the seam (e.g. vLLM register_backend override)
-    load/evict   payloads -> per-slot GPU banks (multi-tenant from day one:
-                 banks + a per-token slot index, never a global singleton)
-    cache_salt   the prefix-cache key contribution — a plugin that changes
-                 hidden states MUST make bundle identity visible to the cache
-    attend       the per-layer merge, written against BatchView only
-
-The numerical proof that a plugin's rollout lowering agrees with the trainer's
-replay lowering is the parity certificate (certificates.py), keyed by build
-fingerprint — bump the engine image and the certificate misses, so parity
-re-runs before any wave is sampled.
+That a plugin's rollout lowering agrees numerically with its kind's replay
+lowering is the parity certificate's job, keyed by build fingerprint.
 """
 
 from __future__ import annotations
@@ -37,8 +31,7 @@ class EngineBuild:
     """One deployed engine build, as a plugin sees it.
 
     `fingerprint` keys the certificate cache; `symbols` is the build's
-    inventory of internal seams (probe checks required_symbols against it —
-    in B3 it is computed by importing the pinned engine and looking).
+    inventory of internal seams, which probe checks required_symbols against.
     """
 
     fingerprint: str
@@ -51,7 +44,7 @@ class ProbeError(RuntimeError):
 
 
 class Seam(ABC):
-    """Where a plugin attaches to the engine. B3's vLLM seam claims via
+    """Where a plugin attaches to the engine. A vLLM seam claims via
     register_backend; the fake seam records the claim for tests."""
 
     @abstractmethod

@@ -1,25 +1,15 @@
-"""LoRA's ROLLOUT lowering: punica, the native multi-LoRA lever (#48, #3).
+"""LoRA's rollout lowering: punica, the native multi-LoRA lever.
 
-The mirror of lora_torch, on the other side of the bridge (I2): the replay half
-wraps a Linear and reads the row plan; this half writes the bank's fragments
-into one peft adapter directory and hands each request the LoRARequest that
-pins it. Same delta, two lowerings, and the parity test between them is the
-kind's own exam — which is why both files live in this directory.
+What this kind pays and what it buys: demands enable_lora plus its sizing;
+attach merges the bank's fragments (disjoint keys, the one-delta-per-site rule)
+into one peft adapter dir and registers it as a LoRARequest, whose int id is
+per BUILD and allocated here because this lowering is the only thing that hands
+them out; apply contributes the lora_request keyword, which is what lets
+requests pinning different bundles batch together; align contributes nothing,
+because a weight delta occupies no prompt positions.
 
-The four verbs, with what punica actually costs:
-  demands   enable_lora plus its sizing (how many adapters resident, how wide
-            their rank) — the engine args that make the lever exist at all.
-  attach    merge the bank's fragments (disjoint keys, the one-delta-per-site
-            rule) into one adapter dir and register it as a LoRARequest. The
-            int id is per BUILD, allocated here because this lowering is the
-            only thing that hands them out.
-  apply     the lora_request keyword: per-request selection, which is what
-            makes multi-tenancy work (any bundles' requests batch together).
-  align     nothing — a weight delta occupies no prompt positions.
-
-vLLM and torch are imported at module scope, so this file loads only from the
-kind's methods (Lora.rollout_lowering), never from the package root — the
-lora_torch precedent, STYLE rule 7.
+vLLM and torch are imported at module scope — this file loads only from
+Lora.rollout_lowering, never from the package root (STYLE rule 7).
 """
 
 from __future__ import annotations

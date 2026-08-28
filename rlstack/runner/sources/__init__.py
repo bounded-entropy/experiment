@@ -1,14 +1,15 @@
-"""Where training data comes from: one base, one file per option.
+"""Where the trainer's waves come from: one base, one file per option.
 
     base.py    — WaveFeed: `obtain(update) -> rows | None`, the whole contract
-    live.py    — LiveFeed: the Generator role writes waves/; this reads them
+    live.py    — LiveFeed: this run's own Generator writes waves/; this reads
     replay.py  — ReplayFeed: another run's sealed waves (store://<run_id>)
     static.py  — StaticFeed: a fixed trajectory dataset (cas://<sha>)
 
-The trainer neither knows nor cares which it has (I1: training consumes
-sealed waves from its own run, full stop). `feed_for` dispatches on
-TrajectorySource.source; whether a Generator role EXISTS is the same dispatch,
-made in plan_roles."""
+The trainer neither knows nor cares which it has (I1: training consumes sealed
+waves from its own run, full stop). `feed_for` dispatches on
+TrajectorySource.source, and whether a Generator daemon exists at all is the
+same dispatch made in plan_daemons.
+"""
 
 from __future__ import annotations
 

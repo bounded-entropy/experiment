@@ -1,8 +1,9 @@
-"""Live: the Generator role writes waves/<u>; this feed just reads them.
+"""Live: the Generator writes waves/<u>; this feed just reads them.
 
 The behavior policy is whatever bundle the generator sampled under — recorded
 per turn, opportunistic within the lag buffer. "Not yet" is the normal answer
-here; the trainer's await condition absorbs it."""
+here, and the trainer's await condition absorbs it.
+"""
 
 from __future__ import annotations
 

@@ -1,9 +1,10 @@
 """Replay: another run's sealed waves, copied in update for update.
 
-Off-policy consumption through the exact contract live uses — the behavior
-policy is whatever the parent recorded (bundle ids, logprobs, draws are all
-in the sealed rows), which is what the loss's importance correction runs
-against. Group structure is the parent's, verbatim."""
+Off-policy consumption through the exact contract live uses. The behavior
+policy is whatever the parent recorded — bundle ids, logprobs and draws are all
+in the sealed rows — which is what a loss's importance correction runs against.
+Group structure is the parent's, verbatim.
+"""
 
 from __future__ import annotations
 

@@ -1,13 +1,13 @@
-"""The specs (SPEC.md §2A). Frozen dataclasses; declarative; they ARE identity (I3).
+"""The specs: frozen dataclasses, declarative, and they ARE identity (I3).
 
-A spec is a value. It never does setup and never touches a GPU; a runner resolves
-it at Phase 0. Mapping-typed fields are plain dicts — hashing is what makes
-identity order-independent (`canonical_json` sorts every mapping), so two banks
-written in different literal orders are the same experiment. Treat specs as
-immutable all the way down: don't mutate a dict after passing it in.
+A spec is a value. It never does setup and never touches a GPU; a runner
+resolves it at Phase 0. Mapping-typed fields are plain dicts because hashing is
+what makes identity order-independent — canonical_json sorts every mapping, so
+two banks written in different literal orders are the same experiment. Treat
+specs as immutable all the way down: never mutate a dict after passing it in.
 
-Reading order below mirrors the spec: inference world → the bridge → training
-world → topology → run level → deploy-time → sugar.
+Reading order below: inference world → the bridge → training world → topology
+→ run level → deploy-time → sugar.
 """
 
 from __future__ import annotations
@@ -57,7 +57,8 @@ class EvalSpec:
 
 @dataclass(frozen=True)
 class AdapterSpec:
-    """One typed intervention at one site pattern."""
+    """One adapter: a configured bank entry — one typed intervention of one
+    registered kind at one site pattern."""
 
     kind: str                     # registered @adapter: "lora", "soft_prompt", ...
     site: str                     # canonical name, resolved against the SiteSchema
@@ -67,7 +68,8 @@ class AdapterSpec:
 
 @dataclass(frozen=True)
 class PolicySpec:
-    """A base model plus a named bank of per-site deltas."""
+    """A base plus a bank of named adapters: the one primitive that lives in
+    both worlds (I2), and so the one carrying a parity obligation."""
 
     base: str                     # HF id + pinned revision
     bank: Mapping[str, AdapterSpec]
@@ -99,7 +101,7 @@ class TrajectorySource:
 
 @dataclass(frozen=True)
 class OptimSpec:
-    """Optimizer plus per-delta overrides (param groups keyed by bank name)."""
+    """Optimizer plus per-adapter overrides (param groups keyed by bank name)."""
 
     name: str
     lr: float
@@ -110,9 +112,10 @@ class OptimSpec:
 
 @dataclass(frozen=True)
 class Schedule:
-    """Mostly statistical knobs (they change the estimator), one engineering knob
-    (microbatch_tokens changes only how compute is chunked). max_policy_lag is
-    estimator policy — how stale a behavior policy the trainer tolerates."""
+    """The wave shape. Mostly statistical knobs (they change the estimator),
+    one engineering knob (microbatch_tokens changes only how compute is
+    chunked). max_policy_lag is the lag BUFFER — how stale a behavior policy
+    the trainer tolerates, 0 meaning strict alternation."""
 
     group_size: int
     trajectories_per_wave: int
@@ -127,8 +130,8 @@ class AlgoSpec:
     """The training world, by registered name; declarations travel with the names (I4).
 
     `post` is the ORDERED postprocessing pipeline: per-group processors run
-    after the seal (rewards, judges, advantages, ...); their columns are stored
-    as postdata and fed to the loss, which `requires` the ones it uses.
+    after the seal (rewards, judges, advantages, ...), their columns land in
+    postdata, and the loss `requires` the ones it uses.
     """
 
     loss: str                     # registered @loss
@@ -144,7 +147,8 @@ class AlgoSpec:
 
 @dataclass(frozen=True)
 class GpuSet:
-    """Pure device demand. Literal ids are only for pinning a dedicated daemon."""
+    """Pure device demand: what, never where (I5) — placement decides that.
+    Literal ids are only for pinning a dedicated daemon."""
 
     n: int | None = None
     nodes: int = 1
@@ -153,7 +157,9 @@ class GpuSet:
 
 @dataclass(frozen=True)
 class PoolMember:
-    """An engine pool: serves sample + score traffic under a name."""
+    """A pool's declared capacity: the name traffic routes to, serving sample
+    and score under it. `tp` is the width the engine handed for it must be
+    BUILT at, never a request."""
 
     name: str
     base: str | None = None       # None → the policy base
@@ -164,7 +170,8 @@ class PoolMember:
 
 @dataclass(frozen=True)
 class LearnerMember:
-    """The differentiable fwd/bwd workload."""
+    """The differentiable fwd/bwd workload; `fsdp` is likewise a build width
+    the handed learner must already have."""
 
     fsdp: int = 1
     fraction: float | None = None
@@ -179,8 +186,8 @@ class GpuGroup:
 
     The member vocabulary is closed at pool + learner; everything else
     (rollout, eval, judge, teacher) is traffic routed to named pools.
-    "sleep" alternates the learner with the engines on the same memory
-    (and therefore implies max_policy_lag == 0).
+    sharing="sleep" makes it an exclusive group: the learner alternates with
+    the engines on the same memory, and therefore implies max_policy_lag == 0.
     """
 
     gpus: GpuSet
@@ -207,7 +214,9 @@ class GpuConfig:
 
 @dataclass(frozen=True)
 class Seeds:
-    """Per-request, dataloader, and init seeds all derive from master."""
+    """The root of the seed tree: every random draw in a run is h(master,
+    *path), so no module ever touches global RNG state and any part of a run
+    can be regenerated in isolation."""
 
     master: int
 
@@ -216,9 +225,9 @@ class Seeds:
 class WarmStart:
     """Start a NEW experiment from another run's sealed state.
 
-    Hashes into run_id; the parent is recorded in the manifest — lineage without
-    ceremony. `map` renames deltas on the way in: source delta name → name in
-    THIS spec's bank.
+    Hashes into run_id; the parent is recorded in the manifest — lineage
+    without ceremony. `map` renames adapters on the way in: source bank name →
+    name in THIS spec's bank.
     """
 
     policy: str                   # "store://<run_id>@<version>" or "cas://<sha>"
@@ -239,7 +248,8 @@ class WarmStart:
 
 @dataclass(frozen=True)
 class ExperimentSpec:
-    """The whole experiment, as one value."""
+    """The whole experiment as one value: the unit of identity, of store
+    ownership, and of a run directory."""
 
     policy: PolicySpec            # the bridge (I2)
     gen: GenSpec | None           # inference world; None = pure-offline run
@@ -284,7 +294,7 @@ def gpus(n: int | None = None, nodes: int = 1, ids: tuple[str, ...] | None = Non
 
 def pool(name: str, base: str | None = None, tp: int = 1, n: int = 1,
             fraction: float | None = None) -> PoolMember:
-    """A named engine pool."""
+    """One declared pool, served by this group's metal."""
     return PoolMember(name=name, base=base, tp=tp, n=n, fraction=fraction)
 
 
@@ -299,10 +309,14 @@ def lora(site: str, r: int, tie: bool = False) -> AdapterSpec:
 
 
 def soft_prompt(site: str, n: int, d: int) -> AdapterSpec:
-    """n virtual tokens of width d, served via vLLM's native prompt_embeds."""
+    """n virtual tokens of width d, served through the native prompt_embeds
+    mechanism."""
     return AdapterSpec(kind="soft_prompt", site=site, init={"n": n, "d": d})
 
 
 def attn_bias(site: str, **init: object) -> AdapterSpec:
-    """Learned bias on an attention-score rectangle — the one engine-touching kind."""
+    """Learned bias on an attention-score rectangle: the one kind served by a
+    mechanism of ours (side_attention, an engine plugin) rather than a native
+    one. Its replay half is proven; its rollout half is not, on the pinned
+    engine build."""
     return AdapterSpec(kind="attn_bias", site=site, init=init)

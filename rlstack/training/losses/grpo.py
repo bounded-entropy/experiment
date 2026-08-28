@@ -10,8 +10,8 @@ from rlstack.training.losses.base import LossResult, PolicyOutputs, rails, token
 
 @loss("grpo", requires=("advantage",))
 def grpo(out: PolicyOutputs, batch: Any, clip_eps: float = 0.2) -> LossResult:
-    """Token-level PPO-clip surrogate over batch.post["advantage"], with the
-    IS ratio against the RECORDED behavior logprobs (I6: never recomputed)."""
+    """Token-level PPO-clip surrogate over the "advantage" column, with the IS
+    ratio against the RECORDED behavior logprobs (I6: never recomputed)."""
     import torch
 
     lp, mask, behavior = token_tensors(out, batch)

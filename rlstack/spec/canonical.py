@@ -1,9 +1,10 @@
 """Canonical serialization, content hashing, and run identity.
 
-I3 — identity is computed, never typed: ``run_id = h(spec ⊕ registered-code hashes ⊕
-data fingerprint)``. Everything hashable in the stack (specs, bundles, certificates)
-routes through :func:`canonical_json`, so two objects that mean the same experiment
-produce byte-identical JSON regardless of how their mappings were literal-ordered.
+Identity is computed, never typed (I3): run_id = h(spec ⊕ registered-code
+hashes ⊕ data fingerprint). Everything hashable in the stack — specs, bundles,
+certificates — routes through canonical_json, so two objects meaning the same
+experiment produce byte-identical JSON no matter how their mappings were
+literal-ordered.
 """
 
 from __future__ import annotations
@@ -94,8 +95,8 @@ def content_hash(obj: object) -> str:
 def run_id(spec: object, code_hashes: Mapping[str, str], data_fingerprint: str) -> str:
     """I3: h(spec ⊕ registered-code hashes ⊕ data fingerprint), first 12 hex chars.
 
-    Editing a registered function's body changes ``code_hashes`` and therefore the run;
-    renaming a file changes nothing.
+    Editing a registered function's body changes the code hashes and therefore
+    the run; renaming a file changes nothing.
     """
     return content_hash(
         {"spec": spec, "code": code_hashes, "data": data_fingerprint}

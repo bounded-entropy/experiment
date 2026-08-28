@@ -1,16 +1,22 @@
-"""rlstack — thin RL wrapper, Phase B1.
+"""rlstack — a thin, high-throughput RL harness for LLMs.
 
-Canon: SPEC.md. Identity is computed (I3); training consumes only sealed data (I1).
+An experiment is one spec value submitted to a host; its identity is computed
+from that value and the source of everything it names, never typed (I3). The
+folders are the architecture:
 
-Layout mirrors the architecture:
-  spec/       the contract (declarative values, identity, submit gate)
-  registry.py the index: name -> typed record (declaration + compute)
-  client.py   the sampling interface both worlds type against
-  policy/     the bridge (I2): sites + adapters/ + bundle compile
-  inference/  the sampling world (Rollout, environments/)
-  training/   the gradient world (post/ pipeline, losses)
-  data/       the membrane (trajectory→group→wave, flatten+pack, stores/)
-  runner/     the substrate (Engine/Learner protocols, the loop, fakes)
+  spec/            the contract — declarative values, identity, the flow
+                   graph, the submit gate
+  registry.py      the index: name -> typed record (declaration + compute)
+  client.py        the pool interface both worlds may type against
+  policy/          the bridge: sites + adapters/ (one file per kind per side)
+                   + bundle compile
+  inference/       the sampling world — Rollout, environments/
+  training/        the gradient world — post/ processors, losses/
+  data/            the membrane — trajectory→group→wave, flatten+pack, stores/
+  runner/          the substrate — Engine/Learner, the fleet and the wire, the
+                   blackboard, daemons/, sources/, engines/, learners/, fakes
+  observe/         read-only derivations over stores and journals
+  rlstack_engine/  (sibling package) what ships in the ENGINE image
 """
 
 __version__ = "0.0.1"

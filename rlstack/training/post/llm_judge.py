@@ -1,11 +1,10 @@
-"""LLM-as-a-judge, reference-free: the judge pool solves each trajectory's
-task independently (greedy, its own sampling budget), and the reward is
-agreement — last number of the judge's answer == last number of the policy's.
+"""LLM-as-a-judge, reference-free: the judge pool solves each trajectory's task
+independently (greedy, its own budget) and the reward is agreement — last
+number of the judge's answer == last number of the policy's.
 
-The exemplar of the pool treaty: `pools` declares the traffic (Phase 0 checks
-a "judge" engine pool is declared), `llm.pool("judge")` carries it, and
-`sampling` is the judge's own — not the policy's — hashing into identity
-through this class's source like every other declaration."""
+The exemplar of the pool declaration treaty: `pools` declares the traffic
+(Phase 0 checks a "judge" pool exists in the spec), `llm.pool("judge")` carries
+it, and `sampling` is the judge's own, not the policy's."""
 
 from __future__ import annotations
 

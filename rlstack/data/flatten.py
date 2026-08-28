@@ -1,9 +1,10 @@
-"""Flattening and packing (SPEC.md §2D): sealed trajectories → microbatches.
+"""The packed forms: sealed trajectories → microbatches.
 
-Dumb, loss-independent, estimator-free by design: one pass turns a trajectory
-into a complete flat token record (`Flat`), `broadcast` turns any advantage's
-per-trajectory output into a per-token channel, and `pack` fills microbatches.
-Nothing in this module knows what an advantage or a loss is.
+`flatten` turns one trajectory into a complete flat token record (`Flat`),
+`broadcast` turns a per-trajectory postdata column into a per-token channel,
+and `pack` fills `TokenBatch`es bounded by microbatch_tokens. Nothing here
+knows what an advantage or a loss is, and nothing estimator-shaped rides
+along.
 """
 
 from __future__ import annotations

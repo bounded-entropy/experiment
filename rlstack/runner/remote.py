@@ -1,33 +1,23 @@
 """The wire: pools served by ANOTHER host, behind the same Engine protocol.
 
-A host's engines are contactable from outside its process (#43): HostService
-is the host-side end (it executes pool verbs on the host's own metal, under
-the host's own arbiter — admission stays with the partition), a Transport
-carries JSON-safe dict frames, and RemotePool implements the Engine protocol
-over it. The runner cannot tell local metal from remote — that is the point:
-PoolClient, the daemons, and the post pipeline change zero lines when a pool
-moves out of process.
+HostService is the host-side end — it executes pool verbs on its own metal
+under its own arbiter, because admission stays with the partition, and engines
+are addressed by CAPABILITY (base, tp), never by pool name. A Transport carries
+JSON-safe dict frames; RemotePool implements the whole Engine protocol over it,
+so the runner cannot tell remote from local. The verb split is the contract
+every transport implements against:
 
-The verb split mirrors the Engine protocol's own contract:
-
-    call (async)   sample_tokens / score_tokens — GPU occupancy, so the
-                   service wraps each in the owning host's arbiter.admit.
+    call (async)   sample_tokens / score_tokens — they occupy the metal, so
+                   the service wraps each in the owning host's arbiter.admit.
     ask  (sync)    add_bundle / reachability / tokenize — additive
-                   registration and build facts; by the multi-tenancy
-                   invariant they never disturb traffic, so they need no
-                   admission and may run from sync call sites.
+                   registration and build facts, which by the tenancy
+                   invariant never disturb traffic, so they need no admission
+                   and may run from sync call sites.
 
-v0 wire decisions (deliberate, cheap to revisit):
-  - sample_tokens is NON-STREAMED: one reply carries the whole event list.
-  - add_bundle ships payload bytes (base64) — fine for adapters, revisit for
-    full-weight bundles.
-  - the learner is NEVER remote: the runner goes to the learner's host and
-    reaches inference partitions through RemotePools.
-
-LocalTransport is the same-process wire that still crosses the serialization
-boundary: every frame round-trips through json.dumps/loads in both
-directions, so anything that works over it works over a real transport — the
-Modal-cls transport is a drop-in with the same two verbs.
+Costs, stated: sample replies are non-streamed (one reply carries the whole
+event list), add_bundle ships payload bytes as base64, and the learner is never
+remote. LocalTransport round-trips every frame through json in both directions,
+so anything that works over it works over a real transport.
 """
 
 from __future__ import annotations
@@ -153,11 +143,11 @@ class Transport(Protocol):
 class HostService:
     """The host-side end of the wire.
 
-    Executes pool verbs on this host's engines under this host's arbiter —
-    the physical resource owns admission (#34), so a remote experiment is
-    just one more source of admitted work; it never gets a vote. Engines are
-    addressed by CAPABILITY (base, tp), the fleet's demand vocabulary, never
-    by pool name — pool names are an experiment's private routing."""
+    Executes pool verbs on this host's engines under this host's arbiter — the
+    physical resource owns admission, so a remote experiment is just one more
+    source of admitted work and never gets a vote. Engines are addressed by
+    CAPABILITY (base, tp), the fleet's demand vocabulary, never by pool name —
+    pool names are an experiment's private routing."""
 
     def __init__(self, host: Host) -> None:
         self.host = host
@@ -181,9 +171,9 @@ class HostService:
 
     async def serve(self, verb: str, payload: dict) -> dict:
         """One admitted verb, admission included: enter the owning host's
-        arbiter, run, leave. A regime-host's engines are attached at birth;
-        a bare host's attach here on first remote use (zero footprint —
-        remote joiners never re-count fractions, #43)."""
+        arbiter, run, leave. A regime-host's engines are attached at birth; a
+        bare host's attach here on first remote use, at zero footprint — a
+        joiner never re-counts a fraction the partition already owns."""
         engine = self._engine(payload["base"], payload["tp"])
         if not self.host.arbiter.is_attached(engine):
             self.host.arbiter.attach(
@@ -227,8 +217,8 @@ def _json_roundtrip(frame: dict) -> dict:
 
 class LocalTransport:
     """Same-process transport that still crosses the serialization boundary
-    (json round-trip both ways) — v0 of the fleet runs every host in one
-    process, and this keeps that fact unobservable to the code above it."""
+    (json round-trip both ways), so a fleet whose hosts share one process is
+    indistinguishable, from above, from one whose hosts do not."""
 
     def __init__(self, service: HostService) -> None:
         self.service = service

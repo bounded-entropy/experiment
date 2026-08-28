@@ -1,33 +1,26 @@
 """The rank chorus: the extra processes a sharded build needs, and no more.
 
-The blackboard stays ONE async process. Rank 0 runs the runner — the daemons,
-the store, the five Learner verbs — and ranks 1..width-1 exist only to stand
-in the collectives that a sharded base forward requires. They are not a
-second scheduler, they never touch the store, and they decide nothing: rank 0
-ANNOUNCES the verb it is about to run, every rank runs it on identical
-inputs, and rank 0 alone answers.
-
-One rule shapes everything here:
+The blackboard stays ONE async process. Rank 0 runs the runner and answers;
+ranks 1..width-1 exist only to stand in the collectives a sharded forward
+requires — they never touch the store and decide nothing. Two rules shape
+everything here:
 
     A COLLECTIVE VERB MUST BE ENTERED BY EVERY RANK, IN THE SAME ORDER.
 
-So a verb that touches a collective is broadcast before it runs locally, and
-a verb that touches none (emit, over replicated deltas) is not broadcast at
-all — a broadcast that buys nothing is a deadlock waiting for the day someone
-calls it from one rank.
-
-A second rule shapes the end of it:
+so a verb touching a collective is announced before it runs locally, and a verb
+touching none is not announced at all — a broadcast that buys nothing is a
+deadlock waiting for its first caller.
 
     A CHORUS ENDS ONLY WHEN EVERY RANK IS ACTUALLY GONE.
 
-A follower spends its life blocked inside a collective, where no signal
-handler gets a turn, so the polite word is tried first and SIGKILL is what
-the shutdown actually promises. Anything less leaves a daemonic child that
-the interpreter's own exit will then join forever (#53).
+A follower spends its life blocked inside a collective, where no signal handler
+gets a turn, so the polite word cannot be trusted and SIGKILL is what shutdown
+actually promises. Anything less leaves a daemonic child the interpreter's own
+exit will then join forever.
 
-The group is deliberately small-minded: one node, one rank per visible
-device, rank r on cuda:r. A host is a partition of some GPUs (#43), the
-container is that partition, and its device indices are its own.
+The group is deliberately small-minded: one node, one rank per visible device,
+rank r on cuda:r — a host is a partition, the container is that partition, and
+its device indices are its own.
 """
 
 from __future__ import annotations
@@ -123,7 +116,7 @@ class RankGroup:
     """One process group: this rank's place in it, and how it hears verbs.
 
     Built by exactly two named entries — `lead` on rank 0, which starts the
-    others, and `join` in each child — so a process's role is a fact of how
+    others, and `join` in each child — so a process's place is a fact of how
     it was constructed, never a flag it consults later.
     """
 
@@ -134,7 +127,7 @@ class RankGroup:
     _mesh: Any = field(default=None, repr=False)
     _stopped: bool = False
 
-    # ---- bring-up, one named entry per role ---------------------------------
+    # ---- bring-up, one named entry per place --------------------------------
 
     @classmethod
     def lead(cls, width: int, follower: Callable[..., None], *,

@@ -1,14 +1,11 @@
 """rlstack_engine — code that ships in the ENGINE image, not in the client.
 
-This is the package `Adapter.engine_plugin` strings name. It holds the plugin
-contract (one serving mechanism the stock engine lacks = one EnginePlugin),
-the typed view plugins see of a batch, slot bookkeeping, and the certificate
-vocabulary. Import direction is one-way: this package may import rlstack
-types; rlstack refers to plugins by string only and never imports back
-(tests/test_architecture.py enforces it).
-
-Phase B1 ships the contract, the bookkeeping, and fakes; B3 lands the vLLM
-seams (BatchView.from_vllm, SideAttention numerics) behind probe().
+The package a kind's rollout lowering names by string when its mechanism is a
+PLUGIN: the plugin contract, the typed view a plugin sees of a batch, slot
+bookkeeping, and the certificate vocabulary. Its charter is narrow on purpose —
+only code that patches engine internals belongs here. The import direction is
+one-way and enforced (tests/test_architecture.py): this package may import
+rlstack types; rlstack refers to plugins by string and never imports back.
 """
 
 from rlstack_engine.plugin import EngineBuild, EnginePlugin, ProbeError, Seam

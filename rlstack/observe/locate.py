@@ -1,13 +1,12 @@
-"""store_for(locator): the principle is that a store is NAMED by a locator,
-and the reader must run somewhere that locator resolves.
+"""store_for(locator): a store is NAMED by a locator, and the reader must run
+somewhere that locator resolves.
 
-    /path, file:///path   LocalStore — resolves wherever that filesystem is
-                          mounted (a Modal volume IS one, inside a container)
+    /path, file:///path   LocalStore — wherever that filesystem is mounted
+                          (a Modal volume IS one, inside a container)
     s3://bucket/prefix    an S3Store subclass, when it lands — resolves
-                          anywhere (network API)
-    modal://volume        does NOT resolve locally, on purpose: run the
-                          reader beside the volume (deploy's hosts hook /
-                          an ASGI observer) instead of pretending to fetch it
+                          anywhere
+    modal://volume        does NOT resolve locally, on purpose: run the reader
+                          beside the volume instead of pretending to fetch it
 """
 
 from __future__ import annotations

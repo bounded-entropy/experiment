@@ -1,37 +1,28 @@
-"""VllmEngine: the Engine protocol over vLLM — a BUS, not a consumer (#48).
+"""VllmEngine: the Engine protocol over vLLM — a BUS, not a consumer.
 
-Every adapter kind ships TWO lowerings (#3): a replay lowering into the trainer
-and a rollout lowering into the engine. Both now live beside the kind
-(policy/adapters/<kind>_vllm.py, contract in policy/adapters/rollout.py), so
-this file knows no mechanism at all. What it knows is the shape of the work:
+Every kind's serving knowledge lives in its own rollout lowering
+(policy/adapters/<kind>_vllm.py), so this file knows no mechanism at all. What
+it knows is the shape of the work:
 
-  BUILD        every served kind's demands(), folded into the engine args and
-               remembered — reachability is then the union of what those
-               payments bought (#25b: a lever is a build fact, and which kinds
-               a build serves is literally a constructor argument).
-  add_bundle   the bus loop: each of the bundle's kinds attach()es its own
-               payloads, additively and idempotently, after the composition
-               rule has passed. A bundle this engine cannot express is refused
-               HERE, while it is still just an id.
-  a request    every attached kind's apply() merged into ONE unit of work —
-               the prompt form and the keywords that pin this bundle. Requests
-               carrying different bundles, of different kinds, batch together
-               in vLLM's own scheduler: the multi-tenancy invariant, held by
-               construction.
-  an answer    every attached kind's align() SUMMED, because a scored suffix
+  BUILD        every served kind's demands(), folded into the engine args;
+               reachability is the union of what those payments bought.
+  add_bundle   each of the bundle's kinds attach()es its own payloads,
+               additively and idempotently — a bundle this engine cannot
+               express is refused HERE, while it is still just an id.
+  a request    every attached kind's apply(), merged into ONE unit of work.
+               Requests pinning different bundles batch together in vLLM's own
+               scheduler: the multi-tenancy invariant, held by construction.
+  an answer    every attached kind's align(), SUMMED, because a scored suffix
                sits after everything the bundle put in front of it.
 
-One more build fact, off to the side: enable_sleep_mode buys the pair
-sleep()/wake() — the seam an ALTERNATING host's arbiter hooks call to make a
-partition really hand the device back (#52). It is deliberately not on the
-Engine protocol: only the deploy that owns the metal reaches for it, and a
-fake or a remote pool has no device to give.
+Two build facts off to the side. enable_sleep_mode buys the sleep()/wake() pair
+an alternating host's arbiter hooks call to make a partition really hand the
+device back — deliberately NOT on the Engine protocol, since a fake or a remote
+pool has no device to give. And no engine plugin is installed here, so a kind
+whose demands() name one cannot be served on this build.
 
-v0 choices, stated: prompts are RAW token concatenations of the messages —
-each message tokenized separately, exactly as flatten will re-tokenize it (no
-chat template; template-faithful rendering is a logged open thread); uniform
-adapter rank across a bundle's entries; no engine plugin is installed, so a
-kind whose demands() name one cannot be served on this build.
+v0 choice, stated: prompts are RAW token concatenations of the messages, each
+tokenized exactly as flatten will re-tokenize it — no chat template.
 """
 
 from __future__ import annotations
@@ -60,12 +51,12 @@ class VllmEngine:
         from transformers import AutoConfig, AutoTokenizer
 
         self.base = base
-        self.tp = tp                # build fact (#43): tensor-parallel width
+        self.tp = tp                # build fact: tensor-parallel width
         self.serves = tuple(serves)  # build fact: the KINDS this build pays for
-        # build fact (#52): whether this engine can hand the device back. Not
-        # a kind's demand (no lowering asks for it) and not part of the Engine
-        # protocol — it is a capability of THIS build, reached by the deploy
-        # that owns the metal and wired into its host's arbiter hooks.
+        # build fact: whether this engine can hand the device back. Not a
+        # kind's demand (no lowering asks for it) and not part of the Engine
+        # protocol — a capability of THIS build, reached by the deploy that
+        # owns the metal and wired into its host's arbiter hooks.
         self.sleeps = enable_sleep_mode
         self._tokenizer = AutoTokenizer.from_pretrained(base)
         self._config = AutoConfig.from_pretrained(base)
@@ -93,17 +84,17 @@ class VllmEngine:
 
     def _serving_kinds(self) -> dict[str, RolloutLowering]:
         """One rollout lowering per kind this build was asked to serve, built
-        from the kind itself (Adapter.rollout_lowering) — the bus never names a
-        mechanism, it names the kinds it pays for."""
+        by the kind itself — the bus never names a mechanism, only the kinds
+        it pays for."""
         return {kind: ADAPTERS.get(kind).instance.rollout_lowering(self._build)
                 for kind in self.serves}
 
     def _pay_demands(self, lowering: RolloutLowering) -> Mapping[str, object]:
         """What this build owes one kind, or a loud refusal.
 
-        Engine args this build can pay by construction. A PLUGIN it cannot: no
-        plugin ships installed here, so a kind demanding one is refused at
-        build time (I7 — die at boot, never mid-run) instead of reporting a
+        Engine args it can pay by construction; a PLUGIN it cannot, since none
+        ships installed here — so a kind demanding one is refused at build
+        time (I7: die at boot, never mid-run) rather than reporting a
         reachability it could not honor.
         """
         demands = lowering.demands()
@@ -129,12 +120,12 @@ class VllmEngine:
         return tuple(self._tokenizer.encode(text, add_special_tokens=False))
 
     def reachability(self, sites) -> Mapping[str, Mechanism]:
-        """This build's self-reported inventory: the union of what its served
-        kinds reach, asked in build order.
+        """This build's inventory: the union of what its served kinds reach,
+        asked in build order.
 
         A kind this build did not pay for is not in the union at all, so its
         sites come back NONE and a tenant needing one is refused at Phase 0
-        rather than served wrong (#25b).
+        rather than served wrong.
         """
         def reach(meta) -> Mechanism:
             for lowering in self._lowerings.values():
@@ -144,14 +135,13 @@ class VllmEngine:
         return {meta.name: reach(meta) for meta in sites}
 
     def add_bundle(self, bundle: Bundle) -> None:
-        """THE bus loop (rollout side): every kind in the bundle, made resident
-        through its own lowering.
+        """THE bus loop: every kind in the bundle, made resident through its
+        own lowering.
 
-        A bundle may reach more than one kind — a bank of two kinds attaches
-        two pieces of state, and its requests carry both kinds' levers.
-        Registration is additive and idempotent (the invariant), and a bundle
-        whose kinds cannot compose into one request is refused here, before any
-        request can pin it.
+        A bank of two kinds attaches two pieces of state and its requests
+        carry both kinds' levers. Registration is additive and idempotent
+        (I8), and a bundle whose kinds cannot compose into one request is
+        refused here, before any request can pin it.
         """
         if bundle.bundle_id in self._known:
             return
@@ -175,13 +165,13 @@ class VllmEngine:
         return self._lowerings[kind]
 
     def attachments(self, bundle_id: str) -> Mapping[str, object]:
-        """What each kind made resident for this bundle (kind -> its state).
-        The bus's own inventory, read by probes; requests go through levers."""
+        """What each kind made resident for this bundle (kind -> its state):
+        the bus's own inventory, read by probes. Requests go through levers."""
         return self._attached.get(bundle_id, {})
 
     def residency(self) -> Mapping[str, int]:
         """How many registered bundles each served kind holds state for — the
-        census of the multi-tenancy invariant, one number per kind."""
+        census of I8 on this engine, one number per kind."""
         counts = {kind: 0 for kind in self.serves}
         for attached in self._attached.values():
             for kind in attached:
@@ -236,10 +226,9 @@ class VllmEngine:
                            token_ids: Sequence[int],
                            bundle_id: str) -> tuple[float, ...]:
         """ONE prefill over context + tokens with prompt_logprobs: vLLM
-        returns each prompt position's logprob under the pinned bundle; we
+        returns each prompt position's logprob under the pinned bundle, and we
         read off the scored suffix. max_tokens=1 because vLLM must generate
-        something — the one decoded token is discarded. Scoring is prefill-
-        shaped traffic: the natural tenant of a prefill-disaggregated pool."""
+        something — the one decoded token is discarded."""
         if bundle_id not in self._known:
             raise RuntimeError(f"bundle {bundle_id!r} was never registered")
         if not token_ids:
@@ -271,8 +260,7 @@ class VllmEngine:
     async def sleep(self) -> None:
         """Hand the device back: vLLM's sleep(level=1) offloads the weights to
         host RAM and DISCARDS the KV cache. THE evict verb an alternating
-        host's arbiter hook calls (#52) — before this existed a deploy had to
-        reach `engine._llm` and poke `_engine_args` to build one at all (#51d).
+        host's arbiter hook calls.
 
         Idempotent, and quiet on an engine that was never built: the vLLM
         build is lazy, so an evict can arrive before the first sample, and
@@ -296,9 +284,9 @@ class VllmEngine:
 
     def check_sleeps(self) -> None:
         """Alternation is a BUILD fact: vLLM allocates its weights into a
-        releasable memory pool only when the engine was built with
-        enable_sleep_mode. A build that did not pay for it cannot sleep, and
-        says so instead of pretending it did."""
+        releasable memory pool only when built with enable_sleep_mode. A build
+        that did not pay for it cannot sleep, and says so instead of
+        pretending it did."""
         if not self.sleeps:
             raise RuntimeError(
                 f"engine for {self.base!r} was built without "
@@ -309,8 +297,8 @@ class VllmEngine:
     # ---- one unit of work ---------------------------------------------------
 
     def _levers_for(self, prompt_ids: list[int], bundle_id: str) -> Levers:
-        """Every attached kind's contribution, merged into ONE request (I8:
-        the request is where a bundle becomes USED).
+        """Every attached kind's apply(), merged into ONE request — where a
+        bundle becomes USED (I8).
 
         The kinds are asked in BANK ORDER, and one that shapes the prompt form
         replaces the plain token prompt the bus would otherwise send — which is

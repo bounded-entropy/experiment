@@ -1,11 +1,10 @@
-"""The daemon shape every role follows.
+"""The shape every daemon follows.
 
-A role owns one GPU responsibility. Its loop is always the same four beats:
-await its CONDITION (a predicate over the store — never a call into another
-role), ADMIT the residents its work occupies (arbiter.py: the physical
-resource decides, waking and evicting per its policy), do the work, write the
-store and notify. Subclass a role and override its condition method to change
-when it wants the metal; the arbiter stays dumb about roles.
+A daemon owns one GPU responsibility, and its loop is always the same four
+beats: await its CONDITION (a predicate over the store — never a call into
+another daemon), ADMIT the residents its work occupies, do the work, write the
+store and notify. Override a daemon's condition method to change when it wants
+the metal; the arbiter stays dumb about which daemon is asking.
 """
 
 from __future__ import annotations
@@ -31,4 +30,5 @@ class Daemon(ABC):
 
     @abstractmethod
     async def run_forever(self) -> None:
-        """The daemon loop; returns when this role's work for the run is done."""
+        """The daemon loop; returns when this daemon's work for the run is
+        done."""

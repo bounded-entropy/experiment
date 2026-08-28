@@ -1,4 +1,4 @@
-"""The Environment contract: drive the engine through one episode, return the
+"""The Environment contract: drive one episode against its pools, return the
 Rollout.
 
 An environment is registered as a CLASS in its own file under this folder:
@@ -8,14 +8,10 @@ An environment is registered as a CLASS in its own file under this folder:
         async def run(self, llm: PoolClient, task: Task) -> Rollout:
             ...
 
-The invariant every subclass inherits: `run` returns a Rollout — the mutable,
-inference-world episode. The RUNNER seals it (after rewards); environments
-never do. Environments may sample freely (that is the stage rule routing them
-here), and thousands run as concurrent coroutines against the resident engine.
-
-An environment is not limited to the one policy pool: the PoolClient
-(rlstack/client.py) reaches every named engine pool via `llm.pool(name)` —
-hinting pipelines, helper models, anything the episode needs.
+The rule every subclass inherits: `run` returns a Rollout — mutable,
+inference-world, unsealed. The RUNNER seals; environments never do. Sampling is
+free here, through the policy pool or any other declared pool via
+`llm.pool(name)`, and thousands of episodes run as concurrent coroutines.
 """
 
 from __future__ import annotations
@@ -39,7 +35,7 @@ class Environment(ABC):
     @abstractmethod
     async def run(self, llm: PoolClient, task: Task) -> Rollout:
         """Drive sample calls until the episode is finished; return the Rollout
-        (unsealed — sealing is the runner's job, after rewards)."""
+        unsealed — the seal is the runner's, at run_episode."""
 
 
 @dataclass(frozen=True)

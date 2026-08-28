@@ -1,17 +1,13 @@
 """Hinted self-scoring: the policy's own logprobs under privileged conditioning.
 
-THE teacher channel (I9) in its simplest true form: for each sealed
-trajectory, prepend a hint (privileged information the sampler never saw),
-re-score the trajectory's OWN generated tokens through the policy pool in one
-prefill pass per turn, and emit the per-token logprobs as a token_level
-column. A loss that requires the column (opsd) then distills the policy
-toward what it believes when it knows the answer — no second model, no pass
-planning, pure pipeline.
-
-The hint is task metadata: meta["hint"] verbatim when present, else
-"The answer is {meta['answer']}. " — the demo teacher for verifier-style
-tasks. Scoring consumes no randomness, so adding this processor never shifts
-the run's sampling seeds.
+For each sealed trajectory, prepend a hint the sampler never saw, re-score the
+trajectory's OWN generated tokens through the policy pool (score traffic, one
+prefill pass per turn), and emit the per-token result as a token_level column;
+opsd requires it and distills the policy toward what it believes when it knows
+the answer — one model, no second pool. The hint is task metadata:
+meta["hint"] verbatim when present, else "The answer is {meta['answer']}. ",
+the demo teacher for verifier-style tasks. Scoring is seedless, so adding this
+processor never shifts the run's sampling seeds.
 """
 
 from __future__ import annotations

@@ -1,18 +1,14 @@
-"""The batched replay seam: which adapter state each ROW of a trainer forward
-carries.
+"""The replay routing seam: which slot each ROW of a trainer forward carries.
 
-The engine batches requests that pin different bundles and indexes its LoRA
-slot banks per token (punica); the trainer batches documents into ONE padded
-forward and indexes the installed deltas PER ROW — same flavor, same reason
-(I8: multi-tenancy on both sides of the bridge). This module is the trainer's
-half of that: one RowPlan per loaded base, routed by the learner for the
-duration of one forward, read by every replay lowering wired into the tree.
+A slot is one tenant's installed deltas; a RowPlan is routed for exactly one
+padded forward and RAISES when a lowering runs unrouted, because an unrouted
+replay forward is a wiring bug and never a fallback to whoever went last. The
+trainer-side twin of the engine's per-token adapter index (I8).
 
-The plan rides ON THE MODEL because the model is the one handle
-Adapter.install_replay receives (adapters/base.py) — the routing has to reach
-every lowering without widening that five-member surface. torch is imported at
-module scope, so this file loads from the kinds' compute halves and the
-learner, never from the package root (STYLE rule 7).
+The plan rides ON THE MODEL because the model is the one handle install_replay
+receives, so routing reaches every wired lowering without widening the kind
+contract. torch is imported at module scope: this file loads from the kinds'
+compute halves and the learner, never from the package root.
 """
 
 from __future__ import annotations
@@ -31,10 +27,10 @@ ROW_PLAN = "_rlstack_row_plan"
 class ReplayRows:
     """One padded forward's routing table.
 
-    A SLOT is one tenant's installed deltas, addressed the way a site can ask
-    for them: {site path -> the params object holding that site's delta}.
-    `slots` is the slot order and `index` is [rows] long — row r applies slot
-    index[r]. A verb pins one tenant, so today every microbatch is the
+    A SLOT is one tenant's installed deltas, addressed the way a site asks for
+    them: {site path -> the params object holding that site's delta}. `slots` is
+    the slot order and `index` is [rows] long — row r applies slot index[r].
+    Every Learner verb pins one tenant, so today each microbatch is the
     degenerate one-slot case; a coalesced microbatch is the same record with
     more slots and a mixed index.
     """
@@ -54,9 +50,9 @@ class ReplayRows:
         """The one slot every row carries, or None when the rows disagree.
 
         THE parity anchor: with one slot a site applies the plain (x A^T) B^T
-        it applied under swap-install, over the whole batch in one GEMM pair —
-        so a single-tenant microbatch is bit-identical to the pre-batching
-        trainer, and the per-row path is entered only when it is needed.
+        over the whole batch in one GEMM pair, so a single-tenant microbatch is
+        bit-identical however many tenants share the learner, and the per-row
+        path is entered only when it is actually needed.
         """
         return self.slots[0] if len(self.slots) == 1 else None
 
