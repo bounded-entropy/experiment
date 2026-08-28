@@ -201,5 +201,32 @@ class CompletionOrderTest(unittest.TestCase):
         self.assertNotEqual(scrambler.finished, scrambler.launched)
 
 
+class AnnotationLeavesTheRunAloneTest(unittest.TestCase):
+    """#58's half of this file's claim: an annotation is FLAVORTEXT beside
+    runs/, so naming, tagging and noting a run changes not one byte of its
+    run directory — and crash recovery, which sweeps everything no ledger
+    line committed, never sees it."""
+
+    def test_annotating_a_run_changes_no_byte_of_it(self) -> None:
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        store, train, heldout = arith_store(tmp.name)
+        report = run_experiment(arith_spec(train, heldout), SCHEMA, store,
+                                FakeEngine(), FakeLearner())
+        before = snapshot(store, report.run_id)
+        self.assertTrue(before)
+
+        store.annotate_run(report.run_id, name="the good one",
+                           tags=["opd", "l3-5"], note="kl fell to 0.28")
+        self.assertEqual(snapshot(store, report.run_id), before)
+        self.assertTrue(store.path_of("annotations.jsonl").exists())
+        self.assertNotIn("annotations.jsonl", before)   # never inside the run
+
+        store.open_run(report.run_id)                   # attach: sweeps unsealed
+        self.assertEqual(snapshot(store, report.run_id), before)
+        self.assertEqual(store.read_annotations()[report.run_id]["tags"],
+                         ["opd", "l3-5"])
+
+
 if __name__ == "__main__":
     unittest.main()

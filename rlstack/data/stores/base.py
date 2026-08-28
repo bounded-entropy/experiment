@@ -19,6 +19,9 @@ subclasses Store and implements only the verbs (local.py is the reference):
                                                never reads them)
     panels.json                                user-defined derived graphs
                                                (observer reads; never identity)
+    annotations.jsonl                          names, tags and notes a human
+                                               attached to runs — flavortext,
+                                               beside runs/ and never inside it
 
 Writes are atomic; the ledger is append-only, strictly increasing, and the
 commit bit; resume is attach plus the ledger tail, and work no ledger line
@@ -31,8 +34,9 @@ import gzip
 import hashlib
 import io
 import json
+import time
 from abc import ABC, abstractmethod
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
@@ -40,6 +44,10 @@ BLOB_SECTIONS = ("adapters", "optim")
 
 # Sections holding one artifact per update, committed by the ledger.
 UPDATE_SECTIONS = (("waves", ".jsonl.gz"), ("postdata", ".json"))
+
+# The three things a human may say about a run. Each merges independently:
+# a row carrying only a note leaves an earlier name standing.
+ANNOTATION_FIELDS = ("name", "tags", "note")
 
 
 class StoreError(RuntimeError):
@@ -286,6 +294,58 @@ class Store(ABC):
     def read_fleet_log(self) -> list[dict[str, Any]]:
         """Every parseable fleet event; a torn tail is tolerated."""
         return self._read_log("fleet/log.jsonl")
+
+    # ---- annotations (FLAVORTEXT: never hashed, never read by experiments) --
+
+    def annotations_key(self) -> str:
+        """annotations.jsonl AT THE STORE ROOT — beside runs/, never inside a
+        run directory.
+
+        A run directory is identity plus the commit record, and
+        resume-equivalence compares its bytes; a name a human typed belongs to
+        neither, so it lives outside. Annotating a run cannot change one byte
+        of it."""
+        return "annotations.jsonl"
+
+    def annotate_run(self, run_id: str, *, name: str | None = None,
+                     tags: Sequence[str] | None = None,
+                     note: str | None = None) -> None:
+        """Append ONE annotation row: {"t", "run_id", + only the fields passed
+        here}. Append-only — an annotation is never edited and never deleted,
+        only superseded by a later row.
+
+        Flavortext, and only flavortext: nothing here is hashed into identity,
+        no experiment ever reads it, and the runner never writes it. A call
+        naming no field is a mistake, not a no-op."""
+        row: dict[str, Any] = {"t": time.time(), "run_id": run_id}
+        if name is not None:
+            row["name"] = str(name)
+        if tags is not None:
+            row["tags"] = [str(tag) for tag in tags]
+        if note is not None:
+            row["note"] = str(note)
+        if not set(row) & set(ANNOTATION_FIELDS):
+            raise StoreError(
+                f"annotate_run({run_id!r}) named none of {ANNOTATION_FIELDS}")
+        self._append_line(self.annotations_key(), _canonical(row))
+
+    def read_annotations(self) -> dict[str, dict[str, Any]]:
+        """{run_id: merged fields} — LATEST WINS PER FIELD, in append order.
+
+        A later row's "tags" replaces the whole list (a tag is never removed
+        one at a time); a row carrying only a note leaves an earlier name
+        standing. Unparseable lines are skipped: this is flavortext, not a
+        commit record, and a torn tail must never stop a page rendering."""
+        merged: dict[str, dict[str, Any]] = {}
+        for row in self._read_log(self.annotations_key()):
+            run_id = row.get("run_id")
+            if not isinstance(run_id, str):
+                continue
+            fields = merged.setdefault(run_id, {})
+            for field in ANNOTATION_FIELDS:
+                if field in row:
+                    fields[field] = row[field]
+        return merged
 
     def _read_log(self, key: str) -> list[dict[str, Any]]:
         try:
