@@ -433,6 +433,13 @@ def report_run(store, run_id: str, label: str, n_updates: int,
         print(f"    u{e['update']:>3}: reward {e['post'].get('reward', float('nan')):.3f} "
               f"loss {e['train']['loss']:+.4f} gap {e['train']['logprob_gap']:.4f} "
               f"grad {e['train']['grad_norm']:.2f}")
+    # a collapsed tenant still fills a ledger: once every rollout scores 0 the
+    # advantages vanish, the gradient is exactly 0 and the policy is frozen at
+    # whatever broke it. That is a real failure of the run and must be a check,
+    # not a shape the reader has to notice in the numbers.
+    grads = [e["train"]["grad_norm"] for e in entries[1:]]
+    check(f"{label}: kept training after the first update", any(g > 0 for g in grads),
+          f"grad_norm 0 on every update after the first")
     due = [u for u in range(1, n_updates + 1) if u % 4 == 0]
     have = [u for u in due if run.has_eval(u)]
     check(f"{label}: evals present", have == due, f"{have} of {due}")
@@ -442,7 +449,7 @@ def report_run(store, run_id: str, label: str, n_updates: int,
 
 @app.function(image=image, gpu="L4", volumes={"/store": store_volume},
               timeout=5400)
-def adapters(n_updates: int = 8) -> dict:
+def adapters(n_updates: int = 8, seeds: int = 410) -> dict:
     import asyncio
 
     import torch
@@ -466,13 +473,25 @@ def adapters(n_updates: int = 8) -> dict:
     host = Host("l4-adapters", engines=(engine,), learner=TorchLearner(),
                 store=store)
 
+    # `seeds` moves all three identities together: a spec's master seed is
+    # inside its run_id, so re-running with the same one ATTACHES to the
+    # finished runs (correct, and the resume path proving itself) instead of
+    # training. Bump it when the point is to watch three tenants train at once.
     tenants = {
-        "lora": make_spec(store, bank_kinds=("lora",), master=401,
+        "lora": make_spec(store, bank_kinds=("lora",), master=seeds + 1,
                           n_updates=n_updates),
-        "soft_prompt": make_spec(store, bank_kinds=("soft_prompt",), master=402,
-                                 n_updates=n_updates, lr=1e-2),
-        "both": make_spec(store, bank_kinds=("lora", "soft_prompt"), master=403,
-                          n_updates=n_updates),
+        # A SOFT PROMPT WANTS ITS OWN LEARNING RATE, and it is not the LoRA's.
+        # AdamW's step is ~lr per coordinate, so one update moves the rows by
+        # lr*sqrt(n*d) = lr*90 — against a row block whose whole norm is 1.8 at
+        # the default init. At 1e-2 that is half the prompt per step: the first
+        # metal run of this file collapsed to reward 0 by update 3 and froze
+        # there (zero advantage, zero gradient, and a logprob_gap of 0.25
+        # because rows that far outside the embedding distribution are exactly
+        # where prefill and decode kernels diverge). 5e-4 is ~4% per step.
+        "soft_prompt": make_spec(store, bank_kinds=("soft_prompt",),
+                                 master=seeds + 2, n_updates=n_updates, lr=5e-4),
+        "both": make_spec(store, bank_kinds=("lora", "soft_prompt"),
+                          master=seeds + 3, n_updates=n_updates),
     }
 
     async def main() -> dict:
