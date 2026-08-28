@@ -35,6 +35,8 @@ from __future__ import annotations
 
 import modal
 
+from probe import CHECKS, check
+
 app = modal.App("rlstack-batch-parity")
 
 image = (
@@ -42,7 +44,7 @@ image = (
     .pip_install("vllm==0.28.0", "torch==2.13.0", "transformers==5.16.1",
                  "safetensors", "numpy")
     .env({"VLLM_USE_FLASHINFER_SAMPLER": "0"})
-    .add_local_python_source("rlstack", "rlstack_engine")
+    .add_local_python_source("probe", "rlstack", "rlstack_engine")
 )
 
 BASE = "Qwen/Qwen3-0.6B"
@@ -130,12 +132,6 @@ def parity() -> dict:
 
     def gap(got, want) -> float:
         return float((got.float() - want.float()).abs().max())
-
-    results: list = []
-
-    def check(name: str, ok: bool, detail: str = "") -> None:
-        results.append((name, ok, detail))
-        print(f"    [{'PASS' if ok else 'FAIL'}] {name}  {detail}")
 
     # ---- one dtype's worth of evidence --------------------------------------
 
@@ -241,7 +237,7 @@ def parity() -> dict:
     measure(torch.float32, 1e-4)      # the mechanism, in exact arithmetic
     measure(torch.bfloat16, 5e-1)     # the production dtype, honestly reported
 
-    failed = [(n, d) for n, ok, d in results if not ok]
-    print(f"\n[parity] {sum(ok for _, ok, _ in results)} passed, "
+    failed = [(n, d) for n, ok, d in CHECKS if not ok]
+    print(f"\n[parity] {sum(ok for _, ok, _ in CHECKS)} passed, "
           f"{len(failed)} failed: {failed}")
-    return {"passed": sum(ok for _, ok, _ in results), "failed": failed}
+    return {"passed": sum(ok for _, ok, _ in CHECKS), "failed": failed}

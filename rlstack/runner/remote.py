@@ -169,14 +169,15 @@ class HostService:
                            for engine in self.host.engines]}
 
     def _engine(self, base: str | None, tp: int) -> Engine:
-        exact = [e for e in self.host.engines if e.base == base and e.tp == tp]
-        wildcard = [e for e in self.host.engines
-                    if e.base is None and e.tp == tp]
-        if not exact and not wildcard:
+        """Resolution delegates to the host's own shape-matched lookup
+        (Host.engine_for — the one home of the rule); the wire's only
+        addition is turning "not served" into a refusal."""
+        engine = self.host.engine_for(base, tp)
+        if engine is None:
             raise KeyError(
                 f"host {self.host.name!r} serves no ({base!r}, tp={tp}); it "
                 f"serves {[(e.base, e.tp) for e in self.host.engines]}")
-        return (exact or wildcard)[0]
+        return engine
 
     async def serve(self, verb: str, payload: dict) -> dict:
         """One admitted verb, admission included: enter the owning host's

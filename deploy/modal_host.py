@@ -36,6 +36,8 @@ their annotation OBJECT ("'str' object has no attribute '__name__'").
 
 import modal
 
+from probe import arith_tasks
+
 app = modal.App("rlstack-remote")
 
 store_volume = modal.Volume.from_name("rlstack-store", create_if_missing=True)
@@ -45,7 +47,7 @@ image = (
     .pip_install("vllm==0.28.0", "torch==2.13.0", "transformers==5.16.1",
                  "safetensors", "numpy")
     .env({"VLLM_USE_FLASHINFER_SAMPLER": "0"})
-    .add_local_python_source("rlstack", "rlstack_engine")
+    .add_local_python_source("probe", "rlstack", "rlstack_engine")
 )
 
 BASE = "Qwen/Qwen3-0.6B"
@@ -163,18 +165,6 @@ class ModalTransport:
 # the driver: a complete run whose main pool lives in another container
 # ---------------------------------------------------------------------------
 
-def arith_tasks(n: int, seed: int) -> bytes:
-    import json
-    import random
-
-    rng = random.Random(seed)
-    rows = []
-    for i in range(n):
-        a, b = rng.randrange(10, 99), rng.randrange(10, 99)
-        rows.append({"id": f"arith-{i:04d}",
-                     "prompt": f"What is {a}+{b}? The answer is",
-                     "meta": {"answer": a + b}})
-    return "".join(json.dumps(r, sort_keys=True) + "\n" for r in rows).encode()
 
 
 def arith_spec(store, *, n_updates: int, master: int):

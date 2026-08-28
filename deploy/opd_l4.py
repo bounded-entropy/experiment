@@ -71,6 +71,8 @@ their annotation OBJECT (deploy/modal_host.py carries the same note).
 
 import modal
 
+from probe import CHECKS, arith_tasks, check
+
 app = modal.App("rlstack-opd")
 
 store_volume = modal.Volume.from_name("rlstack-store", create_if_missing=True)
@@ -92,7 +94,7 @@ image = (
           # downloaded once, ever (hf_hub 1.x transfers over Xet by default —
           # HF_HUB_ENABLE_HF_TRANSFER is retired and warns if set)
           "HF_HOME": "/hf"})
-    .add_local_python_source("rlstack", "rlstack_engine")
+    .add_local_python_source("probe", "rlstack", "rlstack_engine")
 )
 
 STUDENT = "Qwen/Qwen3-8B"
@@ -100,12 +102,6 @@ TEACHER = "Qwen/Qwen3-32B"
 STORE = "modal://rlstack-store"
 VOLUMES = {"/store": store_volume, "/hf": hf_cache}
 
-CHECKS = []
-
-
-def check(name, ok, detail=""):
-    CHECKS.append((name, bool(ok), detail))
-    print(f"  [{'PASS' if ok else 'FAIL'}] {name}" + (f"  {detail}" if detail else ""))
 
 
 # ---------------------------------------------------------------------------
@@ -228,18 +224,6 @@ class ModalTransport:
 # the experiment
 # ---------------------------------------------------------------------------
 
-def arith_tasks(n, seed):
-    import json
-    import random
-
-    rng = random.Random(seed)
-    rows = []
-    for i in range(n):
-        a, b = rng.randrange(10, 99), rng.randrange(10, 99)
-        rows.append({"id": f"arith-{i:04d}",
-                     "prompt": f"What is {a}+{b}? The answer is",
-                     "meta": {"answer": a + b}})
-    return "".join(json.dumps(r, sort_keys=True) + "\n" for r in rows).encode()
 
 
 def opd_spec(store, n_updates, master):

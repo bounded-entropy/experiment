@@ -30,6 +30,8 @@ from __future__ import annotations
 
 import modal
 
+from probe import CHECKS, arith_tasks, check
+
 app = modal.App("rlstack-fsdp")
 
 store_volume = modal.Volume.from_name("rlstack-store", create_if_missing=True)
@@ -39,32 +41,14 @@ image = (
     .pip_install("vllm==0.28.0", "torch==2.13.0", "transformers==5.16.1",
                  "safetensors", "numpy")
     .env({"VLLM_USE_FLASHINFER_SAMPLER": "0"})
-    .add_local_python_source("rlstack", "rlstack_engine")
+    .add_local_python_source("probe", "rlstack", "rlstack_engine")
 )
 
 BASE = "Qwen/Qwen3-0.6B"
 BIG = "Qwen/Qwen3-8B"
 
-CHECKS: list[tuple[str, bool, str]] = []
 
 
-def check(name: str, ok: bool, detail: str = "") -> None:
-    CHECKS.append((name, ok, detail))
-    print(f"  [{'PASS' if ok else 'FAIL'}] {name}" + (f"  {detail}" if detail else ""))
-
-
-def arith_tasks(n: int, seed: int) -> bytes:
-    import json
-    import random
-
-    rng = random.Random(seed)
-    rows = []
-    for i in range(n):
-        a, b = rng.randrange(10, 99), rng.randrange(10, 99)
-        rows.append({"id": f"arith-{i:04d}",
-                     "prompt": f"What is {a}+{b}? The answer is",
-                     "meta": {"answer": a + b}})
-    return "".join(json.dumps(r, sort_keys=True) + "\n" for r in rows).encode()
 
 
 def fsdp_spec(store, base: str, *, width: int, n_updates: int, master: int):

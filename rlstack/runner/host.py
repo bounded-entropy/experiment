@@ -153,7 +153,7 @@ class Host:
         metal dies at construction, not mid-run."""
         for regime in self.regimes:
             if regime.kind == "inference":
-                if self._engine_for(regime.base, regime.shape) is None:
+                if self.engine_for(regime.base, regime.shape) is None:
                     raise HostError(
                         f"host {self.name!r} declares regime {regime.name!r} "
                         f"({regime.base!r}, tp={regime.shape}) but no owned "
@@ -175,16 +175,17 @@ class Host:
         group = f"host:{self.name}" if len(self.regimes) > 1 else None
         for regime in self.regimes:
             obj = (self.learner if regime.kind == "training"
-                   else self._engine_for(regime.base, regime.shape))
+                   else self.engine_for(regime.base, regime.shape))
             # fraction 0.0, not None: a later tenant's declared fraction is
             # a carve hint and must never be adopted into this host's load
             self.arbiter.attach(obj, label=f"{self.name}:{regime.name}",
                                 group=group, fraction=0.0)
 
-    def _engine_for(self, base: str | None, tp: int) -> Engine | None:
-        """Shape-matched lookup: exact base first, fake-metal wildcard as
-        fallback — but tp always matches exactly (a build fact has no
-        wildcard)."""
+    def engine_for(self, base: str | None, tp: int) -> Engine | None:
+        """THE shape-matched lookup — exact base first, fake-metal wildcard
+        as fallback, tp always exact (a build fact has no wildcard). One home
+        for the rule: binding, attestation, and the wire's HostService all
+        resolve through this."""
         exact = [e for e in self.engines if e.base == base and e.tp == tp]
         wildcard = [e for e in self.engines if e.base is None and e.tp == tp]
         return (exact or wildcard or [None])[0]
@@ -206,7 +207,7 @@ class Host:
                 if member.name in remotes:
                     continue
                 wanted = member.base or spec.policy.base
-                engine = self._engine_for(wanted, member.tp)
+                engine = self.engine_for(wanted, member.tp)
                 if engine is None:
                     raise HostError(
                         f"host {self.name!r} has no engine serving {wanted!r} "
