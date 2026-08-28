@@ -155,6 +155,19 @@ then has. Native levers are the engine's own; `side_attention` is ours, shipped
 as a plugin.
 `rlstack/policy/adapters/base.py` (`Mechanism`)
 
+> **Why the set is closed.** A mechanism is not a label — it is the
+> within-batch compute that applies many tenants' state inside one fused
+> forward, and someone must build it. Three tiers: a kind that compiles to an
+> existing mechanism's state shape rides for free (lora on `punica` — vLLM's
+> own segmented kernels); a kind whose effect lives at a per-request point of
+> the graph needs no batched compute at all (`prompt_embeds`, `logits` — the
+> input and sampling boundaries are already per-sequence); a kind that needs
+> per-tenant compute *inside* the fused forward must ship a NEW mechanism as
+> an engine plugin, re-earning the per-token → tenant index mapping the
+> trainer's row plan gets for free (`side_attention` is the standing example,
+> refused until its mechanism exists). The lowerings select *into* a
+> mechanism; they never create one.
+
 **Lowering** — how one kind's math is realized on one side of the bridge. Every
 kind ships two. A **rollout lowering** serves the kind through an engine build
 (`<kind>_vllm.py`, contract in `rollout.py`); a **replay lowering** wires it
