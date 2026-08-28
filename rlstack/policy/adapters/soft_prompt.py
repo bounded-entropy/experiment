@@ -8,8 +8,8 @@ queries -> prompt[:n] attention rectangle, the site an attn_bias attaches to
 
 Its two lowerings prepend the same rows at the same place. ROLLOUT: vLLM
 0.28's mixed embeds prompt — the engine embeds the request's token ids from
-its OWN table and takes only the learned rows from us (runner/engines/
-vllm_engine.py::_prompt_for). REPLAY: a boundary around the trainer's forward
+its OWN table and takes only the learned rows from us
+(soft_prompt_vllm.SoftPromptRollout). REPLAY: a boundary around the trainer's forward
 that prepends the rows and cuts the positions back off the logits
 (soft_prompt_torch.PromptBoundary), so the [len(batch)] alignment above it is
 untouched.
@@ -38,7 +38,12 @@ class SoftPrompt(Adapter):
                      has_weight=False, shape=None, is_boundary=False),
         )
 
-    # compute half — soft_prompt_torch imports torch, so it loads lazily (rule 7)
+    # compute halves — both import torch, so both load lazily, from here
+    # only (rule 7)
+
+    def rollout_lowering(self, build):
+        from rlstack.policy.adapters import soft_prompt_vllm
+        return soft_prompt_vllm.SoftPromptRollout(build)
 
     def params(self, sites: tuple[SiteMeta, ...], init: dict):
         from rlstack.policy.adapters import soft_prompt_torch

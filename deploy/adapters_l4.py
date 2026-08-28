@@ -107,7 +107,7 @@ def parity() -> dict:
           f"transformers={transformers.__version__}")
 
     engine = VllmEngine(BASE, gpu_memory_utilization=0.45, max_model_len=512,
-                        max_lora_rank=RANK, prompt_embeds=True)
+                        max_lora_rank=RANK, serves=("lora", "soft_prompt"))
     learner = TorchLearner()
     learner._ensure_base(BASE)
     model = learner._model
@@ -206,8 +206,9 @@ def parity() -> dict:
         print(f"[bundle] {name}: {bundle.bundle_id} "
               f"payloads={sorted(bundle.payloads)}")
     check("a bank of two kinds registers with BOTH consumers",
-          bundles["both"].bundle_id in engine._lora
-          and bundles["both"].bundle_id in engine._rows)
+          set(engine.attachments(bundles["both"].bundle_id))
+          == {"lora", "soft_prompt"},
+          f"{sorted(engine.attachments(bundles['both'].bundle_id))}")
 
     # ---- the trainer's side --------------------------------------------------
 
@@ -453,7 +454,8 @@ def adapters(n_updates: int = 8, seeds: int = 410) -> dict:
 
     # ONE engine, built with both levers; ONE multi-tenant learner
     engine = VllmEngine(BASE, gpu_memory_utilization=0.40, max_model_len=512,
-                        max_loras=8, max_lora_rank=RANK, prompt_embeds=True)
+                        max_loras=8, max_lora_rank=RANK,
+                        serves=("lora", "soft_prompt"))
     host = Host("l4-adapters", engines=(engine,), learner=TorchLearner(),
                 store=store)
 
@@ -494,10 +496,10 @@ def adapters(n_updates: int = 8, seeds: int = 410) -> dict:
             print(f"\n  -- {name} ({rep.run_id})")
             out[name] = report_run(store, rep.run_id, name, n_updates)
         print("\n[host status]", host.status())
+        served = engine.residency()
         check("one engine served every kind",
-              len(engine._rows) > 0 and len(engine._lora) > 0,
-              f"{len(engine._lora)} punica bundles, {len(engine._rows)} "
-              f"prompt-row bundles on one engine")
+              served["lora"] > 0 and served["soft_prompt"] > 0,
+              f"bundles attached per kind on one engine: {served}")
         return out
 
     out = asyncio.run(main())

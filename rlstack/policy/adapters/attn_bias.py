@@ -10,13 +10,14 @@ with site-no-match.
 
 HALF BUILT, ON PURPOSE (#46). The REPLAY lowering is real and proven
 (attn_bias_torch: the bias rides the 4-D attention mask, which the stock
-attention already adds to the scores). The ROLLOUT lowering is NOT: the seams
-the plugin was designed against do not exist on vllm 0.28.0, so
-rlstack_engine.side_attention still refuses at probe and every engine build
-honestly reports NONE for SIDE_ATTENTION — which means this kind cannot pass
-Phase 0's reachability check and no run can use it yet. That refusal is the
-feature: a kind is served when its mechanism is proven, not when its class
-exists.
+attention already adds to the scores). The ROLLOUT lowering exists as a
+declaration only (attn_bias_vllm): its demands() name a PLUGIN, and the seams
+that plugin was designed against do not exist on vllm 0.28.0 — so
+rlstack_engine.side_attention still refuses at probe, no build serves this
+kind, and every engine honestly reports NONE for SIDE_ATTENTION. This kind
+therefore cannot pass Phase 0's reachability check and no run can use it yet.
+That refusal is the feature: a kind is served when its mechanism is proven,
+not when its class exists.
 """
 
 from __future__ import annotations
@@ -33,7 +34,11 @@ class AttnBias(Adapter):
     def site_ok(self, meta: SiteMeta) -> bool:
         return not meta.has_weight
 
-    # compute half — attn_bias_torch imports torch, so it loads lazily (rule 7)
+    # compute halves — attn_bias_torch imports torch, so it loads lazily
+    # (rule 7); attn_bias_vllm is the rollout half this build cannot pay for
+    def rollout_lowering(self, build):
+        from rlstack.policy.adapters import attn_bias_vllm
+        return attn_bias_vllm.AttnBiasRollout(build)
 
     def params(self, sites: tuple[SiteMeta, ...], init: dict):
         from rlstack.policy.adapters import attn_bias_torch
