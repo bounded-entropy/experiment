@@ -9,6 +9,7 @@ to an uninterrupted run's.
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import tempfile
 import unittest
@@ -17,7 +18,8 @@ from typing import Any
 
 from common import arith_spec, arith_store
 from rlstack import (
-    FakeEngine, FakeLearner, LocalStore, fake_qwen_schema, run_experiment,
+    FakeEngine, FakeLearner, FinishEvent, LocalStore, fake_qwen_schema,
+    run_experiment,
 )
 
 SCHEMA = fake_qwen_schema(4, base="Qwen/Qwen3-0.6B")
@@ -131,6 +133,72 @@ class DeterminismTest(unittest.TestCase):
                                     FakeEngine(), FakeLearner())
             snapshots.append(snapshot(store, report.run_id))
         self.assertEqual(snapshots[0], snapshots[1])
+
+
+class InterleavingEngine(FakeEngine):
+    """A FakeEngine that hands control back to the event loop a seed-dependent
+    number of times, so concurrent episodes finish in an order that has nothing
+    to do with the order they were launched in.
+
+    It changes no content: the fakes' determinism contract makes a completion a
+    pure function of its seed, and this only decides who gets there first.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.launched: list[int] = []
+        self.finished: list[int] = []
+
+    async def sample_tokens(self, messages, sampling, stop, bundle_id, seed):
+        self.launched.append(seed)
+        for _ in range(seed % 7):
+            await asyncio.sleep(0)
+        async for event in super().sample_tokens(messages, sampling, stop,
+                                                 bundle_id, seed):
+            if isinstance(event, FinishEvent):
+                self.finished.append(seed)
+            yield event
+            await asyncio.sleep(0)
+
+
+class CompletionOrderTest(unittest.TestCase):
+    """The bytes may not know which episode finished first.
+
+    Both fans that sample — the Generator's wave and the Evaluator's held-out
+    set — launch every (task, sample) episode at once under a max_inflight
+    semaphore, so the width of the fan and the speed of each episode decide
+    the completion order. Neither may reach the run directory: seeds are
+    derived per (task, sample) before anything is scheduled, and every
+    reduction runs in task order (#53). So the same run at max_inflight=1, at
+    64, and with the engine finishing episodes out of order is the same bytes,
+    eval/ included.
+    """
+
+    def go(self, engine: FakeEngine, max_inflight: int) -> dict[str, str]:
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        store, train, heldout = arith_store(tmp.name)
+        report = run_experiment(arith_spec(train, heldout), SCHEMA, store,
+                                engine, FakeLearner(), max_inflight)
+        return snapshot(store, report.run_id)
+
+    def test_eval_bytes_do_not_depend_on_the_completion_order(self) -> None:
+        reference = self.go(FakeEngine(), 64)
+        evals = sorted(p for p in reference if p.startswith("eval/"))
+        self.assertTrue(evals, "the spec under test must actually run evals")
+
+        scrambler = InterleavingEngine()
+        narrow = InterleavingEngine()
+        for label, run in (("serial", self.go(FakeEngine(), 1)),
+                           ("scrambled", self.go(scrambler, 64)),
+                           ("scrambled, narrow", self.go(narrow, 3))):
+            with self.subTest(schedule=label):
+                self.assertEqual({p: run[p] for p in evals},
+                                 {p: reference[p] for p in evals})
+                self.assertEqual(run, reference)   # ...and the rest of it
+
+        # the pin is only worth something if the scrambling really scrambled
+        self.assertNotEqual(scrambler.finished, scrambler.launched)
 
 
 if __name__ == "__main__":

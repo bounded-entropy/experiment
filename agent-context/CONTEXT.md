@@ -1922,6 +1922,76 @@ specs; backends (local/modal/skypilot) and GPU topology are semantics-neutral.
     device (the arithmetic says ~5 x 0.15 fits, nothing tried it); a sleep
     host under several tenants at once; sub-GPU partitions at tp>1.
 
+53. THE EVAL'S TAIL AND THE CHORUS'S LAST RANK (settled by execution; both
+    observations are the MATH shakeout's, made while Phase A was being
+    priced). Two defects that only a long run on real metal could surface —
+    one that spends money, one that loses the report of how the money was
+    spent — fixed in the two files that own them. No spec shape moved:
+    I1-I12 stand, and the run directory's bytes are unchanged (proven, see
+    below). 498 tests green on fakes (56 skips), test_resume run explicitly.
+    - THE EVAL WAS N SERIAL ROUND-TRIPS. `Evaluator._evaluate` gathered over
+      n_samples INSIDE a `for task in self.tasks` loop, so a held-out set of
+      32 tasks at n_samples=1 was 32 sequential episodes. At MATH lengths
+      that is ten to sixteen minutes of billed tail per eval, and the LAST
+      eval of a run has no training left to hide inside. `sample_heldout`
+      now launches every (task, sample) episode at once under the daemon's
+      existing max_inflight semaphore — the shape `collect_wave` has always
+      had for generation — and the engine batches whatever arrives.
+    - THE CONSTRAINT THAT MADE IT CAREFUL: eval/ IS INSIDE THE BYTE
+      CONTRACT (test_resume: resume-equivalence AND two-straight-runs are
+      byte-identical run dirs, evals included). The argument now stands in
+      two named methods. `sample_heldout`: each episode's seed is derived
+      from (task.id, sample_index) BEFORE anything is scheduled, so which
+      episodes ran together cannot change what any of them sampled, and
+      `gather` returns in ARGUMENT order, so the wave is a function of
+      self.tasks alone. `reduce_in_task_order`: every accumulation runs over
+      the wave, never over completions — float addition is not associative,
+      so a mean summed in completion order would be a mean that depends on
+      the scheduler. Proven twice: the whole run dir is byte-identical
+      before and after the change, and the new CompletionOrderTest runs the
+      same experiment at max_inflight 1, 64 and 3 against an engine that
+      deliberately finishes episodes out of launch order, asserting one
+      snapshot. It bites: reducing in completion order (as_completed) fails
+      it, and fails the old determinism test with it.
+    - THE CHORUS COULD LOSE THE CONTAINER. After a COMPLETED run a follower
+      rank was still blocked in `hear` (an NCCL broadcast); `RankGroup.stop`
+      sent terminate() and never confirmed death; the children are daemonic,
+      so multiprocessing's exit handler joined them with NO timeout and the
+      interpreter's exit hung; Modal killed the container at its 30-second
+      grace and the run's whole printed report died unflushed with it.
+    - THE LADDER, AND WHY THE POLITE RUNG CANNOT BE TRUSTED. A rank inside a
+      collective is down in the driver, running no bytecode, so SIGTERM is a
+      request nobody is at the desk to receive. `escalate` therefore climbs
+      left-on-its-own → SIGTERM → SIGKILL, JOINING after each rung (a
+      teardown that signals and walks away is exactly what left the wedged
+      child), on ONE shared deadline per rung rather than per child, and
+      returns a `Teardown` record — deaf / wedged / lost, plus whether the
+      farewell went out — printed as one line whenever it is not graceful. A
+      wedged collective at shutdown is worth a line, not silence. The
+      process group is destroyed only on a graceful ending: after a kill
+      there is no group left to agree with.
+    - THE FAREWELL IS BOUNDED TOO, which is the half that makes "stop cannot
+      wedge" true. `announce(STOP)` is itself a collective: against a dead
+      or mis-sequenced follower it never matches and blocks until the
+      group's own 1800s timeout, so the farewell that exists to END the
+      chorus would be the thing that hangs rank 0. It now goes out on a
+      daemon thread against the graceful deadline; not returning (or
+      raising) means the chorus is past hearing. stop() is bounded by
+      grace_s + 2 x signal_grace_s = 20s by default, inside Modal's 30.
+    - THE TEST STANDS THE WEDGE UP WITHOUT METAL (tests/test_ranks.py,
+      torch-gated, ~2.7s): `escalate` speaks only the process API, so a
+      spawned stub that installs SIG_IGN on SIGTERM is a rank wedged in a
+      collective exactly where it matters — the signal lands, nothing
+      happens, SIGKILL finishes it. Removing the kill rung fails the suite.
+    NOT DONE (deliberate, and out of this session's file scope): the eval
+    POST half is now the unbounded one — `run_pipeline` gathers over every
+    group with no limiter, which for a 64-task eval against a 32B teacher is
+    64 concurrent scoring fans (runner/post.py; the async scorer daemon
+    thread is where this belongs). `FsdpTorchLearner.stop` still returns
+    None and drops the Teardown record, so on metal the printed line is the
+    report. And deploy/math_opd_l4.py::full's docstring still prices the
+    eval tail as sequential — stale as of this entry.
+
 ## Open threads (do NOT treat as settled; flag when your answer touches them)
 
 - PLANNED (Samarth-approved, queued behind #48 landing): the OPD stress test

@@ -18,7 +18,7 @@ import math
 from typing import Callable
 
 from rlstack.data.stores.base import RunHandle, Store
-from rlstack.data.trajectory import Group, Wave
+from rlstack.data.trajectory import Group, Task, Trajectory, Wave
 from rlstack.policy.compile import Bundle, compile_bundle
 from rlstack.registry import ADAPTERS
 from rlstack.runner.traffic import EnginePoolClient, Routes
@@ -107,24 +107,58 @@ class Evaluator(Daemon):
             await self.signals.notify()
 
     async def _evaluate(self, update: int, routes: Routes) -> None:
+        wave = Wave(await self.sample_heldout(update, routes))
+        columns = await run_pipeline(self.pipeline, wave, routes, self.sampling,
+                                     self.master, update, phase="eval-post")
+        rows, summary = self.reduce_in_task_order(update, wave, columns)
+        self.run.write_eval(update, "results.jsonl", _jsonl(rows))
+        self.run.write_eval(update, "summary.json",
+                            json.dumps(summary, sort_keys=True,
+                                       separators=(",", ":")))
+
+    async def sample_heldout(self, update: int,
+                             routes: Routes) -> list[Group]:
+        """Every held-out (task, sample) episode at once, bounded by
+        max_inflight — and grouped back in TASK order.
+
+        The held-out tasks are independent, so walking them one at a time made
+        an eval of N tasks N serial round-trips: at MATH lengths that was ten
+        minutes of billed tail with nothing left to overlap it (#53). They are
+        launched together and the engine batches whatever arrives; the
+        semaphore is the same bound the Generator's wave runs under.
+
+        Concurrency may not reach the bytes. Each episode's seed is derived
+        from (task.id, sample_index) — fixed before it is scheduled, so WHICH
+        episodes ran together cannot change what any of them sampled — and
+        `gather` returns in ARGUMENT order, so the wave this builds is a
+        function of self.tasks alone, never of who finished first."""
         limiter = asyncio.Semaphore(self.max_inflight)
 
-        async def one(task, sample_index: int):
+        async def one(task: Task, sample_index: int) -> Trajectory:
             async with limiter:
                 seed = derive(self.master, "eval", update, task.id, sample_index)
                 client = EnginePoolClient(routes, self.sampling, seed)
                 return await run_episode(self.env_name, task, client)
 
-        groups = []
-        for task in self.tasks:
-            episodes = await asyncio.gather(
-                *[one(task, s) for s in range(self.n_samples)])
-            groups.append(Group(task.id, episodes))
-        wave = Wave(groups)
+        jobs = [one(task, sample_index)
+                for task in self.tasks
+                for sample_index in range(self.n_samples)]
+        episodes = await asyncio.gather(*jobs)
+        n = self.n_samples
+        return [Group(task.id, episodes[i * n:(i + 1) * n])
+                for i, task in enumerate(self.tasks)]
 
-        columns = await run_pipeline(self.pipeline, wave, routes, self.sampling,
-                                     self.master, update, phase="eval-post")
+    def reduce_in_task_order(
+            self, update: int, wave: Wave,
+            columns: dict[str, list]) -> tuple[list[dict], dict]:
+        """The eval's two files, folded in WAVE order — which is task order.
 
+        The rule this states: every accumulation over a concurrently sampled
+        eval runs over the wave, not over completions. Float addition is not
+        associative, so a mean summed in completion order would be a mean that
+        depends on the scheduler — and eval/ is inside the byte-identity
+        contract that resume-equivalence and the fakes determinism test hold
+        the run to."""
         rows, index = [], 0
         for group in wave.groups:
             for sample_index in range(len(group)):
@@ -139,10 +173,7 @@ class Evaluator(Daemon):
             "means": {name: math.fsum(values) / len(values)
                       for name, values in sorted(columns.items()) if values},
         }
-        self.run.write_eval(update, "results.jsonl", _jsonl(rows))
-        self.run.write_eval(update, "summary.json",
-                            json.dumps(summary, sort_keys=True,
-                                       separators=(",", ":")))
+        return rows, summary
 
 
 def _jsonl(rows: list[dict]) -> str:
