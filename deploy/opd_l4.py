@@ -34,6 +34,33 @@ WHAT THE RUN PROVES, in the order the checks assert it:
 Cost is the reason the schedule is tiny: eight L4s are live at once, and this
 run exists to prove plumbing, not convergence.
 
+WHAT THE METAL SAID (2026-08-28, run c0f65f24362b, 4 updates, 6/6 checks).
+Loads: the student 8.17 GiB per device in 81s with 10.28 GiB left for KV; the
+teacher 16.5 GiB per device in 52s with 3.03 GiB left (49,664 tokens) — 32B at
+tp=4 fits an L4:4 with room to prefill, which was the open question. Warming
+both partitions CONCURRENTLY took 237s; the four updates took 386s.
+
+    update 1: reward 0.750  loss +0.3559  ratio 0.9968  gap 0.0216
+    update 2: reward 0.500  loss +0.3041  ratio 1.0001  gap 0.0201
+    update 3: reward 0.500  loss +0.3146  ratio 1.0001  gap 0.0185
+    update 4: reward 0.500  loss +0.2848  ratio 0.9974  gap 0.0165
+
+`loss` IS the per-token reverse KL in nats, so that column is the distillation
+signal itself: 0.356 → 0.285 over four steps, i.e. the student moved toward the
+teacher. At update 1 the LoRA is still B=0, so 0.356 nats/token is the bare
+8B-vs-32B distance on these completions. Over all 384 scored tokens the teacher
+mean is -1.3357 and the student's recorded mean -1.0188 (KL +0.3169) — the
+teacher is LESS confident on the student's draws than the student is, which is
+what sampling from the student guarantees.
+
+`gap` is a different rail and stays at 0.0165-0.0216 — the student pool served
+exactly the adapters the local trainer recomputed, across a wire, with a
+sharded learner. #45's scoring floor enters the TEACHER column instead, as
+prefill-vs-decode kernel noise; it is bounded by that same ~0.02 and the
+teacher pool carries no adapter at all, so it is ~6% of a 0.32-nat signal and
+never an alignment error (::probe's shift-free evidence: four nats between the
+true and a wrong continuation).
+
 Deployment only (I5): wiring and measurement, nothing semantics-bearing.
 Image pins: keep in sync with deploy/modal_app.py.
 
@@ -272,7 +299,17 @@ def probe():
     THE SCORE IS THE SIGNAL: the teacher is asked for the same continuation
     twice — the true sum and a wrong one. A frozen 32B that is actually
     reading prefers the true one, and by a wide margin; identical scores
-    would mean the prefill never saw the context."""
+    would mean the prefill never saw the context.
+
+    OBSERVED (2026-08-28, one L4:4, twice on two separate cold starts): the
+    tokenizers agree exactly (12 ids); ' 105' scores -0.0814 per token and
+    ' 731' -4.1414 — four nats, so the prefill demonstrably read the context.
+    The per-token scores came back BIT-IDENTICAL across both container
+    lifetimes ([-0.3004, -0.0213, -0.0026, -0.0013]), which is the seedless-
+    determinism claim of the scoring verb (#40) tested the only way that
+    counts. Cold start: 16.5 GiB of weights per device, 308s to load
+    unauthenticated from HF the first time and 52s from the cache volume
+    after, 3.03 GiB left for KV, ~30s to init the engine."""
     import asyncio
 
     from transformers import AutoTokenizer
