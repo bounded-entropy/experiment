@@ -104,10 +104,10 @@ export async function drawRun() {
 
 function drawParity(points, dict) {
   if (!points.length) return;
-  const grid = section("parity", "logprob_gap — the running certificate (#25)", "half");
+  const grid = section("parity", "logprob_gap — the running certificate (#25)");
   grid.append(card(GAP, "loss:" + (dict.loss ?? "?"),
       [{label: GAP, color: C.warn, points: points}],
-      {H: 200, reference: [{y: 0, label: "identical kernels", color: C.dim}]}));
+      {reference: [{y: 0, label: "identical kernels", color: C.dim}]}));
 }
 
 // ---- step economics: where the wall clock went ----------------------------

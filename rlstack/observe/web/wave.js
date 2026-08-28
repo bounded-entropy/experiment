@@ -144,7 +144,8 @@ function trajectoryBlock(traj) {
   const version = Object.entries(traj.policy_version)
       .map(([k, v]) => `${k}@${v}`).join(" ");
   if (version) facts.push(`<span class="k">${esc(version)}</span>`);
-  node.append(el("div", {class: "facts"}, facts.join("")));
+  node.append(el("div", {class: "facts"},
+      facts.map(fact => `<span>${fact}</span>`).join("")));
 
   const chat = el("div", {class: "chat"});
   for (const message of traj.messages) chat.append(bubble(message, traj));

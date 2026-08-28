@@ -73,9 +73,8 @@ export async function drawFleet() {
 function drawAggregates(flow) {
   const inference = (flow || {}).inference || [];
   const training = (flow || {}).training || [];
-  const bucket = (flow || {}).bucket_s;
   const grid = section("fleet throughput",
-      bucket ? `summed per ${brief(bucket)}s bucket` : "nothing journaled yet",
+      "summed per bucket — each host's own mean rate, added across hosts",
       "half");
   if (!inference.length && !training.length) {
     grid.append(emptyCard("inference", "traffic events",
@@ -86,7 +85,8 @@ function drawAggregates(flow) {
     return;
   }
   grid.append(card("inference · tokens/s",
-      `${(flow.hosts || []).length} serving host(s)`,
+      `${(flow.hosts || []).length} serving host(s) · ${
+        brief(flow.inference_bucket_s)}s buckets`,
       [{label: "prefill", color: C.feed,
         points: inference.map(b => [b.t, b.prefill_tok_s,
             `${raw(b.prefill_tokens)} prefill tokens · ${b.hosts} host(s)`
@@ -96,7 +96,8 @@ function drawAggregates(flow) {
             `${raw(b.decode_tokens)} decode tokens · ${raw(b.requests)} requests`])}],
       {unit: " tok/s", y0: 0, xlabel: clock, breakGaps: true, H: 190}));
   grid.append(card("training · updates/s",
-      `${(flow.runs || []).length} run(s)`,
+      `${(flow.runs || []).length} run(s) · ${
+        brief(flow.training_bucket_s)}s buckets`,
       [{label: "updates/s", color: C.derived,
         points: training.map(b => [b.t, b.updates_s,
             `${b.updates} update(s) from ${b.runs} run(s) · mean `

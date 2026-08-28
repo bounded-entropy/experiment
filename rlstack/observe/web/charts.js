@@ -211,9 +211,9 @@ function drawStacked(box, o, rows, keys) {
           text-anchor="end">${esc(o.xlabel(rows[rows.length - 1].x))}</text>
     <line x1="${o.pad}" y1="${o.H - 18}" x2="${o.W - 8}" y2="${o.H - 18}"
           stroke="${C.dim}33"/>
+    <rect class="hi" y="4" height="${o.H - 22}" width="${step.toFixed(1)}"
+          fill="#dde5ec" opacity="0"/>
     ${body}
-    <rect class="hi" y="4" height="${o.H - 22}" width="${bar.toFixed(1)}"
-          fill="#dde5ec" opacity="0" stroke="${C.dim}" stroke-width="0.7"/>
     <rect x="0" y="0" width="${o.W}" height="${o.H}" fill="transparent"/></svg>`;
 
   const svg = box.querySelector("svg");
@@ -226,8 +226,8 @@ function drawStacked(box, o, rows, keys) {
     const index = Math.max(0, Math.min(rows.length - 1,
         Math.floor((at.x - o.pad) / step)));
     const row = rows[index];
-    hi.setAttribute("x", (o.pad + step * index + (step - bar) / 2).toFixed(1));
-    hi.setAttribute("opacity", 0.12);
+    hi.setAttribute("x", (o.pad + step * index).toFixed(1));
+    hi.setAttribute("opacity", 0.07);
     const lines = keys.filter(key => row.parts[key.name] !== undefined).map(key =>
       `<div><span style="color:${key.color}">${esc(key.name)}</span> `
       + raw(row.parts[key.name]) + esc(o.unit) + "</div>");

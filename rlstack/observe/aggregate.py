@@ -124,16 +124,21 @@ def fleet_throughput(stores: Sequence[Store],
 
     times = [when for when, _, _ in traffic] + [when for when, _ in updates]
     if not times:
-        return {"window": None, "bucket_s": None, "inference": [],
-                "training": [], "hosts": [], "runs": [], "totals": {}}
+        return {"window": None, "inference_bucket_s": None,
+                "training_bucket_s": None, "inference": [], "training": [],
+                "hosts": [], "runs": [], "totals": {}}
     window = [min(times), max(times)]
-    width = max(1.0, (window[1] - window[0]) / buckets)
+    span = window[1] - window[0]
+    serving = bucket_width(span, buckets, widest_window(traffic))
+    training = bucket_width(span, buckets,
+                            typical_gap(sorted(when for when, _ in updates)))
 
     return {
         "window": window,
-        "bucket_s": width,
-        "inference": inference_buckets(traffic, window[0], width),
-        "training": training_buckets(updates, window[0], width),
+        "inference_bucket_s": serving,
+        "training_bucket_s": training,
+        "inference": inference_buckets(traffic, window[0], serving),
+        "training": training_buckets(updates, window[0], training),
         "hosts": sorted({host for _, host, _ in traffic}),
         "runs": sorted({str(event.get("run_id")) for _, event in updates}),
         "totals": {
@@ -146,6 +151,30 @@ def fleet_throughput(stores: Sequence[Store],
                 if _numeric(event.get("seconds"))),
         },
     }
+
+
+def bucket_width(span: float, buckets: int, floor: float) -> float:
+    """A BUCKET IS NEVER NARROWER THAN THE FACT IT SUMMARIZES. A host that
+    journals a ten-second window cannot be read at three — the buckets between
+    its samples would read empty and the line would saw. Nor is one update per
+    three seconds a rate when updates land two minutes apart. So each aggregate
+    gets its own width: the fleet's shape, floored by its own emission."""
+    return max(1.0, span / buckets, floor)
+
+
+def widest_window(traffic: list[tuple[float, str, dict]]) -> float:
+    """The coarsest window any serving host declared."""
+    windows = [float(event["window_s"]) for _, _, event in traffic
+               if _numeric(event.get("window_s")) and event["window_s"] > 0]
+    return max(windows) if windows else 0.0
+
+
+def typical_gap(times: Sequence[float]) -> float:
+    """The median wall gap between completed updates, POOLED over the fleet:
+    N runs each stepping every T seconds land one update every T/N, which is
+    exactly the width at which the summed rate reads N/T."""
+    gaps = sorted(later - earlier for earlier, later in zip(times, times[1:]))
+    return gaps[len(gaps) // 2] if gaps else 0.0
 
 
 def inference_buckets(traffic: list[tuple[float, str, dict]],

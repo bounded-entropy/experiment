@@ -85,6 +85,11 @@ export function hideTip() {
   document.getElementById("tip").style.display = "none";
 }
 
+// a scroll moves the chart out from under the cursor: the tooltip goes with
+// it, and the poll is free again
+addEventListener("scroll", () => { poll.hovering = false; hideTip(); },
+                 {passive: true});
+
 export function section(title, note, kind) {
   const holder = document.getElementById("page");
   holder.append(el("h2", {}, esc(title) + (note ? ` <span>${esc(note)}</span>` : "")));

@@ -7,7 +7,7 @@
 
 import {C, WHEEL, brief, clock, el, esc, getJSON, gib, note, section, when}
   from "./dom.js";
-import {card, emptyCard, plot, residencyTip, timeline} from "./charts.js";
+import {card, plot, residencyTip, timeline} from "./charts.js";
 import {ctx, legend, route, runPath} from "./nav.js";
 
 const MOMENT_COLOR = {"host-up": C.teal, attach: C.rail, detach: C.feed,

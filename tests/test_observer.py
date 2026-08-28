@@ -318,11 +318,20 @@ class FleetAggregateTest(unittest.TestCase):
         flow = fleet_throughput([self.store])
         first = flow["training"][0]
         self.assertEqual((first["updates"], first["runs"]), (2, 2))
-        self.assertAlmostEqual(first["updates_s"], 2 / flow["bucket_s"])
+        self.assertAlmostEqual(first["updates_s"], 2 / flow["training_bucket_s"])
         self.assertEqual(first["seconds_mean"], 20.0)
         self.assertEqual(first["phases"]["train"], 7.0)
         self.assertEqual(sorted(flow["runs"]), ["bbb", RUN])
         self.assertEqual(flow["totals"]["updates"], 2)
+
+    def test_a_bucket_is_never_narrower_than_the_fact_it_sums(self) -> None:
+        """The aliasing rule: a host journaling a 10s window cannot be read at
+        1.7s — the buckets between its samples would read empty and the fleet
+        line would saw. Each aggregate carries its own floored width."""
+        flow = fleet_throughput([self.store])
+        self.assertEqual(flow["inference_bucket_s"], 10.0)   # the declared window
+        self.assertAlmostEqual(flow["training_bucket_s"], 300 / 180)
+        self.assertEqual(len(fleet_throughput([self.store], buckets=1)["inference"]), 2)
 
     def test_the_fleet_route_serves_the_aggregate(self) -> None:
         status, _, body = call(ui_app([self.store]), "/api/fleet")
