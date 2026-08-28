@@ -1522,6 +1522,56 @@ specs; backends (local/modal/skypilot) and GPU topology are semantics-neutral.
     opd-math tests), the whole 432 green in the image under
     modal_app::run_tests.
 
+48. THE LOWERING: ONE CONTRACT FOR BOTH SIDES' ADAPTER ATTACHMENT (design
+    settled, Samarth-directed: "the trainer pattern is the gold standard...
+    can we come up with a unified abstraction with some verbs that applies
+    for both — essentially a 1 to 1 mirror"). This COMPLETES #3, which
+    declared every kind ships a ROLLOUT lowering (engine) and a REPLAY
+    lowering (trainer) — the replay half became real files (lora_torch,
+    soft_prompt_torch); the rollout half got smeared into vllm_engine.py as
+    private methods (_register_lora / _register_prompt_rows / _prompt_for /
+    the score offset). The smear is the finding (post-#47 review): request
+    assembly and answer-geometry knowledge live inline in the verbs and
+    grow a conditional per mechanism.
+    THE CONTRACT — one Lowering per (kind, side), four verbs, read off the
+    tendril inventory:
+      demands   what the substrate BUILD must pay (engine args, plugin
+                presence; trainer: nothing today)
+      attach    make the kind's state resident — ADDITIVE (trainer: wrap
+                sites / hook the boundary; engine: payloads -> LoRARequest /
+                prefix rows)
+      apply     contribute to ONE unit of work (trainer: the row plan's row;
+                engine: prompt form + request kwargs). The units DIFFER by
+                side (row vs request; our plan batches the trainer, vLLM's
+                scheduler batches the engine) — apply takes the side's unit,
+                the contract does not pretend they are the same.
+      align     keep answers aligned to real tokens (trainer: trim virtual
+                positions so logprobs stay [len(batch)]; engine: positions
+                occupied, SUMMED across kinds for the score offset).
+    Both substrates become BUSES: loop the kinds, call the verbs, merge
+    apply's levers, sum align. vllm_engine.py loses all mechanism awareness
+    (_prompt_for's soft-prompt knowledge -> soft prompt's apply; the
+    mechanism dispatch -> the bus loop); "native vs plugin" stops being a
+    category — it is a demands() difference only.
+    GEOGRAPHY (I2-exact): both lowerings live WITH THE KIND —
+    adapters/lora_vllm.py beside adapters/lora_torch.py — because the
+    policy bridge is the ONLY two-world primitive, and parity (the exam
+    binding the pair) becomes reviewable in one directory. rlstack_engine/
+    shrinks to its honest charter: only code that patches vLLM internals
+    (side_attention), reached by string from its kind's rollout file. Lazy
+    vllm imports keep the fakes suite stdlib-clean (rule 7, the lora_torch
+    precedent).
+    COMPOSITION RULE: one request may carry several kinds' levers; prefix
+    contributions concatenate in BANK ORDER; at most the composition the
+    engine can express (soft_prompt + lora proven; a second prompt-shape
+    kind must compose or refuse loudly).
+    SCOPE DISCIPLINE: the trainer side ALREADY realizes the contract
+    (attach=install_replay, apply=the sites reading the row plan,
+    align=the boundary's logit trim) — it is documented as conforming, NOT
+    renamed; no trainer files change in this pass. Proof obligation: the
+    463-test suite green, then tp_l4 + adapters_l4 + the OPD probe re-run
+    on metal (this relocates the most metal-proven path in the repo).
+
 ## Open threads (do NOT treat as settled; flag when your answer touches them)
 
 - TODO (Samarth, settled intent): DELETE RunSignals.notify() and run the
