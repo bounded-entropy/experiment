@@ -17,10 +17,11 @@ update) is a number about a workload someone would actually run.
 
 WHAT THIS RUN EXISTS TO MEASURE. Teacher scoring rides the Trainer's post
 phase inline: an update's gradient waits on a group's worth of sequential 32B
-prefills. On twelve-token completions that is invisible. On MATH completions
-it is the bottleneck the async scorer daemon is designed to remove — so this
-file times it (`ScoreClock`) and reports seconds per update, which is the
-input to deciding whether the daemon is worth building and how much it buys.
+prefills. On twelve-token completions that is invisible; on MATH completions
+it is a real cost, and the async scorer daemon is the designed fix — so the
+question this file answers is HOW BIG, because that is what decides whether
+the daemon is worth building. It times the wire (`ScoreClock`) and reports
+seconds per update. The answer, below, is smaller than expected.
 
 THE TASK SET (deterministic, content-addressed):
     levels 3-5, filtered to answers THE EXISTING VERIFIER CAN CHECK — the
@@ -45,10 +46,11 @@ TOPOLOGY (#47's, unchanged except max_model_len):
     teacher    Qwen3-32B tp=4 on L4:4, frozen, inference regime only
     student    Qwen3-8B  tp=2 on L4:2, the sampler
     learner    Qwen3-8B  fsdp=2 on L4:2, the runner beside it
-    max_model_len 2048 (was 512): prompt ~450 + 512 generated, with the
-    teacher's prefill of both inside the same window. #47 measured the 32B's
-    KV at 49,664 tokens, so 2048 per sequence is affordable — `shakeout`
-    is where that stops being arithmetic and becomes an observation.
+    max_model_len 2048 (was 512): a 211-543 token prompt plus 512 generated,
+    with the teacher's prefill of both inside the same window. #47 measured
+    the 32B's KV at 49,664 tokens, so 2048 per sequence looked affordable —
+    `shakeout` is where that stopped being arithmetic and became the
+    observation recorded below.
 
 WHAT THE METAL SAID (2026-08-28; ::tasks, ::baseline, ::shakeout run
 d43141929dc2 at 6 updates, ::score_clock). The full run has NOT been run.
