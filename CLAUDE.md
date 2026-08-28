@@ -38,7 +38,7 @@ continue is in the repo.
 
 ## State at handover
 
-- 432 tests green on fakes (21 torch-gated skips run in the image). Real
+- 503 tests green on fakes (torch-gated skips run in the image). Real
   metal is PROVEN through the stress matrix (deploy/stress_l4.py): seven
   concurrent tenants — grpo/ppo/gspo/sft/sdft/replay_distill/self_anchor,
   live + replay + static sources, a judge pool, lag=2 — on one Modal L4
@@ -75,6 +75,18 @@ continue is in the repo.
 - The loss is pure math (#38): requires names data columns only; post
   processors produce everything else (token_level = per-token channel; a
   processor may score through any declared pool, cross-base included).
+- SUB-GPU HOSTS ARE METAL-PROVEN (#51/#52, deploy/partition_l4.py): many
+  fractional partitions coexist on one device (vLLM budgets against device
+  total, so partitions compose additively), real sleep alternation hands
+  HBM back (~9.9 GiB on an L4), joins are fraction-free, refusals correct,
+  a failed carve leaves neighbors serving. Partitions carry their gpu kind
+  (#49, fraction_for_gb is the one GB↔fraction meeting point); carve names
+  are unique + journal-safe, factories receive the Partition, VllmEngine
+  has an honest sleep seam (#52). Adapter lowerings are ONE contract per
+  (kind, side) (#48: demands/attach/apply/align + reaches; vllm_engine.py
+  is a mechanism-blind bus). The observer has host pages + hover + the
+  open metrics slot (#50). Evaluator samples concurrently with
+  order-independent bytes; rank teardown is bounded (#53).
 
 ## Quick commands
 
