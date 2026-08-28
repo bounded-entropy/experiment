@@ -120,8 +120,11 @@ modal run deploy/fsdp_l4.py                     # the FSDP ladder on 2xL4
 - Async post daemon ("scorer"), pool-annotated flow graph, eval `terminal`
   bit, S3Store, generation-only runs (algo=None: needs a committing Sealer
   daemon + wave-shape knobs out of Schedule) — designed in CONTEXT, not
-  built. The UI (observe/ui.py) exists: graphs with loss-walkback priority;
-  distributions, token drill-down, gpu/host pages are the named next
-  features.
+  built. The UI (observe/ui.py + page.py + host_series.py, #50): graphs
+  with loss-walkback priority, hover raw values, host pages off the
+  journals (fleet placement timeline, per-device gpu series, the
+  schema-tolerant metrics slot — nothing emits into it yet), run
+  dropdown. Named next: distributions, token drill-down, cross-run curve
+  comparison, host throughput emission (design in #50).
 - Open threads listed at the foot of CONTEXT.md (identity rings, schedule
   split, Wave/ArchiveContext typing).
