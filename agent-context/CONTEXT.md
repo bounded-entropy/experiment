@@ -1922,6 +1922,81 @@ specs; backends (local/modal/skypilot) and GPU topology are semantics-neutral.
     device (the arithmetic says ~5 x 0.15 fits, nothing tried it); a sleep
     host under several tenants at once; sub-GPU partitions at tp>1.
 
+52. THE FOUR FLEET FIXES: #51's FINDINGS (a)-(d), CLOSED IN rlstack/ (a core
+    session, directed: fix (a)-(d), leave (e) and (f) alone). #51 was a test
+    campaign that could not touch rlstack/; this entry is the repair, and its
+    proof is the same harness re-run — deploy/partition_l4.py legs 1, 2 and 6
+    on ONE L4: 41 + 12 + 3 checks, 0 failed (the four checks #51 left
+    deliberately failing are among the passes). 497 tests green on fakes
+    (five new) and 497 in the image. Cost: 15.3 GPU-minutes across three L4
+    containers (~$0.20), one of which was spent re-running leg 1 after a
+    harness artifact (see the volume note below).
+    (a) A CARVE NAME IS UNIQUE, AND REGISTRATION REFUSES TO REPLACE — both
+        halves, because either alone is a promise. Fleet.carve_name() names a
+        carved host "{metal}:{devices}.{regimes}.c{n}" with a PER-FLEET CARVE
+        ORDINAL: a regime carries kind and shape but not base, and the base
+        cannot go in the name either — a base is "Qwen/Qwen3-0.6B" and a host
+        name is a journal path segment that may hold no "/" (finding (b)), so
+        the ordinal is the honest discriminator. Fleet.register() is then the
+        one door into self.hosts (the constructor's seeded hosts included) and
+        RAISES FleetError on a name already taken: a replaced host keeps its
+        metal — engines resident, tenants bound — while dropping out of the
+        dict residual() sums over, which is how a live partition's memory
+        silently returned to the residual. Metal: four carves off one device
+        named .c1-.c4, TWO of them learner regimes differing only by base
+        (Qwen3-0.6B @0.20 and Qwen3-0.6B-Base @0.125), both alive at the end
+        with their own tenants, residual 0.225 exactly — the #51a repro,
+        inverted. Fakes: test_fleet's two-carves-differing-only-by-base and
+        the registration refusal.
+    (b) A HOST NAME IS ONE JOURNAL PATH SEGMENT, ATTESTED AT BOTH LAYERS.
+        Host.attest_name() (a birth fact, beside attest_regimes) raises
+        HostError on a name containing "/", and Store.append_host_event
+        asserts the same at the key it writes — loud twice, because the layer
+        that owns the name and the layer that owns the path are different
+        layers. Metal: the hosts view now renders every carved host with its
+        partition ("metal   : L4 l4-solo[0] @ 0.30", @0.20, @0.15, @0.12,
+        @0.45), with their boots, tenants and runs. The four pre-#52 names
+        ("l4-solo:0/main-tp1" and friends) are still in the volume's fleet log
+        and are unreachable FOREVER — nothing can recover a journal written
+        one directory deeper than list_hosts() looks; leg 6 prints them as
+        such rather than pretending they can be found.
+    (c) THE FACTORY IS PAID THE PARTITION IT REALIZES. Both factory
+        signatures are now (Regime, Partition) -> Engine/Learner: the
+        Partition IS the birth fact the factory builds (#43), and the
+        fraction the carve just computed is the whole point of a sub-GPU
+        host. Fleet.carve() builds the Partition first and hands the same
+        object to the factories and to the Host. The ripple was exactly the
+        two lambdas in tests, and it DELETED deploy/partition_l4.py's
+        Partitioned.absorb() — the workaround that re-read every carve step's
+        memory off the plan before apply().
+    (d) VllmEngine HAS A SLEEP SEAM, AND IT IS A BUILD FACT. VllmEngine takes
+        enable_sleep_mode (plumbed into the engine args, remembered as
+        .sleeps, checked by check_sleeps()) and offers public async sleep() /
+        wake() wrapping vLLM's sleep(1) / wake_up() — idempotent, and quiet
+        before the lazy build, since an evict can arrive before the first
+        sample. It is deliberately NOT on the Engine protocol (FakeEngine and
+        RemotePool have no device to hand back): alternation is a capability
+        of THIS build, reached by the deploy that owns the metal. The #51d
+        repro poked engine._engine_args and engine._llm; the deploy's hooks
+        are now measurement and nothing else. Engine fact, first contact
+        settled: on vllm 0.28.0 AsyncLLMEngine.sleep/wake_up ARE coroutines,
+        so the campaign's isawaitable probe is gone. Metal (leg 2): 5
+        switches, sleep returned 9.92 GiB and wake put back 9.81, the learner
+        offload 1.78, the device at 0.74 GiB between regimes, gap max 0.0259.
+    THE VOLUME NOTE (harness, not the model): the store's fleet log is
+    CUMULATIVE, so "every carve names a distinct host" read against the whole
+    log fails on the pre-#52 history forever. The campaign's checks now slice
+    from where the log stood when the container opened, and leg 6 separates
+    the legacy "/" names from the ones a fixed fleet writes.
+    NOT MINE, DELIBERATELY: (e) a training partition's fraction is
+    unenforceable in-process — a stated cost of sharing one process, not a
+    bug to fix; and (f) two hosts of one capability are unaddressable —
+    find_join takes the first covering host, so spreading tenants across
+    identical partitions needs a currency beyond capability (declared_load, a
+    measured saturation signal). (f) is a design decision and goes to
+    Samarth; it is why partition_l4.py still gives its second inference
+    partition a different base.
+
 ## Open threads (do NOT treat as settled; flag when your answer touches them)
 
 - PLANNED (Samarth-approved, queued behind #48 landing): the OPD stress test

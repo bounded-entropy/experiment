@@ -12,6 +12,11 @@ hosts — the runner beside the learner, every other pool over the wire.
 Plus #49: a carve stamps the Metal's KIND onto the partition it births, and
 fraction_for_gb is the one place a hint written in GB becomes the fraction of
 one device that a partition actually owns.
+
+Plus #52, the three fleet findings of the mass-partition campaign: carved
+names are unique (#51a), registration refuses to replace a live host (#51a),
+a name is a journal path segment the observer can read back (#51b), and the
+factories are paid the Partition they are realizing (#51c).
 """
 
 from __future__ import annotations
@@ -24,9 +29,10 @@ from dataclasses import replace
 from common import arith_spec, arith_store
 from rlstack import (
     Acquire, Carve, FakeEngine, FakeLearner, Fleet, FleetError, GpuConfig,
-    GpuGroup, Join, Metal, Regime, Seeds, demands_of, fake_qwen_schema,
-    fraction_for_gb, gpus, learner, pool,
+    GpuGroup, Host, Join, Metal, Partition, Regime, Seeds, demands_of,
+    fake_qwen_schema, fraction_for_gb, gpus, learner, pool,
 )
+from rlstack.observe import render_hosts
 
 SCHEMA = fake_qwen_schema(4, base="Qwen/Qwen3-0.6B")
 
@@ -35,11 +41,11 @@ def go(coro):
     return asyncio.run(coro)
 
 
-def fake_engine_factory(regime: Regime) -> FakeEngine:
+def fake_engine_factory(regime: Regime, partition: Partition) -> FakeEngine:
     return FakeEngine(base=regime.base, tp=regime.shape)
 
 
-def fake_learner_factory(regime: Regime) -> FakeLearner:
+def fake_learner_factory(regime: Regime, partition: Partition) -> FakeLearner:
     return FakeLearner(fsdp=regime.shape)
 
 
@@ -184,6 +190,119 @@ class FleetTest(unittest.TestCase):
         host = next(iter(fleet.hosts.values()))
         self.assertEqual(host.partition.memory, 0.5)
         self.assertEqual(fleet.residual("node-a"), [0.5])
+
+    # ---- #52: names, registration, the factory contract ---------------------
+
+    def partitioned_spec(self, base: str, main: float, train: float,
+                         master: int):
+        """One tenant that declares BOTH its fractions — the sub-GPU shape the
+        mass-partition campaign ran (#51)."""
+        spec = arith_spec(self.train, gpu_config=GpuConfig(groups=(
+            GpuGroup(gpus(n=1), (pool("main", fraction=main),
+                                 learner(fraction=train))),)),
+            seeds=Seeds(master=master))
+        return replace(spec, policy=replace(spec.policy, base=base))
+
+    def test_two_carves_differing_only_by_base_are_two_hosts(self) -> None:
+        """#51a, the campaign's repro. A regime is named by kind and shape,
+        never by base, so a second base's learner used to carve the SAME name
+        and REPLACE a live host: its metal stayed resident and its tenants
+        stayed bound while its 0.20 silently returned to the residual — an
+        automatic path into overcommit. The carve ordinal keeps the names
+        apart; the residual stays honest."""
+        fleet = self.fleet(devices=1)
+        fleet.apply(fleet.place(
+            self.partitioned_spec("Qwen/Qwen3-0.6B", 0.30, 0.20, 1)))
+        self.assertAlmostEqual(fleet.residual("node-a")[0], 0.50)
+        trainer = next(h for h in fleet.hosts.values()
+                       if any(r.kind == "training" for r in h.regimes))
+
+        fleet.apply(fleet.place(
+            self.partitioned_spec("Qwen/Qwen3-0.6B-Base", 0.15, 0.125, 2)))
+        self.assertEqual(len(fleet.hosts), 4)          # four distinct hosts
+        self.assertIs(fleet.hosts[trainer.name], trainer)   # nothing replaced
+        self.assertEqual(
+            sorted(r.base for h in fleet.hosts.values() for r in h.regimes
+                   if r.kind == "training"),
+            ["Qwen/Qwen3-0.6B", "Qwen/Qwen3-0.6B-Base"])
+        self.assertAlmostEqual(fleet.residual("node-a")[0], 0.225)
+        names = [e["host"] for e in self.store.read_fleet_log()
+                 if e["event"] == "carve"]
+        self.assertEqual(len(set(names)), 4)
+
+    def test_registering_a_taken_name_is_refused_never_replaced(self) -> None:
+        """Uniqueness is by construction; this is the rule that keeps it so.
+        A replaced host would keep its metal and leave the residual's sum —
+        so registration raises rather than overwriting (#51a)."""
+        fleet = self.fleet(devices=1)
+        fleet.apply(fleet.place(
+            self.partitioned_spec("Qwen/Qwen3-0.6B", 0.30, 0.20, 1)))
+        taken = sorted(fleet.hosts)[0]
+        with self.assertRaises(FleetError) as caught:
+            fleet.register(Host(taken, engines=(FakeEngine(),), learner=None,
+                                store=self.store))
+        self.assertIn("already registered", str(caught.exception))
+        self.assertAlmostEqual(fleet.residual("node-a")[0], 0.50)
+
+        pre = Host("pre-carved", engines=(FakeEngine(),), learner=None,
+                   store=self.store)
+        with self.assertRaises(FleetError):             # also at construction
+            Fleet((Metal("node-a", "L4", 1),), store=self.store,
+                  engine_factory=fake_engine_factory,
+                  learner_factory=fake_learner_factory, hosts=(pre, pre))
+
+    def test_a_carved_host_is_visible_to_the_observer(self) -> None:
+        """#51b, inverted. Carved names once contained "/", so every carved
+        partition journaled one directory deeper than list_hosts() looks and
+        a four-partition campaign rendered as ONE phantom host. A name is one
+        journal path segment now — attested by Host at birth — so a carved
+        host round-trips: journal, list, render."""
+        fleet = self.fleet(devices=1)
+        fleet.apply(fleet.place(
+            self.partitioned_spec("Qwen/Qwen3-0.6B", 0.50, 0.25, 1)))
+        carved = sorted(fleet.hosts)
+        self.assertEqual(self.store.list_hosts(), carved)
+        for name in carved:
+            self.assertNotIn("/", name)
+            ups = [e for e in self.store.read_host_log(name)
+                   if e["event"] == "host-up"]
+            self.assertEqual(len(ups), 1)
+            self.assertEqual(ups[0]["partition"]["gpuset"], "node-a")
+        text = render_hosts([self.store])
+        for name in carved:
+            self.assertIn(f"host {name}", text)
+        self.assertIn("L4 node-a[0] @ 0.50", text)
+        self.assertIn("L4 node-a[0] @ 0.25", text)
+
+    def test_the_factories_are_paid_the_partition_they_realize(self) -> None:
+        """#51c: the fraction a carve computed is the whole point of a
+        sub-GPU host, and the factory is the only thing that can spend it
+        (vLLM's gpu_memory_utilization). It arrives as the second argument —
+        the SAME Partition the host is then born onto."""
+        seen: list[tuple[str, Partition]] = []
+
+        def engine_factory(regime: Regime, partition: Partition) -> FakeEngine:
+            seen.append((regime.name, partition))
+            return FakeEngine(base=regime.base, tp=regime.shape)
+
+        def learner_factory(regime: Regime,
+                            partition: Partition) -> FakeLearner:
+            seen.append((regime.name, partition))
+            return FakeLearner(fsdp=regime.shape)
+
+        fleet = Fleet((Metal("node-a", "L4", 1),), store=self.store,
+                      engine_factory=engine_factory,
+                      learner_factory=learner_factory)
+        fleet.apply(fleet.place(
+            self.partitioned_spec("Qwen/Qwen3-0.6B", 0.30, 0.20, 1)))
+        self.assertEqual([(name, p.memory, p.gpu, p.devices)
+                          for name, p in seen],
+                         [("main-tp1", 0.30, "L4", (0,)),
+                          ("learner-fsdp1", 0.20, "L4", (0,))])
+        for name, partition in seen:
+            host = next(h for h in fleet.hosts.values()
+                        if any(r.name == name for r in h.regimes))
+            self.assertIs(host.partition, partition)
 
     # ---- submit -------------------------------------------------------------
 

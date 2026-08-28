@@ -21,6 +21,12 @@ this file knows no mechanism at all. What it knows is the shape of the work:
   an answer    every attached kind's align() SUMMED, because a scored suffix
                sits after everything the bundle put in front of it.
 
+One more build fact, off to the side: enable_sleep_mode buys the pair
+sleep()/wake() — the seam an ALTERNATING host's arbiter hooks call to make a
+partition really hand the device back (#52). It is deliberately not on the
+Engine protocol: only the deploy that owns the metal reaches for it, and a
+fake or a remote pool has no device to give.
+
 v0 choices, stated: prompts are RAW token concatenations of the messages —
 each message tokenized separately, exactly as flatten will re-tokenize it (no
 chat template; template-faithful rendering is a logged open thread); uniform
@@ -49,12 +55,18 @@ class VllmEngine:
     def __init__(self, base: str, *, gpu_memory_utilization: float = 0.45,
                  max_model_len: int = 1024, max_loras: int = 8,
                  max_lora_rank: int = 32, enforce_eager: bool = True,
-                 tp: int = 1, serves: Sequence[str] = ("lora",)) -> None:
+                 tp: int = 1, serves: Sequence[str] = ("lora",),
+                 enable_sleep_mode: bool = False) -> None:
         from transformers import AutoConfig, AutoTokenizer
 
         self.base = base
         self.tp = tp                # build fact (#43): tensor-parallel width
         self.serves = tuple(serves)  # build fact: the KINDS this build pays for
+        # build fact (#52): whether this engine can hand the device back. Not
+        # a kind's demand (no lowering asks for it) and not part of the Engine
+        # protocol — it is a capability of THIS build, reached by the deploy
+        # that owns the metal and wired into its host's arbiter hooks.
+        self.sleeps = enable_sleep_mode
         self._tokenizer = AutoTokenizer.from_pretrained(base)
         self._config = AutoConfig.from_pretrained(base)
         self._workdir = Path(tempfile.mkdtemp(prefix="rlstack-bundles-"))
@@ -69,11 +81,12 @@ class VllmEngine:
         self._engine_args = dict(
             model=base, max_model_len=max_model_len,
             gpu_memory_utilization=gpu_memory_utilization,
-            tensor_parallel_size=tp,
+            tensor_parallel_size=tp, enable_sleep_mode=enable_sleep_mode,
             enforce_eager=enforce_eager, disable_log_stats=True)
         for lowering in self._lowerings.values():
             self._engine_args.update(self._pay_demands(lowering))
         self._llm = None                       # built inside the running loop
+        self._asleep = False                   # the sleep seam's own state
         self._known: set[str] = set()          # every registered bundle_id
         self._attached: dict[str, dict[str, object]] = {}  # id -> kind -> state
         self._request_count = 0
@@ -252,6 +265,46 @@ class VllmEngine:
         return tuple(
             float(final.prompt_logprobs[start + j][int(tok)].logprob)
             for j, tok in enumerate(token_ids))
+
+    # ---- the sleep seam (a build capability, NOT the Engine protocol) -------
+
+    async def sleep(self) -> None:
+        """Hand the device back: vLLM's sleep(level=1) offloads the weights to
+        host RAM and DISCARDS the KV cache. THE evict verb an alternating
+        host's arbiter hook calls (#52) — before this existed a deploy had to
+        reach `engine._llm` and poke `_engine_args` to build one at all (#51d).
+
+        Idempotent, and quiet on an engine that was never built: the vLLM
+        build is lazy, so an evict can arrive before the first sample, and
+        nothing resident is nothing to offload."""
+        self.check_sleeps()
+        if self._llm is None or self._asleep:
+            return
+        await self._llm.sleep(1)
+        self._asleep = True
+
+    async def wake(self) -> None:
+        """The other half: wake_up() puts the weights back and re-allocates
+        the KV cache. Idempotent, and the exact inverse of sleep() — the
+        arbiter only switches when in-flight work is zero, so no request ever
+        meets a half-woken engine."""
+        self.check_sleeps()
+        if self._llm is None or not self._asleep:
+            return
+        await self._llm.wake_up()
+        self._asleep = False
+
+    def check_sleeps(self) -> None:
+        """Alternation is a BUILD fact: vLLM allocates its weights into a
+        releasable memory pool only when the engine was built with
+        enable_sleep_mode. A build that did not pay for it cannot sleep, and
+        says so instead of pretending it did."""
+        if not self.sleeps:
+            raise RuntimeError(
+                f"engine for {self.base!r} was built without "
+                f"enable_sleep_mode: it cannot hand the device back. "
+                f"Alternation is a build fact — build it "
+                f"VllmEngine(..., enable_sleep_mode=True)")
 
     # ---- one unit of work ---------------------------------------------------
 

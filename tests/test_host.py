@@ -324,6 +324,22 @@ class ShapeAndRegimeTest(unittest.TestCase):
         self.assertEqual(host.arbiter.declared_load(), 0.0)
         self.assertGreater(len(host.arbiter.switches), 1)
 
+    def test_a_host_name_is_one_journal_path_segment(self) -> None:
+        """#51b / #52: hosts/<name>/log.jsonl is the journal key and
+        list_hosts() recovers the name with split("/")[1], so a "/" in a name
+        buries the host one directory deeper than the observer ever looks —
+        alive, serving, and invisible. Refused at both layers: Host at birth,
+        and the store at the key it writes."""
+        with self.assertRaises(HostError) as caught:
+            Host("node-a:0/main-tp1", engines=(FakeEngine(),), learner=None,
+                 store=self.store)
+        self.assertIn("journal path segment", str(caught.exception))
+        self.assertEqual(self.store.list_hosts(), [])   # nothing journaled
+
+        with self.assertRaises(AssertionError):
+            self.store.append_host_event("node-a:0/main-tp1",
+                                         {"event": "host-up"})
+
     def test_learner_shape_mismatch_is_a_binding_issue(self) -> None:
         spec = arith_spec(self.train, gpu_config=GpuConfig(groups=(
             GpuGroup(gpus(n=2), (pool("main"), learner(fsdp=2))),)))

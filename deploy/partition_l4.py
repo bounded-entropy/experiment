@@ -34,8 +34,17 @@ children included) beside the fleet's own arithmetic: a claim about a
 partition can then be checked against the metal it claims.
 
 A FAILING CHECK HERE IS A FINDING, not a broken harness: every check states a
-property the sub-GPU host model claims, and the ones this campaign could not
-make true are named in CONTEXT #51 with the repro that shows them.
+property the sub-GPU host model claims, and the ones the first campaign could
+not make true are named in CONTEXT #51 with the repro that shows them.
+
+Four of those findings are now fixed in rlstack/ (#52), so the checks that
+were deliberately failing — distinct carve names, a live carve that adds
+rather than replaces, an honest residual, a carved host the observer can name
+— are THE metal regression for the fix, and legs 1 and 2 are the cheap way to
+re-run it. Two findings stand: (e) a training partition's fraction is
+unenforceable in-process, and (f) two hosts of one capability are
+unaddressable — which is why this file still gives its second inference
+partition a different base.
 
 Deployment only (I5): wiring and measurement, nothing semantics-bearing.
 Image pins: keep in sync with deploy/modal_app.py.
@@ -127,63 +136,47 @@ def print_ledger(title: str) -> None:
 class Partitioned:
     """The engine/learner factories a carve builds through.
 
-    FINDING (#51), stated where it bites: the fleet's factory contract is
-    `Callable[[Regime], Engine]`, and a Regime carries no memory — so the one
-    number the carve just computed (Partition.memory, the whole point of a
-    sub-GPU host) cannot reach the constructor that must spend it. Every real
-    deploy therefore re-derives it from the PLAN, which is what absorb() does:
-    read the carve steps' memory back off the plan before apply() executes
-    them. A factory taking (Regime, Partition) would delete this class."""
+    Each is handed BOTH birth facts the carve decided — the Regime (what
+    capability) and the Partition (how much of what metal) — so the fraction
+    reaches gpu_memory_utilization directly (#52 fixing #51c; this class used
+    to re-derive it from the plan through an absorb() step that no longer has
+    anything to do)."""
 
     def __init__(self, *, sleepy: bool = False) -> None:
-        self.memory_of: dict[str, float] = {}
         self.engines: dict[str, object] = {}
         self.learners: dict[str, object] = {}
         self.sleepy = sleepy
 
-    def absorb(self, plan) -> None:
-        """The plan's carve steps, as the fraction each regime will be built
-        with. Raises later (KeyError in engine()) rather than guessing."""
-        from rlstack import Carve
-
-        for step in plan.steps:
-            if isinstance(step, Carve):
-                for regime in step.regimes:
-                    self.memory_of[regime.name] = step.memory
-
-    def engine(self, regime):
+    def engine(self, regime, partition):
         """One vLLM engine per inference regime, built with
         gpu_memory_utilization = ITS partition's memory — the fraction is a
         reservation of the whole device, so this is where the partition stops
-        being a record and starts being metal."""
+        being a record and starts being metal. `sleepy` builds it able to hand
+        that memory back (the #52 seam), which is what an alternating host's
+        arbiter hooks call."""
         from rlstack.runner.engines.vllm_engine import VllmEngine
 
-        memory = self.memory_of[regime.name]
         print(f"  [build] engine {regime.name}: {regime.base} tp={regime.shape} "
-              f"gpu_memory_utilization={memory}")
-        engine = VllmEngine(regime.base, gpu_memory_utilization=memory,
+              f"gpu_memory_utilization={partition.memory} "
+              f"on {partition.gpu} {partition.gpuset}{list(partition.devices)}")
+        engine = VllmEngine(regime.base,
+                            gpu_memory_utilization=partition.memory,
                             max_model_len=MAX_LEN, max_loras=8,
-                            max_lora_rank=16, tp=regime.shape)
-        if self.sleepy:
-            # FINDING (#51): VllmEngine has no sleep seam — enable_sleep_mode
-            # is not a constructor argument, so an ALTERNATING host cannot be
-            # built through the fleet's factory without reaching into the
-            # engine args. The poke is the repro, not a fix (rlstack/ is
-            # untouched by this campaign).
-            engine._engine_args["enable_sleep_mode"] = True
+                            max_lora_rank=16, tp=regime.shape,
+                            enable_sleep_mode=self.sleepy)
         self.engines[regime.name] = engine
         return engine
 
-    def learner(self, regime):
-        """One learner per training regime. NOTE (#51): nothing here can cap
-        the learner's share of the device — torch's
+    def learner(self, regime, partition):
+        """One learner per training regime. NOTE (#51e, still true): nothing
+        here can cap the learner's share of the device — torch's
         set_per_process_memory_fraction is per PROCESS, and every host in this
         campaign shares one process, so a training partition's fraction is
         declared, journaled, and unenforced."""
         from rlstack.runner.learners.torch_learner import TorchLearner
 
         print(f"  [build] learner {regime.name}: {regime.base} "
-              f"fsdp={regime.shape} (declared {self.memory_of[regime.name]})")
+              f"fsdp={regime.shape} (declared {partition.memory})")
         lrn = TorchLearner()
         self.learners[regime.name] = lrn
         return lrn
@@ -306,6 +299,16 @@ def summarize(title: str) -> dict:
 # leg 0: the ladder on fakes — the whole campaign rehearsed for free
 # ---------------------------------------------------------------------------
 
+def training_host(fleet, base: str):
+    """The host serving the TRAINING capability for one base — the thing the
+    collision used to destroy (#51a): two bases' learner regimes are named
+    alike, so before #52 the second carve replaced the first host in the
+    fleet's dict while its metal stayed resident."""
+    return next(host for host in fleet.hosts.values()
+                for regime in host.regimes
+                if regime.kind == "training" and regime.base == base)
+
+
 def preview_ladder(store) -> dict:
     """Every placement decision the metal legs depend on, decided on fakes:
     the static partition carves, the joins, both refusals, the live carve, and
@@ -321,8 +324,8 @@ def preview_ladder(store) -> dict:
 
     metal = l4_solo()
     fleet = Fleet((metal,), store=store,
-                  engine_factory=lambda r: FakeEngine(base=r.base, tp=r.shape),
-                  learner_factory=lambda r: FakeLearner(fsdp=r.shape))
+                  engine_factory=lambda r, p: FakeEngine(base=r.base, tp=r.shape),
+                  learner_factory=lambda r, p: FakeLearner(fsdp=r.shape))
 
     print("\n-- leg 1 rehearsal: the static partition ---------------------")
     first = make_spec(store, master=1)
@@ -385,18 +388,17 @@ def preview_ladder(store) -> dict:
           len(carves) == 1 and carves[0].memory == hint,
           str([(type(s).__name__, getattr(s, "memory", None))
                for s in plan.steps]))
-    before = fleet.hosts.get("l4-solo:0/learner-fsdp1")
+    before = training_host(fleet, BASE)
     fleet.apply(plan)
-    after = fleet.hosts.get("l4-solo:0/learner-fsdp1")
     names = [e["host"] for e in store.read_fleet_log()
              if e.get("event") == "carve"]
     check("preview: every carve names a distinct host",
           len(names) == len(set(names)), f"carved {names}")
     check("preview: a live carve adds a host, never replaces one",
-          len(fleet.hosts) == 4 and after is before,
-          f"{len(fleet.hosts)} hosts; the learner host's regime base went "
-          f"{[r.base for r in before.regimes]} -> "
-          f"{[r.base for r in after.regimes]}")
+          len(fleet.hosts) == 4 and fleet.hosts.get(before.name) is before,
+          f"{len(fleet.hosts)} hosts; {before.name} still serves "
+          f"{[r.base for r in before.regimes]}, beside "
+          f"{[r.base for r in training_host(fleet, ALT_BASE).regimes]}")
     check("preview: a live carve leaves the residual honest",
           abs(fleet.residual(METAL_NAME)[0] - 0.225) < 1e-9,
           f"residual {fleet.residual(METAL_NAME)[0]:.3f}, expected 0.225 "
@@ -472,6 +474,10 @@ def mass_partition(n_updates: int = 4, kill_after: float = 75.0,
     fleet = Fleet((metal,), store=store, engine_factory=factories.engine,
                   learner_factory=factories.learner)
     out: dict = {}
+    # the volume's fleet log is CUMULATIVE — every campaign that ever ran
+    # against this store is in it, pre-#52 names included. This campaign's own
+    # events start where the log stood when the container opened.
+    log_from = len(store.read_fleet_log())
 
     async def main() -> dict:
         hbm("container start (bare CUDA context)")
@@ -480,7 +486,6 @@ def mass_partition(n_updates: int = 4, kill_after: float = 75.0,
         print("\n== leg 1: carve a static partition out of one L4 ==========")
         first = make_spec(store, master=seed_base + 1, n_updates=n_updates)
         plan = fleet.place(first)
-        factories.absorb(plan)
         print("    plan:", [(type(s).__name__, getattr(s, "memory", None))
                             for s in plan.steps])
         fleet.apply(plan)
@@ -488,7 +493,6 @@ def mass_partition(n_updates: int = 4, kill_after: float = 75.0,
                            post=("llm_judge", "grpo_advantage"),
                            judge=(ALT_BASE, 0.15))
         plan = fleet.place(judged)
-        factories.absorb(plan)
         print("    plan:", [(type(s).__name__, getattr(s, "memory", None))
                             for s in plan.steps])
         fleet.apply(plan)
@@ -614,11 +618,9 @@ def mass_partition(n_updates: int = 4, kill_after: float = 75.0,
               len(carves) == 1 and abs(carves[0].memory - hint) < 1e-9,
               str([(type(s).__name__, getattr(s, "memory", None))
                    for s in plan.steps]))
-        factories.absorb(plan)
-        before = fleet.hosts.get("l4-solo:0/learner-fsdp1")
+        before = training_host(fleet, BASE)
         fleet.apply(plan)
-        after = fleet.hosts.get("l4-solo:0/learner-fsdp1")
-        carve_events = [e for e in store.read_fleet_log()
+        carve_events = [e for e in store.read_fleet_log()[log_from:]
                         if e.get("event") == "carve"]
         check("leg4: the carve is journaled with its metal stamped",
               all(e.get("gpu") == "L4" for e in carve_events),
@@ -627,10 +629,11 @@ def mass_partition(n_updates: int = 4, kill_after: float = 75.0,
         check("leg4: every carve names a distinct host",
               len(names) == len(set(names)), f"carved {names}")
         check("leg4: a live carve adds a host, never replaces one",
-              len(fleet.hosts) == 4 and after is before,
-              f"{len(fleet.hosts)} hosts; the learner host's regime base went "
-              f"{[r.base for r in before.regimes]} -> "
-              f"{[r.base for r in after.regimes]}")
+              len(fleet.hosts) == 4
+              and fleet.hosts.get(before.name) is before,
+              f"{len(fleet.hosts)} hosts; {before.name} still serves "
+              f"{[r.base for r in before.regimes]}, beside "
+              f"{[r.base for r in training_host(fleet, ALT_BASE).regimes]}")
         check("leg4: a live carve leaves the residual honest",
               abs(fleet.residual(METAL_NAME)[0] - 0.225) < 1e-9,
               f"residual {fleet.residual(METAL_NAME)[0]:.3f}, expected 0.225")
@@ -657,46 +660,26 @@ def mass_partition(n_updates: int = 4, kill_after: float = 75.0,
 # leg 2: the alternating host, with hooks that really evict
 # ---------------------------------------------------------------------------
 
-async def maybe_await(value):
-    """vLLM's sleep verbs are sync on some builds and coroutines on others;
-    this is a FIRST CONTACT probe, so it takes whichever it is handed."""
-    import inspect
-
-    if inspect.isawaitable(value):
-        return await value
-    return value
-
-
 def vllm_sleep_hooks(engine, facts: dict):
-    """vLLM's own alternation verbs, as the arbiter's evict/wake hooks: this
-    is what #43's alternation has never had on metal — an evict that actually
-    returns HBM. sleep(level=1) offloads weights to host RAM and discards the
-    KV cache; wake_up() puts them back."""
-    state = {"asleep": False}
+    """The engine's OWN sleep seam, as the arbiter's evict/wake hooks (#52).
+
+    `engine.sleep()` is vLLM's sleep(level=1) — weights to host RAM, KV cache
+    discarded — and `engine.wake()` its inverse; both are idempotent and quiet
+    before the lazy build, so this deploy attaches alternation without
+    touching a single private (the #51d repro reached `engine._llm` and poked
+    `_engine_args` to get here). All that is left for the harness is the
+    measurement: the HBM ledger on either side of each verb."""
 
     async def evict() -> None:
-        llm = engine._llm
-        if llm is None or state["asleep"]:
-            return
-        facts["verbs"] = sorted(v for v in ("sleep", "wake_up", "is_sleeping")
-                                if hasattr(llm, v))
-        if not hasattr(llm, "sleep"):
-            facts["missing"] = f"{type(llm).__name__} has no sleep()"
-            return
         before = hbm("evict: engine before sleep")
-        await maybe_await(llm.sleep(1))
+        await engine.sleep()
         after = hbm("evict: engine after sleep")
-        state["asleep"] = True
         facts["freed"] = max(facts.get("freed", 0.0), before - after)
 
     async def wake() -> None:
-        llm = engine._llm
-        if llm is None or not state["asleep"]:
-            return
         before = hbm("wake: engine before wake_up")
-        await maybe_await(llm.wake_up())
+        await engine.wake()
         hbm("wake: engine after wake_up")
-        state["asleep"] = False
         facts["woke"] = facts.get("woke", 0) + 1
         facts["reclaimed"] = before
 
@@ -777,7 +760,6 @@ def alternating(n_updates: int = 4, memory: float = 0.45) -> dict:
                          main_fraction=memory, learner_fraction=memory,
                          sharing="sleep")
         plan = fleet.place(spec)
-        factories.absorb(plan)
         check("leg2: a sleep unit carves ONE host with two regimes",
               len(plan.steps) == 1 and len(plan.steps[0].regimes) == 2,
               str([(type(s).__name__, [r.name for r in getattr(s, 'regimes', ())])
@@ -791,6 +773,9 @@ def alternating(n_updates: int = 4, memory: float = 0.45) -> dict:
               str(host.arbiter.residency()))
 
         engine, learner = host.engines[0], host.learner
+        check("leg2: the engine was BUILT able to hand the device back",
+              engine.sleeps, f"VllmEngine.sleeps={engine.sleeps} "
+              f"(enable_sleep_mode, a build fact — #52)")
         wake_e, evict_e = vllm_sleep_hooks(engine, engine_facts)
         wake_l, evict_l = offload_hooks(learner, learner_facts)
         host.arbiter.attach(engine, label=f"{host.name}:main-tp1",
@@ -842,9 +827,11 @@ def alternating(n_updates: int = 4, memory: float = 0.45) -> dict:
 @app.function(image=image, gpu="L4", volumes=VOLUMES, timeout=3600,
               cpu=8.0, memory=32768)
 def overcommit(first: float = 0.30, second: float = 0.75) -> dict:
-    """The overcommit boundary, measured — because leg 4 found a way to reach
-    it by accident (a name collision returns a live partition's memory to the
-    residual, so the next carve is sized against memory that is already gone).
+    """The overcommit boundary, measured — because the #51a collision was a
+    way to reach it BY ACCIDENT (a replaced host returned a live partition's
+    memory to the residual, so the next carve was sized against memory that
+    was already gone). #52 closed that path; the boundary itself is still
+    worth knowing.
 
     Two questions, and only the metal can answer them: what does a partition
     sized past the device DO, and does its failure take down the partitions
@@ -857,17 +844,21 @@ def overcommit(first: float = 0.30, second: float = 0.75) -> dict:
     started = time.monotonic()
     store = ModalVolumeStore("/store", volume=store_volume, locator=STORE)
     factories = Partitioned()
-    factories.memory_of = {"a-tp1": first, "b-tp1": second}
 
     async def main() -> dict:
-        from rlstack import Regime
+        from rlstack import Partition, Regime
+
+        def partition(memory: float) -> Partition:
+            return Partition(METAL_NAME, (0,), memory, "L4")
 
         hbm("container start (bare CUDA context)")
-        engine_a = factories.engine(Regime("a-tp1", "inference", BASE, 1))
+        engine_a = factories.engine(Regime("a-tp1", "inference", BASE, 1),
+                                    partition(first))
         await warm(engine_a, f"a-tp1 @ {first}")
         print(f"\n  now asking for {second} of a device that has "
               f"{1.0 - first:.2f} left")
-        engine_b = factories.engine(Regime("b-tp1", "inference", ALT_BASE, 1))
+        engine_b = factories.engine(Regime("b-tp1", "inference", ALT_BASE, 1),
+                                    partition(second))
         failure = None
         try:
             await warm(engine_b, f"b-tp1 @ {second}")
@@ -919,13 +910,21 @@ def observe() -> dict:
         print("-" * 72)
 
     log = store.read_fleet_log()
-    carved = [e["host"] for e in log if e.get("event") == "carve"]
+    every = [e["host"] for e in log if e.get("event") == "carve"]
+    # the pre-#52 carve names are still in this volume's history and always
+    # will be: they contain "/", so they journaled one directory deeper than
+    # list_hosts() looks and NOTHING can recover them (#51b). They are the
+    # finding, kept; the check is about the names a fixed fleet writes.
+    legacy = sorted({name for name in every if "/" in name})
+    carved = sorted({name for name in every if "/" not in name})
     listed = store.list_hosts()
     print(f"\ncarved hosts (fleet log): {carved}")
     print(f"observer's list_hosts()  : {listed}")
+    print(f"pre-#52 names, invisible for good: {legacy}")
     check("leg6: the observer can name every carved host",
           all(name in listed for name in carved),
-          f"{len(carved)} carved, {len(listed)} listed")
+          f"{len(carved)} carved, {len(listed)} listed, "
+          f"{len(legacy)} pre-#52 names unreachable")
     journaled = {name: [e for e in store.read_host_log(name)
                         if e.get("event") == "host-up"] for name in carved}
     check("leg6: every carved host journaled host-up with partition+regimes",
