@@ -2069,6 +2069,21 @@ specs; backends (local/modal/skypilot) and GPU topology are semantics-neutral.
 
 ## Open threads (do NOT treat as settled; flag when your answer touches them)
 
+- TODO (Samarth, settled intent — future, nothing now): BUNDLE LRU EVICTION
+  + FAULT-IN. Registrations only grow today (add_bundle is additive forever;
+  vLLM already LRU-pages GPU slots/CPU cache from our kept peft dirs — the
+  growth is OUR map, disk dirs, prompt-row tensors). The future shape: LRU
+  eviction of cold registrations at the engine layer, and on a request
+  pinning a VERY OLD bundle_id, fault the weights back in FROM THE CHECKPOINT
+  STORE (adapters/<name>@<v>.bin -> compile_bundle reproduces the identical
+  content-addressed id — the resume path IS the fault-in path, so eviction
+  can never cause wrongness, only a re-registration stall). Two rules: never
+  evict under an in-flight pin (I8 immunity); fault-in is transparent at the
+  pool-client layer (catch "never registered", re-add, retry). Verify vLLM
+  0.28's own max_cpu_loras boundary behavior on the pinned build first.
+  Consequence for the join-refusal thread: slots become soft, contention
+  becomes the only join currency.
+
 - PLANNED (Samarth-approved, queued behind #48 landing): the OPD stress test
   — Phase A: MATH levels 3-5, numeric-answer subset, few-shot raw-completion
   prompts (no chat template — the v0 constraint), three-host 8B<-32B topology,
