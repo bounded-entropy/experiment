@@ -28,6 +28,7 @@ tokenized exactly as flatten will re-tokenize it — no chat template.
 from __future__ import annotations
 
 import tempfile
+import time
 from collections.abc import AsyncIterator, Mapping, Sequence
 from pathlib import Path
 
@@ -39,6 +40,7 @@ from rlstack.policy.adapters.rollout import (
 from rlstack.policy.compile import Bundle, group_by_adapter_type
 from rlstack.registry import ADAPTER_TYPES
 from rlstack.runner.interfaces import FinishEvent, TokenEvent
+from rlstack.runner.meters import TrafficMeter
 from rlstack.spec.specs import SamplingSpec
 
 
@@ -79,6 +81,9 @@ class VllmEngine:
             self._engine_args.update(self._pay_demands(lowering))
         self._llm = None                       # built inside the running loop
         self._asleep = False                   # the sleep seam's own state
+        # traffic is counted HERE, at our own seam — never inside vLLM, whose
+        # statistics are version-coupled. A host wires its own meter in.
+        self.meter = TrafficMeter()
         self._known: set[str] = set()          # every registered bundle_id
         # id -> adapter type -> state
         self._attached: dict[str, dict[str, object]] = {}
@@ -204,6 +209,10 @@ class VllmEngine:
         self._request_count += 1
         request_id = f"rlstack-{self._request_count}-{seed}"
         levers = self._levers_for(prompt_ids, bundle_id)
+        # the prefill is known BEFORE the request leaves, and the clock for
+        # time-to-first-token starts on the same line
+        self.meter.opened_request(len(prompt_ids))
+        submitted = time.time()
 
         emitted = 0
         text_len = 0
@@ -212,6 +221,9 @@ class VllmEngine:
                 levers.prompt, params, request_id, **levers.kwargs):
             completion = output.outputs[0]
             new_ids = list(completion.token_ids)[emitted:]
+            if new_ids and not emitted:
+                self.meter.first_token_after(time.time() - submitted)
+            self.meter.decoded(len(new_ids))
             for offset, token_id in enumerate(new_ids):
                 position = emitted + offset
                 logprob = completion.logprobs[position][token_id].logprob
@@ -246,6 +258,9 @@ class VllmEngine:
         self._request_count += 1
         request_id = f"rlstack-score-{self._request_count}"
         levers = self._levers_for(full_ids, bundle_id)
+        # one prefill of known length, no decode loop: it costs the metal a
+        # prefill and the window says so
+        self.meter.opened_request(len(full_ids))
 
         final = None
         async for output in self._ensure_llm().generate(

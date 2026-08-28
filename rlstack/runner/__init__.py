@@ -30,6 +30,10 @@ The map, by responsibility — read top to bottom:
     sources/        WaveFeed: where the trainer's waves come from
                     (live / replay / static), one file each
     seeds.py        the seed tree: derive(master, *path)
+    meters.py       the emission plane: the TrafficMeter engines and the
+                    arbiter count into (drained once per stats tick), the
+                    UpdateClock the Trainer laps, and the HostJournal door
+                    they reach — wall clock, so host journals only
     engines/        real inference metal (vllm_engine), heavy imports,
     learners/       real training metal (torch_learner) — import lazily
     fakes.py        FakeEngine / FakeLearner: deterministic stand-ins behind
@@ -39,6 +43,6 @@ This is the one package allowed to import both worlds.
 """
 
 from rlstack.runner import (  # noqa: F401
-    interfaces, seeds, traffic, signals, arbiter, sources, post, daemons,
-    loop, host, fakes,
+    meters, interfaces, seeds, traffic, signals, arbiter, sources, post,
+    daemons, loop, host, fakes,
 )

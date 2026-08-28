@@ -10,15 +10,18 @@ own dictionary.json rather than re-deriving any declaration.
                     render_* (terminal text)
     series.py       run_series: one run's dictionary joined with its committed
                     history — the graphs' data
-    host_series.py  the per-HOST reading off the journals, plus fleet_data,
-                    the global join
+    host_series.py  the per-HOST reading off the journals — birth facts,
+                    residencies, gpu and traffic channels, run_timing —
+                    plus fleet_data, the global join
     panels.py       user-declared derived graphs, as expressions-as-data
     page.py         THE document: one self-contained page, every route's
                     response
     ui.py           the routes: a dependency-free WSGI app
 """
 
-from rlstack.observe.host_series import fleet_data, host_series  # noqa: F401
+from rlstack.observe.host_series import (  # noqa: F401
+    fleet_data, host_series, run_timing,
+)
 from rlstack.observe.locate import store_for  # noqa: F401
 from rlstack.observe.series import run_series  # noqa: F401
 from rlstack.observe.ui import serve, ui_app  # noqa: F401

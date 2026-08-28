@@ -22,6 +22,8 @@ from contextlib import AsyncExitStack, asynccontextmanager
 from dataclasses import dataclass, field
 from typing import Awaitable, Callable
 
+from rlstack.runner.meters import TrafficMeter
+
 Hook = Callable[[], Awaitable[None]]
 
 
@@ -47,16 +49,22 @@ class _Group:
 
 class GpuArbiter:
     def __init__(self, *, quantum: float = 0.0, max_wait: float | None = None,
-                 clock: Callable[[], float] = time.monotonic) -> None:
+                 clock: Callable[[], float] = time.monotonic,
+                 meter: TrafficMeter | None = None) -> None:
         """Two knobs bound drain-until-blocked's pathologies. `quantum` is the
         minimum seconds between switches — hysteresis against thrash when
         misaligned tenants interleave (0 = off). `max_wait` is the seconds
         after which a starving waiter forces a handoff: new admits of the
         current resident stop being fed so its work drains (None = off, which
-        the blackboard's own dataflow bounds whenever max_policy_lag does)."""
+        the blackboard's own dataflow bounds whenever max_policy_lag does).
+
+        The door is also the one place that knows what waited and what is
+        running, so it counts both into the host's `meter` — its own if none
+        is handed in, its host's once the host wires one (Host.wire_meter)."""
         self.quantum = quantum
         self.max_wait = max_wait
         self.clock = clock
+        self.meter = meter or TrafficMeter()
         self.switches: list[str] = []       # residency history, labels
         self._residents: dict[int, _Resident] = {}
         self._objects: dict[int, object] = {}   # keep attached objects alive
@@ -130,21 +138,29 @@ class GpuArbiter:
     @asynccontextmanager
     async def admit(self, obj: object):
         """Run the enclosed work with `obj` resident. Free residents never
-        block; exclusive residents wait for their group's drain-and-switch."""
+        block; exclusive residents wait for their group's drain-and-switch.
+
+        THE ADMISSION DOOR IS THE MEASUREMENT POINT: every unit of work that
+        passes through it reports how long it queued and stays counted as
+        in-flight until it leaves — a free resident's honest zero included,
+        because "nothing waited" is the fact the window is there to show."""
         entry = self._entry(obj)
         if entry.group is None:
             entry.in_flight += 1
+            self.meter.admitted(0.0)
             try:
                 yield
             finally:
                 entry.in_flight -= 1
+                self.meter.released()
             return
 
         cond = self._condition()
         group = self._groups[entry.group]
         async with cond:
+            queued = self.clock()
             if entry.waiting_since is None:
-                entry.waiting_since = self.clock()
+                entry.waiting_since = queued
             while not self._may_enter(obj, entry, group):
                 self._age(group)
                 await self._wait(cond)
@@ -152,11 +168,15 @@ class GpuArbiter:
             if group.resident is not obj:
                 await self._switch(group, obj, entry)
             entry.in_flight += 1
+            # this request's own wait, not the resident's oldest: two callers
+            # of one resident queue independently
+            self.meter.admitted(self.clock() - queued)
         try:
             yield
         finally:
             async with cond:
                 entry.in_flight -= 1
+                self.meter.released()
                 cond.notify_all()
 
     @asynccontextmanager

@@ -5,8 +5,8 @@ with its Partition and its Regimes, attesting the metal it was handed against
 them and never growing or reshaping afterward (I12). One regime is a dedicated
 host; several make it ALTERNATE them on its own arbiter group — one host
 wearing masks, never two hosts coordinating. It owns its engines, at most ONE
-multi-tenant learner (never remote — the runner comes to it), its arbiter and
-its journal.
+multi-tenant learner (never remote — the runner comes to it), its arbiter, its
+journal, and the one traffic meter both of the former count into.
 
 `await host.submit(spec, schema, store)` is how an experiment reaches metal:
 BIND each declared pool onto an owned engine serving that base at that shape,
@@ -33,6 +33,7 @@ from rlstack.runner.interfaces import Engine, Learner
 from rlstack.runner.loop import (
     RunReport, experiment_identity, run_experiment_async,
 )
+from rlstack.runner.meters import HostJournal, TrafficMeter
 from rlstack.spec.specs import ExperimentSpec, PoolMember
 
 
@@ -115,10 +116,12 @@ class Host:
         self.regimes = regimes
         self.capacity = capacity
         self.sampler = sampler or sample_gpu
+        self.meter = TrafficMeter()
         self.roster: dict[str, Tenancy] = {}
         self.attest_name()
         self.attest_regimes()
         self._attach_regimes()
+        self.wire_meter()
         store.append_host_event(name, {
             "event": "host-up", "t": time.time(),
             "engines": [engine.base or "*" for engine in self.engines],
@@ -176,6 +179,17 @@ class Host:
             # a carve hint and must never be adopted into this host's load
             self.arbiter.attach(obj, label=f"{self.name}:{regime.name}",
                                 group=group, fraction=0.0)
+
+    def wire_meter(self) -> None:
+        """ONE meter per host: every engine it owns counts its tokens into
+        this meter and its arbiter counts admission into the same one, so a
+        `traffic` event describes the PARTITION — which is what a shared
+        engine's load is a property of. Wired by assignment at birth because
+        engines and arbiters are built by the deploy that owns the metal and
+        handed to the host afterwards."""
+        for engine in self.engines:
+            engine.meter = self.meter
+        self.arbiter.meter = self.meter
 
     def engine_for(self, base: str | None, tp: int) -> Engine | None:
         """THE shape-matched lookup — exact base first, fake-metal wildcard
@@ -273,7 +287,11 @@ class Host:
         try:
             report = await run_experiment_async(
                 spec, schema, run_store, binding, self.learner,
-                max_inflight, arbiter=self.arbiter)
+                max_inflight, arbiter=self.arbiter,
+                # the tenant knows its own phases but not its metal: this is
+                # the door through which its update timings reach THIS host's
+                # journal, and the only reason the runner learns a host name
+                journal=HostJournal(self.store, self.name))
         except BaseException:
             self.roster[rid].status = "failed"
             self.store.append_host_event(self.name, {
@@ -290,15 +308,24 @@ class Host:
     # ---- observability ------------------------------------------------------
 
     async def run_stats(self, every: float = 30.0) -> None:
-        """Journal one GPU sample every `every` seconds until cancelled —
-        the CLI's `gpu` view (utilization, memory, downtime) is computed from
-        these events; a gap in them IS the downtime. Run it alongside
-        submissions: create_task(host.run_stats()), cancel when done."""
+        """Journal one GPU sample and one traffic window every `every` seconds
+        until cancelled — the CLI's `gpu` view (utilization, memory, downtime)
+        is computed from the samples; a gap in them IS the downtime. Run it
+        alongside submissions: create_task(host.run_stats()), cancel when done.
+
+        ONE cadence, two events: the traffic window is drained on the same
+        tick rather than by a second timer, so load and utilization are read
+        against the same clock. The gpu sample is skipped where no NVIDIA
+        runtime answers; the traffic window never is — a host that served
+        nothing this window says so with zeros."""
         while True:
             sample = await asyncio.to_thread(self.sampler)
+            now = time.time()
             if sample is not None:
                 self.store.append_host_event(self.name, {
-                    "event": "stats", "t": time.time(), **sample})
+                    "event": "stats", "t": now, **sample})
+            self.store.append_host_event(self.name, {
+                "event": "traffic", "t": now, **self.meter.drain(now).row()})
             await asyncio.sleep(every)
 
     def status(self) -> dict:

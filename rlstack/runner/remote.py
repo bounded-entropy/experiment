@@ -32,6 +32,7 @@ from rlstack.policy.adapters.base import Mechanism
 from rlstack.policy.compile import Bundle
 from rlstack.policy.siteschema import SiteMeta
 from rlstack.runner.interfaces import Engine, FinishEvent, TokenEvent
+from rlstack.runner.meters import TrafficMeter
 from rlstack.spec.specs import SamplingSpec
 
 if TYPE_CHECKING:
@@ -242,12 +243,19 @@ class RemotePool:
     Implements the full Engine protocol; base and tp are this pool's
     CAPABILITY ADDRESS on the serving host (the fleet's demand vocabulary),
     and double as the build facts the submit gate attests — the serving host
-    refuses an address it does not serve, so the attestation is real."""
+    refuses an address it does not serve, so the attestation is real.
+
+    TRAFFIC IS COUNTED WHERE IT IS SERVED, never here: every verb below lands
+    in HostService, which admits it through the SERVING host's arbiter and
+    runs it on that host's engine — both already wired to that host's meter.
+    A client-side count would attribute another partition's load to this one,
+    so this meter exists only to satisfy the protocol and stays at zero."""
 
     def __init__(self, transport: Transport, *, base: str | None = None,
                  tp: int = 1) -> None:
         self.base = base
         self.tp = tp
+        self.meter = TrafficMeter()
         self._transport = transport
 
     def _address(self) -> dict:

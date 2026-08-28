@@ -24,6 +24,7 @@ from rlstack.registry import ADAPTER_TYPES, POST, code_hashes
 from rlstack.runner.daemons import Daemon, Evaluator, Generator, Trainer
 from rlstack.runner.interfaces import Engine, Learner
 from rlstack.runner.arbiter import GpuArbiter
+from rlstack.runner.meters import HostJournal
 from rlstack.runner.traffic import Routes, load_tasks
 from rlstack.runner.signals import RunSignals
 from rlstack.runner.sources import feed_for
@@ -75,7 +76,8 @@ async def run_experiment_async(
         spec: ExperimentSpec, schema: SiteSchema, store: Store,
         engines: Engine | Mapping[str, Engine], learner: Learner,
         max_inflight: int = 64,
-        arbiter: GpuArbiter | None = None) -> RunReport:
+        arbiter: GpuArbiter | None = None,
+        journal: HostJournal | None = None) -> RunReport:
     """The async form of run_experiment — the multi-tenant entry.
 
     The multi-tenancy invariant (I8) is only expressible when several
@@ -85,6 +87,10 @@ async def run_experiment_async(
     way. Pass the metal-owner's shared `arbiter` so colocated tenants alternate
     under ONE admission authority; None builds a private one, the
     single-experiment convenience.
+
+    `journal` is the host's write door for this tenant's update timings
+    (Host.submit supplies it): observability that never touches the run
+    directory, and None — a run on no host — simply emits none.
     """
     if spec.algo is None:
         raise NotImplementedError(
@@ -182,7 +188,7 @@ async def run_experiment_async(
                            initial_bundle=bundle,
                            initial_version=policy_version,
                            max_inflight=max_inflight,
-                           arbiter=arbiter, tenant=rid)
+                           arbiter=arbiter, tenant=rid, journal=journal)
     try:
         async with asyncio.TaskGroup() as group:
             for daemon in daemons:
@@ -196,7 +202,8 @@ async def run_experiment_async(
 
 def plan_daemons(spec: ExperimentSpec, *, run, store, engine_map, learner,
                  routes_at, initial_bundle, initial_version,
-                 max_inflight, arbiter, tenant) -> list[Daemon]:
+                 max_inflight, arbiter, tenant,
+                 journal: HostJournal | None = None) -> list[Daemon]:
     """The spec already declares the daemons; this reads them off.
 
     live trajectories → a Generator writes the data bus; eval declared → an
@@ -204,6 +211,9 @@ def plan_daemons(spec: ExperimentSpec, *, run, store, engine_map, learner,
     the RESIDENTS its work occupies: the trainer's post phase the engines of
     its pipeline's declared pools, its train phase the learner, the generator
     and evaluator their serving pool's engine (plus the eval pipeline's).
+
+    Only the Trainer takes the host journal: an update is the unit of progress
+    the other daemons orbit, so its phase timings are the run's own clock.
     """
     signals = RunSignals()
     daemons: list[Daemon] = [
@@ -211,7 +221,7 @@ def plan_daemons(spec: ExperimentSpec, *, run, store, engine_map, learner,
                 spec=spec, feed=feed_for(spec, store, run),
                 engine=engine_map["main"], learner=learner, tenant=tenant,
                 post_residents=pipeline_residents(spec.algo.post, engine_map),
-                routes_at=routes_at,
+                routes_at=routes_at, journal=journal,
                 initial_bundle=initial_bundle, initial_version=initial_version),
     ]
     if spec.trajectories.source == "live":

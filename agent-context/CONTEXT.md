@@ -2238,6 +2238,80 @@ specs; backends (local/modal/skypilot) and GPU topology are semantics-neutral.
       and leaving the wire on the old word would have re-created the drift
       this pass exists to kill; both readers tolerate both.
 
+56. THE EMISSION PLANE: HOSTS MEASURE THEMSELVES (settled by execution,
+    directed: build the metrics data the observer UI renders, against a
+    schema fixed in advance because a sibling agent was overhauling the UI
+    against the same two events). #50 designed the schema-tolerant metrics
+    slot and deliberately emitted nothing into it; this entry is the
+    emission. 523 green (20 new in tests/test_emission.py).
+    - TWO JOURNAL EVENTS, both on hosts/<name>/log.jsonl and nowhere else.
+      `traffic` — one per existing stats tick, windowed since the previous
+      tick: {event, t, window_s, prefill_tokens, decode_tokens, requests,
+      ttft_ms_mean, admit_wait_ms_mean, admit_wait_ms_max, inflight}.
+      `update` — one per COMMITTED update, from the Trainer: {event, t,
+      run_id, update, seconds, phases:{collect, post, train, seal}}.
+      (#50 sketched the first as "throughput"; the built name is `traffic`.)
+    - THE RULE IS THE WINDOW, NOT THE REQUEST: counters accumulate at the
+      seams and the host's EXISTING stats loop drains them — one row per
+      tick, never one per request (journal bloat on the volume is the thing
+      being measured, defeating the point), and never a second timer (two
+      cadences on one host cannot be read against each other). A tick that
+      served nothing emits zeros with null means: a hole in the series is
+      indistinguishable from a dead host, and a fabricated 0ms is a lie.
+    - TIMESTAMPS NEVER ENTER A RUN DIRECTORY. Every number here is wall
+      clock, and a run dir is a pure function of (spec, code, data) — so
+      durations live in the host journal, which is observability, outside
+      identity, never read by correctness. The ledger line carries an
+      update's FACTS, the `update` event carries its DURATION. Guarded by a
+      test that snapshots the whole hosted run directory against a raw
+      run_experiment's: byte-identical, resume-equivalence untouched.
+    - THE SEAMS, all ours, none of them inside vLLM or torch (whose own
+      statistics are version-coupled to the pinned build): VllmEngine's own
+      generate loop (prefill = len(prompt_ids) before the request leaves,
+      TTFT = the gap to the first output, decode counted per streamed
+      chunk — zero per-token allocation; score_tokens is one prefill of
+      known length and counts as a request); the GpuArbiter's admission
+      door (this request's own queue time, not the resident's oldest, plus
+      the in-flight gauge — the learner's gradient admissions included,
+      because the wait is a property of the door); the Trainer's four
+      existing phase boundaries, lapped so every second between the first
+      await and the commit lands in exactly one phase.
+    - ONE METER PER HOST (rlstack/runner/meters.py: TrafficMeter +
+      TrafficWindow.row(), UpdateClock, HostJournal). The Host owns it and
+      wire_meter() assigns it into every engine it owns and its arbiter, so
+      a `traffic` event describes the PARTITION — a shared engine's load is
+      a property of the metal, while a tenant's share is a run fact the
+      ledger already carries. `meter` is declared on the Engine protocol,
+      not duck-typed on. Plain int/float adds on the one event loop: no
+      lock. Wiring is by assignment because deploys build engines first and
+      hand them to the host afterwards.
+    - THE WIRE NEEDS NOTHING (verified, not assumed): a RemotePool verb
+      lands in HostService, which admits it through the SERVING host's
+      arbiter and runs it on that host's engine — both already wired to
+      that host's meter. RemotePool carries a meter that stays at zero, and
+      says so: a client-side count would attribute another partition's load
+      to this one. Tested with two hosts and a LocalTransport.
+    - THE OBSERVER'S SIX CHANNELS (observe/host_series.py, which imports
+      nothing from the runner — the journal row IS the contract between
+      them): metric_series now serves traffic_channels first and then the
+      open slot. Names are fixed: prefill_tok_s, decode_tok_s, requests_s
+      (window counts over window_s), ttft_ms, admit_wait_ms (the window's
+      means), inflight (the gauge). All six appear together once a host has
+      ever journaled a window, so a polling page never watches cards appear
+      and vanish; a latency channel stays EMPTY while nothing measured one.
+      run_timing(store, run_id) scans every host's journal for that run's
+      `update` rows and returns them RAW, sorted by update — steps/s and
+      per-step bars are the page's arithmetic, not the observer's.
+    - DELIBERATELY SKIPPED: vLLM-internal KV-cache occupancy and scheduler
+      queue depth. They are the two numbers a seam cannot see, and both are
+      version-coupled to the pinned 0.28.0 engine — revisit only if the
+      seam-level numbers prove insufficient in practice. Also not built:
+      admit_wait_ms_max rides in the journal but is not one of the six
+      channels (the contract named six); the fleet page shows no traffic;
+      and no deploy entry point was touched, so a serving-only host
+      (deploy/modal_host.py) counts but never drains until someone starts
+      its run_stats loop.
+
 ## Open threads (do NOT treat as settled; flag when your answer touches them)
 
 - TODO (Samarth, settled intent — future, nothing now): BUNDLE LRU EVICTION

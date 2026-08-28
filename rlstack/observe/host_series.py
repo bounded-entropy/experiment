@@ -1,14 +1,20 @@
 """Per-host series assembly: one host's journal read as the fleet sees it.
 
 series.py is the per-EXPERIMENT reading; this is the per-HOST one, and its only
-input is hosts/<name>/log.jsonl — which correctness never reads. Four named
+input is hosts/<name>/log.jsonl — which correctness never reads. Six named
 readings, one per kind of fact a journal carries: boot_facts (the birth
 attestation — engines, and for newer hosts the Partition and Regimes; older
 journals carry neither and the page SAYS so rather than inventing one),
 tenancy_lanes (attach/detach paired into residencies), gpu_channels (stats as
-per-device util and memory series), and metric_series — the open throughput
-slot, which plots any numeric field an event carries that the other three do
-not claim, and into which nothing in runner/ emits yet.
+per-device util and memory series), traffic_channels (the host's own load, six
+channels off the windows its meter drains), run_timing (one run's update clock,
+across every host it ran on), and metric_series — which serves the traffic
+channels first and then the OPEN SLOT, any numeric field an event carries that
+no named reading claims.
+
+The journal row IS the contract between the emitters (runner/meters.py) and
+this file; the observer imports nothing from the runner, so the shape is
+carried by the bytes and by nothing else.
 
 fleet_data is the GLOBAL reading: hosts_data and runs_data joined with each
 host's lanes and utilization under one shared time window, because placement
@@ -23,14 +29,31 @@ from rlstack.data.stores.base import Store
 from rlstack.observe.views import hosts_data, runs_data
 
 # What the named readings above already render. Everything else numeric an
-# event carries falls through to metric_series — that is the open slot.
+# event carries falls through to the open slot inside metric_series.
 CLAIMED_FIELDS = {
     "host-up": ("engines", "partition", "regimes", "store"),
     "attach": ("pools", "remotes", "n_updates", "store"),
     "detach": ("status", "updates_completed"),
     "stats": ("gpus",),
+    "traffic": ("window_s", "prefill_tokens", "decode_tokens", "requests",
+                "ttft_ms_mean", "admit_wait_ms_mean", "admit_wait_ms_max",
+                "inflight"),
+    "update": ("update", "seconds", "phases"),
 }
 ALWAYS_CLAIMED = ("event", "t", "run_id")
+
+# The two ways a traffic window becomes a channel. A RATE is a window count
+# divided by the window it was counted over; a LEVEL is the window's own
+# summary, plotted as journaled. Channel names are the contract the UI reads.
+TRAFFIC_RATES = (("prefill_tok_s", "prefill_tokens"),
+                 ("decode_tok_s", "decode_tokens"),
+                 ("requests_s", "requests"))
+TRAFFIC_LEVELS = (("ttft_ms", "ttft_ms_mean"),
+                  ("admit_wait_ms", "admit_wait_ms_mean"),
+                  ("inflight", "inflight"))
+TRAFFIC_CHANNELS = tuple(name for name, _ in TRAFFIC_RATES + TRAFFIC_LEVELS)
+
+UPDATE_PHASES = ("collect", "post", "train", "seal")
 
 FLEET_POINTS = 600   # the fleet plot is a shape; the host page carries it all
 
@@ -144,11 +167,81 @@ def gpu_channels(events: Sequence[dict]) -> list[dict]:
     return channels
 
 
+def traffic_channels(events: Sequence[dict]) -> list[dict]:
+    """THE THROUGHPUT READING: each `traffic` event is one drained window of
+    the host's own load, and these are its six channels — prefill_tok_s,
+    decode_tok_s, requests_s (counts over the window they were counted in),
+    ttft_ms, admit_wait_ms (the window's own means), inflight (the gauge at
+    the tick).
+
+    All six appear together as soon as a host has ever journaled a window, so
+    a polling page never watches cards appear and vanish; a latency channel
+    stays EMPTY while nothing measured one, because a window that served only
+    scoring prefills has no time to first token and a fabricated 0ms would be
+    a lie. A host that predates the emission plane gets no channels at all.
+    """
+    points: dict[str, list] = {name: [] for name in TRAFFIC_CHANNELS}
+    windows = 0
+    for event in events:
+        when = event.get("t")
+        if event.get("event") != "traffic" or not isinstance(when, (int, float)):
+            continue
+        windows += 1
+        span = event.get("window_s")
+        if isinstance(span, (int, float)) and not isinstance(span, bool) and span > 0:
+            for channel, field in TRAFFIC_RATES:
+                for _, count in numbers_under(channel, event.get(field)):
+                    points[channel].append([when, count / span])
+        for channel, field in TRAFFIC_LEVELS:
+            for _, value in numbers_under(channel, event.get(field)):
+                points[channel].append([when, value])
+    if not windows:
+        return []
+    return [{"key": name, "event": "traffic", "points": points[name]}
+            for name in TRAFFIC_CHANNELS]
+
+
+def run_timing(store: Store, run_id: str) -> dict:
+    """One run's UPDATE CLOCK: every `update` event this store's hosts
+    journaled for it, raw and sorted by update.
+
+    A run's placement is discoverable from the journals and a run may have
+    moved (resume onto other metal), so every host in the store is scanned and
+    the rows are joined — the run, not the host, is what the reader asked
+    about. Nothing is derived here: steps/s and per-step bars are the page's
+    arithmetic over these rows, and a row is exactly what the Trainer measured.
+    """
+    updates = []
+    for host in store.list_hosts():
+        for event in store.read_host_log(host):
+            if event.get("event") != "update" or event.get("run_id") != run_id:
+                continue
+            update = event.get("update")
+            when = event.get("t")
+            if (not isinstance(update, int) or isinstance(update, bool)
+                    or not isinstance(when, (int, float))):
+                continue
+            phases = event.get("phases")
+            phases = phases if isinstance(phases, dict) else {}
+            updates.append({
+                "update": update, "t": float(when),
+                "seconds": float(event.get("seconds") or 0.0),
+                "phases": {phase: float(phases.get(phase) or 0.0)
+                           for phase in UPDATE_PHASES}})
+    return {"updates": sorted(updates, key=lambda row: row["update"])}
+
+
 def metric_series(events: Sequence[dict]) -> list[dict]:
-    """THE THROUGHPUT SLOT: every numeric field an event carries that the
-    named readings do not claim, as a series keyed <event>.<field>. One
-    rule, no schema — a host that starts journaling a new numeric fact gets
-    it plotted without the observer learning its name first."""
+    """The host's numeric series: the six named traffic channels first, then
+    THE OPEN SLOT — every numeric field an event carries that no named
+    reading claims, keyed <event>.<field>. One rule, no schema — a host that
+    starts journaling a new numeric fact gets it plotted without the observer
+    learning its name first."""
+    return traffic_channels(events) + open_slot(events)
+
+
+def open_slot(events: Sequence[dict]) -> list[dict]:
+    """The unclaimed half of metric_series, keyed <event>.<field>."""
     points: dict[str, list] = {}
     for event in events:
         kind = str(event.get("event", "event"))
