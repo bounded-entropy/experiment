@@ -10,13 +10,16 @@ continue is in the repo.
    architecture, enforced by `tests/test_architecture.py`. Deviations are
    review findings.
 2. **agent-context/CONTEXT.md** — the decision log. Chronological, numbered;
-   later entries supersede earlier ones (#28–#43 cover the current shape:
+   later entries supersede earlier ones (#28–#48 cover the current shape:
    the trajectory/wave rename, the loss zoo + stress matrix, the GpuArbiter,
    the multi-tenant Learner, the Host, the operational CLI + observe/, the
    flow graph + dictionary.json, the #38 loss-purity ruling, the scoring
-   verb + real opsd, the observer UI + custom panels, and #43: the fleet —
-   hosts as atomic partitions, join/carve/acquire, the wire). If code
-   and an early entry disagree, the code plus the latest entry win.
+   verb + real opsd, the observer UI + custom panels, #43: the fleet —
+   hosts as atomic partitions, join/carve/acquire, the wire — #44: the
+   trainer's punica, #45: TP/transport/FSDP on metal, #46: soft prompts +
+   the side_attention refusal, #47: real OPD, and #48: the Lowering — one
+   contract per (kind, side)). If code and an early entry disagree, the
+   code plus the latest entry win.
 3. **agent-context/rl-stack-spec.md** — the spec canon, v3 (folded through
    #43). Invariants I1–I12. Deltas after the fold-in live in CONTEXT.md.
 
