@@ -2067,6 +2067,81 @@ specs; backends (local/modal/skypilot) and GPU topology are semantics-neutral.
     report. And deploy/math_opd_l4.py::full's docstring still prices the
     eval tail as sequential — stale as of this entry.
 
+54. ARCHITECTURE.md + THE DOCSTRING RECODE (settled, directed: a universal
+    vocabulary reference, then every docstring in the repo made to speak it).
+    Docs only — `git diff` on .py is docstrings and comments, verified
+    mechanically (AST equality against HEAD with docstrings stripped, exact
+    for all 111 changed files). 503 green before and after, test_resume run
+    explicitly.
+    - THE DOC IS ARCHITECTURE.md AT THE REPO ROOT, and its charter is narrow:
+      it DEFINES existing vocabulary and never redefines semantics. Canon is
+      still rl-stack-spec.md plus the latest entry here; where the doc and
+      canon disagree, canon wins. It is pedagogical, not chronological —
+      history stays in THIS file, which is why the doc has no dates and no
+      campaign results. Shape: the system in two paragraphs; ~73 NOUNS, each
+      1-3 sentences plus the file it lives in, grouped contract / bridge /
+      data objects / training world / metal / store / runtime; VERBS grouped
+      by contract (the rollout lowering's demands-reaches-attach-apply-align
+      plus the `claims` declaration, the kind's params/install_replay/
+      uninstall_replay/emit/load/parity/rollout_lowering, the fleet's
+      join-carve-acquire-place-apply, the host's submit-attach-admit-sleep,
+      pool traffic's sample/score/collect and the admission-free ask verbs,
+      the store's verbs); THE TWO PLANES; and an I1-I12 index that POINTS at
+      the spec rather than restating it.
+    - THE TWO PLANES is the one piece of framing the doc adds, and it is a
+      distinction the code already makes: pool traffic rides the wire
+      (availability signals, admitted at the serving host, nothing durable),
+      the store plane rides the volume (the ledger append is the only
+      durability bit). The consequence stated for future readers: an
+      availability signal must never be mistaken for a commit — a bundle
+      registered on an engine is availability, the ledger line naming it is
+      the commit.
+    - THE RECODE'S RULE: a docstring says what the thing IS in the doc's
+      vocabulary plus the rule it enforces; module docstrings are 1-4
+      sentences (a map or a verb table may be longer when the module IS a
+      map); AT MOST ONE load-bearing citation survives, and only where the
+      rule genuinely comes from it. A docstring that used to DEFINE "pool" or
+      "lowering" inline now just USES the word. Honesty was compressed, never
+      softened — side_attention's refusal and its true probe reason, attn_bias
+      unreachable and refused at Phase 0, the parity certificate designed and
+      unwired, additive_mask's mask cost, best-effort CUDA determinism, and
+      partition_l4's two standing findings all survive.
+    - STALE CLAIMS THE PASS CAUGHT (docstrings had drifted from the code in
+      ways worth recording): losses/base.py still said a loss's `requires` may
+      name "planned passes" — retired in #38, and this file is the one that
+      enforces the rule; interfaces.py's Learner still said "swap-install"
+      (#44(f)'s named debt, now paid); inference/rollout.py said the runner
+      seals "after rewards", but run_episode seals immediately and rewards are
+      postdata computed after the seal; stores/base.py's key tree omitted
+      fleet/log.jsonl; validate.py said ONE check lives outside CHECKS when
+      three do (the three that consult live metal, now named); arbiter.py said
+      "one arbiter per GpuSet", which sub-GPU hosts falsified — a Host
+      constructs its own, so an arbiter governs its owner's PARTITION and
+      several coexist on one device (ARCHITECTURE.md carries the corrected
+      wording too). Also swept: SPEC.md citations (that file does not exist),
+      Phase A/B1/B2/B3/C chronology, leases, "role" for daemon, plan_roles for
+      plan_daemons, the "five-member" adapter protocol (rollout_lowering made
+      it six), and a `--fake` flag that never existed.
+    - ADAPTER -> KIND WAS DELIBERATELY DEFERRED. The registered class is named
+      `Adapter` and its registry `ADAPTERS`, but what they register is a KIND
+      (`AdapterSpec.kind` names it by string); a configured bank entry is the
+      adapter. The doc states the debt honestly and uses the words correctly
+      in prose; NO identifier moved, because the rename is its own pass and
+      would touch `Registry("adapter")`, whose string reaches user-facing
+      KeyErrors and — through code_hashes keys ("adapter:lora") — every
+      run_id. Rename candidates found while reading, for that pass: `llm` as
+      the PoolClient parameter name everywhere (environments and every post
+      processor); `Partition.gpuset` holding a Metal NAME rather than a
+      GpuSet, a real false friend; `kind` overloaded three ways (adapter kind,
+      Regime/Demand capability, GPU kind) with `FlowNode.kind` a fourth;
+      `TokenBatch.post` for postdata; VllmEngine's `max_loras`/`max_lora_rank`
+      surviving on a mechanism-blind bus. Two stale strings live in
+      NotImplementedError/raise messages rather than docstrings and so were
+      out of scope: batch_view.py's and side_attention.py's "B3", loop.py's
+      two "B1" messages, and base.py's uninstall_replay message still saying
+      "each tenant needs exclusive install" (install is additive; the true
+      reason is the tenant could never be REMOVED).
+
 ## Open threads (do NOT treat as settled; flag when your answer touches them)
 
 - TODO (Samarth, settled intent — future, nothing now): BUNDLE LRU EVICTION
