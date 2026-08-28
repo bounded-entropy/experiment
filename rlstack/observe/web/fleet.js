@@ -13,6 +13,16 @@ export async function drawFleet() {
   const holder = document.getElementById("page");
   holder.innerHTML = "";
   if (!fleet) { holder.textContent = "no stores"; return; }
+  // a host name is unique per store, not per fleet: when two roots journal
+  // the same name, the folder is what tells them apart
+  const shared = new Set();
+  const seen = new Set();
+  for (const h of fleet.hosts) {
+    if (seen.has(h.host)) shared.add(h.host);
+    seen.add(h.host);
+  }
+  const label = h => shared.has(h.host) ? `${h.folder || "(top)"}/${h.host}` : h.host;
+  const link = h => hostPath(h.host, shared.has(h.host) ? h.folder : null);
   ctx(`<span class="meta">${fleet.hosts.length} host${fleet.hosts.length === 1 ? "" : "s"}
      · ${fleet.runs.length} experiment${fleet.runs.length === 1 ? "" : "s"}
      · ${fleet.stores.map(esc).join(" ")}</span>`);
@@ -23,7 +33,7 @@ export async function drawFleet() {
   }
   holder.append(el("h2", {}, "placement <span>who ran where, over time</span>"));
   holder.append(timeline(fleet.hosts.map(h => ({
-      name: h.host, href: hostPath(h.host),
+      name: label(h), href: link(h),
       bars: h.tenancy.map(t => ({label: t.run_id, status: t.status,
           t0: t.attached, t1: t.detached,
           detail: (t.pools || []).join(", ")}))})),
@@ -34,8 +44,8 @@ export async function drawFleet() {
   const busy = fleet.hosts.filter(h => h.util.length);
   if (busy.length) {
     const grid = section("utilization", "busiest device per host", "wide");
-    grid.append(card("gpu util", busy.map(h => h.host).join(" · "),
-        busy.map((h, i) => ({label: h.host, color: WHEEL[i % WHEEL.length],
+    grid.append(card("gpu util", busy.map(label).join(" · "),
+        busy.map((h, i) => ({label: label(h), color: WHEEL[i % WHEEL.length],
                              points: h.util})),
         {unit: "%", y0: 0, y1: 100, xlabel: clock, breakGaps: true, H: 200}));
   }
@@ -43,7 +53,7 @@ export async function drawFleet() {
       + "<th>partition</th><th>tenants</th><th>boots</th><th>last seen</th></tr>");
   for (const h of fleet.hosts) {
     const row = el("tr", {});
-    row.append(el("td", {}, `<a href="${hostPath(h.host)}">${esc(h.host)}</a>`));
+    row.append(el("td", {}, `<a href="${link(h)}">${esc(label(h))}</a>`));
     row.append(el("td", {}, esc(h.engines.join(", ") || "?")));
     row.append(el("td", {}, (h.regimes || []).map(r =>
         esc(`${r.name}:${r.kind}×${r.shape}`)).join(" ") || "<span class='k'>—</span>"));

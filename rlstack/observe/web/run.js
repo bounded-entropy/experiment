@@ -7,7 +7,8 @@
 
 import {C, brief, el, esc, getJSON, note, section} from "./dom.js";
 import {card, emptyCard, stackedCard} from "./charts.js";
-import {ctx, hostPath, legend, route, syncSwitcher, wavePath} from "./nav.js";
+import {apiRun, ctx, drawAmbiguity, hostPath, legend, route, syncSwitcher,
+        wavePath} from "./nav.js";
 
 const GAP = "logprob_gap";      // the parity alarm (#25's certificate, running)
 const PHASES = [{name: "collect", color: C.feed},
@@ -16,23 +17,32 @@ const PHASES = [{name: "collect", color: C.feed},
                 {name: "seal", color: C.eval}];
 
 export async function drawRun() {
-  const runId = route.runId;
+  const runId = route.runId, folder = route.folder;
   const [data, runs, timing, waves] = await Promise.all([
-    getJSON("/api/run/" + encodeURIComponent(runId)),
+    getJSON(apiRun(runId, "", folder)),
     getJSON("/api/runs"),
-    getJSON("/api/run/" + encodeURIComponent(runId) + "/timing"),
-    getJSON("/api/run/" + encodeURIComponent(runId) + "/waves"),
+    getJSON(apiRun(runId, "/timing", folder)),
+    getJSON(apiRun(runId, "/waves", folder)),
   ]);
   if (!data) { document.getElementById("page").textContent = "unknown run"; return; }
+  if (data.ambiguous) { drawAmbiguity(runId, data.ambiguous); return; }
   syncSwitcher(runs || []);
-  const mine = (runs || []).find(r => r.run_id === runId);
+  const mine = (runs || []).find(r => r.run_id === runId
+      && (folder === null || r.folder === folder));
   const dict = data.dictionary || {columns: [], rails: []};
-  ctx(`<span class="meta">loss ${esc(dict.loss ?? "?")} · lag ${esc(dict.max_policy_lag ?? 0)}
+  // the NAME leads and the hex id is secondary: a run is a thing a human
+  // named, addressed by (folder, run_id) underneath
+  ctx(`<span>${esc((mine && mine.name) || runId)}</span>`
+    + ((mine && mine.name) ? `<span class="k">${esc(runId)}</span>` : "")
+    + ((mine && mine.folder) ? `<span class="k">${esc(mine.folder)}</span>` : "")
+    + ((mine && mine.tags || []).map(t =>
+        `<span class="tag">${esc(t)}</span>`).join("")
+    + `<span class="meta">loss ${esc(dict.loss ?? "?")} · lag ${esc(dict.max_policy_lag ?? 0)}
      · post [${(dict.post_pipeline || []).map(esc).join(" → ")}]</span>
      <span class="${data.committed >= (data.target ?? 1e9) ? "meta" : "live"}">
-     ${data.committed}/${esc(data.target ?? "?")} committed</span>`
+     ${data.committed}/${esc(data.target ?? "?")} committed</span>`)
     + (mine ? `<span class="meta">on ${mine.hosts.map(h =>
-        `<a href="${hostPath(h)}" style="color:${C.feed}">${esc(h)}</a>`
+        `<a href="${hostPath(h, folder)}" style="color:${C.feed}">${esc(h)}</a>`
       ).join(" + ") || "?"}</span>` : ""));
   document.getElementById("page").innerHTML = "";
 
@@ -143,7 +153,8 @@ function drawWaves(waves) {
       + "<th>groups</th><th>post means</th><th>bundle</th></tr>");
   for (const wave of rows.slice().reverse()) {
     const row = el("tr", {});
-    row.append(el("td", {}, `<a href="${wavePath(route.runId, wave.update)}">`
+    row.append(el("td", {},
+        `<a href="${wavePath(route.runId, wave.update, route.folder)}">`
         + `wave ${wave.update}</a>`));
     row.append(el("td", {class: "n"}, esc(wave.trajectories ?? "?")));
     row.append(el("td", {class: "n"}, esc(wave.groups ?? "?")));

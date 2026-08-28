@@ -8,7 +8,7 @@
 import {C, WHEEL, brief, clock, el, esc, getJSON, gib, note, section, when}
   from "./dom.js";
 import {card, plot, residencyTip, timeline} from "./charts.js";
-import {ctx, legend, route, runPath} from "./nav.js";
+import {ctx, legend, query, route, runPath} from "./nav.js";
 
 const MOMENT_COLOR = {"host-up": C.teal, attach: C.rail, detach: C.feed,
                       sleep: C.derived, wake: C.eval};
@@ -17,12 +17,15 @@ const MOMENT_COLOR = {"host-up": C.teal, attach: C.rail, detach: C.feed,
 const CLAIMED_EVENTS = ["traffic.", "update."];
 
 export async function drawHost() {
-  const host = await getJSON("/api/host/" + encodeURIComponent(route.host));
+  const host = await getJSON("/api/host/" + encodeURIComponent(route.host)
+                             + query(route.folder));
   const holder = document.getElementById("page");
   if (!host) { holder.textContent = "unknown host"; return; }
   holder.innerHTML = "";
   const resident = host.tenancy.filter(t => t.detached === null).length;
   ctx(`<span>${esc(host.host)}</span>`
+    + (host.folders.some(f => f)
+        ? `<span class="k">${esc(host.folders.filter(f => f).join(" "))}</span>` : "")
     + `<span class="meta">engines ${esc(host.engines.join(", ") || "?")}`
     + ` · ${host.boots.length} boot${host.boots.length === 1 ? "" : "s"}`
     + ` · ${host.events} events · ${esc(host.journal_stores.map(esc).join(" "))}</span>`
@@ -76,7 +79,7 @@ function drawTenancy(host) {
     return;
   }
   holder.append(timeline(host.tenancy.map(t => ({
-      name: t.run_id, href: runPath(t.run_id),
+      name: t.run_id, href: runPath(t.run_id, route.folder),
       bars: [{label: t.run_id, status: t.status, t0: t.attached, t1: t.detached,
               detail: (t.pools || []).join(", ")}]})),
     [host.first_seen, host.last_seen], residencyTip));
@@ -85,7 +88,7 @@ function drawTenancy(host) {
       + "<th>store</th></tr>");
   for (const t of host.tenancy.slice().reverse()) {
     const row = el("tr", {});
-    row.append(el("td", {}, `<a href="${runPath(t.run_id)}">${esc(t.run_id)}</a>`));
+    row.append(el("td", {}, `<a href="${runPath(t.run_id, route.folder)}">${esc(t.run_id)}</a>`));
     row.append(el("td", {class: t.status === "running" ? "live" : ""}, esc(t.status)));
     row.append(el("td", {class: "k"}, esc(t.pools.join(", ") || "—")));
     row.append(el("td", {class: "k"}, esc(t.remotes.join(", ") || "—")));

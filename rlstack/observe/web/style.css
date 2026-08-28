@@ -52,6 +52,21 @@ select { background:var(--card); color:var(--ink); border:1px solid var(--line);
        padding:6px 9px; font-size:12px; line-height:1.5; white-space:nowrap;
        box-shadow:0 4px 14px #0008; }
 
+/* the organization plane (#58): the folder tree, the search box, the chips.
+   A folder is a store root, so the tree is not a control — it is where the
+   runs already are. The chips are annotations: flavortext, never identity. */
+.find { padding:14px 22px 2px; }
+.find input { background:var(--card); color:var(--ink); border:1px solid var(--line);
+              border-radius:6px; padding:6px 10px; font:inherit; font-size:13px;
+              width:min(440px, 100%); }
+.find input:focus { outline:none; border-color:var(--feed); }
+#tree > details.group { margin:8px 22px 10px; }
+#tree > details.group table { margin:0 12px 10px; }
+#tree > table { margin-top:10px; }
+.tag { display:inline-block; background:#141a21; border:1px solid var(--line);
+       border-radius:10px; color:var(--derived); font-size:11px;
+       padding:0 8px; margin-right:5px; }
+
 /* the wave browser: groups, and the chat reader inside them */
 .wave { margin:0 22px 14px; }
 details.group { background:var(--card); border:1px solid var(--line);
