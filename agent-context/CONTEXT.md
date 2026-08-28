@@ -1412,6 +1412,26 @@ specs; backends (local/modal/skypilot) and GPU topology are semantics-neutral.
     payload bytes, but again unrun); score_tokens under a soft prompt is
     implemented with the offset and exercised by the parity harness, but no
     opsd tenant has used it.
+    CORRECTION (LSE spike, 2026-08-28, branch worktree-agent-a09fda7796df17719,
+    unmerged): #46's stated blocker is imprecise. The dense FlashAttention
+    path CAN yield the LSE on 0.28.0 without forking dispatch:
+    flash_attn_varlen_func is a rebindable module global called exactly once
+    per dense forward with out= (return discarded), so a shim adds
+    return_softmax_lse=True invisibly — 159 executable lines, zero copied
+    dispatch, 18/18 on metal: bit-identical identity at zero bias, exact
+    LSE-merge arithmetic (#25's math finally executed), gated/ungated
+    separation exact, disarm restores stock exactly. Also: side_attention.py's
+    required_symbols names a fictional `dense_lse` symbol — must be rewritten
+    to name the module global + kwarg if anything lands. Costs measured, not
+    hidden: cascade attention declined while armed (and cascade fires on
+    exactly GRPO-wave shapes), full CUDA graphs forfeited, prefix caching
+    unwired (cache_salt), ~3x warm latency un-optimized. Recommendation on
+    record: write attn_bias's rollout lowering as a SCORE_MOD (ports to
+    FlexAttention today and FA4/Blackwell later — vLLM ships an in-tree FA4
+    precedent, fa4_rel_attention with in-kernel additive bias); keep the LSE
+    patch as the measured fallback. FLAVOR DECISION IS SAMARTH'S — nothing
+    merged, reachability still NONE.
+
 47. REAL ON-POLICY DISTILLATION: THE TEACHER IS A POOL (settled by
     execution — Samarth-directed: "`opd` is repointed to true on-policy
     distillation: the student samples live, a frozen teacher SCORES the
