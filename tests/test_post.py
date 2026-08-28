@@ -6,13 +6,17 @@ import asyncio
 import unittest
 from typing import Any
 
-from common import sealed
+from common import char_tokenize, make_turn, sealed
 from rlstack import (
-    POST, Bundle, FakeEngine, Group, Message, PostProcessor, Role, SamplingSpec, Wave,
-    postprocessor, run_pipeline, zscore,
+    POST, Bundle, FakeEngine, Group, Message, PostProcessor, Role, Rollout,
+    SamplingSpec, Task, Wave, postprocessor, run_pipeline, zscore,
 )
 
 BUNDLE = Bundle(bundle_id="bundle:post0000", policy_version={"pi": 0})
+TEACHER_BASE = "Qwen/Qwen3-32B"
+# what the loop registers for a non-policy pool: payload-free, so the teacher
+# engine serves its bare base and no delta of this run reaches it
+TEACHER_BUNDLE = Bundle(bundle_id="bundle:base:teacher", policy_version={})
 
 
 def pools():
@@ -287,3 +291,142 @@ class ScoringAndHintedTest(unittest.TestCase):
         self.assertEqual(hinted["granularity"], "token")
         self.assertTrue(hinted["feeds_loss"])
         self.assertIn("loss:opsd", hinted["consumers"])
+
+
+def two_turn(task_id: str = "t0"):
+    """A trajectory with an INJECTED message between two generated turns —
+    the shape that makes "flatten order" mean something: turn 2 must be
+    scored against turn 1 and the message that followed it."""
+    first = make_turn("4", char_tokenize("4"))
+    second = make_turn("40", char_tokenize("40"))
+    rollout = Rollout(
+        task=Task(task_id, "What is 2+2?", {"answer": 4}),
+        messages=[Message(Role.USER, "What is 2+2?"), first.message,
+                  Message(Role.USER, "And times ten?"), second.message],
+        turns=[first, second])
+    return rollout.seal()
+
+
+class TeacherDistillationTest(unittest.TestCase):
+    """The OPD teacher channel (#47): a SECOND model's pool scores the
+    student's own sampled tokens, the column lands token-aligned in postdata,
+    and the flow graph shows it feeding loss:opd — I9 with no pass planning
+    anywhere, exactly as hinted_logprobs does it for opsd."""
+
+    def routes_and_traj(self):
+        student = FakeEngine()
+        teacher = FakeEngine(base=TEACHER_BASE)
+        student.add_bundle(BUNDLE)
+        teacher.add_bundle(TEACHER_BUNDLE)
+        return ({"main": (student, BUNDLE), "teacher": (teacher, TEACHER_BUNDLE)},
+                teacher, two_turn())
+
+    def test_the_teacher_pool_scores_in_flatten_order(self) -> None:
+        routes, teacher, traj = self.routes_and_traj()
+
+        async def scenario():
+            columns = await run_pipeline(
+                ("teacher_logprobs",), Wave([Group("g", [traj])]), routes,
+                SamplingSpec(), master=7, update=1)
+            # the same walk by hand: each generated turn under everything
+            # BEFORE it, on the teacher's own metal and its own bundle
+            by_hand = list(await teacher.score_tokens(
+                traj.messages[:1], traj.turns[0].token_ids,
+                TEACHER_BUNDLE.bundle_id))
+            by_hand += list(await teacher.score_tokens(
+                traj.messages[:3], traj.turns[1].token_ids,
+                TEACHER_BUNDLE.bundle_id))
+            # and what the STUDENT's pool would have said, which must differ
+            student_engine, student_bundle = routes["main"]
+            student_says = list(await student_engine.score_tokens(
+                traj.messages[:1], traj.turns[0].token_ids,
+                student_bundle.bundle_id))
+            return columns["teacher_logprobs"][0], by_hand, student_says
+
+        column, by_hand, student_says = go(scenario())
+        self.assertEqual(column, by_hand)
+        self.assertEqual(len(column), 3)             # "4" + "40"
+        self.assertNotEqual(column[:1], student_says)  # the pool is the teacher
+
+    def test_the_column_is_token_aligned_at_the_loss_mask(self) -> None:
+        from rlstack.data.flatten import broadcast, flatten
+
+        routes, _, traj = self.routes_and_traj()
+        columns = go(run_pipeline(("teacher_logprobs",),
+                                  Wave([Group("g", [traj])]), routes,
+                                  SamplingSpec(), master=7, update=1))
+        flat = flatten(traj, tokenize=char_tokenize)
+        (per_doc,) = broadcast(columns, [flat])
+        aligned = per_doc["teacher_logprobs"]
+        self.assertEqual(len(aligned), len(flat.token_ids))
+        self.assertEqual([v for v, m in zip(aligned, flat.loss_mask) if m],
+                         columns["teacher_logprobs"][0])
+        self.assertTrue(all(v == 0.0 for v, m
+                            in zip(aligned, flat.loss_mask) if not m))
+
+    def test_teacher_pipeline_feeds_opd_end_to_end(self) -> None:
+        import tempfile
+        from dataclasses import replace
+
+        from common import arith_spec, arith_store
+        from rlstack import (
+            FakeLearner, GpuConfig, GpuGroup, fake_qwen_schema, gpus, learner,
+            pool, run_experiment,
+        )
+
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        store, train, heldout = arith_store(tmp.name)
+        base = arith_spec(train, heldout)
+        spec = replace(
+            base,
+            algo=replace(base.algo, loss="opd",
+                         post=("verifier", "teacher_logprobs")),
+            # the teacher is a DECLARED pool on another base — placement then
+            # decides it lives on other metal; the spec never says where (#43)
+            gpu_config=GpuConfig(groups=(
+                GpuGroup(gpus(n=1), (pool("main", fraction=0.3),
+                                     pool("teacher", base=TEACHER_BASE,
+                                          fraction=0.4),
+                                     learner(fraction=0.3))),)))
+
+        report = run_experiment(
+            spec, fake_qwen_schema(4, base="Qwen/Qwen3-0.6B"), store,
+            {"main": FakeEngine(), "teacher": FakeEngine(base=TEACHER_BASE)},
+            FakeLearner())
+        run = store.open_run(report.run_id)
+        self.assertEqual(len(run.read_ledger()), 4)
+
+        postdata = run.read_postdata(1)
+        rows = run.read_wave(1)
+        for vector, row in zip(postdata["teacher_logprobs"], rows):
+            generated = sum(len(t["token_ids"]) for t in row["turns"])
+            self.assertEqual(len(vector), generated)      # token-aligned
+            self.assertTrue(all(v < 0 for v in vector))
+
+        dictionary = store.peek_dictionary(report.run_id)
+        by_name = {(c["name"], c["phase"]): c for c in dictionary["columns"]}
+        teacher = by_name[("teacher_logprobs", "post")]
+        self.assertEqual(teacher["granularity"], "token")
+        self.assertEqual(teacher["producer"], "postprocessor:teacher_logprobs")
+        self.assertTrue(teacher["feeds_loss"])
+        self.assertIn("loss:opd", teacher["consumers"])
+        self.assertEqual(dictionary["loss"], "opd")
+        # reward is MEASUREMENT here: opd's gradient never sees it
+        self.assertFalse(by_name[("reward", "post")]["feeds_loss"])
+
+
+class TeacherRegistrationTest(unittest.TestCase):
+    def test_the_processor_declares_its_teacher_pool_and_token_channel(self) -> None:
+        pdef = POST.get("teacher_logprobs")
+        self.assertEqual(pdef.produces, ("teacher_logprobs",))
+        self.assertEqual(pdef.token_level, ("teacher_logprobs",))
+        self.assertEqual(pdef.consumes, ())
+        self.assertEqual(pdef.pools, ("teacher",))
+
+    def test_opd_requires_the_column_and_nothing_metal(self) -> None:
+        from rlstack.registry import LOSSES
+
+        self.assertEqual(LOSSES.get("opd").requires, ("teacher_logprobs",))
+        self.assertEqual(LOSSES.get("replay_distill").requires,
+                         ("behavior_logprobs",))

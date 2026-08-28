@@ -9,7 +9,8 @@ import tempfile
 import unittest
 
 from rlstack import (
-    AlgoSpec, OptimSpec, Schedule, TrajectorySource, fake_qwen_schema, validate,
+    AlgoSpec, GpuConfig, GpuGroup, OptimSpec, Schedule, TrajectorySource,
+    fake_qwen_schema, gpus, learner, pool, validate,
 )
 from tests.common import arith_spec, arith_store
 
@@ -21,11 +22,13 @@ ZOO = {
     "sdft": ("verifier",),
     "self_anchor": ("verifier",),
     "opsd": ("verifier", "hinted_logprobs"),
+    "opd": ("verifier", "teacher_logprobs"),
     "sft": (),
-    "opd": (),
+    "replay_distill": (),
 }
 
-OFFLINE = {"sft", "opd"}   # consume sealed store data; no gen, no Generator
+OFFLINE = {"sft", "replay_distill"}   # sealed store data; no gen, no Generator
+TEACHER = {"opd"}      # distils from ANOTHER model: a second pool, declared
 
 
 def algo(loss: str, post: tuple[str, ...], lag: int = 0) -> AlgoSpec:
@@ -48,6 +51,11 @@ class LossZooTest(unittest.TestCase):
         if loss in OFFLINE:
             overrides["gen"] = None
             overrides["trajectories"] = TrajectorySource("store://parent/waves")
+        if loss in TEACHER:
+            overrides["gpu_config"] = GpuConfig(groups=(
+                GpuGroup(gpus(n=1), (pool("main"),
+                                     pool("teacher", base="Qwen/Qwen3-32B"),
+                                     learner())),))
         return arith_spec(self.train, **overrides)
 
     def test_every_zoo_pairing_validates(self) -> None:
@@ -59,6 +67,21 @@ class LossZooTest(unittest.TestCase):
     def test_requires_still_bites_without_its_pipeline(self) -> None:
         """sdft names "reward"; an empty pipeline must fail Phase 0."""
         spec = arith_spec(self.train, algo=algo("sdft", ()))
+        codes = {issue.code for issue in validate(spec, self.schema)}
+        self.assertIn("unsatisfied-requires", codes)
+
+    def test_opd_without_its_teacher_pool_is_refused(self) -> None:
+        """teacher_logprobs samples the "teacher" pool; a spec that declares
+        no such pool is caught at Phase 0, never as a KeyError mid-update."""
+        spec = arith_spec(self.train,
+                          algo=algo("opd", ("verifier", "teacher_logprobs")))
+        codes = {issue.code for issue in validate(spec, self.schema)}
+        self.assertIn("post-pool-missing", codes)
+
+    def test_opd_without_its_processor_has_nothing_to_distil_from(self) -> None:
+        """The column is the whole teacher channel (I9): drop the processor
+        and the loss's requires is unsatisfied — it cannot plan a pass."""
+        spec = arith_spec(self.train, algo=algo("opd", ("verifier",)))
         codes = {issue.code for issue in validate(spec, self.schema)}
         self.assertIn("unsatisfied-requires", codes)
 

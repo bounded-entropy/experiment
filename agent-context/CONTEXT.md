@@ -1402,8 +1402,9 @@ specs; backends (local/modal/skypilot) and GPU topology are semantics-neutral.
       not share a sensible learning rate, so a spec with a mixed bank that
       leaves OptimSpec.overrides empty is arguably a validate warning, not a
       silently divergent run.
-    452 tests green on fakes (440 + 12 new attn_bias), 30 in
-    test_soft_prompt.py under torch in the image. NOT BUILT, stated: side
+    452 tests green on fakes at the end of this track (30 of them in
+    test_soft_prompt.py, torch-gated and green in the image); 463 once #47
+    merged alongside. NOT BUILT, stated: side
     attention serving (above); a soft prompt under TP > 1 (the rows are a
     request field, so nothing should shard, but it has not been run); a
     soft-prompt tenant through the RemotePool wire (prompt rows are engine-
@@ -1411,6 +1412,115 @@ specs; backends (local/modal/skypilot) and GPU topology are semantics-neutral.
     payload bytes, but again unrun); score_tokens under a soft prompt is
     implemented with the offset and exercised by the parity harness, but no
     opsd tenant has used it.
+47. REAL ON-POLICY DISTILLATION: THE TEACHER IS A POOL (settled by
+    execution — Samarth-directed: "`opd` is repointed to true on-policy
+    distillation: the student samples live, a frozen teacher SCORES the
+    student's sampled tokens, and the loss consumes the teacher's per-token
+    logprobs"). #40 built the scoring verb and spent it on the policy
+    scoring ITSELF under a hint; this entry spends it on a SECOND MODEL,
+    which is the case the verb was really for, and #45's three multi-GPU
+    layers are exactly what makes it runnable. It is also the OPD 8B←32B
+    end test #43 and #45 both left named-and-unbuilt.
+    - THE RENAME. What #30/#38 called opd matched a REPLAYED run's RECORDED
+      behavior logprobs. Honest math, wrong name: the teacher there is a
+      sealed record, and nothing about it is on-policy. It is now
+      `replay_distill` — same expression, same requires=("behavior_logprobs",),
+      the file moved; stress_l4's tenant renamed with it. Sealed runs are
+      untouched: a loss name is inside canonical_json(spec), so old runs keep
+      their identity and their manifests keep the old name, and only a NEW
+      submission under the new name exists.
+    - THE NEW opd IS SAMPLED-TOKEN REVERSE KL (GKD's on-policy branch),
+      requires=("teacher_logprobs",), one sample deep — score_tokens returns
+      the CHOSEN tokens' logprobs and no distribution beyond them.
+      THE ESTIMATOR IS THE ONE PLACE THIS ENTRY ADDS TO THE DIRECTION, and
+      the math forces it: the tokens are the STUDENT'S OWN DRAWS, so
+      differentiating (student_lp − teacher_lp) pathwise gives ∇lp — the
+      teacher cancels out of the gradient completely and the objective
+      degenerates into "push every sampled token down", identically for every
+      teacher. The loss therefore reports the masked-mean per-token KL as its
+      VALUE and carries the SCORE-FUNCTION gradient of it (the detached KL
+      weighting ∇log π), which is what on-policy distillation optimizes and
+      what makes `loss` in the ledger read directly as nats of teacher-student
+      distance. Both halves are pinned by tests/test_opd_math.py (torch-gated,
+      skipped locally, green in the image): the value, the gradient, the
+      zero-KL fixed point, and that logprob_gap still answers to the RECORD
+      rather than to the teacher.
+    - THE PROCESSOR (training/post/teacher_logprobs.py) IS the teacher
+      channel: produces / token_level = ("teacher_logprobs",),
+      pools = ("teacher",), walking each sealed trajectory in FLATTEN ORDER
+      and scoring every generated turn against everything before it —
+      hinted_logprobs' walk minus the hint, through another model's pool.
+      I9 end to end: the loss reads a column, the pipeline owns the metal,
+      and changing teachers is a pool declaration, never an edit to a loss.
+      Two preconditions, stated in the file and checked by the deploy: the
+      teacher SHARES THE STUDENT'S TOKENIZER (the ids crossing the wire are
+      the student's own draws, so a different vocabulary would score
+      different text), and the teacher is FROZEN (a non-policy pool gets a
+      payload-free bundle, so no delta of this run ever reaches it, and
+      scoring is seedless — adding the processor never shifts sampling).
+    - THE E2E, THREE PER-CAPABILITY HOSTS ACROSS CONTAINERS (deploy/opd_l4.py,
+      run c0f65f24362b, 6/6 checks): teacher Qwen3-32B tp=4 on L4:4
+      (inference regime only, no learner), student Qwen3-8B tp=2 on L4:2,
+      learner Qwen3-8B fsdp=2 on L4:2 with the runner beside it — both pools
+      RemotePools over ModalTransport, stores and journals on the volume,
+      and the observer's `hosts` view seeing all three partitions. Nothing in
+      rlstack/ changed for it; the spec declares three capability demands and
+      never says where, which is the #43 claim executed at full size.
+      THE TEACHER PROBE FIRST (::probe, twice, on two separate cold starts,
+      4/4 both times): tokenizers identical (12 ids); ' 105' scored -0.0814
+      per token against ' 731' at -4.1414 — four nats, so the prefill
+      demonstrably read the context; and the per-token scores came back
+      BIT-IDENTICAL across both container lifetimes, which is #40's
+      seedless-determinism claim tested the only way that counts.
+      THE LEDGER, and it is the distillation signal itself because `loss` IS
+      the per-token reverse KL: 0.3559 / 0.3041 / 0.3146 / 0.2848 nats over
+      four updates — the student moved toward the teacher. Update 1's 0.356
+      is the BARE 8B-vs-32B distance on these completions (the LoRA is still
+      B=0 there). Over all 384 scored tokens the teacher mean is −1.3357 and
+      the student's recorded mean −1.0188: the teacher is LESS confident on
+      the student's draws than the student is, which sampling from the
+      student guarantees. mean_ratio 0.9968–1.0001.
+      THE RAILS SEPARATE CLEANLY, which is the correctness result: gap
+      0.0165–0.0216 across a wire, under a sharded learner, on an 8B — the
+      kernel floor, meaning the remote student pool served exactly the
+      adapters the local FSDP trainer recomputed. #45's SCORING floor lands
+      somewhere else entirely: it is prefill-vs-decode punica noise, it
+      applies to the TEACHER column, and the teacher pool carries no adapter
+      at all — so at ~0.02 it is about 6% of a 0.32-nat signal and is never
+      an alignment error. A scoring-based loss should treat it as a floor on
+      the column, not as an error bar on the gap rail.
+      METAL FACTS (I5): 32B at tp=4 is 16.5 GiB per device with 3.03 GiB left
+      for KV (49,664 tokens at max_model_len=512) — it fits an L4:4 with room
+      to prefill, which was the open question; 8B at tp=2 is 8.17 GiB per
+      device with 10.28 GiB of KV. Loading 32B unauthenticated from HF took
+      308s cold and 52s from a cache volume after. Warming both partitions
+      concurrently took 237s and the four updates 386s. Whole milestone,
+      probes included, ≈2.5 L4-GPU-hours.
+    - PROPOSED SPEC DELTA (I9, rl-stack-spec.md): the loss-purity section
+      names hinted/teacher logprobs as the token_level channel but has only
+      ever had a SELF-scoring example. Add the second, now that it has run:
+      "a post processor may score through ANY declared pool, including one
+      serving a different base — so a frozen teacher is an inference
+      capability the fleet places like any other, and distilling from a
+      different teacher is a pool declaration rather than a change to any
+      loss. Two preconditions ride with it: the scoring pool must share the
+      sampled tokens' tokenizer, and a non-policy pool serves its bare base."
+      Also worth a line in I5's neighbourhood: a spec's gpu_config may
+      declare capability demands that NO single host can satisfy (a tp=4
+      teacher beside a tp=2 sampler beside an fsdp=2 learner), and placement
+      answering that with three hosts is the normal case, not the exotic one.
+    - NOT BUILT, and named honestly: teacher scoring rides the Trainer's post
+      phase INLINE, so an update's gradient waits on 8 sequential prefills
+      against a 32B — the async post daemon ("scorer") is the fix and is a
+      separate planned track. Teacher scoring is also un-batched (one
+      score_tokens per turn) and un-cached (identical prefixes re-prefill).
+      A kill/resume of this three-host run was not attempted (the mechanism
+      is #45-proven at fsdp=2; only the wire is new). The teacher's own
+      certificate (#25) would be the honest way to pin "the teacher I
+      distilled from is the teacher I think it is" and remains unwired.
+    432 tests green locally (21 skipped: 17 pre-existing + 4 new torch-gated
+    opd-math tests), the whole 432 green in the image under
+    modal_app::run_tests.
 
 ## Open threads (do NOT treat as settled; flag when your answer touches them)
 

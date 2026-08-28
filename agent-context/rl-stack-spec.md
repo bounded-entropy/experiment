@@ -71,7 +71,10 @@ member vocabulary is closed at two workload kinds — **pools**
 fraction)`) — and everything else (rollout, eval, judges, teachers) is traffic
 routed to pool *names*. Any two GpuConfigs execute the same experiment;
 placement changes wall-clock, never results. Scheduling (the arbiter's policy,
-the host chosen, `max_inflight`) is likewise outside identity.
+the host chosen, `max_inflight`) is likewise outside identity. A gpu_config
+may declare demands no single host can satisfy — several hosts answering one
+experiment is the normal case, not a special one (#47: teacher, student
+inference, and learner on three containers is the proven shape).
 
 **I6 — Record loss-independently at the seal.** Token ids (the engine's, never
 re-tokenized), behavior logprobs, bundle id + policy versions, seeds, finish
@@ -103,7 +106,11 @@ its `requires` names data columns only (postdata columns ∪ recorded facts ∪
 bank-provided forward tensors) — enforced at registration. Anything that needs
 a GPU to compute (judge scores, teacher logprobs, hinted rescoring) is a post
 processor's job and lands in postdata first, per-trajectory scalars or
-`token_level` per-token vectors. There are no planned passes.
+`token_level` per-token vectors. There are no planned passes. A processor may
+score through ANY declared pool, including one serving a DIFFERENT base than
+the policy (#47) — the preconditions are a shared tokenizer (the scored ids
+must mean the same text to both) and that a non-policy pool serves its bare,
+frozen base (its scores are then version-free and timing-independent).
 
 **I10 — One experiment, one store, for life.** run_id is global but existence
 is store-scoped, so the run store is a per-experiment binding made explicit at
@@ -306,10 +313,18 @@ def grpo(out: PolicyOutputs, b: TokenBatch) -> LossResult: ...
 # never routes work to metal. Every loss returns LossResult(loss, mean_ratio,
 # logprob_gap) — the rails; logprob_gap is the trainer/sampler mismatch alarm.
 # Builtin zoo: grpo · ppo (center_reward advantage) · gspo (sequence-level
-# ratios) · sft · sdft (reward-weighted BC) · opd · self_anchor (lagged-record
-# matching) · opsd (REAL hinted self-distillation: the hinted_logprobs post
-# processor scores each trajectory's own tokens under privileged conditioning
-# via PoolClient.score — a token_level column the loss purely consumes).
+# ratios) · sft · sdft (reward-weighted BC) · replay_distill (match a replayed
+# run's recorded logprobs — the loss formerly named opd) · opd (#47: TRUE
+# on-policy distillation — a live frozen teacher scores the student's own
+# sampled tokens via the teacher_logprobs post processor; the loss reports
+# sampled-token reverse KL and trains its score-function gradient, since the
+# pathwise gradient of lp−teacher_lp degenerates to teacher-blind) ·
+# self_anchor (lagged-record matching) · opsd (REAL hinted self-distillation:
+# hinted_logprobs scores each trajectory's own tokens under privileged
+# conditioning via PoolClient.score). A token_level teacher column may come
+# from ANY declared pool, including one serving a DIFFERENT base (#47) — the
+# preconditions are a shared tokenizer and a frozen non-policy pool serving
+# its bare base; cross-base teacher_logprobs is the proven case (8B←32B).
 
 # ════════════════════════════════════════════════════════════════════
 # C. RUNTIME — hosts own metal; experiments are tenants; daemons on a blackboard

@@ -35,38 +35,43 @@ continue is in the repo.
 
 ## State at handover
 
-- 401 tests green on fakes. Real metal is PROVEN through the stress
-  matrix (deploy/stress_l4.py): seven concurrent tenants — grpo/ppo/gspo/
-  sft/sdft/opd/self_anchor, live + replay + static sources, a judge pool,
-  lag=2 — on one Modal L4 with ONE shared engine and ONE shared
-  multi-tenant learner, plus sleep-sharing kill/resume and cross-container
-  resume, all green. An eighth tenant (opsd: hinted scoring through
-  VllmEngine.score_tokens) is in the harness but NOT yet executed on metal
-  — first-contact expected in the prompt_logprobs indexing. Image pinned:
-  vllm 0.28.0 / torch 2.13.0 / transformers 5.16.1. The observer UI is
-  deployed (…--rlstack-ui.modal.run), verified live on a 30-step GRPO run.
-- The fleet (#43, I12; fakes-proven, real TP/FSDP metal is the next layer):
-  a Host is an ATOMIC PURPOSED PARTITION — Partition (gpuset, devices,
-  memory fraction) + Regimes (kind × base × shape), attested at birth,
-  never reshaped; >1 regime alternates on the host's own arbiter group.
-  Sharding is a build fact (Engine.tp / Learner.fsdp, shape-matched at
-  submit). runner/fleet.py climbs join (automatic, fraction-free) → carve
-  (automatic from residual, journaled in fleet/log.jsonl) → acquire
-  (human). runner/remote.py is the wire: HostService (admission at the
-  serving host) + LocalTransport (json-round-trips every frame) +
-  RemotePool (full Engine protocol; a remote main pool is byte-identical
-  to local). The learner is never remote — the runner goes to it. The
-  Modal-cls transport and the OPD 8B←32B e2e are NOT yet built.
+- 432 tests green on fakes (21 torch-gated skips run in the image). Real
+  metal is PROVEN through the stress matrix (deploy/stress_l4.py): seven
+  concurrent tenants — grpo/ppo/gspo/sft/sdft/replay_distill/self_anchor,
+  live + replay + static sources, a judge pool, lag=2 — on one Modal L4
+  with ONE shared engine and ONE shared multi-tenant learner, plus
+  sleep-sharing kill/resume and cross-container resume, all green. Image
+  pinned: vllm 0.28.0 / torch 2.13.0 / transformers 5.16.1. The observer
+  UI is deployed (…--rlstack-ui.modal.run), verified live.
+- The fleet (#43, I12) is METAL-PROVEN through #45/#47: hosts are ATOMIC
+  PURPOSED PARTITIONS (Partition + Regimes, attested at birth, never
+  reshaped; >1 regime alternates on the host's own arbiter group);
+  sharding is a build fact (Engine.tp / Learner.fsdp, shape-matched at
+  submit); runner/fleet.py climbs join → carve (journaled) → acquire
+  (human); runner/remote.py is the wire (HostService: admission at the
+  serving host; RemotePool: full Engine protocol, byte-identical to local
+  on fakes). TP=2/4 inference, score_tokens, the Modal-cls transport
+  (deploy/modal_host.py), and FsdpTorchLearner (fsdp=2, kill/resume,
+  width-free sealed bytes) are all proven on L4 metal. The learner is
+  never remote — the runner goes to it.
+- The trainer batches (#44): additive install + row routing (the
+  trainer-side punica; rlstack/policy/adapters/replay.py is the seam),
+  16/16 metal parity incl. two tenants' deltas in one forward; swap-install
+  is gone.
+- THE MILESTONE END TEST IS GREEN (#47): true OPD — `opd` is sampled-token
+  reverse KL (score-function gradient) over a teacher_logprobs token_level
+  column scored by a LIVE Qwen3-32B tp=4 teacher host, student inference
+  tp=2, learner fsdp=2, three containers over ModalTransport (run
+  c0f65f24362b: KL 0.356→0.285 nats over 4 updates, gap at the kernel
+  floor). The old replay-matching loss is renamed replay_distill.
 - Experiments are tenants submitted to hosts, each with its own run store
   (one experiment, one store, for life). The GpuArbiter owns admission;
   leases are gone. The observer (rlstack/observe/, `python -m rlstack
   {hosts,runs,gpu,ui}`) reads journals + peeks only — never experiment
   content; the UI renders each run from its own dictionary.json.
 - The loss is pure math (#38): requires names data columns only; post
-  processors produce everything else (token_level = per-token channel).
-- TorchLearner batches the forward (one padded pass per microbatch,
-  numerics identical to the per-doc form) — written for the FSDP milestone,
-  not yet run on metal.
+  processors produce everything else (token_level = per-token channel; a
+  processor may score through any declared pool, cross-base included).
 
 ## Quick commands
 
@@ -79,16 +84,23 @@ modal deploy deploy/modal_app.py                # + the observer UI beside the
                                                 #   volume (…--rlstack-ui.modal.run)
 python3.13 -m rlstack ui <store-root>           # the same UI over a local store
 modal run deploy/stress_l4.py                   # the full stress matrix (~1h)
+modal run deploy/opd_l4.py                      # OPD 8B←32B, three hosts (~15m)
+modal run deploy/fsdp_l4.py                     # the FSDP ladder on 2xL4
 ```
 
 ## Known-open work (deliberate, logged)
 
-- The multi-GPU milestone's remaining layers (#43): real TP engines + FSDP
-  learner processes; the Modal-cls transport + per-capability host deploy;
-  host linger/GC back to residual; a measured join-refusal signal; the end
-  test — OPD distilling Qwen 8B from Qwen 32B on L4 hosts (teacher tp-4,
-  student inference tp-2, learner fsdp-2), shard configs flipped as host
-  build facts.
+- The async scorer daemon: teacher scoring currently rides the Trainer's
+  post phase INLINE (sequential 32B prefills block each gradient); the
+  scorer is a store-synced daemon that writes postdata ahead of the
+  trainer (design settled in conversation + CONTEXT; version-pinning rule:
+  post traffic to the POLICY pool pins the wave's recorded policy_version).
+  Also un-batched/un-cached teacher scoring, and the notify-deletion TODO.
+- Multi-GPU leftovers (#45/#47): host linger/GC back to residual; a
+  measured join-refusal signal; the cross-tenant training coalescer (#44
+  designed it); streamed sample replies + a local tokenizer beside
+  RemotePool; kill/resume of the three-host OPD run (mechanism proven,
+  wire untested); the trainer-side cross-tenant batching determinism rule.
 - Parity certificates designed (#25, rlstack_engine/certificates.py) but
   unwired — logprob_gap is the running alarm. side_attention numerics are B3+.
 - Async post daemon ("scorer"), pool-annotated flow graph, eval `terminal`
