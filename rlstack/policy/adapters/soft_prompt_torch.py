@@ -137,7 +137,28 @@ class PromptBoundary:
             [torch.ones(attention.shape[0], self._prepended,
                         dtype=attention.dtype, device=attention.device),
              attention], dim=1)
+        widened["attention_mask"] = self.bias_the_mask(
+            widened["attention_mask"], embeds.dtype)
         return args, widened
+
+    def bias_the_mask(self, attention: torch.Tensor,
+                      dtype: torch.dtype) -> torch.Tensor:
+        """An attn_bias on this base's rectangle, folded into the mask.
+
+        The bias's site (queries -> prompt[:n]) exists only because a soft
+        prompt exported it, so the boundary that owns those positions is where
+        a bias on them is applied — but the arithmetic stays with the kind
+        (attn_bias_torch). Without a bias in the routed slot this returns the
+        padding mask it was handed, unchanged and untouched: a base that never
+        carries an attn_bias never pays for one.
+        """
+        from rlstack.policy.adapters import attn_bias_torch
+
+        bias = attn_bias_torch.routed_bias(self.plan.rows)
+        if bias is None:
+            return attention
+        return attn_bias_torch.additive_mask(bias, attention, self._prepended,
+                                             dtype)
 
     def trim_virtual_positions(self, module, args, kwargs, output):
         """The rows leave before the logits do.

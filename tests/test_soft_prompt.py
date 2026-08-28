@@ -27,7 +27,7 @@ except ImportError:                                  # the client environment
 
 if torch is not None:
     from rlstack.data.flatten import TokenBatch
-    from rlstack.policy.adapters import lora_torch, soft_prompt_torch
+    from rlstack.policy.adapters import attn_bias_torch, lora_torch, soft_prompt_torch
     from rlstack.policy.adapters.replay import ReplayRows, row_plan
     from rlstack.runner.learners.torch_learner import TorchLearner, _doc_spans
 
@@ -35,8 +35,11 @@ needs_torch = unittest.skipUnless(
     torch is not None, "torch is trainer metal: this suite runs in the image")
 
 WIDTH = 8
+HEADS = 2
 BOUNDARY = (SiteMeta(name="prompt[:3]", path="model.embed_tokens",
                      has_weight=False, shape=None, is_boundary=True),)
+RECTANGLE = (SiteMeta(name="queries -> prompt[:3]", path="attn_scores",
+                      has_weight=False, shape=None, is_boundary=False),)
 PROJ = (SiteMeta(name="block.proj", path="block.proj", has_weight=True,
                  shape=(WIDTH, WIDTH), is_boundary=False),)
 
@@ -46,38 +49,61 @@ class _Logits:
         self.logits = logits
 
 
+class _Config:
+    num_attention_heads = HEADS
+
+
 class _ToyLM(torch.nn.Module if torch is not None else object):
     """A causal stand-in for the base, in the shape HF hands the learner.
 
     Real enough to bite: it takes EITHER input_ids or inputs_embeds, adds a
     learned position embedding (so a row prepended at the front shifts every
-    token after it), attends causally under the padding mask, and carries one
-    Linear a LoRA can wrap — so a soft-prompt tenant and a lora tenant can be
-    installed on the same object.
+    token after it), attends through scaled_dot_product_attention under the
+    same 4-D-mask contract transformers keeps (a 4-D float mask is passed
+    straight to the attention; anything else is turned into one here), and
+    carries one Linear a LoRA can wrap — so a soft-prompt tenant, a bias and a
+    lora tenant can all be installed on the same object.
     """
 
     def __init__(self, vocab: int = 23) -> None:
         super().__init__()
+        self.config = _Config()
         self.embed = torch.nn.Embedding(vocab, WIDTH)
         self.positions = torch.nn.Embedding(64, WIDTH)
         self.block = torch.nn.Module()
         self.block.proj = torch.nn.Linear(WIDTH, WIDTH, bias=False)
-        self.attn = torch.nn.MultiheadAttention(WIDTH, 2, batch_first=True,
-                                                bias=False)
+        self.q = torch.nn.Linear(WIDTH, WIDTH, bias=False)
+        self.k = torch.nn.Linear(WIDTH, WIDTH, bias=False)
+        self.v = torch.nn.Linear(WIDTH, WIDTH, bias=False)
         self.head = torch.nn.Linear(WIDTH, vocab, bias=False)
 
     def get_input_embeddings(self):
         return self.embed
 
+    def as_mask(self, attention_mask, rows: int, length: int, dtype):
+        """A 4-D float mask goes to the attention untouched; a 2-D padding mask
+        becomes the causal-and-padding one it stands for."""
+        if attention_mask is not None and attention_mask.dim() == 4:
+            return attention_mask
+        causal = torch.ones(length, length, dtype=torch.bool).tril()[None]
+        if attention_mask is not None:
+            causal = causal & attention_mask.bool()[:, None, :]
+        return torch.where(causal[:, None], 0.0,
+                           torch.finfo(dtype).min).to(dtype)
+
     def forward(self, input_ids=None, attention_mask=None, inputs_embeds=None):
         h = self.embed(input_ids) if inputs_embeds is None else inputs_embeds
         h = h + self.positions(torch.arange(h.shape[1]))[None]
         h = self.block.proj(h)
-        causal = torch.triu(torch.ones(h.shape[1], h.shape[1], dtype=torch.bool),
-                            diagonal=1)
-        pad = None if attention_mask is None else attention_mask == 0
-        out, _ = self.attn(h, h, h, attn_mask=causal, key_padding_mask=pad,
-                           need_weights=False)
+        rows, length, _ = h.shape
+
+        def heads(projection):
+            return projection(h).view(rows, length, HEADS, -1).transpose(1, 2)
+
+        out = torch.nn.functional.scaled_dot_product_attention(
+            heads(self.q), heads(self.k), heads(self.v),
+            attn_mask=self.as_mask(attention_mask, rows, length, h.dtype))
+        out = out.transpose(1, 2).reshape(rows, length, WIDTH)
         return _Logits(self.head(h + out))
 
 
@@ -311,6 +337,154 @@ class PayloadTest(unittest.TestCase):
             soft_prompt_torch.merge_rows(
                 {"a": soft_prompt_torch.emit(a_state(2, 81)),
                  "b": soft_prompt_torch.emit(a_state(2, 82, d=WIDTH + 1))})
+
+
+@needs_torch
+class AttnBiasTest(unittest.TestCase):
+    """attn_bias's REPLAY half (#46): the bias rides the attention mask.
+
+    The rollout half does not exist on the pinned build, so nothing here
+    claims parity — what it claims is that the trainer-side lowering is the
+    arithmetic it says it is, and that version 0 is exactly the base.
+    """
+
+    def setUp(self) -> None:
+        torch.manual_seed(0)
+        self.learner = TorchLearner(device="cpu", dtype=torch.float32)
+        self.learner._model = _ToyLM()
+        self.docs = [[3, 1, 4, 1, 5], [9, 2], [6, 5, 3, 5]]
+        self.batch = a_batch(self.docs)
+
+    def a_bias(self, seed: int, fill: float = 0.0, n: int = 3):
+        site = (SiteMeta(name=f"queries -> prompt[:{n}]", path="attn_scores",
+                         has_weight=False, shape=None, is_boundary=False),)
+        state = attn_bias_torch.build(site, {"heads": HEADS, "seed": seed})
+        if fill:
+            generator = torch.Generator().manual_seed(seed)
+            state.theta.data = torch.randn(HEADS, n, generator=generator) * fill
+        return state
+
+    def batched(self, slots, index=None):
+        rows = ReplayRows(
+            slots=tuple(slots),
+            index=(torch.zeros(len(self.docs), dtype=torch.long)
+                   if index is None else torch.tensor(index, dtype=torch.long)))
+        with row_plan(self.learner._model).route(rows):
+            return self.learner._batched_logprobs(self.batch,
+                                                  _doc_spans(self.batch))
+
+    def test_the_site_name_carries_the_rectangle_width(self) -> None:
+        self.assertEqual(attn_bias_torch.prompt_width("queries -> prompt[:12]"), 12)
+        with self.assertRaises(ValueError):
+            attn_bias_torch.prompt_width("logits")
+
+    def test_version_zero_is_the_base(self) -> None:
+        """theta = 0 through either parameterization is a zero bias, so a
+        freshly built attn_bias must reproduce the unbiased forward — the
+        promise LoRA's B = 0 makes.
+
+        Not bit-for-bit, and the reason is worth naming: a biased forward
+        materializes the mask over heads ([rows, heads, L, L]) where the
+        unbiased one broadcasts ([rows, 1, L, L]), and SDPA reduces the two
+        shapes in a different order. The BIAS is exactly zero; the mask's
+        shape is what moves the last bits.
+        """
+        prompt = a_state(3, 91)
+        soft_prompt_torch.install(self.learner._model, prompt)
+        alone = self.batched([{prompt.path: prompt}])
+        for param in sorted(attn_bias_torch.PARAMETERIZATIONS):
+            state = attn_bias_torch.build(RECTANGLE, {"heads": HEADS,
+                                                      "param": param})
+            self.assertEqual(float(state.value().abs().max()), 0.0, param)
+            attn_bias_torch.install(self.learner._model, state)
+            biased = self.batched([{prompt.path: prompt,
+                                    state.path: state}])
+            self.assertTrue(torch.allclose(alone, biased, atol=1e-5), param)
+
+    def test_a_learned_bias_moves_the_numbers(self) -> None:
+        prompt, bias = a_state(3, 92), self.a_bias(93, fill=2.0)
+        soft_prompt_torch.install(self.learner._model, prompt)
+        attn_bias_torch.install(self.learner._model, bias)
+        alone = self.batched([{prompt.path: prompt}])
+        biased = self.batched([{prompt.path: prompt, bias.path: bias}])
+        self.assertGreater(float((alone - biased).abs().max()), 1e-3)
+
+    def test_gradient_reaches_theta(self) -> None:
+        prompt, bias = a_state(3, 94), self.a_bias(95, fill=1.0)
+        soft_prompt_torch.install(self.learner._model, prompt)
+        attn_bias_torch.install(self.learner._model, bias)
+        self.batched([{prompt.path: prompt, bias.path: bias}]).sum().backward()
+        self.assertIsNotNone(bias.theta.grad)
+        self.assertGreater(float(bias.theta.grad.abs().sum()), 0.0)
+
+    def test_the_prompt_rows_are_not_biased_against_themselves(self) -> None:
+        """The prefix must stay a pure function of the rows — that is what
+        lets an engine precompute its K/V once per bundle (#25)."""
+        bias = self.a_bias(96, fill=1.0)
+        attention = torch.ones(2, 7, dtype=torch.long)
+        mask = attn_bias_torch.additive_mask(
+            bias.value()[None].expand(2, HEADS, 3), attention, 3, torch.float32)
+        self.assertEqual(tuple(mask.shape), (2, HEADS, 7, 7))
+        prefix = mask[:, :, :3, :3]
+        causal = torch.where(
+            torch.ones(3, 3, dtype=torch.bool).tril(), 0.0,
+            torch.finfo(torch.float32).min)
+        self.assertTrue(torch.equal(prefix, causal[None, None].expand_as(prefix)))
+        self.assertTrue(torch.allclose(mask[:, :, 3:, :3],
+                                       bias.value()[None, :, None, :].expand(
+                                           2, HEADS, 4, 3)))
+
+    def test_rows_carry_their_own_bias(self) -> None:
+        first, second = self.a_bias(97, fill=1.0), self.a_bias(98, fill=1.0)
+        rows = ReplayRows(slots=({first.path: first}, {second.path: second}),
+                          index=torch.tensor([0, 1, 1], dtype=torch.long))
+        got = attn_bias_torch.routed_bias(rows)
+        self.assertEqual(tuple(got.shape), (3, HEADS, 3))
+        self.assertTrue(torch.equal(got[0], first.value()))
+        self.assertTrue(torch.equal(got[1], second.value()))
+
+    def test_slots_may_not_disagree_about_having_a_bias(self) -> None:
+        only = self.a_bias(99, fill=1.0)
+        rows = ReplayRows(slots=({only.path: only}, {}),
+                          index=torch.tensor([0, 1, 1], dtype=torch.long))
+        with self.assertRaises(ValueError):
+            attn_bias_torch.routed_bias(rows)
+
+    def test_the_rectangle_must_match_the_prompt(self) -> None:
+        bias = self.a_bias(100, fill=1.0, n=3)
+        with self.assertRaises(ValueError) as raised:
+            attn_bias_torch.additive_mask(
+                bias.value()[None], torch.ones(1, 9, dtype=torch.long), 5,
+                torch.float32)
+        self.assertIn("must agree", str(raised.exception))
+
+    def test_a_bias_that_is_not_one_per_head_is_refused(self) -> None:
+        site = (SiteMeta(name="queries -> prompt[:3]", path="attn_scores",
+                         has_weight=False, shape=None, is_boundary=False),)
+        state = attn_bias_torch.build(site, {"heads": HEADS + 1})
+        with self.assertRaises(ValueError) as raised:
+            attn_bias_torch.install(self.learner._model, state)
+        self.assertIn("per head", str(raised.exception))
+
+    def test_unknown_parameterization_is_refused(self) -> None:
+        with self.assertRaises(ValueError):
+            attn_bias_torch.build(RECTANGLE, {"heads": HEADS, "param": "magic"})
+
+    def test_emit_load_roundtrip(self) -> None:
+        state, other = self.a_bias(101, fill=1.0), self.a_bias(102)
+        attn_bias_torch.load(other, attn_bias_torch.emit(state))
+        self.assertTrue(torch.equal(state.theta, other.theta))
+
+    def test_bounded_sigmoid_stays_inside_its_cap(self) -> None:
+        site = (SiteMeta(name="queries -> prompt[:3]", path="attn_scores",
+                         has_weight=False, shape=None, is_boundary=False),)
+        state = attn_bias_torch.build(
+            site, {"heads": HEADS, "param": "bounded_sigmoid", "cap": 2.0})
+        state.theta.data = torch.tensor([[-50.0, 0.0, 50.0]] * HEADS)
+        value = state.value()
+        self.assertLessEqual(float(value.abs().max()), 2.0)
+        self.assertGreater(float(value.max()), 1.9)
+        self.assertLess(float(value.min()), -1.9)
 
 
 if __name__ == "__main__":

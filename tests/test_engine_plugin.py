@@ -19,7 +19,15 @@ from rlstack_engine import (
 from rlstack_engine.batch_view import BatchViewError
 from rlstack_engine.plugin import EnginePlugin
 
-GOOD_BUILD = fake_build("flash_attn.return_softmax_lse", "merge_attn_states")
+GOOD_BUILD = fake_build(*sorted(SideAttention.required_symbols))
+
+# What vllm 0.28.0 actually offers (#46, checked in the pinned image): the
+# registry moved under v1 and still exists, merge_attn_states moved and still
+# exists, and the dense FlashAttention path hands back no LSE at all. This is
+# the build the fleet runs on today, and the probe must refuse it.
+PINNED_0_28 = fake_build(
+    "vllm.v1.attention.backends.registry.register_backend",
+    "vllm.v1.attention.ops.merge_attn_states.merge_attn_states")
 
 
 class ProbeTest(unittest.TestCase):
@@ -27,11 +35,20 @@ class ProbeTest(unittest.TestCase):
         SideAttention().probe(GOOD_BUILD)  # no raise
 
     def test_probe_names_the_missing_seams(self) -> None:
-        bare = fake_build("flash_attn.return_softmax_lse")
+        bare = fake_build("vllm.v1.attention.backends.registry.register_backend")
         with self.assertRaises(ProbeError) as caught:
             SideAttention().probe(bare)
         self.assertIn("merge_attn_states", str(caught.exception))
         self.assertIn(bare.fingerprint, str(caught.exception))
+
+    def test_the_pinned_build_is_refused_for_the_reason_it_lacks(self) -> None:
+        """#46's honest status, pinned as a test: side attention does not serve
+        on vllm 0.28.0, and the one thing missing is the dense LSE."""
+        with self.assertRaises(ProbeError) as caught:
+            SideAttention().probe(PINNED_0_28)
+        self.assertIn("dense_lse", str(caught.exception))
+        self.assertNotIn("register_backend", str(caught.exception))
+        self.assertNotIn("merge_attn_states", str(caught.exception))
 
     def test_install_claims_the_seam_once(self) -> None:
         seam = FakeSeam()

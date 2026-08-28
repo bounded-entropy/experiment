@@ -7,6 +7,16 @@ the rollout side, and a score-level patch on the replay side.
 Its site (queries -> prompt[:n]) is not a base-model site: the soft prompt
 EXPORTS it, so an attn_bias without a soft prompt in the bank dies at Phase 0
 with site-no-match.
+
+HALF BUILT, ON PURPOSE (#46). The REPLAY lowering is real and proven
+(attn_bias_torch: the bias rides the 4-D attention mask, which the stock
+attention already adds to the scores). The ROLLOUT lowering is NOT: the seams
+the plugin was designed against do not exist on vllm 0.28.0, so
+rlstack_engine.side_attention still refuses at probe and every engine build
+honestly reports NONE for SIDE_ATTENTION — which means this kind cannot pass
+Phase 0's reachability check and no run can use it yet. That refusal is the
+feature: a kind is served when its mechanism is proven, not when its class
+exists.
 """
 
 from __future__ import annotations
@@ -22,3 +32,25 @@ class AttnBias(Adapter):
 
     def site_ok(self, meta: SiteMeta) -> bool:
         return not meta.has_weight
+
+    # compute half — attn_bias_torch imports torch, so it loads lazily (rule 7)
+
+    def params(self, sites: tuple[SiteMeta, ...], init: dict):
+        from rlstack.policy.adapters import attn_bias_torch
+        return attn_bias_torch.build(sites, init)
+
+    def install_replay(self, model, params, sites: tuple[SiteMeta, ...]) -> None:
+        from rlstack.policy.adapters import attn_bias_torch
+        attn_bias_torch.install(model, params)
+
+    def uninstall_replay(self, model, params, sites: tuple[SiteMeta, ...]) -> None:
+        from rlstack.policy.adapters import attn_bias_torch
+        attn_bias_torch.uninstall(model, params)
+
+    def emit(self, params) -> bytes:
+        from rlstack.policy.adapters import attn_bias_torch
+        return attn_bias_torch.emit(params)
+
+    def load(self, params, payload: bytes) -> None:
+        from rlstack.policy.adapters import attn_bias_torch
+        attn_bias_torch.load(params, payload)
