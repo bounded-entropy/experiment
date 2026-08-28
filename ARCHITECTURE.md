@@ -60,8 +60,8 @@ fingerprint)`, computed at Phase 0 and never typed by a human (I3). Editing a
 registered function's body changes it; renaming a file does not.
 `rlstack/spec/canonical.py`, `rlstack/registry.py` (`code_hashes`)
 
-**Registry** — one table per swappable kind (`ENVS`, `POST`, `LOSSES`,
-`ADAPTERS`), filled at import, each entry a typed record pairing a
+**Registry** — one table per swappable kind of thing (`ENVS`, `POST`,
+`LOSSES`, `ADAPTER_TYPES`), filled at import, each entry a typed record pairing a
 **declaration** half with a **compute** half (I4). A name exists iff the module
 defining it was imported.
 `rlstack/registry.py`
@@ -118,22 +118,17 @@ Names are the user's; one delta per site is the rule; a bundle pins the whole
 bank's version map.
 `rlstack/spec/specs.py` (`PolicySpec.bank`)
 
-**Adapter** — **a configured bank entry**: `AdapterSpec(kind, site, init,
-trainable)`, one typed intervention at one site pattern. "The adapter named
-`pi`" means this.
+**Adapter** — **a configured bank entry**: `AdapterSpec(adapter_type, site,
+init, trainable)`, one typed intervention at one site pattern. "The adapter
+named `pi`" means this.
 `rlstack/spec/specs.py` (`AdapterSpec`)
 
-**Kind** — **a registered class**: the thing `@adapter("lora")` puts in the
-`ADAPTERS` registry, which `AdapterSpec.kind` names by string. A kind owns the
-declaration (`serving`, `provides`, `records`, `site_ok`, `exports`) and both
-lowerings; an adapter is one *use* of a kind.
+**Adapter type** — **a registered class**: the thing `@adapter_type("lora")`
+puts in the `ADAPTER_TYPES` registry, which `AdapterSpec.adapter_type` names by
+string. An adapter type owns the declaration (`serving`, `provides`, `records`,
+`site_ok`, `exports`) and both lowerings; an adapter is one *use* of an adapter
+type.
 `rlstack/policy/adapters/base.py`, `rlstack/policy/adapters/{lora,soft_prompt,attn_bias,value_head}.py`
-
-> **Naming debt, stated honestly.** The registered class is currently called
-> `Adapter` and its registry is `ADAPTERS`, but what it registers is a KIND —
-> `AdapterSpec.kind` is the string that names it. `Adapter` → `Kind` is a
-> pending rename; until it lands, read `Adapter` (the class) as "kind" and
-> `AdapterSpec` (the value) as "adapter".
 
 **Site** — a canonical attachment point named by the checkpoint's own module
 path, resolved at Phase 0 against `site_space` = the schema ∪ every bank
@@ -157,21 +152,23 @@ as a plugin.
 
 > **Why the set is closed.** A mechanism is not a label — it is the
 > within-batch compute that applies many tenants' state inside one fused
-> forward, and someone must build it. Three tiers: a kind that compiles to an
-> existing mechanism's state shape rides for free (lora on `punica` — vLLM's
-> own segmented kernels); a kind whose effect lives at a per-request point of
-> the graph needs no batched compute at all (`prompt_embeds`, `logits` — the
-> input and sampling boundaries are already per-sequence); a kind that needs
+> forward, and someone must build it. Three tiers: an adapter type that
+> compiles to an existing mechanism's state shape rides for free (lora on
+> `punica` — vLLM's own segmented kernels); one whose effect lives at a
+> per-request point of the graph needs no batched compute at all
+> (`prompt_embeds`, `logits` — the input and sampling boundaries are already
+> per-sequence); one that needs
 > per-tenant compute *inside* the fused forward must ship a NEW mechanism as
 > an engine plugin, re-earning the per-token → tenant index mapping the
 > trainer's row plan gets for free (`side_attention` is the standing example,
 > refused until its mechanism exists). The lowerings select *into* a
 > mechanism; they never create one.
 
-**Lowering** — how one kind's math is realized on one side of the bridge. Every
-kind ships two. A **rollout lowering** serves the kind through an engine build
-(`<kind>_vllm.py`, contract in `rollout.py`); a **replay lowering** wires it
-into a trainer forward (`<kind>_torch.py`, entered through `install_replay`). A
+**Lowering** — how one adapter type's math is realized on one side of the
+bridge. Every adapter type ships two. A **rollout lowering** serves it through
+an engine build (`<adapter_type>_vllm.py`, contract in `rollout.py`); a **replay
+lowering** wires it into a trainer forward (`<adapter_type>_torch.py`, entered
+through `install_replay`). A
 replay lowering may be a module replacement *or* a boundary around the base's
 forward; either way its obligation is alignment.
 `rlstack/policy/adapters/rollout.py`, `rlstack/policy/adapters/replay.py`
@@ -190,12 +187,12 @@ trainer-side twin of punica's per-token adapter index (I8).
 `rlstack/policy/adapters/replay.py`
 
 **Engine plugin** — a serving mechanism the stock engine lacks, shipped in the
-engine image and named from a kind by string only. It must re-earn per-request
+engine image and named from an adapter type by string only. It must re-earn per-request
 selection, cache correctness and parity at seams the engine never promised to
 keep stable.
 `rlstack_engine/plugin.py`, `rlstack_engine/side_attention.py`
 
-**Parity certificate** — the numerical exam binding a kind's two lowerings,
+**Parity certificate** — the numerical exam binding an adapter type's two lowerings,
 keyed by build fingerprint so a version bump re-runs it (I7). Designed and
 unwired; the running parity mechanism is the per-update `logprob_gap` rail.
 `rlstack_engine/certificates.py`
@@ -218,7 +215,7 @@ runner seals; environments never do.
 **Trajectory** — one sealed episode: frozen training data. Recording is
 loss-independent and happens at the seal (I6) — the engine's own token ids
 (never re-tokenized), behavior logprobs, the pinned bundle id and policy
-version, seeds, finish reasons, and any kind-recorded per-token facts.
+version, seeds, finish reasons, and any per-token facts an adapter type recorded.
 `rlstack/data/trajectory.py`
 
 **Turn** — one request inside a trajectory: token ids, behavior logprobs,
@@ -239,8 +236,8 @@ derived from tasks.
 complete flat token record; `broadcast` turns a per-trajectory column into a
 per-token channel; `pack` fills microbatches bounded by `microbatch_tokens`. A
 `TokenBatch` carries token ids, loss mask, behavior logprobs, segment ids, doc
-starts, the per-token post columns and token extras — and nothing estimator-
-shaped.
+starts, the per-token `postdata` columns and token extras — and nothing
+estimator-shaped.
 `rlstack/data/flatten.py`
 
 ### The training world
@@ -285,14 +282,15 @@ ids). Demand, never a provider name — the spec says what, placement says where
 (I5).
 `rlstack/spec/specs.py`
 
-**Partition** — the irreducible carved share of metal a host is born onto: the
-GPU kind, the device indices, and the memory fraction owned on each. Memory
-partitions honestly; SMs still time-share across partition boundaries, which is
-a stated cost, not a hidden one.
+**Partition** — the irreducible carved share of metal a host is born onto:
+`metal` (the registered Metal's NAME it was carved from — never a GpuSet, which
+is demand), the GPU kind, the device indices, and the memory fraction owned on
+each. Memory partitions honestly; SMs still time-share across partition
+boundaries, which is a stated cost, not a hidden one.
 `rlstack/runner/host.py`
 
-**Regime** — one capability a host can wear: inference (an engine built at some
-`tp`) or training (a learner built at some `fsdp`) over one base. The fleet
+**Regime** — one `capability` a host can wear: inference (an engine built at
+some `tp`) or training (a learner built at some `fsdp`) over one base. The fleet
 matches joins against regimes; the host attests its metal against them at birth.
 `rlstack/runner/host.py`
 
@@ -447,29 +445,29 @@ seed sequence.
 
 ### The rollout lowering (`rlstack/policy/adapters/rollout.py`)
 
-One `RolloutLowering` per (kind, engine build). The engine that owns these is a
-BUS: it loops the bundle's kinds, calls the verbs, merges the levers and sums
-the alignments — "native vs plugin" is a `demands()` difference and nothing
-else.
+One `RolloutLowering` per (adapter type, engine build). The engine that owns
+these is a BUS: it loops the bundle's adapter types, calls the verbs, merges the
+levers and sums the alignments — "native vs plugin" is a `demands()` difference
+and nothing else.
 
-- **demands** — what the BUILD must pay before this kind can be served (engine
-  args, a plugin's presence). A build that cannot pay says so at construction,
-  not at the first request.
+- **demands** — what the BUILD must pay before this adapter type can be served
+  (engine args, a plugin's presence). A build that cannot pay says so at
+  construction, not at the first request.
 - **attach** — make one bundle's state resident: payloads → the object `apply`
   and `align` read. Additive, idempotent, once per bundle.
 - **apply** — contribute to ONE unit of work, a request: the prompt form and
   the keywords that pin this bundle.
-- **align** — how many prompt positions this kind's state occupies, SUMMED
-  across a bundle's kinds, so an answer read off the prompt is found where the
-  real tokens start.
+- **align** — how many prompt positions this adapter type's state occupies,
+  SUMMED across a bundle's adapter types, so an answer read off the prompt is
+  found where the real tokens start.
 - **reaches** — does the payment above buy this site? The engine's reachability
-  inventory is the union of its served kinds' answers.
+  inventory is the union of its served adapter types' answers.
 - **claims** — a class-level declaration, not a verb: which request parts
-  `apply` writes (the prompt form, or a generate keyword), so two kinds
+  `apply` writes (the prompt form, or a generate keyword), so two adapter types
   claiming one lever are refused at `add_bundle` while the bundle is still just
   an id.
 
-### The kind (`rlstack/policy/adapters/base.py`)
+### The adapter type (`rlstack/policy/adapters/base.py`)
 
 The declaration half is class attributes (`serving`, `engine_plugin`,
 `provides`, `records`) plus `site_ok` and `exports`. The compute half:
@@ -477,14 +475,15 @@ The declaration half is class attributes (`serving`, `engine_plugin`,
 - **params** — build the trainable parameterization for the matched sites.
 - **install_replay** — wire the replay lowering into the trainer forward.
   Additive: every installed tenant stays wired (I8).
-- **uninstall_replay** — its exact inverse; a kind without it cannot share a
-  multi-tenant learner.
+- **uninstall_replay** — its exact inverse. Install is additive, so without the
+  inverse a tenant could never be REMOVED: an adapter type lacking it cannot
+  share a multi-tenant learner.
 - **emit** — lower params into the bundle payload the engine-side consumer
   reads.
 - **load** — emit's inverse, in place; resume and warm start walk through here.
 - **parity** — the mandatory rollout/replay numerical exam (declared, unwired).
-- **rollout_lowering** — build this kind's serving half for one engine build;
-  `install_replay`'s twin.
+- **rollout_lowering** — build this adapter type's serving half for one engine
+  build; `install_replay`'s twin.
 
 ### The fleet ladder (`rlstack/runner/fleet.py`)
 
@@ -575,7 +574,7 @@ referenced by number throughout the code. In short, by subject:
 | | subject | where the vocabulary above touches it |
 |---|---|---|
 | I1 | two worlds, one membrane | seal, Rollout/Trajectory, WaveFeed |
-| I2 | policy is the only bridge | kind, lowering, bundle, parity |
+| I2 | policy is the only bridge | adapter type, lowering, bundle, parity |
 | I3 | identity is computed | run_id, spec, registry code hashes |
 | I4 | registered things declare, then compute | registry, flow graph, submit gate |
 | I5 | GPU topology is semantics-neutral | GpuSet, pool, traffic, arbiter policy |

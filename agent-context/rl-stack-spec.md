@@ -59,7 +59,7 @@ identity; renaming a file changes nothing; humans never author identifiers.
 
 **I4 — Registered things declare, then compute.** Every registry entry has a
 static declaration half (`@postprocessor` classes declare `produces / consumes /
-token_level / pools / sampling`; `@loss` declares `requires`; `@adapter`
+token_level / pools / sampling`; `@loss` declares `requires`; `@adapter_type`
 classes declare `serving / provides / records / exports`) and a compute half.
 All wiring validates at submit, before any GPU is touched, as **queries on the
 flow graph** (spec/flow.py) — the one canonical walk over these declarations,
@@ -171,11 +171,12 @@ class PolicySpec:
 
 @dataclass(frozen=True)
 class AdapterSpec:                   # ONE typed intervention; lives in BOTH worlds
-    kind: str                        # registered @adapter: "lora" | "soft_prompt"
-                                     #   | "attn_bias" | "value_head" | ...
+    adapter_type: str                # registered @adapter_type: "lora"
+                                     #   | "soft_prompt" | "attn_bias"
+                                     #   | "value_head" | ...
     site: str                        # canonical name, resolved at Phase 0 against
                                      #   site_space = SiteSchema ∪ bank exports
-    init: Mapping                    # kind-specific: rank, tie, shapes
+    init: Mapping                    # adapter-type-specific: rank, tie, shapes
     trainable: bool = True
 # sugar: lora(site, r) · soft_prompt(n, d) · attn_bias(spans) · ...
 
@@ -267,8 +268,8 @@ class WarmStart:                     # start a NEW experiment from sealed state
 # B. REGISTRIES — declaration half + compute half (I4)
 # ════════════════════════════════════════════════════════════════════
 
-@adapter("lora")                     # the bridge (I2) — one class per file
-class Lora(Adapter):
+@adapter_type("lora")                # the bridge (I2) — one class per file
+class Lora(AdapterType):
     serving = Mechanism.PUNICA       # None = trainer-only, never served
     engine_plugin = None             # STRING naming an rlstack_engine module,
                                      #   for plugin mechanisms (side_attention)
@@ -418,8 +419,8 @@ rlstack_engine/   # ships in the ENGINE image; imports one-way; bound by string
                   #   cache_salt / attend
   side_attention.py  # the one plugin mechanism (soft_prompt + attn_bias fused)
   batch_view.py   # the ONE version-pinned vLLM metadata shim
-  certificates.py # CertificateKey(build, base, kind, mechanism) + cache (I7;
-                  #   wiring open)
+  certificates.py # CertificateKey(build, base, adapter_type, mechanism) +
+                  #   cache (I7; wiring open)
 
 # ════════════════════════════════════════════════════════════════════
 # D. DATA OBJECTS

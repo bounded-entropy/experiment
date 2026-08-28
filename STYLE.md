@@ -32,8 +32,8 @@ The one reader is Samarth, six months from now, mid-experiment. Optimize for
    registry.py     the index: name -> typed record; registrations live elsewhere
    client.py       the sampling interface (PoolClient Protocol, pool(name))
                    — neutral ground both worlds may type against
-   policy/         the bridge (I2): sites + adapters/ (one file per kind PER
-                   SIDE — lora_torch/lora_vllm — plus the two shared seams:
+   policy/         the bridge (I2): sites + adapters/ (one file per ADAPTER
+                   TYPE PER SIDE — lora_torch/lora_vllm — plus the two seams:
                    replay.py (RowPlan/ReplayRows, #44) and rollout.py (the
                    RolloutLowering contract, #48)) + compile
    inference/      the sampling world: Rollout + environments/ (an episode is

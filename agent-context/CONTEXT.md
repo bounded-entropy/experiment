@@ -2142,6 +2142,102 @@ specs; backends (local/modal/skypilot) and GPU topology are semantics-neutral.
       "each tenant needs exclusive install" (install is additive; the true
       reason is the tenant could never be REMOVED).
 
+55. THE VOCABULARY RENAME PASS: "KIND" IS DEAD, THE WORD IS ADAPTER TYPE
+    (settled, Samarth-directed; #54 deferred this and listed the map, this
+    entry executes it). Mechanical and behavior-preserving — no logic, no
+    control flow, no signature SHAPE changed; only names. 503 tests green
+    before the first commit, 504 after the last (the one addition is the
+    journal-tolerance regression below). test_resume.py run explicitly.
+    - THE RULING: the registered class is an ADAPTER TYPE; a configured bank
+      entry is an adapter. ONE word, ONE spelling — `adapter_type` in code,
+      "adapter type" in prose, never `kind`, never bare `type`.
+        Adapter -> AdapterType · AdapterDef -> AdapterTypeDef ·
+        @adapter -> @adapter_type · ADAPTERS -> ADAPTER_TYPES ·
+        Registry("adapter") -> Registry("adapter_type") ·
+        AdapterSpec.kind / RolloutLowering.kind -> .adapter_type ·
+        Bundle.kinds and compile_bundle(kinds=) -> .adapter_types ·
+        group_by_kind -> group_by_adapter_type ·
+        _Tenant.kinds -> .adapter_types ·
+        VllmEngine._serving_kinds -> _serving_adapter_types ·
+        check_kinds_accept_their_sites -> check_adapter_types_accept_their_sites
+    - THE IDENTITY MOVE IS ACCEPTED, AND STATED. Registered strings and
+      registered-class sources hash into run identity (I3), so this pass MOVES
+      EVERY run_id twice over: code_hashes keys go "adapter:lora" ->
+      "adapter_type:lora", and AdapterSpec's field rename changes the canonical
+      JSON. CONSEQUENCE, deliberately taken: pre-rename stores are READ-ONLY
+      HISTORY, fresh runs get new run_ids, and resume compatibility across the
+      rename is NOT promised. Identity stays internally consistent WITHIN a
+      version, which is what test_resume protects and what still passes. The
+      three tests that pin identity (test_registry's code_hashes keys,
+      test_canonical's two goldens) were updated to the new strings — that IS
+      the accepted move, not a regression.
+    - THE FREED WORD IS `capability`. With "kind" no longer owed to adapters,
+      Regime.kind and Demand.kind take the word ARCHITECTURE.md already uses
+      for them ("one capability a host can wear"). FlowNode.kind (a node
+      category), BackendProfile.kind, Registry.kind (the registry's own
+      category) and the Metal/Partition GPU kind KEEP the word: different
+      meanings, same spelling, and none of them an adapter type.
+    - THE OTHER FALSE FRIENDS, same pass. Partition.gpuset -> .metal (it holds
+      a registered Metal's NAME; GpuSet means pure device demand in a spec) ·
+      TokenBatch.post -> .postdata (postdata is the columns; `post` is the
+      processor LIST on an AlgoSpec, and one word for both made
+      batch.post["advantage"] read as a pipeline) · the PoolClient parameter
+      is `client`, never `llm`, in every environment, every postprocessor and
+      every test (it routes to pools, and a pool may be a judge, a teacher on
+      another base, or a scorer) · VllmEngine(max_loras=, max_lora_rank=) ->
+      (max_bundles=, max_rank=), which is what ServingBuild already called
+      them; lora_vllm still feeds vLLM's own max_loras/max_lora_rank engine
+      args unchanged, so the last mechanism-flavored words in vllm_engine.py
+      are gone and #48's noted exception is closed.
+      NOT renamed, because the word is right there: VllmEngine._llm (vLLM's
+      own engine handle, not a PoolClient) and the llm_judge processor's
+      registered name and file — a judge that IS an LLM.
+    - THE OBSERVER STAYS TOLERANT OF OLD JOURNALS. A journal is append-only
+      history, so hosts booted before this pass say "gpuset" and regime "kind"
+      on the volume forever. views.py grows partition_metal() and page.py the
+      JS twins partMetal() / regimeCapability(), each reading either spelling.
+      test_ui.py keeps its l4-b fixture in the OLD spelling ON PURPOSE — that
+      fixture plus test_a_pre_rename_journal_still_names_its_metal is the
+      regression pinning the tolerance, and it is the reason the suite grew by
+      one. Nothing else reads a journal: correctness never does (#43).
+    - THE STALE STRINGS #54 FOUND, now stating the rule they enforce rather
+      than a build chronology retired with Phase A/B/C: loop.py's two "B1"
+      messages (no algo means no Trainer, and the Trainer is the ledger's only
+      writer, so nothing would ever commit; warm start needs a store://
+      address because it reads another run's SEALED deltas), batch_view.py's
+      and side_attention.py's "B3" (the shim is unbuilt because no plugin's
+      attend() exercises it; the merge is unbuilt because vllm 0.28.0 does not
+      plumb return_softmax_lse through the dense FlashAttention path — the
+      module docstring's own reason, now in the raise), and base.py's
+      uninstall_replay (install is ADDITIVE, so the true consequence of a
+      missing inverse is that a tenant could never be REMOVED from a shared
+      learner). NB: #54 filed batch_view.py under rlstack/data/; it lives in
+      rlstack_engine/, the only place it could — it is the version-pinned shim
+      that ships in the engine image.
+    - DOCS IN THE SAME PASS. ARCHITECTURE.md's **Kind** entry became **Adapter
+      type**, its naming-debt blockquote is DELETED (the debt is paid), and the
+      verbs section is now "The adapter type"; the Partition, Regime and
+      TokenBatch entries name their renamed fields. STYLE rule 8's adapters/
+      line says "one file per ADAPTER TYPE PER SIDE". rl-stack-spec.md got the
+      adapter-type terminology swap ONLY (@adapter_type, AdapterSpec.
+      adapter_type, CertificateKey) — zero semantic edits, per the directive.
+      CARRIED AS DELTAS, not folded: the spec canon still spells
+      Partition.gpuset, Demand.kind and the PoolClient parameter `llm` at
+      lines 292/305/306/362/376/515/516/568/571. They are terminology-only and
+      are superseded by THIS entry until someone folds v4.
+    - JUDGMENT CALLS, listed so they are reviewable rather than silent. The
+      "unknown-adapter" validation issue code and flow.py's "adapter:<type>"
+      dictionary.json producer label KEEP their spelling: both describe a bank
+      ENTRY (which is genuinely an adapter), neither is in the rename map, and
+      the producer label is derived, never identity (I11). FakeLearner's
+      forward_backward hashes a dict whose key is still "post": it is a label
+      inside content_hash, never read back, and moving it would shift fake-run
+      bytes for no vocabulary gain. Regime's journal row key moved to
+      "capability" alongside Partition's "metal" — #55's directive named the
+      tolerance only for gpuset, but a row IS a serialization of the fields,
+      and leaving the wire on the old word would have re-created the drift
+      this pass exists to kill; both readers tolerate both.
+
 ## Open threads (do NOT treat as settled; flag when your answer touches them)
 
 - TODO (Samarth, settled intent — future, nothing now): BUNDLE LRU EVICTION
