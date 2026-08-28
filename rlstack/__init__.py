@@ -53,7 +53,9 @@ from rlstack.data.stores import (
     LedgerError, LocalStore, ManifestMismatch, ModalVolumeStore, RunHandle,
     Store, StoreError, bump,
 )
-from rlstack.policy.compile import Bundle, compile_bundle, group_by_mechanism
+from rlstack.policy.compile import (
+    Bundle, compile_bundle, group_by_kind, group_by_mechanism,
+)
 from rlstack.runner.interfaces import (
     Emitted, Engine, FinishEvent, Learner, TokenEvent, TrainStats,
 )

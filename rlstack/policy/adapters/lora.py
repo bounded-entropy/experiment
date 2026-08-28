@@ -13,7 +13,12 @@ class Lora(Adapter):
     def site_ok(self, meta: SiteMeta) -> bool:
         return meta.has_weight
 
-    # compute half — lora_torch imports torch, so it loads lazily (rule 7)
+    # compute halves — lora_torch imports torch and lora_vllm imports vLLM,
+    # so both load lazily, from here only (rule 7)
+
+    def rollout_lowering(self, build):
+        from rlstack.policy.adapters import lora_vllm
+        return lora_vllm.LoraRollout(build)
 
     def params(self, sites: tuple[SiteMeta, ...], init: dict):
         from rlstack.policy.adapters import lora_torch

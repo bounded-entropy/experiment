@@ -28,8 +28,8 @@ class Bundle:
     """One compiled policy: id, full version map, servable payloads.
 
     `kinds` (payload name -> registered adapter kind) makes the bundle
-    self-describing: any engine can route each payload to its serving
-    mechanism without seeing the spec (group_by_mechanism below).
+    self-describing: any engine can route each payload to the kind that lowers
+    it without seeing the spec (group_by_kind below).
     """
 
     bundle_id: str
@@ -68,24 +68,41 @@ def compile_bundle(
                   kinds={name: (kinds or {})[name] for name in served} if kinds else {})
 
 
-def group_by_mechanism(bundle: Bundle) -> dict[Mechanism, dict[str, bytes]]:
-    """Route a bundle's payloads to their serving mechanisms.
+def group_by_kind(bundle: Bundle) -> dict[str, dict[str, bytes]]:
+    """Route a bundle's payloads to their adapter KINDS.
 
-    THE dispatch input for any engine's add_bundle: each mechanism's consumer
-    receives ALL payloads of its adapters and compiles them jointly (punica
-    merges peft fragments; side_attention takes prompt rows + bias together).
-    A payload with no kind label or a trainer-only kind is a compile error —
-    servable payloads must be routable.
+    THE dispatch input for an engine bus (#48): each kind's rollout lowering
+    receives ALL payloads of its own entries and attaches them jointly (punica
+    merges peft fragments; a soft prompt's blocks are segments of one virtual
+    prompt). Payloads arrive in the bundle's own order — bank order, since
+    compile_bundle sorts them — so a kind that occupies prompt positions
+    concatenates them in it. A payload with no kind label or a trainer-only
+    kind is a compile error: servable payloads must be routable.
     """
-    grouped: dict[Mechanism, dict[str, bytes]] = {}
+    grouped: dict[str, dict[str, bytes]] = {}
     for name, data in bundle.payloads.items():
         if name not in bundle.kinds:
             raise ValueError(
                 f"payload {name!r} in {bundle.bundle_id} carries no kind label")
-        serving = ADAPTERS.get(bundle.kinds[name]).instance.serving
-        if serving is None:
+        kind = bundle.kinds[name]
+        if ADAPTERS.get(kind).instance.serving is None:
             raise ValueError(
-                f"payload {name!r} ({bundle.kinds[name]}) is trainer-only yet "
+                f"payload {name!r} ({kind}) is trainer-only yet "
                 f"shipped in {bundle.bundle_id}")
-        grouped.setdefault(serving, {})[name] = data
+        grouped.setdefault(kind, {})[name] = data
+    return grouped
+
+
+def group_by_mechanism(bundle: Bundle) -> dict[Mechanism, dict[str, bytes]]:
+    """The same routing, keyed by the serving MECHANISM instead of the kind.
+
+    The mechanism-keyed view of group_by_kind: two kinds served through one
+    lever are one consumer's problem, which is how #3 first read the dispatch.
+    Engines dispatch by kind now (the bus calls each kind's rollout lowering),
+    so this is the inventory view — who would be asked to serve this bundle.
+    """
+    grouped: dict[Mechanism, dict[str, bytes]] = {}
+    for kind, payloads in group_by_kind(bundle).items():
+        serving = ADAPTERS.get(kind).instance.serving
+        grouped.setdefault(serving, {}).update(payloads)
     return grouped

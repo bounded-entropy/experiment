@@ -14,6 +14,11 @@ folder:
         def site_ok(self, meta): ...
         # params / install_replay / emit / parity land with Phase B compute
 
+Both lowerings live beside the class, one file each and lazily imported: the
+REPLAY half in `<kind>_torch.py` (install_replay reads it), the ROLLOUT half in
+`<kind>_vllm.py` (rollout_lowering builds it, contract in adapters/rollout.py).
+Parity — the exam that binds the pair — is then reviewable in one directory.
+
 `records` and `provides` are mirror images across the membrane: records are
 FACTS from sampling time (frozen at the seal, never recomputable — e.g. the
 adapter index drawn at each token); provides are TENSORS from training time
@@ -26,11 +31,14 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import StrEnum
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from rlstack.policy.siteschema import SiteMeta
 from rlstack.registry import ADAPTERS, source_hash
 from rlstack.spec.specs import AdapterSpec
+
+if TYPE_CHECKING:                       # the seam imports this module back
+    from rlstack.policy.adapters.rollout import RolloutLowering, ServingBuild
 
 
 class Mechanism(StrEnum):
@@ -73,6 +81,18 @@ class Adapter:
     def params(self, sites: tuple[SiteMeta, ...], init: dict) -> Any:
         """Build the trainable parameterization for the matched sites."""
         raise NotImplementedError
+
+    def rollout_lowering(self, build: "ServingBuild") -> "RolloutLowering":
+        """Build this kind's ROLLOUT lowering for one engine build (#3, #48).
+
+        install_replay's twin on the other side of the bridge: that one wires
+        the kind into a trainer forward, this one hands the engine the four
+        verbs (demands / attach / apply / align) it serves the kind through.
+        A trainer-only kind (serving None) has none, and says so.
+        """
+        raise NotImplementedError(
+            f"{type(self).__name__} has no rollout lowering: it is trainer-"
+            f"only (serving is None) and no engine ever hears about it")
 
     def install_replay(self, model: Any, params: Any, sites: tuple[SiteMeta, ...]) -> None:
         """Wire the replay lowering into the trainer forward."""
