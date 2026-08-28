@@ -1571,6 +1571,62 @@ specs; backends (local/modal/skypilot) and GPU topology are semantics-neutral.
     renamed; no trainer files change in this pass. Proof obligation: the
     463-test suite green, then tp_l4 + adapters_l4 + the OPD probe re-run
     on metal (this relocates the most metal-proven path in the repo).
+    LANDED (2026-08-28, built and re-proven). GEOGRAPHY AS BUILT: the
+    contract is policy/adapters/rollout.py — RolloutLowering plus the typed
+    records (ServingBuild, BuildDemands, Request, Levers, Alignment) — filed
+    beside replay.py, because rule 8 already names that slot "the kinds'
+    shared compute-side seam" and this is that seam on the serving side; the
+    three rollout halves (lora_vllm, soft_prompt_vllm, attn_bias_vllm) sit
+    next to their _torch twins. Adapter grew ONE member,
+    rollout_lowering(build) — install_replay's twin — implemented by each
+    kind with the lazy import lora_torch already precedents, so the fakes
+    suite stays stdlib-clean.
+    THREE DELTAS FROM THE DESIGN, all small. (1) A FIFTH verb, reaches(meta):
+    once the bus stopped knowing mechanisms, something had to answer
+    Engine.reachability, and the honest owner is the kind — demands() says
+    what the build pays, reaches() says what the payment buys. (2) The
+    composition rule needed something to compare, so a lowering DECLARES what
+    it claims of a request (lora: the lora_request keyword; soft prompt: the
+    prompt form) and check_levers_compose refuses two kinds claiming one
+    lever at add_bundle — which is exactly where a second prompt-shape kind
+    lands. (3) The build fact is now VllmEngine(serves=("lora",
+    "soft_prompt")) — KINDS, not mechanisms; max_loras/max_lora_rank keep
+    their vLLM-flavored names because every call site spells them that way
+    and are passed on as plain capacity, and they are the ONLY
+    mechanism-flavored words left in vllm_engine.py (which otherwise greps
+    clean for punica/rows/lora and keeps "prompt" as request vocabulary only:
+    prompt_ids, prompt_logprobs, TokensPrompt). compile.group_by_kind is the
+    bus's dispatch input; group_by_mechanism survives as the mechanism-keyed
+    view of it.
+    THE METAL, which is the point of the entry — 473 tests green first (the
+    463 plus 10 for the seam), all 473 green in the image:
+      tp_l4 13/13 on L4:2 — punica under TP and score_tokens through the bus;
+      scoring gap by adapter magnitude base 0.02087 / faint 0.04544 / loud
+      0.27661, i.e. #45's 0.02/0.05/0.28 reproduced through the new path.
+      adapters_l4::parity 21/21 — and the control with no tolerance still has
+      none: rows-as-tokens max|d| = 0.00e+00 on BOTH sides, shift controls
+      4.1-4.5 nats against 0.04-0.24 aligned, the sweep landing on #46's own
+      numbers (base floor 0.0400, lora 0.0405, soft_prompt 0.048-0.125).
+      adapters_l4::adapters 13/13 with THREE FRESH tenants (seeds 480, so
+      they trained rather than attaching to #46's finished runs): lora
+      9130f1aa2cad 0.500 -> 1.000, soft_prompt 965372217a46 0.562 -> 0.688,
+      both 2351c5a5b39a 0.500 -> 0.938, gaps 0.025-0.073 with the
+      cross-contamination alarm quiet, and the bus's census reading 18 lora +
+      18 soft_prompt bundles resident on one engine — #46's number exactly.
+      opd_l4::probe 4/4 against the 32B tp=4 teacher (the align path with
+      NOTHING attached: a payload-free bundle sums to zero positions) — and
+      the per-token scores came back BIT-IDENTICAL to #47's recorded ones
+      ([-0.3004, -0.0213, -0.0026, -0.0013]; ' 105' -0.0814 vs ' 731'
+      -4.1414), which is the strongest statement available that the
+      relocation changed no number.
+    SCOPE HELD: no trainer file, no FakeEngine, no runner/remote.py — the
+    wire ships payloads and the serving bus consumes them exactly as before.
+    deploy/adapters_l4.py took four lines (serves= at two constructors; the
+    two engine._lora/_rows peeks became the bus's public attachments() /
+    residency()). DOC DEBT, one line larger than #44(f) left it: STYLE rule
+    8's adapters/ line now owes "one file per kind — declaration, replay
+    lowering, rollout lowering — plus replay.py AND rollout.py, the kinds'
+    two shared seams".
 
 ## Open threads (do NOT treat as settled; flag when your answer touches them)
 
