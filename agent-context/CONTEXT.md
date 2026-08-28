@@ -1707,6 +1707,147 @@ specs; backends (local/modal/skypilot) and GPU topology are semantics-neutral.
           makes the register-time default silently kind-dependent, and the
           A100 40/80 split shows why a stated number beats a lookup.
 
+51. MASS PARTITIONING ONE L4: THE SUB-GPU HOST MEETS REAL SILICON (settled by
+    execution, Samarth-directed: "try mass partitioning one L4 gpu to do many
+    runs simultaneously with sleep, etc. etc. i just want to test the shit out
+    of everything"). #43 made a Host an ATOMIC PURPOSED PARTITION and #49 gave
+    the partition its metal, but every GPU either of them ever touched was a
+    WHOLE device: sub-GPU hosts were a fakes-proven design. This entry is that
+    design's first contact with silicon — one L4, carved by the fleet into
+    three and then four coexisting hosts, plus an alternating host whose
+    wake/evict hooks are REAL for the first time anywhere in this repo.
+    Deploy only: deploy/partition_l4.py is the one new file, nothing under
+    rlstack/ changed, 479 tests still green. Cost: 20.7 GPU-minutes across
+    four L4 containers (~$0.30) plus two CPU containers, all legs replicated
+    at least once.
+    THE VERDICT FIRST: the sub-GPU host model HOLDS. A fraction means what it
+    says on the metal, many partitions coexist in one container, joins are
+    free, alternation really hands the device back, and the ladder's refusals
+    are correct. It creaks in four places, all of them NAMING, PLUMBING or
+    OBSERVABILITY rather than the model — listed as findings below, none
+    fixed here (this was a test campaign; rlstack/ was out of scope).
+    - THE PARTITION IS REAL, AND ITS ARITHMETIC IS SIMPLE. The device's usable
+      total is 22.03 GiB (torch.cuda.mem_get_info; nvidia-smi says 23034 MiB),
+      and an engine built with gpu_memory_utilization = its partition's memory
+      costs fraction x 22.03 PLUS ~0.30 GiB of CUDA context that sits OUTSIDE
+      vLLM's budget: main @0.30 took +6.90 GiB, judge @0.15 took +3.61 GiB,
+      two engines resident at 10.69 GiB, five tenants' learner state on top at
+      13.03 GiB, four partitions' worth of metal at 14.14 GiB — reproduced to
+      0.01 GiB in a second container. So the packing rule for a mass-
+      partitioned device is: fractions sum to <= 1 minus ~1.4% per additional
+      engine process. TWO vLLM ENGINES IN ONE CONTAINER ON ONE DEVICE DO NOT
+      FIGHT: each v1 engine core is its own child process with its own ipc
+      paths, and vLLM measures its budget against the DEVICE total, not
+      against what is left, so partitions compose additively by construction.
+    - THE LADDER, ON METAL: two place/apply calls carved main-tp1 @0.30,
+      learner-fsdp1 @0.20 and judge-tp1 @0.15 (a second base, see finding (f))
+      off one device, residual 0.35 exactly. Five concurrent tenants — grpo,
+      grpo (another seed), gspo, sdft, and an llm_judge tenant whose judge
+      pool routes to the OTHER inference partition — all JOINED (never
+      carved), all completed 4/4 with evals, logprob_gap 0.017-0.046 (the
+      kernel floor, so no adapter was ever served to the wrong tenant across
+      three partitions), and declared_load stayed 0.0 on every host: a join
+      really is fraction-free. Each tenant's runner sat on the learner's host
+      and reached the other one or two partitions through RemotePools over
+      LocalTransport — three partitions per tenant, all in one process.
+      Placement journaled under every run_id.
+    - ALTERNATION, WITH HOOKS THAT ACTUALLY EVICT. A sleep unit carved ONE
+      host with two regimes at 0.45; the regimes attached at birth into
+      "host:<name>", and the deploy then attached REAL hooks onto those same
+      residents — arbiter.attach is idempotent, filled the hooks, and did not
+      re-legislate the group (#43's deference rule, on metal). The run made 9
+      switches, strictly alternating main-tp1 <-> learner-fsdp1. vLLM's
+      sleep(1) returned 9.92 GiB (11.57 -> 1.65) and wake_up() put back 9.81;
+      the learner offload (model .to("cpu") + empty_cache) returned 1.78 GiB
+      (2.53 -> 0.74). Between regimes the whole device sat at 0.74 GiB used —
+      a sleep host hands the metal back, it does not merely promise to. The
+      run finished 4/4, gap max 0.0298: alternation costs latency, not
+      numerics.
+    - THE LIVE CARVE AND THE REFUSALS: fraction_for_gb(3.0, L4) = 0.125 sized
+      a carve that happened mid-campaign, journaled with gpu "L4" stamped, and
+      the host it made ran a real 2-update tenant on the second base. Both
+      refusals came back needs_human on a full device — a tp=2 demand on a
+      one-device metal, and a 20 GB demand against a 0.35 residual — and
+      apply() refused the plan ("the plan needs new metal — a human's call").
+    - KILL/RESUME THROUGH THE FLEET: a tenant cancelled mid-flight at update 4
+      of 8 and resubmitted as the same spec came back resumed_from=4, ledger
+      complete 8/8, evals backfilled at 2/4/6/8.
+    - THE OVERCOMMIT BOUNDARY (leg 7, added because finding (a) is a way to
+      reach it by accident): asking for 0.75 of a device already holding a
+      0.30 partition is REFUSED AT BUILD, cleanly, by vLLM itself —
+      "Free memory on device cuda:0 (14.76/22.03 GiB) on startup is less than
+      desired GPU memory utilization (0.75, 16.53 GiB)" (v1/worker/utils.py
+      request_memory), surfaced to the caller as RuntimeError: Engine core
+      initialization failed. AND THE PARTITION THAT WAS ALREADY SERVING
+      SURVIVED IT: the first engine kept sampling, its HBM unchanged. A failed
+      carve is a failed carve, not a dead device.
+    FINDINGS (repro in deploy/partition_l4.py; the harness's failing checks
+    ARE these, deliberately left failing):
+      (a) THE CARVE NAME IS NOT UNIQUE PER CAPABILITY, AND THE COLLISION LEAKS
+          RESIDUAL. Fleet.carve names a host f"{metal}:{devices}/{regimes}"
+          and regime_of names a training regime "learner-fsdp{shape}" — with
+          no base in it. Two carves that differ only by BASE therefore collide:
+          self.hosts[name] = host REPLACES a live host (its metal still
+          resident, its tenants still bound), and because residual() sums over
+          self.hosts, the replaced partition's 0.20 silently returns to the
+          residual — the fleet then believes 0.425 of the device is free when
+          0.225 is. That is an automatic path into the overcommit boundary
+          above. Free repro on fakes (`modal run deploy/partition_l4.py::
+          preview`), reproduced on metal twice. Fix candidates: put the base
+          (or a counter) in the carved name, or refuse a carve whose name
+          exists.
+      (b) THE OBSERVER CANNOT SEE A CARVED HOST AT ALL. A carved name contains
+          "/", Store.append_host_event writes hosts/<host>/log.jsonl, and
+          Store.list_hosts() recovers the name with key.split("/")[1] — so
+          every carved partition journals one directory deeper than the
+          observer looks. The whole campaign (4 partitions, 15 runs, 11
+          minutes of nvidia-smi samples) renders as ONE phantom host
+          "l4-solo:0" with "metal : unpartitioned", 0 boots, 0 tenants; and
+          because runs_data and gpu_data are host-journal-driven, the runs and
+          the gpu samples are invisible too. The fleet log (keyed by nothing)
+          is the only place the campaign's story survives. #43's tests never
+          saw this because they read the journal back by exact name.
+      (c) THE FACTORY CONTRACT CANNOT PAY THE PARTITION. Fleet's factories are
+          Callable[[Regime], Engine] and a Regime carries no memory, so the
+          one number the carve just computed — the fraction, the whole point
+          of a sub-GPU host — cannot reach gpu_memory_utilization. Every real
+          deploy has to re-derive it from the Plan first (Partitioned.absorb
+          in the harness). A factory taking (Regime, Partition) deletes that
+          class.
+      (d) THE ENGINE HAS NO SLEEP SEAM, AND NOTHING HAS EVER ATTACHED A HOOK.
+          VllmEngine takes no enable_sleep_mode, so an alternating host cannot
+          be built through the fleet's factory without poking
+          engine._engine_args; and the arbiter's wake/evict hooks — designed
+          in #34, carried through #43 — had never been attached by anything on
+          metal, so a deploy must write both hooks itself and reach
+          engine._llm / learner._model to do it. The hooks work (see above);
+          the seam is missing. Candidates: VllmEngine(sleeps=True) as a build
+          fact, and a named sleep/wake pair on the Engine and Learner
+          protocols that Host wires when a host has >1 regime.
+      (e) A TRAINING PARTITION'S FRACTION IS UNENFORCEABLE IN-PROCESS. vLLM's
+          gpu_memory_utilization is per-engine, but torch's
+          set_per_process_memory_fraction is per PROCESS and every host in a
+          mass-partitioned container shares one — so a training partition is a
+          declaration and a journal entry, never a cap. It behaved (the shared
+          learner held ~2.3 GiB across five tenants against a declared 0.20 =
+          4.4 GiB) but nothing made it.
+      (f) TWO HOSTS OF ONE CAPABILITY ARE UNADDRESSABLE. Capability is (kind,
+          base, shape) and find_join takes the FIRST covering host in sorted
+          name order, so a second partition serving the same base at the same
+          tp is dead metal no tenant can ask for. The campaign gave its second
+          inference partition a different base (Qwen3-0.6B-Base) purely to
+          make it reachable. If sub-GPU hosts are meant to be spread across
+          identical capabilities, placement needs a currency beyond capability
+          (declared_load, or a measured saturation signal — the join-refusal
+          thread #43 already left open).
+    NOT DONE (deliberate): none of (a)-(f) is fixed — this campaign was
+    evidence, and a core fix belongs in a session that can change rlstack/.
+    Untested here: sub-GPU partitions ACROSS containers (every host in this
+    campaign shared one process, so SM contention across partitions is
+    measured only as latency, never isolated); more than two engines on one
+    device (the arithmetic says ~5 x 0.15 fits, nothing tried it); a sleep
+    host under several tenants at once; sub-GPU partitions at tp>1.
+
 ## Open threads (do NOT treat as settled; flag when your answer touches them)
 
 - PLANNED (Samarth-approved, queued behind #48 landing): the OPD stress test
