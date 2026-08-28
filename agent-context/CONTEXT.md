@@ -1250,6 +1250,168 @@ specs; backends (local/modal/skypilot) and GPU topology are semantics-neutral.
     rides `ask` is the contract every out-of-process transport implements
     against, pinned in the fakes suite rather than rediscovered on metal).
 
+46. ADAPTER KINDS BEYOND LORA: SOFT PROMPTS SERVED, SIDE ATTENTION REFUSED
+    (settled by execution, Samarth-directed: "take care of soft prompts, side
+    attention, etc. implementations... the test for this will be seeing if we
+    can execute grpo runs with different adapter types on the same vllm
+    engine"). #25 gave soft_prompt and attn_bias declaration halves — sites,
+    mechanisms, exports — and no compute. This entry gives soft_prompt both
+    halves on metal, gives attn_bias the replay half only, and records exactly
+    why the second one stops there.
+    - THE SOFT PROMPT'S REPLAY LOWERING IS A BOUNDARY, NOT A SITE
+      (policy/adapters/soft_prompt_torch.py, new). LoRA replaces a Linear;
+      a soft prompt cannot, because it does not change a computation, it adds
+      POSITIONS. PromptBoundary hooks the base's forward: it embeds the ids,
+      prepends the routed rows, widens the padding mask by n ones, and — the
+      rule the file exists for — CUTS THOSE POSITIONS BACK OFF THE LOGITS
+      before they leave. forward_backward returns [len(batch)] logprobs
+      aligned to batch.token_ids and a virtual row is a position with no
+      token, so it must not survive the boundary. Virtual positions exist
+      between embed and logits and nowhere else: flatten, pack and the
+      learner's gather need no knowledge of them, and torch_learner.py was
+      NOT edited.
+    - TWO TRANSPARENCIES MAKE MIXED-KIND TENANCY WORK, and they are the same
+      rule twice. A row whose slot carries no soft prompt takes no virtual
+      positions (the boundary passes its kwargs through); a uniform forward
+      whose slot carries no delta at a wrapped LoraSite gets the base. Before
+      this, a co-tenant with a different bank shape would have hit a KeyError
+      inside someone else's lowering — #44's additive install made every
+      tenant's sites resident, but every tenant's forward still assumed its own
+      bank covered them. A mixed forward still raises (admission is the
+      coalescer's job, #44), which is unchanged.
+    - A SOFT PROMPT HAS NO IDENTITY ELEMENT. LoRA's B = 0 delta IS the base; n
+      virtual positions change the forward at version 0 by construction. Init
+      is therefore small, seeded, and part of the policy (init_std defaults to
+      0.02 — transformers' own initializer_range, and a good match for the
+      measured Qwen3-0.6B embedding std of 0.0292).
+    - THE ROLLOUT LOWERING USES vLLM 0.28's MIXED EMBEDS PROMPT, which is
+      better than "we embed the prompt and hand over the whole thing".
+      VERIFIED IN THE PINNED IMAGE, not from memory: EmbedsPrompt takes
+      prompt_embeds AND prompt_token_ids AND a per-position
+      prompt_is_token_ids mask; the ENGINE embeds every position marked True
+      from its own table (gpu_model_runner zeroes the placeholder ids before
+      the gather and writes the result back without clobbering the embeds
+      positions), so the learned rows are the only thing we hand over and
+      nothing depends on our copy of the embedding matrix matching the served
+      one. The real token ids stay in the request, so prefix-cache block
+      hashes, detokenization and prompt_logprobs indexing all see the tokens
+      they would see without a soft prompt — and _gen_prompt_embeds_extra_hash_keys
+      digests the embeds per block into the block hash, so two bundles'
+      prefixes can never alias (no cache_salt needed; the plugin-era rule is
+      already enforced by vLLM here). Other verified facts: enable_prompt_embeds
+      coexists with enable_lora on one build; a request may carry prompt_embeds
+      AND a LoRARequest; prompt_embeds and punica requests are in flight
+      together and show batch-composition noise against their serial answers,
+      i.e. they really share forward steps; sleep(1)/wake_up is unaffected;
+      and enable_prompt_embeds puts the build on the V1 model runner (it is on
+      the V2 runner's unsupported list) and moves the embedding layer outside
+      the CUDA graph.
+    - REACHABILITY IS A BUILD FACT, AND NOW LITERALLY A CONSTRUCTOR ARGUMENT.
+      VllmEngine(prompt_embeds=True) is what enables the lever; a build that
+      was not asked for it reports NONE at model.embed_tokens and a
+      soft-prompt tenant is refused at Phase 0 rather than served wrong. This
+      is #25(b)'s rule finally having a real second instance.
+    - PARITY (deploy/adapters_l4.py::parity, 21/21 on one L4, ~4 min). The
+      control that settles it has NO tolerance: a soft prompt whose rows ARE
+      the embeddings of four real tokens must serve exactly as those tokens
+      and replay exactly as those tokens. Both come back BIT-IDENTICAL
+      (max|d| = 0.00e+00), which settles positions, the padding mask, the
+      is_token_ids mask, the logit trim and the scored-suffix offset at once.
+      The cross-side gap is then numerics, read on two document sets because
+      the two questions want different material: PLAIN (rollout-shaped) is
+      where the floor is measured — base 0.040, lora 0.041, both 0.049,
+      soft_prompt 0.048-0.125 across row magnitudes 0.005/0.02/0.05, all at
+      #28's 0.022-0.033 kernel floor's order — while JAGGED (a predictable
+      token beside a wildly surprising one) is where the shift control is a
+      proof: 4.1-4.5 nats shifted against 0.04-0.24 aligned. On a smooth
+      sequence an off-by-one hides in the noise, which is why #45's shift test
+      needs material like this.
+    - THE ACCEPTANCE TEST, Samarth's own (deploy/adapters_l4.py::adapters,
+      13/13, ~25 min on one L4). Three GRPO tenants join one Host 25s apart
+      and share ONE VllmEngine and ONE multi-tenant learner: lora
+      (f09a696e0c48, reward 0.500 -> 0.938, gap 0.016-0.026), soft_prompt
+      (3ef3b03e0611, 0.438 -> 0.688, gap 0.028-0.056), and a bank carrying
+      BOTH kinds (98ee4812037d, 0.375 -> 0.938, gap 0.019-0.038). All 8/8
+      updates, all evals present, engine holding 18 punica bundles and 18
+      prompt-row bundles at once. The gap is the cross-contamination alarm: a
+      request served the wrong prefix or the wrong adapter blows it up long
+      before 0.15.
+    - A SOFT PROMPT WANTS ITS OWN LEARNING RATE, learned by collapsing a run.
+      AdamW's step is ~lr per coordinate, so one update moves the rows by
+      lr*sqrt(n*d) = lr*90 against a row block whose whole norm is 1.8 at the
+      default init. At 1e-2 that is half the prompt per step: reward hit 0 by
+      update 3 and froze there (no reward spread -> no advantage -> no
+      gradient), with logprob_gap at 0.25 because rows that far outside the
+      embedding distribution are exactly where prefill and decode kernels
+      diverge. 5e-4 is ~4% per step and trains. The general rule: a kind's
+      sensible lr scales with 1/sqrt(its parameter count), and the bank's
+      single OptimSpec.lr is the wrong shape for a bank of mixed kinds —
+      OptimSpec.overrides exists per entry and is the lever.
+    - ATTN_BIAS: THE REPLAY HALF IS REAL, THE ROLLOUT HALF IS REFUSED
+      (policy/adapters/attn_bias_torch.py, new; NOT PROVEN end to end and
+      deliberately unreachable). An attention mask already IS a score-level
+      bias, so the trainer needs no kernel patch — hand the base a 4-D float
+      mask instead of the 2-D padding mask. Verified on the pinned
+      transformers 5.16.1 + Qwen3 (sdpa) BEFORE writing it: a 4-D mask that
+      merely reproduces the causal mask is bit-identical to the 2-D one, a
+      +2.0 bias on three columns moves the logits by 8.7 nats, a bias on one
+      head alone by 2.1. theta per (head, prompt row), two named
+      parameterizations (free / bounded_sigmoid) both mapping zero to zero so
+      version 0 IS the base, n read from the site name (the canonical name
+      carries it), the bias applied to the REAL tokens' rows only — the
+      prompt's own positions stay a pure function of the rows, which is what
+      would let an engine precompute their K/V once per bundle. Cost stated:
+      the mask is [rows, heads, L, L] where the ordinary path passes
+      [rows, L].
+    - WHAT BLOCKS SIDE ATTENTION ON vllm 0.28.0, precisely. The registration
+      seam MOVED and still exists (vllm.v1.attention.backends.registry.
+      register_backend, with an AttentionBackendEnum.CUSTOM member, and
+      load_general_plugins() still runs in BOTH the engine core and the
+      worker — #16's ambient registration is intact). merge_attn_states MOVED
+      and still exists (vllm.v1.attention.ops.merge_attn_states). THE BLOCKER
+      is that return_softmax_lse is NOT plumbed through the dense
+      FlashAttention path: FlashAttentionImpl sets can_return_lse_for_decode =
+      True but v1/attention/backend.py reads it only when dcp_world_size > 1,
+      and every other user on this build is an MLA backend or the
+      context-parallel helper. #25's "stock kernel + tiny partition attention
+      + exact LSE merge" therefore has no seam here short of forking 262 lines
+      of FA-version-conditioned dispatch. SideAttention.required_symbols now
+      names the CURRENT paths plus the one this build genuinely lacks, so
+      probe() fails for the true reason (pinned as a test), and every engine
+      keeps reporting NONE for SIDE_ATTENTION.
+    - WHAT WOULD UNBLOCK IT, and it is not #25's design: FLEX ATTENTION, which
+      this build ALREADY has. FlexAttentionMetadata carries a first-class
+      `score_mod` field — torch's (score, b, h, q_idx, kv_idx) -> score hook,
+      which is exactly an additive bias on the score rectangle — and
+      get_transformed_score_mod() already converts paged PHYSICAL kv indices
+      to LOGICAL per-request ones, which is the job BatchView was invented
+      for. Nothing in vLLM sets score_mod today, so the work is a registered
+      backend plus a metadata builder carrying our per-request slot vector;
+      the cost is that FLEX_ATTENTION becomes the whole engine's backend (a
+      build fact, and a different numerics baseline for every tenant on it).
+      The LSE-merge route stays the fallback if a later vLLM plumbs the dense
+      LSE the way the MLA backends already do.
+    - PROPOSED SPEC DELTA (for the main session; canon untouched). (1) I2/I8
+      should say that a kind's replay lowering may be a BOUNDARY around the
+      base's forward, not only a module replacement — with the alignment
+      obligation stated: whatever a lowering adds to the sequence it must
+      remove before the logits, so PolicyOutputs.logprobs stays [len(batch)]
+      token-aligned. That obligation is what makes data/ able to stay
+      estimator-free about adapter kinds. (2) The "one delta per site" bank
+      rule (#2) needs a companion for OPTIMIZATION: two kinds in one bank do
+      not share a sensible learning rate, so a spec with a mixed bank that
+      leaves OptimSpec.overrides empty is arguably a validate warning, not a
+      silently divergent run.
+    452 tests green on fakes (440 + 12 new attn_bias), 30 in
+    test_soft_prompt.py under torch in the image. NOT BUILT, stated: side
+    attention serving (above); a soft prompt under TP > 1 (the rows are a
+    request field, so nothing should shard, but it has not been run); a
+    soft-prompt tenant through the RemotePool wire (prompt rows are engine-
+    side state built at add_bundle, which the transport already carries as
+    payload bytes, but again unrun); score_tokens under a soft prompt is
+    implemented with the offset and exercised by the parity harness, but no
+    opsd tenant has used it.
+
 ## Open threads (do NOT treat as settled; flag when your answer touches them)
 
 - TODO (Samarth, settled intent): DELETE RunSignals.notify() and run the
