@@ -251,7 +251,7 @@ class TestExample4DataPath(unittest.TestCase):
         batches = pack(docs, microbatch_tokens=16)
         self.assertEqual(sum(len(b.doc_starts) for b in batches), 4)
         for batch in batches:
-            self.assertEqual(len(batch.token_ids), len(batch.post["advantage"]))
+            self.assertEqual(len(batch.token_ids), len(batch.postdata["advantage"]))
 
 
 # --- Example 5 — multi-GPU with sharding: 35B on three nodes -----------------

@@ -87,7 +87,11 @@ async def run_experiment_async(
     single-experiment convenience.
     """
     if spec.algo is None:
-        raise NotImplementedError("B1 runs training specs: algo required")
+        raise NotImplementedError(
+            "this loop runs TRAINING specs, so algo is required: with no algo "
+            "there is no Trainer, and the Trainer is the ledger's only writer "
+            "— no update would ever commit. Generation-only runs need a "
+            "committing Sealer daemon of their own")
     engine_map: dict[str, Engine] = (
         dict(engines) if isinstance(engines, Mapping) else {"main": engines})
     if "main" not in engine_map:
@@ -298,7 +302,10 @@ def _warm_start(init: WarmStart, *, tenant: str, bank_names: set[str],
                 trainable: list[str], store: Store, learner: Learner) -> None:
     """Load another run's sealed deltas (renamed via init.map) into this learner."""
     if not init.policy.startswith("store://"):
-        raise NotImplementedError("B1 warm-starts from store:// runs only")
+        raise NotImplementedError(
+            f"warm start reads another run's SEALED deltas out of a run "
+            f"store, so init.policy must be a 'store://<run_id>@<version>' "
+            f"address; got {init.policy!r}")
     address = init.policy[len("store://"):]
     parent_id, _, version_text = address.partition("@")
     version = int(version_text)

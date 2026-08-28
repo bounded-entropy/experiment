@@ -16,7 +16,7 @@ def sdft(out: PolicyOutputs, batch: Any) -> LossResult:
     import torch
 
     lp, mask, behavior = token_tensors(out, batch)
-    weight = torch.tensor(batch.post["reward"], dtype=lp.dtype,
+    weight = torch.tensor(batch.postdata["reward"], dtype=lp.dtype,
                           device=lp.device) * mask
     objective = -(lp * weight).sum() / weight.sum().clamp(min=1.0)
 

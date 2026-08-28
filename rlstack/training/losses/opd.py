@@ -28,7 +28,7 @@ def opd(out: PolicyOutputs, batch: Any) -> LossResult:
     import torch
 
     lp, mask, behavior = token_tensors(out, batch)
-    teacher = torch.tensor(batch.post["teacher_logprobs"], dtype=lp.dtype,
+    teacher = torch.tensor(batch.postdata["teacher_logprobs"], dtype=lp.dtype,
                            device=lp.device)
 
     reverse_kl = (lp - teacher).detach()

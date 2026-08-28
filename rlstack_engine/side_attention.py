@@ -72,4 +72,10 @@ class SideAttention(EnginePlugin):
     # ---- forward ------------------------------------------------------------
 
     def attend(self, view: BatchView, q: object, out: object, lse: object) -> None:
-        raise NotImplementedError("B3: dense side attention + LSE merge")
+        raise NotImplementedError(
+            "dense side attention + LSE merge is unbuilt: vllm 0.28.0 does "
+            "not plumb return_softmax_lse through the dense FlashAttention "
+            "path, so the stock kernel's LSE never comes back and the two "
+            "partials cannot be merged exactly. Every engine reports NONE for "
+            "SIDE_ATTENTION and Phase 0 refuses the spec, so nothing reaches "
+            "here on this build")

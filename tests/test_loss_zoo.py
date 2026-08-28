@@ -62,7 +62,7 @@ class LossZooTest(unittest.TestCase):
         for loss, post in ZOO.items():
             with self.subTest(loss=loss):
                 issues = validate(self.spec_for(loss), self.schema)
-                self.assertEqual(issues, [], f"{loss} with post={post}")
+                self.assertEqual(issues, [], f"{loss} with postdata={post}")
 
     def test_requires_still_bites_without_its_pipeline(self) -> None:
         """sdft names "reward"; an empty pipeline must fail Phase 0."""

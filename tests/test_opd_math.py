@@ -37,7 +37,7 @@ BEHAVIOR = (-0.25, -1.40, -0.75, 0.0)
 def a_batch() -> TokenBatch:
     return TokenBatch(token_ids=(11, 12, 13, 14), loss_mask=MASK,
                       behavior_logprobs=BEHAVIOR, segment_ids=(0, 0, 0, 0),
-                      doc_starts=(0,), post={"teacher_logprobs": TEACHER})
+                      doc_starts=(0,), postdata={"teacher_logprobs": TEACHER})
 
 
 @needs_torch

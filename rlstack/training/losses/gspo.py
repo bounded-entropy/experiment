@@ -17,7 +17,7 @@ def gspo(out: PolicyOutputs, batch: Any, clip_eps: float = 0.1) -> LossResult:
     import torch
 
     lp, mask, behavior = token_tensors(out, batch)
-    advantage = torch.tensor(batch.post["advantage"], dtype=lp.dtype,
+    advantage = torch.tensor(batch.postdata["advantage"], dtype=lp.dtype,
                              device=lp.device)
 
     starts = list(batch.doc_starts) + [len(batch)]

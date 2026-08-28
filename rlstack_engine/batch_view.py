@@ -44,4 +44,8 @@ class BatchView:
                   slot_of: dict[str, int]) -> "BatchView":
         """Build the view from vLLM attention metadata: the engine-side seam,
         unbuilt while no plugin's attend() is (see side_attention.py)."""
-        raise NotImplementedError("B3: the vLLM metadata shim")
+        raise NotImplementedError(
+            "the vLLM metadata shim is unbuilt: nothing reads a BatchView "
+            "while side_attention's attend() is refused on this engine build, "
+            "and a shim written against metadata no plugin exercises would be "
+            "a guess pinned to a version")

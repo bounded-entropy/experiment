@@ -188,7 +188,7 @@ class FakeLearner:
             "state": state.state,
             "ids": batch.token_ids,
             "mask": batch.loss_mask,
-            "post": {k: batch.post[k] for k in sorted(batch.post)},
+            "post": {k: batch.postdata[k] for k in sorted(batch.postdata)},
             "blp": batch.behavior_logprobs,
         })
         return TrainStats(

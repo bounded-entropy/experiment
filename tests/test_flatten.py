@@ -119,7 +119,7 @@ class TokenExtrasFlattenTest(unittest.TestCase):
         batch = pack([(a, {"advantage": (1.0, 1.0)}),
                       (b, {"advantage": (0.5,)})], microbatch_tokens=8)[0]
         self.assertEqual(batch.token_extras["adapter_draw"], (0, 1, 2))
-        self.assertEqual(batch.post["advantage"], (1.0, 1.0, 0.5))
+        self.assertEqual(batch.postdata["advantage"], (1.0, 1.0, 0.5))
 
     def test_pack_rejects_mismatched_token_extras(self) -> None:
         a = Flat((1,), (1,), (0,), (-0.1,), 1,
@@ -209,7 +209,7 @@ class PackTest(unittest.TestCase):
         batch = batches[0]
         self.assertEqual(batch.loss_mask, (0, 1, 1))
         self.assertEqual(batch.segment_ids, (-1, 0, 0))
-        self.assertEqual(batch.post["advantage"], (0.0, 2.0, 2.0))
+        self.assertEqual(batch.postdata["advantage"], (0.0, 2.0, 2.0))
         self.assertEqual(batch.behavior_logprobs, (0.0, -0.3, -0.4))
 
     def test_empty_input(self) -> None:

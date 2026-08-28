@@ -15,7 +15,7 @@ def grpo(out: PolicyOutputs, batch: Any, clip_eps: float = 0.2) -> LossResult:
     import torch
 
     lp, mask, behavior = token_tensors(out, batch)
-    advantage = torch.tensor(batch.post["advantage"], dtype=lp.dtype,
+    advantage = torch.tensor(batch.postdata["advantage"], dtype=lp.dtype,
                              device=lp.device)
 
     ratio = torch.exp(lp - behavior)

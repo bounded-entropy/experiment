@@ -18,7 +18,7 @@ def opsd(out: PolicyOutputs, batch: Any) -> LossResult:
     import torch
 
     lp, mask, behavior = token_tensors(out, batch)
-    hinted = torch.tensor(batch.post["hinted_logprobs"], dtype=lp.dtype,
+    hinted = torch.tensor(batch.postdata["hinted_logprobs"], dtype=lp.dtype,
                           device=lp.device)
     objective = (((lp - hinted) ** 2) * mask).sum() / mask.sum().clamp(min=1.0)
 
