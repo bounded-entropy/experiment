@@ -210,8 +210,13 @@ def run_timing(store: Store, run_id: str) -> dict:
     the rows are joined — the run, not the host, is what the reader asked
     about. Nothing is derived here: steps/s and per-step bars are the page's
     arithmetic over these rows, and a row is exactly what the Trainer measured.
+
+    One row per update, LAST line wins (by t): a journal is append-only
+    history, and the same content-addressed run_id resubmitted over a wiped
+    store legitimately journals the same update numbers again — the newest
+    measurement is the one describing the run the reader is looking at.
     """
-    updates = []
+    updates: dict[int, dict] = {}
     for host in store.list_hosts():
         for event in store.read_host_log(host):
             if event.get("event") != "update" or event.get("run_id") != run_id:
@@ -221,14 +226,16 @@ def run_timing(store: Store, run_id: str) -> dict:
             if (not isinstance(update, int) or isinstance(update, bool)
                     or not isinstance(when, (int, float))):
                 continue
+            if update in updates and updates[update]["t"] >= float(when):
+                continue
             phases = event.get("phases")
             phases = phases if isinstance(phases, dict) else {}
-            updates.append({
+            updates[update] = {
                 "update": update, "t": float(when),
                 "seconds": float(event.get("seconds") or 0.0),
                 "phases": {phase: float(phases.get(phase) or 0.0)
-                           for phase in UPDATE_PHASES}})
-    return {"updates": sorted(updates, key=lambda row: row["update"])}
+                           for phase in UPDATE_PHASES}}
+    return {"updates": [updates[number] for number in sorted(updates)]}
 
 
 def metric_series(events: Sequence[dict]) -> list[dict]:

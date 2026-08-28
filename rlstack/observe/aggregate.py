@@ -30,73 +30,24 @@ import math
 from collections.abc import Sequence
 
 from rlstack.data.stores.base import Store
+# run_timing is re-exported unchanged: the clock reading has ONE home,
+# host_series, and this module is where the routes import it from.
+from rlstack.observe.host_series import (  # noqa: F401
+    TRAFFIC_CHANNELS, TRAFFIC_RATES, run_timing,
+    traffic_channels as _traffic_rows,
+)
 
 FLEET_BUCKETS = 180     # the aggregate is a shape over the fleet's whole window
 
-# The six rails a serving host draws. Rates are per-second (each traffic event
-# over its own window); latencies and depth are journaled as they are.
-TRAFFIC_CHANNELS = ("prefill_tok_s", "decode_tok_s", "requests_s",
-                    "ttft_ms", "admit_wait_ms", "inflight")
-
-_RATE_FIELDS = (("prefill_tok_s", "prefill_tokens"),
-                ("decode_tok_s", "decode_tokens"),
-                ("requests_s", "requests"))
-_LEVEL_FIELDS = (("ttft_ms", "ttft_ms_mean"),
-                 ("admit_wait_ms", "admit_wait_ms_mean"),
-                 ("inflight", "inflight"))
 PHASES = ("collect", "post", "train", "seal")
 
 
-# merge seam: replaced by host_series.metric_series's named channels at merge —
-# one line, `{m["key"]: m["points"] for m in metric_series(events)
-#             if m["key"] in TRAFFIC_CHANNELS}`.
 def traffic_channels(events: Sequence[dict]) -> dict[str, list]:
-    """One serving host's six rails, from its windowed traffic events. A rate
-    divides by the window the host itself declared, so a host that changes its
-    stats cadence mid-run stays comparable with itself."""
-    channels: dict[str, list] = {name: [] for name in TRAFFIC_CHANNELS}
-    for event in events:
-        if event.get("event") != "traffic":
-            continue
-        when, window = event.get("t"), event.get("window_s")
-        if not isinstance(when, (int, float)):
-            continue
-        if isinstance(window, (int, float)) and window > 0:
-            for channel, field in _RATE_FIELDS:
-                count = event.get(field)
-                if _numeric(count):
-                    channels[channel].append([when, count / window])
-        for channel, field in _LEVEL_FIELDS:
-            value = event.get(field)
-            if _numeric(value):
-                channels[channel].append([when, float(value)])
-    return {name: points for name, points in channels.items() if points}
-
-
-# merge seam: replaced by host_series.run_timing at merge — one line,
-# `from rlstack.observe.host_series import run_timing`.
-def run_timing(store: Store, run_id: str) -> dict:
-    """One run's completed updates as its hosts journaled them: wall seconds
-    per update, decomposed into the four phases. Sorted by update; an update
-    journaled twice (a resume re-running it) keeps the last line, which is the
-    one that committed."""
-    updates: dict[int, dict] = {}
-    for host in store.list_hosts():
-        for event in store.read_host_log(host):
-            if event.get("event") != "update" or event.get("run_id") != run_id:
-                continue
-            number, seconds = event.get("update"), event.get("seconds")
-            if not isinstance(number, int) or isinstance(number, bool):
-                continue
-            phases = event.get("phases") if isinstance(event.get("phases"), dict) else {}
-            updates[number] = {
-                "update": number,
-                "t": event.get("t"),
-                "seconds": float(seconds) if _numeric(seconds) else None,
-                "phases": {phase: float(phases[phase]) for phase in PHASES
-                           if _numeric(phases.get(phase))},
-            }
-    return {"updates": [updates[number] for number in sorted(updates)]}
+    """One serving host's six rails, page-shaped: host_series's reading (the
+    ONE home for the traffic schema, #56) as {channel: points}, empty channels
+    dropped — the page skips cards a host has never had a value for."""
+    return {row["key"]: row["points"] for row in _traffic_rows(events)
+            if row["points"]}
 
 
 # ---------------------------------------------------------------------------
@@ -188,9 +139,9 @@ def inference_buckets(traffic: list[tuple[float, str, dict]],
         window = event.get("window_s")
         index = int((when - start) / width)
         per_host = binned.setdefault(index, {}).setdefault(
-            host, {channel: [] for channel, _ in _RATE_FIELDS})
-        raw = counts.setdefault(index, {field: 0.0 for _, field in _RATE_FIELDS})
-        for channel, field in _RATE_FIELDS:
+            host, {channel: [] for channel, _ in TRAFFIC_RATES})
+        raw = counts.setdefault(index, {field: 0.0 for _, field in TRAFFIC_RATES})
+        for channel, field in TRAFFIC_RATES:
             value = event.get(field)
             if not _numeric(value):
                 continue
@@ -203,7 +154,7 @@ def inference_buckets(traffic: list[tuple[float, str, dict]],
         point = {"t": start + (index + 0.5) * width,
                  "hosts": len(hosts),
                  "samples": sum(len(rates["prefill_tok_s"]) for rates in hosts.values())}
-        for channel, field in _RATE_FIELDS:
+        for channel, field in TRAFFIC_RATES:
             point[channel] = math.fsum(_mean(rates[channel]) or 0.0
                                        for rates in hosts.values())
             point[field] = counts[index][field]

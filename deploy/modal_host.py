@@ -91,13 +91,20 @@ class ServedHost:
             regimes=(Regime(f"serve-tp{self.tp}", "inference", self.base,
                             self.tp),))
         self.service = HostService(self.host)
+        self.stats_task = None
         print(f"[host {self.host_name}] up: {self.base} tp={self.tp}")
 
     @modal.method()
     async def call(self, verb: str, payload: dict) -> dict:
         """The admitted verbs (sample_tokens / score_tokens), async because
         they occupy the GPU and the host's arbiter admits them one regime at
-        a time."""
+        a time. The stats loop starts here, not in the enter hook, for the
+        same reason the engine materializes here: it needs the running loop —
+        and without it a serving-only host would count traffic into its meter
+        but never drain a window into the journal."""
+        import asyncio
+        if self.stats_task is None:
+            self.stats_task = asyncio.create_task(self.host.run_stats())
         return await self.service.serve(verb, payload)
 
     @modal.method()
