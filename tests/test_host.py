@@ -243,6 +243,34 @@ class ShapeAndRegimeTest(unittest.TestCase):
         self.addCleanup(tmp.cleanup)
         self.store, self.train, _ = arith_store(tmp.name)
 
+    def test_the_partition_says_what_metal_it_is_made_of(self) -> None:
+        """#49: a partition carries the KIND of GPU it is a slice of, and it
+        says so in all three places an operator looks — the host-up journal
+        row, status() (JSON-safe, so it crosses the wire), and the hosts
+        view. Half an L4 and half an H100 are not the same half."""
+        host = Host("stamped", engines=(FakeEngine(tp=2),), learner=None,
+                    store=self.store,
+                    partition=Partition("node-a", (0, 1), 0.5, "L4"),
+                    regimes=(Regime("main-tp2", "inference", None, 2),))
+        row = {"gpuset": "node-a", "gpu": "L4", "devices": [0, 1],
+               "memory": 0.5}
+        up = [e for e in self.store.read_host_log("stamped")
+              if e["event"] == "host-up"][-1]
+        self.assertEqual(up["partition"], row)
+        self.assertEqual(host.status()["partition"], row)
+
+        text = render_hosts([self.store])
+        self.assertIn("L4 node-a[0,1] @ 0.50", text)
+
+    def test_a_host_without_a_partition_renders_unpartitioned(self) -> None:
+        """The gpu name is a default-empty field, so every pre-#49 host (and
+        every bare test host) still journals, statuses, and renders."""
+        host = Host("bare", engines=(FakeEngine(),), learner=FakeLearner(),
+                    store=self.store)
+        self.assertIsNone(host.status()["partition"])
+        self.assertIn("unpartitioned", render_hosts([self.store]))
+        self.assertEqual(Partition("node-a", (0,), 1.0).gpu, "")
+
     def test_bind_is_shape_matched(self) -> None:
         tp2 = FakeEngine(base="Qwen/Qwen3-8B", tp=2)
         host = Host("shaped", engines=(FakeEngine(), tp2),

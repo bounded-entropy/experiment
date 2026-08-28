@@ -70,16 +70,28 @@ class HostError(RuntimeError):
 
 @dataclass(frozen=True)
 class Partition:
-    """The metal a host is born onto: an atomic slice of one GpuSet — device
-    indices plus the memory fraction it owns on each (vLLM's
-    gpu_memory_utilization is a reservation, torch's
-    set_per_process_memory_fraction a cap; both honor this number). Memory
-    partitions honestly; SMs still time-share across partition boundaries —
-    a stated cost, visible in latency, not hidden by this record."""
+    """The metal a host is born onto: an atomic slice of one GpuSet — the KIND
+    of GPU it is made of ("L4", "H100"), the device indices, and the memory
+    fraction it owns on each (vLLM's gpu_memory_utilization is a reservation,
+    torch's set_per_process_memory_fraction a cap; both honor this number).
+    Memory partitions honestly; SMs still time-share across partition
+    boundaries — a stated cost, visible in latency, not hidden by this record.
+    `gpu` is descriptive, never decisive (#49): the fleet carves by fraction
+    and carries the kind down from the Metal it carved, so the journal, the
+    status and the observer all say what the metal IS — a fraction alone
+    cannot tell 0.5 of an L4 from 0.5 of an H100."""
 
     gpuset: str
     devices: tuple[int, ...]
     memory: float = 1.0
+    gpu: str = ""
+
+    def row(self) -> dict:
+        """The partition as a JSON row — ONE home for the shape the host-up
+        event journals, status() reports over the wire, and the observer's
+        hosts view reads back (#49)."""
+        return {"gpuset": self.gpuset, "gpu": self.gpu,
+                "devices": list(self.devices), "memory": self.memory}
 
 
 @dataclass(frozen=True)
@@ -135,10 +147,7 @@ class Host:
         store.append_host_event(name, {
             "event": "host-up", "t": time.time(),
             "engines": [engine.base or "*" for engine in self.engines],
-            "partition": ({"gpuset": partition.gpuset,
-                           "devices": list(partition.devices),
-                           "memory": partition.memory}
-                          if partition is not None else None),
+            "partition": partition.row() if partition is not None else None,
             "regimes": [{"name": r.name, "kind": r.kind, "base": r.base,
                          "shape": r.shape} for r in regimes],
             "store": store.describe()})
@@ -305,12 +314,14 @@ class Host:
             await asyncio.sleep(every)
 
     def status(self) -> dict:
-        """The GpuSet as this host sees it: state (arbiter residency),
-        declared load, and the tenant roster."""
+        """The GpuSet as this host sees it: the partition it was born onto
+        (kind of GPU, devices, fraction — as a row, so a status crosses the
+        wire unchanged), state (arbiter residency), declared load, and the
+        tenant roster."""
         return {
             "host": self.name,
             "engines": [engine.base or "*" for engine in self.engines],
-            "partition": self.partition,
+            "partition": self.partition.row() if self.partition else None,
             "regimes": [regime.name for regime in self.regimes],
             "declared_load": round(self.arbiter.declared_load(), 3),
             "residency": self.arbiter.residency(),

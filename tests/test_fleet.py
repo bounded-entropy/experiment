@@ -8,6 +8,10 @@ capability JOINS instead of carving (the tp-N worker is contactable); carving
 draws from residual only, never double-books, and is journaled; acquire is
 refused as a human's call; and fleet.submit runs a whole experiment across
 hosts — the runner beside the learner, every other pool over the wire.
+
+Plus #49: a carve stamps the Metal's KIND onto the partition it births, and
+fraction_for_gb is the one place a hint written in GB becomes the fraction of
+one device that a partition actually owns.
 """
 
 from __future__ import annotations
@@ -20,8 +24,8 @@ from dataclasses import replace
 from common import arith_spec, arith_store
 from rlstack import (
     Acquire, Carve, FakeEngine, FakeLearner, Fleet, FleetError, GpuConfig,
-    GpuGroup, Join, Metal, Regime, Seeds, demands_of, fake_qwen_schema, gpus,
-    learner, pool,
+    GpuGroup, Join, Metal, Regime, Seeds, demands_of, fake_qwen_schema,
+    fraction_for_gb, gpus, learner, pool,
 )
 
 SCHEMA = fake_qwen_schema(4, base="Qwen/Qwen3-0.6B")
@@ -129,6 +133,57 @@ class FleetTest(unittest.TestCase):
                          ["carve", "carve", "carve"])
         self.assertEqual(events[1]["devices"], [1, 2])
         self.assertEqual(events[1]["regimes"][0]["base"], "Qwen/Qwen3-32B")
+
+    def test_a_carve_stamps_the_metals_gpu_onto_the_partition(self) -> None:
+        """#49: the kind of GPU is registered once, on the Metal, and rides
+        the carve down into every partition born from it — the fraction says
+        how much, the kind says of what."""
+        fleet = Fleet((Metal("node-h", "H100", 2, vram_gb=80.0),),
+                      store=self.store, engine_factory=fake_engine_factory,
+                      learner_factory=fake_learner_factory)
+        fleet.apply(fleet.place(arith_spec(self.train)))
+        for host in fleet.hosts.values():
+            self.assertEqual(host.partition.gpu, "H100")
+        carve = [e for e in self.store.read_fleet_log()
+                 if e["event"] == "carve"][0]
+        self.assertEqual(carve["gpu"], "H100")
+
+    # ---- the VRAM hint ------------------------------------------------------
+
+    def test_a_carve_hint_in_gb_becomes_a_fraction_of_one_device(self) -> None:
+        """The one conversion (#49): GB is what a human sizes a model in, a
+        fraction is what a partition owns — and the same 20 GB is most of an
+        L4 and a quarter of an H100."""
+        self.assertEqual(fraction_for_gb(12.0, Metal("node-a", "L4", 4)), 0.5)
+        self.assertAlmostEqual(
+            fraction_for_gb(20.0, Metal("node-a", "L4", 4)), 0.8333, places=4)
+        self.assertEqual(
+            fraction_for_gb(20.0, Metal("node-h", "H100", 8, vram_gb=80.0)),
+            0.25)
+        self.assertEqual(fraction_for_gb(24.0, Metal("node-a", "L4", 4)), 1.0)
+
+    def test_more_vram_than_one_device_holds_is_the_acquire_rung(self) -> None:
+        """A fraction cannot exceed a device, so the conversion refuses
+        rather than clamping: 40 GB on an L4 is bigger metal, a human's."""
+        with self.assertRaises(FleetError) as caught:
+            fraction_for_gb(40.0, Metal("node-a", "L4", 4))
+        self.assertIn("acquire", str(caught.exception))
+        self.assertIn("L4", str(caught.exception))
+
+    def test_a_gb_hint_sizes_a_carve_like_any_fraction(self) -> None:
+        """Converted at the fleet, a GB hint is just the declared fraction:
+        two 12 GB tenants fit one L4 device, and the residual proves it.
+        (PoolMember.fraction remains the declared unit — #49.)"""
+        fleet = self.fleet(devices=1)
+        half = fraction_for_gb(12.0, fleet.metal["node-a"])
+        spec = arith_spec(self.train, gpu_config=GpuConfig(groups=(
+            GpuGroup(gpus(n=1), (pool("main", fraction=half),
+                                 learner(fraction=half)),
+                     sharing="sleep"),)))
+        fleet.apply(fleet.place(spec))
+        host = next(iter(fleet.hosts.values()))
+        self.assertEqual(host.partition.memory, 0.5)
+        self.assertEqual(fleet.residual("node-a"), [0.5])
 
     # ---- submit -------------------------------------------------------------
 

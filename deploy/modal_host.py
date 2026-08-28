@@ -98,7 +98,7 @@ class ServedHost:
         # builds everything that does not
         self.host = Host(
             self.host_name, engines=(engine,), learner=None, store=store,
-            partition=Partition("modal-l4", tuple(range(self.tp)), 0.60),
+            partition=Partition("modal-l4", tuple(range(self.tp)), 0.60, "L4"),
             regimes=(Regime(f"serve-tp{self.tp}", "inference", self.base,
                             self.tp),))
         self.service = HostService(self.host)
@@ -122,8 +122,7 @@ class ServedHost:
         """What this partition serves and who is on it — the same dict the
         local `hosts` view renders, fetched across the wire."""
         return {"describe": self.service.describe(),
-                "status": {k: v for k, v in self.host.status().items()
-                           if k != "partition"}}
+                "status": self.host.status()}
 
 
 # ---------------------------------------------------------------------------
@@ -226,7 +225,7 @@ def run_arith_remote(n_updates: int = 3, master: int = 41) -> dict:
 
     learner_host = Host(
         "modal-learner", engines=(), learner=TorchLearner(), store=store,
-        partition=Partition("modal-l4", (0,), 0.40),
+        partition=Partition("modal-l4", (0,), 0.40, "L4"),
         regimes=(Regime("learner-fsdp1", "training", BASE, 1),))
 
     started = time.time()

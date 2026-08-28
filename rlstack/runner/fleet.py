@@ -59,11 +59,35 @@ class FleetError(RuntimeError):
 class Metal:
     """Owned metal: one GpuSet the fleet may carve. Registering Metal IS the
     acquire rung executed — the one that costs money, so the one a human
-    does; everything below it is automatic."""
+    does; everything below it is automatic. `gpu` is the KIND (what was
+    bought) and `vram_gb` one device's VRAM in GB (what a model is measured
+    against — L4=24, A100=40 or 80, H100=80); a carve stamps the kind onto the
+    Partition it births, and fraction_for_gb is the ONE place GB and
+    fraction meet (#49)."""
 
     name: str
     gpu: str = "L4"
     devices: int = 1
+    vram_gb: float = 24.0
+
+
+def fraction_for_gb(gb: float, metal: Metal) -> float:
+    """THE conversion between the unit a human sizes models in (GB of VRAM)
+    and the unit a partition owns (a fraction of ONE device): the carve hint
+    `gb` becomes gb / metal.vram_gb on the target metal. Partition.memory
+    stays a fraction because both substrates take one (vLLM's
+    gpu_memory_utilization, torch's set_per_process_memory_fraction), so this
+    is the only place the two units meet — a GB figure is converted HERE,
+    against the metal it will live on, and never stored (#49). More GB than
+    one device holds is not a smaller fraction, it is bigger metal: that is
+    the acquire rung, so it raises instead of clamping."""
+    fraction = gb / metal.vram_gb
+    if fraction > 1.0 + 1e-9:
+        raise FleetError(
+            f"{gb:g} GB is more than one {metal.gpu} device holds "
+            f"({metal.vram_gb:g} GB on {metal.name!r}) — VRAM per shard past "
+            f"one device is the acquire rung (bigger metal), not a fraction")
+    return fraction
 
 
 @dataclass(frozen=True)
@@ -299,7 +323,9 @@ class Fleet:
         """Rung two executed. Residual-only by construction (plan_carve drew
         from residual), never mutates an existing host (a NEW Host is born
         with its capability), journaled (legibility by record, not by
-        approval — #43)."""
+        approval — #43). The born partition is STAMPED with the metal's kind:
+        the fraction says how much, the kind says of what (#49)."""
+        metal = self.metal[step.metal]
         engines: list[Engine] = []
         carved_learner: Learner | None = None
         for regime in step.regimes:
@@ -311,13 +337,14 @@ class Fleet:
                 + "+".join(regime.name for regime in step.regimes))
         host = Host(name, engines=tuple(engines), learner=carved_learner,
                     store=self.store,
-                    partition=Partition(step.metal, step.devices, step.memory),
+                    partition=Partition(step.metal, step.devices, step.memory,
+                                        metal.gpu),
                     regimes=step.regimes)
         self.hosts[name] = host
         self.store.append_fleet_event({
             "event": "carve", "t": time.time(), "host": name,
-            "metal": step.metal, "devices": list(step.devices),
-            "memory": step.memory,
+            "metal": step.metal, "gpu": metal.gpu,
+            "devices": list(step.devices), "memory": step.memory,
             "regimes": [{"name": r.name, "kind": r.kind, "base": r.base,
                          "shape": r.shape} for r in step.regimes]})
         return host

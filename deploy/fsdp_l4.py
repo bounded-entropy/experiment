@@ -237,7 +237,8 @@ def run_fsdp(base: str, width: int, n_updates: int, kill_after: float,
         # sampler engine co-resides (concurrent, never alternating)
         host = Host(f"l4-fsdp{width}", engines=(engine,), learner=learner,
                     store=store,
-                    partition=Partition("modal-l4", tuple(range(width)), 0.40),
+                    partition=Partition("modal-l4", tuple(range(width)),
+                                        0.40, "L4"),
                     regimes=(Regime(f"learner-fsdp{width}", "training", base,
                                     width),))
 
@@ -262,7 +263,7 @@ def run_fsdp(base: str, width: int, n_updates: int, kill_after: float,
             resumed_host = Host(
                 f"l4-fsdp{width}", engines=(engine,), learner=learner,
                 store=store,
-                partition=Partition("modal-l4", tuple(range(width)), 0.40),
+                partition=Partition("modal-l4", tuple(range(width)), 0.40, "L4"),
                 regimes=(Regime(f"learner-fsdp{width}", "training", base,
                                 width),))
             report = await resumed_host.submit(spec, schema)

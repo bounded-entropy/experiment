@@ -78,6 +78,7 @@ from rlstack.runner.remote import (
 )
 from rlstack.runner.fleet import (
     Acquire, Carve, Demand, Fleet, FleetError, Join, Metal, Plan, demands_of,
+    fraction_for_gb,
 )
 from rlstack.runner.loop import (
     RunReport, experiment_identity, plan_daemons, run_experiment,

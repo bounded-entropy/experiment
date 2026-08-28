@@ -123,7 +123,7 @@ def serve_one_partition(name, base, tp, memory):
     engine = VllmEngine(base, tp=tp, gpu_memory_utilization=memory,
                         max_model_len=512, max_loras=8, max_lora_rank=16)
     host = Host(name, engines=(engine,), learner=None, store=store,
-                partition=Partition("modal-l4", tuple(range(tp)), memory),
+                partition=Partition("modal-l4", tuple(range(tp)), memory, "L4"),
                 regimes=(Regime(f"serve-tp{tp}", "inference", base, tp),))
     print(f"[host {name}] up: {base} tp={tp} mem={memory}")
     return host, HostService(host)
@@ -165,8 +165,7 @@ class TeacherHost:
     @modal.method()
     def status(self) -> dict:
         return {"describe": self.service.describe(),
-                "status": {k: v for k, v in self.host.status().items()
-                           if k != "partition"}}
+                "status": self.host.status()}
 
 
 @app.cls(image=image, gpu="L4:2", volumes=VOLUMES, timeout=7200,
@@ -201,8 +200,7 @@ class StudentHost:
     @modal.method()
     def status(self) -> dict:
         return {"describe": self.service.describe(),
-                "status": {k: v for k, v in self.host.status().items()
-                           if k != "partition"}}
+                "status": self.host.status()}
 
 
 class ModalTransport:
@@ -448,7 +446,7 @@ def opd_run(n_updates: int = 2, master: int = 71) -> dict:
 
     learner = lead_fsdp_learner(2)
     host = Host("modal-opd-learner", engines=(), learner=learner, store=store,
-                partition=Partition("modal-l4", (0, 1), 0.90),
+                partition=Partition("modal-l4", (0, 1), 0.90, "L4"),
                 regimes=(Regime("learner-fsdp2", "training", STUDENT, 2),))
     print(f"[chorus] rank 0 of 2, learner.fsdp={learner.fsdp}")
 

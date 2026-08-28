@@ -1648,6 +1648,65 @@ specs; backends (local/modal/skypilot) and GPU topology are semantics-neutral.
     lowering, rollout lowering — plus replay.py AND rollout.py, the kinds'
     two shared seams".
 
+49. THE PARTITION SAYS WHAT METAL IT IS MADE OF (settled, Samarth-directed:
+    "gpu name in partition/host unit. add vram constraint instead of just
+    fraction (this is optional)"). #43 made the Host an ATOMIC PURPOSED
+    PARTITION but described its metal with one number — a fraction — and a
+    fraction cannot tell half an L4 from half an H100: the host-up journal,
+    the status frame and the hosts view all printed "0.50" and meant
+    different amounts of different silicon.
+    - THE KIND IS CARRIED, NEVER DECLARED TWICE: Partition gains
+      `gpu: str = ""` (LAST field, so every positional construction in the
+      deploys and tests still reads) and Fleet.carve STAMPS it from the
+      Metal whose residual it drew — one source (registration, the acquire
+      rung a human executes), one copy (the carve), no second declaration
+      that could disagree with the first. Partition.row() is the ONE
+      journal/status/wire shape: host-up's partition dict, the carve event's
+      new "gpu" beside "metal", and Host.status()["partition"] — which is
+      now JSON-safe, so the three Modal serving classes dropped their
+      `if k != "partition"` filters and a remote partition finally
+      advertises its own metal over the wire. The observer's hosts view
+      grew one line, `metal : L4 node-a[0,1] @ 0.50` ("unpartitioned" for a
+      bare host — every pre-#49 host still journals, statuses and renders).
+    - THE VRAM HALF, ONE FUNCTION AND ONE RULE: Metal gains
+      `vram_gb: float = 24.0` (ONE device's VRAM, the unit a model is
+      measured against — L4=24, A100/H100=80) and
+      fleet.fraction_for_gb(gb, metal) is the only place the two units meet:
+      the hint is gb / metal.vram_gb on the target metal, and past one
+      device it RAISES rather than clamping, because more VRAM per shard is
+      not a smaller fraction — it is bigger metal, i.e. the acquire rung.
+      Partition.memory REMAINS a fraction: both substrates take one (vLLM's
+      gpu_memory_utilization, torch's set_per_process_memory_fraction), so a
+      GB figure is converted against the metal it will live on and never
+      stored. Nothing gained a second unit to keep in sync.
+    - SCOPE HELD: no file under spec/ changed, so GB touches neither
+      PoolMember.fraction (still THE declared unit) nor run identity; the
+      only new caller of the conversion is a human writing a fraction at the
+      fleet. 479 tests green (473 + 6: the carve's stamp, the conversion
+      both ways, the >1-device refusal, a GB-sized carve, the journal/status/
+      view triple, and the unpartitioned fallback).
+    PROPOSED, NOT DONE (each is Samarth's call, and (a) is the big one):
+      (a) PoolMember.vram_gb / LearnerMember.vram_gb as a declarable
+          alternative to `fraction` — the honest way to say "this model
+          needs 20 GB" once instead of recomputing a fraction per GPU kind.
+          Spec-side, so it lands in gpu_config and therefore in the run_id
+          hash: a run declared in GB would carry a DIFFERENT identity from
+          the same run declared as a fraction, which is exactly the
+          identity-rings open thread (are fractions placement hints that
+          should leave the hash?). Do that ruling first.
+      (b) a submit-time hint map — Fleet.place(spec, hint_gb={pool: gb}) —
+          identity-free by construction, converted through fraction_for_gb
+          before plan_carve sizes the partition. Cheap, but it grows the
+          fleet API for a caller that does not exist yet.
+      (c) plan_carve consulting VRAM directly: refuse a carve whose hint
+          exceeds the metal's device instead of first-fitting a fraction
+          that silently means less GB than the tenant needs. Needs (a) or
+          (b) to have a GB figure to check.
+      (d) Metal.vram_gb defaulting off a kind table (L4=24, A100=40|80,
+          H100=80, B200=192) rather than a bare 24.0 — one dict, but it
+          makes the register-time default silently kind-dependent, and the
+          A100 40/80 split shows why a stated number beats a lookup.
+
 ## Open threads (do NOT treat as settled; flag when your answer touches them)
 
 - PLANNED (Samarth-approved, queued behind #48 landing): the OPD stress test

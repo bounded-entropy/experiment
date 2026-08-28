@@ -46,6 +46,17 @@ def _progress(store: Store, run_id: str) -> tuple[int, object]:
 # hosts
 # ---------------------------------------------------------------------------
 
+def _metal(partition: dict | None) -> str:
+    """A journaled partition row as the one line an operator reads: how much
+    of what, and where. The kind of GPU is a birth fact of the partition
+    (#49) — without it a fraction cannot tell half an L4 from half an H100."""
+    if not partition:
+        return "unpartitioned"
+    return (f"{partition.get('gpu') or '?'} {partition['gpuset']}"
+            f"[{','.join(str(d) for d in partition['devices'])}]"
+            f" @ {partition['memory']:.2f}")
+
+
 def hosts_data(stores: Sequence[Store]) -> list[dict]:
     out = []
     for store, host, events in _events_by_host(stores):
@@ -57,6 +68,7 @@ def hosts_data(stores: Sequence[Store]) -> list[dict]:
             "host": host,
             "journal_store": store.describe(),
             "engines": ups[-1].get("engines", []) if ups else [],
+            "partition": ups[-1].get("partition") if ups else None,
             "boots": len(ups),
             "first_seen": events[0].get("t") if events else None,
             "last_seen": events[-1].get("t") if events else None,
@@ -71,6 +83,7 @@ def render_hosts(stores: Sequence[Store]) -> str:
     lines = []
     for h in hosts_data(stores):
         lines.append(f"host {h['host']}")
+        lines.append(f"  metal   : {_metal(h['partition'])}")
         lines.append(f"  engines : {', '.join(h['engines']) or '?'}")
         lines.append(f"  journal : {h['journal_store']}")
         lines.append(f"  seen    : first {_when(h['first_seen'])}  last "
