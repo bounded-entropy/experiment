@@ -142,6 +142,7 @@ class Host:
         self.capacity = capacity
         self.sampler = sampler or sample_gpu
         self.roster: dict[str, Tenancy] = {}
+        self.attest_name()
         self.attest_regimes()
         self._attach_regimes()
         store.append_host_event(name, {
@@ -153,6 +154,19 @@ class Host:
             "store": store.describe()})
 
     # ---- birth facts, one named method per rule -----------------------------
+
+    def attest_name(self) -> None:
+        """A host's name is a JOURNAL PATH SEGMENT — hosts/<name>/log.jsonl —
+        so it may contain no "/": a name that did would journal one directory
+        deeper than Store.list_hosts() looks, and the host would be perfectly
+        alive and completely invisible to the observer, taking its runs and
+        its gpu samples with it (#51b). Refused at birth, where the name is
+        still just a string."""
+        if "/" in self.name:
+            raise HostError(
+                f"host name {self.name!r} contains '/': the name is a journal "
+                f"path segment (hosts/<name>/log.jsonl), so a '/' would hide "
+                f"the host from the observer entirely")
 
     def attest_regimes(self) -> None:
         """A host IS its regimes: each inference regime must be backed by an

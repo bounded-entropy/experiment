@@ -204,17 +204,44 @@ class Fleet:
     """The inventory and the ladder. Factories make a carve's metal (an
     engine per inference regime, a learner per training regime) — fakes in
     tests, vLLM/torch builders on real metal; the Host constructor attests
-    the result against the regimes either way."""
+    the result against the regimes either way.
+
+    A factory is handed BOTH birth facts of the host it is building: the
+    Regime (what capability) and the Partition (how much of what metal). The
+    fraction is the whole point of a sub-GPU host and only the carve knows
+    it, so the contract that realizes a partition must be paid it — a
+    factory taking the regime alone has to re-derive the number off the plan
+    (#51c)."""
 
     def __init__(self, metal: Sequence[Metal], *, store: Store,
-                 engine_factory: Callable[[Regime], Engine],
-                 learner_factory: Callable[[Regime], Learner],
+                 engine_factory: Callable[[Regime, Partition], Engine],
+                 learner_factory: Callable[[Regime, Partition], Learner],
                  hosts: Sequence[Host] = ()) -> None:
         self.metal = {m.name: m for m in metal}
         self.store = store
         self.engine_factory = engine_factory
         self.learner_factory = learner_factory
-        self.hosts: dict[str, Host] = {h.name: h for h in hosts}
+        self.hosts: dict[str, Host] = {}
+        self.carves = 0                 # carve ordinal, for unique host names
+        for host in hosts:
+            self.register(host)
+
+    def register(self, host: Host) -> None:
+        """A host's name is its identity in the fleet: registration REFUSES a
+        name already taken instead of replacing the host that holds it.
+
+        Replacing is never right, even when names are unique by construction
+        (carve_name). The replaced host keeps its metal — engines resident,
+        tenants bound, arbiter admitting — while dropping out of the dict
+        residual() sums over, so its fraction silently returns to the
+        residual and the next carve is sized against memory that is already
+        gone (#51a)."""
+        if host.name in self.hosts:
+            raise FleetError(
+                f"host {host.name!r} is already registered with this fleet; "
+                f"a host is never replaced — its metal outlives the dict "
+                f"entry, and the residual would count its partition free")
+        self.hosts[host.name] = host
 
     # ---- the inventory ------------------------------------------------------
 
@@ -319,6 +346,21 @@ class Fleet:
                     placement[demand.pool] = host
         return placement
 
+    def carve_name(self, step: Carve) -> str:
+        """The name a carved host is born with: the metal it came from, the
+        devices it owns, the regimes it wears, and a per-fleet CARVE ORDINAL.
+
+        The ordinal is not decoration. A regime's name carries kind and shape
+        but not base, so two carves that differ only by base would otherwise
+        produce one name (#51a) — and the base cannot go in the name either,
+        because a base is "Qwen/Qwen3-0.6B" and a host name is a journal path
+        segment that may hold no "/" (#51b, attested by Host). No separator
+        here is "/" for that same reason."""
+        self.carves += 1
+        devices = "-".join(str(d) for d in step.devices)
+        regimes = "+".join(regime.name for regime in step.regimes)
+        return f"{step.metal}:{devices}.{regimes}.c{self.carves}"
+
     def carve(self, step: Carve) -> Host:
         """Rung two executed. Residual-only by construction (plan_carve drew
         from residual), never mutates an existing host (a NEW Host is born
@@ -326,21 +368,19 @@ class Fleet:
         approval — #43). The born partition is STAMPED with the metal's kind:
         the fraction says how much, the kind says of what (#49)."""
         metal = self.metal[step.metal]
+        partition = Partition(step.metal, step.devices, step.memory, metal.gpu)
         engines: list[Engine] = []
         carved_learner: Learner | None = None
         for regime in step.regimes:
             if regime.kind == "inference":
-                engines.append(self.engine_factory(regime))
+                engines.append(self.engine_factory(regime, partition))
             else:
-                carved_learner = self.learner_factory(regime)
-        name = (f"{step.metal}:{'-'.join(str(d) for d in step.devices)}/"
-                + "+".join(regime.name for regime in step.regimes))
+                carved_learner = self.learner_factory(regime, partition)
+        name = self.carve_name(step)
         host = Host(name, engines=tuple(engines), learner=carved_learner,
-                    store=self.store,
-                    partition=Partition(step.metal, step.devices, step.memory,
-                                        metal.gpu),
+                    store=self.store, partition=partition,
                     regimes=step.regimes)
-        self.hosts[name] = host
+        self.register(host)
         self.store.append_fleet_event({
             "event": "carve", "t": time.time(), "host": name,
             "metal": step.metal, "gpu": metal.gpu,

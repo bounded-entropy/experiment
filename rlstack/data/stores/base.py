@@ -222,7 +222,14 @@ class Store(ABC):
 
     def append_host_event(self, host: str, entry: dict[str, Any]) -> None:
         """One event line in hosts/<host>/log.jsonl (host-up/attach/detach).
-        Outside every run directory, outside identity, outside recovery."""
+        Outside every run directory, outside identity, outside recovery.
+
+        The name is ONE path segment: a "/" in it would shear the key, so the
+        event would land where list_hosts() (which recovers the name with
+        split("/")[1]) never looks (#51b). Host attests this at birth; this is
+        the same rule at the layer that owns the key."""
+        assert "/" not in host, (
+            f"host name {host!r} contains '/': it is one journal path segment")
         self._append_line(f"hosts/{host}/log.jsonl", _canonical(entry))
 
     def read_host_log(self, host: str) -> list[dict[str, Any]]:
