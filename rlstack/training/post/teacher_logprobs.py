@@ -30,7 +30,7 @@ from rlstack.data.trajectory import Group, Message, Trajectory
 from rlstack.training.post.base import PostProcessor, postprocessor
 
 
-async def teacher_scores(traj: Trajectory, llm: PoolClient) -> list[float]:
+async def teacher_scores(traj: Trajectory, client: PoolClient) -> list[float]:
     """Walk the sealed message stream in flatten order: each generated turn's
     token_ids scored against everything before it — the SAME conditioning the
     student had, which is what makes the difference a pure model difference."""
@@ -40,7 +40,7 @@ async def teacher_scores(traj: Trajectory, llm: PoolClient) -> list[float]:
     for message in traj.messages:
         turn = turn_of.get(id(message))
         if turn is not None:
-            scores.extend(await llm.score(context, turn.token_ids))
+            scores.extend(await client.score(context, turn.token_ids))
         context.append(message)
     return scores
 
@@ -51,8 +51,8 @@ class TeacherLogprobs(PostProcessor):
     token_level = ("teacher_logprobs",)
     pools = ("teacher",)              # another model's metal, declared at submit
 
-    async def process(self, group: Group, data, llm: PoolClient
+    async def process(self, group: Group, data, client: PoolClient
                       ) -> Mapping[str, Sequence]:
-        teacher = llm.pool("teacher")
+        teacher = client.pool("teacher")
         return {"teacher_logprobs": [await teacher_scores(traj, teacher)
                                      for traj in group.trajectories]}

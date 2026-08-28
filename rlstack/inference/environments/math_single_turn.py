@@ -9,7 +9,7 @@ from rlstack.inference.rollout import Rollout
 
 @environment("math_single_turn")
 class MathSingleTurn(Environment):
-    async def run(self, llm: PoolClient, task: Task) -> Rollout:
+    async def run(self, client: PoolClient, task: Task) -> Rollout:
         prompt = Message(Role.USER, task.prompt)
-        turn = await llm.sample([prompt])
+        turn = await client.sample([prompt])
         return Rollout(task=task, messages=[prompt, turn.message], turns=[turn])

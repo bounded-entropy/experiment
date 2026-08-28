@@ -3,7 +3,7 @@ independently (greedy, its own budget) and the reward is agreement — last
 number of the judge's answer == last number of the policy's.
 
 The exemplar of the pool declaration treaty: `pools` declares the traffic
-(Phase 0 checks a "judge" pool exists in the spec), `llm.pool("judge")` carries
+(Phase 0 checks a "judge" pool exists in the spec), `client.pool("judge")` carries
 it, and `sampling` is the judge's own, not the policy's."""
 
 from __future__ import annotations
@@ -31,8 +31,8 @@ class LlmJudge(PostProcessor):
     sampling = SamplingSpec(temperature=0.0, top_p=1.0, max_tokens=16)
 
     async def process(self, group: Group, data: Mapping[str, Sequence[float]],
-                      llm: PoolClient) -> Mapping[str, Sequence[float]]:
-        judge = llm.pool("judge")
+                      client: PoolClient) -> Mapping[str, Sequence[float]]:
+        judge = client.pool("judge")
         rewards = []
         for traj in group.trajectories:
             verdict = await judge.sample((Message(Role.USER, traj.task.prompt),))

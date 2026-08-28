@@ -1,7 +1,7 @@
 """Postprocessors: one class per file, all inheriting PostProcessor (base.py).
 
 Each declares produces / consumes / token_level / pools / sampling and
-implements `async process(group, data, llm) -> {column: vector}` — per group,
+implements `async process(group, data, client) -> {column: vector}` — per group,
 after the seal, before the loss. Importing this package registers the builtins.
 """
 

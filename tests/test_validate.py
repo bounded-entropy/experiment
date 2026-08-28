@@ -48,14 +48,14 @@ class _NeedsJudge(PostProcessor):
     consumes = ("judge",)
     produces = ("weighted",)
 
-    async def process(self, group: Any, data: Any, llm: Any) -> Any: ...
+    async def process(self, group: Any, data: Any, client: Any) -> Any: ...
 
 
 @postprocessor("val_also_reward")  # produces "reward" too: collides with verifier
 class _AlsoReward(PostProcessor):
     produces = ("reward",)
 
-    async def process(self, group: Any, data: Any, llm: Any) -> Any: ...
+    async def process(self, group: Any, data: Any, client: Any) -> Any: ...
 
 
 @adapter_type("val_recording_adapter")

@@ -5,13 +5,13 @@ An environment is registered as a CLASS in its own file under this folder:
 
     @environment("my_env")
     class MyEnv(Environment):
-        async def run(self, llm: PoolClient, task: Task) -> Rollout:
+        async def run(self, client: PoolClient, task: Task) -> Rollout:
             ...
 
 The rule every subclass inherits: `run` returns a Rollout — mutable,
 inference-world, unsealed. The RUNNER seals; environments never do. Sampling is
 free here, through the policy pool or any other declared pool via
-`llm.pool(name)`, and thousands of episodes run as concurrent coroutines.
+`client.pool(name)`, and thousands of episodes run as concurrent coroutines.
 """
 
 from __future__ import annotations
@@ -33,7 +33,7 @@ class Environment(ABC):
     """
 
     @abstractmethod
-    async def run(self, llm: PoolClient, task: Task) -> Rollout:
+    async def run(self, client: PoolClient, task: Task) -> Rollout:
         """Drive sample calls until the episode is finished; return the Rollout
         unsealed — the seal is the runner's, at run_episode."""
 

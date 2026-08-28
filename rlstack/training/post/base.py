@@ -32,7 +32,7 @@ class PostProcessor(ABC):
     arguments — the decorator instantiates one shared instance.
 
     `pools` declares EVERY pool this processor sends traffic to, whether via
-    `llm.pool(name)` or the default main-pinned client. Phase 0 holds it
+    `client.pool(name)` or the default main-pinned client. Phase 0 holds it
     against the spec's declared pools ("main" exempt — the runner requires it
     unconditionally) and against sleep-sharing: the trainer admits exactly
     these residents around the pipeline, so an undeclared pool is sampled
@@ -52,7 +52,7 @@ class PostProcessor(ABC):
 
     @abstractmethod
     async def process(self, group: Group, data: Mapping[str, Sequence[float]],
-                      llm: PoolClient) -> Mapping[str, Sequence[float]]:
+                      client: PoolClient) -> Mapping[str, Sequence[float]]:
         """One vector per `produces` name; each len(group), in group order."""
 
 

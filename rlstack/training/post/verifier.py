@@ -19,7 +19,7 @@ class Verifier(PostProcessor):
     produces = ("reward",)
 
     async def process(self, group: Group, data: Mapping[str, Sequence[float]],
-                      llm: PoolClient) -> Mapping[str, Sequence[float]]:
+                      client: PoolClient) -> Mapping[str, Sequence[float]]:
         rewards = []
         for traj in group.trajectories:
             numbers = _NUMBER.findall(traj.turns[-1].message.content)

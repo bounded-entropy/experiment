@@ -1,6 +1,6 @@
 """Environments: one class per file, all inheriting Environment (base.py).
 
-The contract is `async run(llm, task) -> Rollout`; a name exists iff the module
+The contract is `async run(client, task) -> Rollout`; a name exists iff the module
 defining it was imported, and importing this package registers the builtins.
 """
 

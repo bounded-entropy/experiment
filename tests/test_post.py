@@ -33,7 +33,7 @@ def go(coro):
 class _BadColumns(PostProcessor):
     produces = ("promised",)
 
-    async def process(self, group: Any, data: Any, llm: Any):
+    async def process(self, group: Any, data: Any, client: Any):
         return {"something_else": [0.0] * len(group)}
 
 
@@ -41,7 +41,7 @@ class _BadColumns(PostProcessor):
 class _BadLength(PostProcessor):
     produces = ("short",)
 
-    async def process(self, group: Any, data: Any, llm: Any):
+    async def process(self, group: Any, data: Any, client: Any):
         return {"short": [0.0]}  # wrong length for any group > 1
 
 
@@ -53,10 +53,10 @@ class _SamplingJudge(PostProcessor):
     produces = ("judge",)
     pools = ("main",)
 
-    async def process(self, group: Any, data: Any, llm: Any):
+    async def process(self, group: Any, data: Any, client: Any):
         scores = []
         for traj in group.trajectories:
-            turn = await llm.sample(traj.messages)   # llm.pool(name) also works
+            turn = await client.sample(traj.messages)   # client.pool(name) also works
             scores.append(float(len(turn.message.content)))
         return {"judge": scores}
 
@@ -141,10 +141,10 @@ class _TinyBudget(PostProcessor):
     produces = ("length",)
     sampling = SamplingSpec(max_tokens=1)
 
-    async def process(self, group: Any, data: Any, llm: Any):
+    async def process(self, group: Any, data: Any, client: Any):
         out = []
         for _ in group.trajectories:
-            turn = await llm.sample((Message(Role.USER, "What is 30+40?"),))
+            turn = await client.sample((Message(Role.USER, "What is 30+40?"),))
             out.append(float(len(turn.message.content)))
         return {"length": out}
 
@@ -181,7 +181,7 @@ class _TokenTeacher(PostProcessor):
     produces = ("teacher_lp",)
     token_level = ("teacher_lp",)
 
-    async def process(self, group: Any, data: Any, llm: Any):
+    async def process(self, group: Any, data: Any, client: Any):
         return {"teacher_lp": [
             [0.5] * sum(len(t.token_ids) for t in traj.turns)
             for traj in group.trajectories]}
@@ -192,7 +192,7 @@ class _TokenLiar(PostProcessor):
     produces = ("bad_lp",)
     token_level = ("bad_lp",)
 
-    async def process(self, group: Any, data: Any, llm: Any):
+    async def process(self, group: Any, data: Any, client: Any):
         return {"bad_lp": [[0.5, 0.5] for _ in group.trajectories]}
 
 

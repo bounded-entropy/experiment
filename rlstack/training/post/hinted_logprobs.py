@@ -25,7 +25,7 @@ def hint_for(traj: Trajectory) -> Message:
     return Message(Role.USER, text)
 
 
-async def hinted_scores(traj: Trajectory, llm: PoolClient) -> list[float]:
+async def hinted_scores(traj: Trajectory, client: PoolClient) -> list[float]:
     """Walk the sealed message stream in flatten order: each generated turn's
     token_ids scored against hint + everything before it."""
     turn_of = {id(t.message): t for t in traj.turns}
@@ -34,7 +34,7 @@ async def hinted_scores(traj: Trajectory, llm: PoolClient) -> list[float]:
     for message in traj.messages:
         turn = turn_of.get(id(message))
         if turn is not None:
-            scores.extend(await llm.score(context, turn.token_ids))
+            scores.extend(await client.score(context, turn.token_ids))
         context.append(message)
     return scores
 
@@ -45,8 +45,8 @@ class HintedLogprobs(PostProcessor):
     token_level = ("hinted_logprobs",)
     pools = ("main",)                 # scores the POLICY pool: self-distillation
 
-    async def process(self, group: Group, data, llm: PoolClient
+    async def process(self, group: Group, data, client: PoolClient
                       ) -> Mapping[str, Sequence]:
-        main = llm.pool("main")
+        main = client.pool("main")
         return {"hinted_logprobs": [await hinted_scores(traj, main)
                                     for traj in group.trajectories]}

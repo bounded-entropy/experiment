@@ -18,7 +18,7 @@ class CenterReward(PostProcessor):
     produces = ("advantage",)
 
     async def process(self, group: Group, data: Mapping[str, Sequence[float]],
-                      llm: PoolClient) -> Mapping[str, Sequence[float]]:
+                      client: PoolClient) -> Mapping[str, Sequence[float]]:
         rewards = data["reward"]
         mean = math.fsum(rewards) / len(rewards)
         return {"advantage": [r - mean for r in rewards]}

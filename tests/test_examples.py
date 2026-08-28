@@ -75,7 +75,7 @@ from rlstack import Environment  # noqa: E402
 class ToolUse(Environment):
     """Sample / execute-tool loop; tool-result tokens get loss_mask=0."""
 
-    async def run(self, llm: Any, task: Any) -> Any:
+    async def run(self, client: Any, task: Any) -> Any:
         raise NotImplementedError
 
 
@@ -142,7 +142,7 @@ class Gae(PostProcessor):
     consumes = ("reward",)
     produces = ("gae_advantage",)
 
-    async def process(self, group: Any, data: Any, llm: Any) -> Any:
+    async def process(self, group: Any, data: Any, client: Any) -> Any:
         raise NotImplementedError  # detached, CPU, group-scope
 
 

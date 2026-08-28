@@ -15,5 +15,5 @@ class Constant(PostProcessor):
     produces = ("reward",)
 
     async def process(self, group: Group, data: Mapping[str, Sequence[float]],
-                      llm: PoolClient) -> Mapping[str, Sequence[float]]:
+                      client: PoolClient) -> Mapping[str, Sequence[float]]:
         return {"reward": [1.0] * len(group)}

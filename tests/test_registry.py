@@ -104,7 +104,7 @@ class TestDecorators(unittest.TestCase):
             consumes = ("reward",)
             produces = ("score", "length_penalty")
 
-            async def process(self, group: Any, data: Any, llm: Any) -> Any:
+            async def process(self, group: Any, data: Any, client: Any) -> Any:
                 raise NotImplementedError
 
         pdef = POST.get("test_dec_post")
@@ -126,7 +126,7 @@ class TestDecorators(unittest.TestCase):
     def test_environment_decorator_registers(self) -> None:
         @environment("test_dec_env")
         class MyEnv(Environment):
-            async def run(self, llm: Any, task: Any) -> Any:
+            async def run(self, client: Any, task: Any) -> Any:
                 raise NotImplementedError
 
         edef = ENVS.get("test_dec_env")
