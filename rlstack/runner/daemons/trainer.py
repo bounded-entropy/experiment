@@ -2,22 +2,33 @@
 
 One update, and the commit protocol that makes kill -9 safe at any point:
 
-    await the plan's wave → POST PIPELINE → write postdata →
-    flatten/broadcast/pack → forward_backward × microbatches × epochs →
-    optim_step → bump → write blobs → register bundle → APPEND LEDGER
-    (the commit point) → notify
+    await the plan's wave → await the SCORER's part → INLINE POST →
+    write the merged postdata → flatten/broadcast/pack →
+    forward_backward × microbatches × epochs → optim_step → bump →
+    write blobs → register bundle → APPEND LEDGER (the commit point) → notify
 
 Everything before the ledger line is unsealed: attach discards it and it
 regenerates. The bundle is registered on the engine BEFORE the ledger line, so
-any daemon reading the commit can pin its bundle_id immediately. The post phase
-admits the ENGINES its pipeline declared (judges sample) and the gradient
-admits the LEARNER — so on an alternating host the common no-judge update costs
-one switch.
+any daemon reading the commit can pin its bundle_id immediately.
+
+THE POST PHASE HAS TWO HALVES since the Scorer exists (#65). The processors
+that address a pool are the Scorer's, run beside that pool and arriving here as
+a postdata PART; the pool-less ones are arithmetic over columns and run here,
+over the part as `given`. The Trainer still writes the one merged
+postdata/<u>.json, so everything downstream — flatten, the ledger's column
+means, the observer, the wave browser — reads exactly what it always did. A
+pipeline with no pooled half awaits nothing and plans no Scorer, and this
+daemon is byte-for-byte the daemon it was.
+
+The gradient admits the LEARNER; the inline half admits nothing, because
+occupying metal is what put a processor on the other side of the split.
 
 Those boundaries are also the update's four measured phases — collect / post /
 train / seal — lapped into an UpdateClock and journaled to the HOST after the
 commit. Durations are wall clock, so they live in the host journal and nowhere
-near a run directory.
+near a run directory. `post` now measures the WAIT for the part plus the inline
+half, which is the number that says whether the Scorer is keeping up: a scorer
+running far enough ahead makes it collapse to the arithmetic alone.
 """
 
 from __future__ import annotations
@@ -40,7 +51,9 @@ from rlstack.runner.interfaces import Engine, Learner, TrainStats
 from rlstack.runner.meters import HostJournal, UpdateClock
 from rlstack.runner.post import run_pipeline
 from rlstack.runner.daemons.base import Daemon
+from rlstack.runner.daemons.scorer import SCORER
 from rlstack.runner.signals import RunSignals
+from rlstack.spec.flow import split_pipeline
 from rlstack.spec.specs import ExperimentSpec, SamplingSpec
 
 
@@ -61,6 +74,8 @@ class Trainer(Daemon):
         self.retention = retention
         self.post_residents = post_residents
         self.spec = spec
+        split = split_pipeline(spec.algo.post)
+        self.pooled, self.inline = split.pooled, split.inline
         self.schedule = spec.algo.schedule
         self.sampling = spec.gen.sampling if spec.gen else SamplingSpec()
         self.plan = plan
@@ -95,6 +110,25 @@ class Trainer(Daemon):
         self.run.write_wave(update, rows)
         return rows
 
+    def scored(self, update: int) -> bool:
+        """The Scorer's part for this update exists — the SECOND await, and it
+        exists only when the pipeline has a pooled half.
+
+        A predicate over the store, like every other daemon condition: the part
+        file IS the handshake, and this daemon never learns that a Scorer is
+        running, only that a file appeared.
+        """
+        return self.run.read_postdata_part(update, SCORER) is not None
+
+    async def await_scored(self, update: int) -> dict[str, list]:
+        """The pooled half's columns, in wave order — {} when there is no
+        pooled half, which is when the Trainer is exactly what it was before
+        the Scorer existed."""
+        if not self.pooled:
+            return {}
+        await self.signals.wait_for(lambda: self.scored(update))
+        return self.run.read_postdata_part(update, SCORER) or {}
+
     # ---- the daemon ---------------------------------------------------------
 
     async def run_forever(self) -> None:
@@ -105,11 +139,14 @@ class Trainer(Daemon):
             wave = wave_from_rows(rows)
             clock.collected()
 
-            # judges sample: admit the engines the pipeline declared
+            # the pooled half, awaited on the store; then the inline half over
+            # it; then the ONE merged file every reader downstream still reads
+            given = await self.await_scored(update)
             async with self.arbiter.admit_all(self.post_residents):
-                postdata = await run_pipeline(
-                    self.spec.algo.post, wave, self.routes_at(self.bundle),
-                    self.sampling, self.spec.seeds.master, update)
+                produced = await run_pipeline(
+                    self.inline, wave, self.routes_at(self.bundle),
+                    self.sampling, self.spec.seeds.master, update, given=given)
+            postdata = {**given, **produced}
             self.run.write_postdata(update, postdata)
             clock.posted()
 
@@ -208,8 +245,15 @@ def _column_means(columns) -> dict[str, float]:
 
 
 def _train_summary(stats: list[TrainStats]) -> dict:
+    """One update's training facts. The bank's PROVIDED tensors are folded in
+    first and the standing rails written over them, so the rails always own
+    their own names; every other provided name lands here beside them, mean of
+    the microbatch means — the same convention `loss` already uses, and exact
+    for a quantity that is a function of the parameters alone (a latent KL is
+    identical in every microbatch of one update)."""
     n = len(stats)
     return {
+        **_provided_means(stats),
         "microbatches": n,
         "tokens": sum(s.tokens for s in stats),
         "loss": math.fsum(s.loss for s in stats) / n,
@@ -217,3 +261,11 @@ def _train_summary(stats: list[TrainStats]) -> dict:
         "logprob_gap": max(s.logprob_gap for s in stats),
         "grad_norm": max(s.grad_norm for s in stats),
     }
+
+
+def _provided_means(stats: list[TrainStats]) -> dict[str, float]:
+    """Each declared provided name, meaned across the update's microbatches."""
+    names = sorted({name for s in stats for name in s.provided})
+    return {name: math.fsum(s.provided[name] for s in stats if name in s.provided)
+                  / sum(1 for s in stats if name in s.provided)
+            for name in names}

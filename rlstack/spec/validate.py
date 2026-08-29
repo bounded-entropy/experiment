@@ -32,7 +32,9 @@ from rlstack.spec.specs import PoolMember, ExperimentSpec, LearnerMember
 # The base records set lives with the flow graph (spec/flow.py), the one
 # canonical walk over the data declarations; re-exported here because it is
 # part of the validation vocabulary.
-from rlstack.spec.flow import BASE_RECORDS, flow_graph  # noqa: E402,F401
+from rlstack.spec.flow import (  # noqa: E402,F401
+    BASE_RECORDS, PipelineSplit, flow_graph, split_pipeline,
+)
 
 @dataclass(frozen=True)
 class ValidationIssue:
@@ -148,6 +150,45 @@ def check_post_pipelines_are_wired(spec: ExperimentSpec, schema: SiteSchema) -> 
     return issues
 
 
+def check_pooled_post_follows_inline(spec: ExperimentSpec, schema: SiteSchema) -> list[ValidationIssue]:
+    """The SPLIT must respect produces→consumes: a POOLED processor may not
+    consume a column an INLINE one produces.
+
+    The two halves of a train pipeline meet exactly once — at the postdata part
+    the Scorer writes and the Trainer awaits — so the pooled half runs FIRST
+    and whole. A pooled processor consuming inline output would be waiting on a
+    column written after it: a deadlock by declaration, refused here while it
+    is still text. The other direction is the normal case and is fine, because
+    the Trainer awaits the part before running its own half and hands those
+    columns in as `given`.
+
+    The TRAIN pipeline only. Eval keeps its single inline path (the Evaluator
+    is firewalled measurement and plans no Scorer), so nothing constrains its
+    order.
+    """
+    if spec.algo is None:
+        return []
+    split = split_pipeline(spec.algo.post)
+    if not split.pooled:
+        return []
+    inline_owner = {column: name for name in split.inline if name in POST
+                    for column in POST.get(name).produces}
+    issues = []
+    for index, name in enumerate(spec.algo.post):
+        if name not in split.pooled or name not in POST:
+            continue
+        for want in POST.get(name).consumes:
+            if want in inline_owner:
+                issues.append(_issue(
+                    "post-split-order", f"algo.post[{index}]",
+                    f"postprocessor {name!r} sends pool traffic, so the Scorer "
+                    f"runs it — but it consumes {want!r}, produced by "
+                    f"{inline_owner[want]!r}, which runs INLINE in the Trainer "
+                    f"after the Scorer's whole half. Move the producer onto a "
+                    f"pool, or the consumer off one"))
+    return issues
+
+
 def site_space(spec: ExperimentSpec, schema: SiteSchema) -> tuple[SiteMeta, ...]:
     """The full site space of this experiment: schema ∪ every bank entry's
     exports.
@@ -203,6 +244,67 @@ def check_adapter_types_accept_their_sites(
                 "site-predicate-failed", f"policy.bank.{entry_name}.site",
                 f"adapter type {adapter.adapter_type!r} rejects {len(rejected)} "
                 f"matched site(s): {', '.join(rejected[:4])}"))
+    return issues
+
+
+def _plora_entries(spec: ExperimentSpec) -> list[tuple[str, Mapping]]:
+    """Every bank entry of adapter type "plora", as (name, init).
+
+    Named once because two checks read it, and spelled by ADAPTER TYPE rather
+    than by duck-typing the init: an adapter type is a registered string, so
+    the gate can ask about one by name without importing its compute half
+    (which would drag torch into Phase 0).
+    """
+    return [(name, adapter.init) for name, adapter in spec.policy.bank.items()
+            if adapter.adapter_type == "plora"]
+
+
+def check_plora_entries_name_their_factors(
+        spec: ExperimentSpec, schema: SiteSchema) -> list[ValidationIssue]:
+    """A plora entry's FROZEN half is a content-addressed artifact, named here.
+
+    The trained half is tiny and travels in the bundle; the singular directions
+    it steers are megabytes per site and identical at every version, so they
+    live in the CAS and the spec carries the address. An address is not
+    optional: without it nothing the engine can serve exists, and identity
+    (I3) would silently cover two different factorizations under one run_id.
+    """
+    issues = []
+    for name, init in _plora_entries(spec):
+        uri = init.get("factors")
+        if not isinstance(uri, str) or not uri.startswith("cas://"):
+            issues.append(_issue(
+                "plora-factors-missing", f"policy.bank.{name}.init.factors",
+                f"plora entry {name!r} carries factors={uri!r}; it must name a "
+                f"content-addressed artifact ('cas://<sha>') built by "
+                f"plora_factors.build_factors for this base and this k"))
+    return issues
+
+
+def check_plora_shapes_are_positive(
+        spec: ExperimentSpec, schema: SiteSchema) -> list[ValidationIssue]:
+    """k, latent and members are counts, and a count of zero is not a smaller
+    policy — it is no policy at all (a rank-0 delta, an empty latent, an
+    ensemble nobody can be drawn from). Refused here, where they are still
+    plain ints, rather than at the first eigh."""
+    issues = []
+    for name, init in _plora_entries(spec):
+        for field, floor in (("k", 1), ("latent", 1), ("members", 1),
+                             ("hidden", 1)):
+            value = init.get(field)
+            if not isinstance(value, int) or isinstance(value, bool) \
+                    or value < floor:
+                issues.append(_issue(
+                    "plora-bad-shape", f"policy.bank.{name}.init.{field}",
+                    f"plora entry {name!r} declares {field}={value!r}; it must "
+                    f"be an int >= {floor}"))
+        prior_std = init.get("prior_std")
+        if not isinstance(prior_std, (int, float)) or prior_std <= 0:
+            issues.append(_issue(
+                "plora-bad-shape", f"policy.bank.{name}.init.prior_std",
+                f"plora entry {name!r} declares prior_std={prior_std!r}; the "
+                f"prior is N(0, prior_std^2) and a non-positive scale has no "
+                f"KL to the posterior"))
     return issues
 
 
@@ -429,9 +531,10 @@ def check_post_pools_can_coreside(spec: ExperimentSpec, schema: SiteSchema) -> l
     but two pools in one exclusive group alternate on the same memory by
     declaration, so no admission order can satisfy that pipeline. Refused at
     submit; the arbiter would raise at runtime, later and louder. The algo
-    pipeline's set is its processors' declared pools (the trainer admits
-    exactly those); the eval pipeline additionally holds eval.pool, since the
-    evaluator runs episodes and scoring under one admission."""
+    pipeline's set is its processors' declared pools (the Scorer admits exactly
+    those — they are its whole half by the split rule); the eval pipeline
+    additionally holds eval.pool, since the evaluator runs episodes and scoring
+    under one admission."""
     sleep_group: dict[str, int] = {}
     for gi, group in enumerate(spec.gpu_config.groups):
         if group.sharing != "sleep":
@@ -537,9 +640,12 @@ CHECKS = (
     check_names_are_registered,
     check_loss_requires_are_provided,
     check_post_pipelines_are_wired,
+    check_pooled_post_follows_inline,
     check_schema_describes_the_base,
     check_sites_resolve,
     check_adapter_types_accept_their_sites,
+    check_plora_entries_name_their_factors,
+    check_plora_shapes_are_positive,
     check_groups_exist,
     check_pool_names_are_unique,
     check_sleep_groups_have_one_learner,

@@ -7,12 +7,19 @@ its declaration — exactly the `produces` names, one float per trajectory —
 before being concatenated into wave-order columns. Deterministic: each (group,
 processor) draws its own seed from the tree, so resume recomputes byte-
 identical postdata.
+
+ONE runner, TWO callers. A pipeline is split by `split_pipeline` into the
+pooled half the Scorer runs and the pool-less half the Trainer runs, and each
+half comes through here unchanged — same order, same seed paths, same
+validation. `given` is the seam: wave-order columns the OTHER caller already
+produced, sliced back per group so a processor cannot tell which daemon
+produced what it consumes.
 """
 
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 
 from rlstack.data.trajectory import Group, Wave
 from rlstack.registry import POST
@@ -34,6 +41,20 @@ def _token_vector(processor: str, column: str, traj, value) -> list[float]:
     return [float(v) for v in value]
 
 
+def group_slice(given: Mapping[str, Sequence], wave: Wave,
+                index: int) -> dict[str, list]:
+    """One group's share of wave-order columns another runner produced.
+
+    Wave order IS the groups concatenated in order, so a group's rows are the
+    contiguous window at its offset — the same arithmetic `broadcast` and the
+    observer walk the columns with, stated once here for the seam.
+    """
+    start = sum(len(group) for group in wave.groups[:index])
+    width = len(wave.groups[index])
+    return {name: list(values[start:start + width])
+            for name, values in given.items()}
+
+
 async def run_pipeline(
     pipeline: Sequence[str],
     wave: Wave,
@@ -42,11 +63,24 @@ async def run_pipeline(
     master: int,
     update: int,
     phase: str = "post",
+    given: Mapping[str, Sequence] | None = None,
 ) -> dict[str, list[float]]:
-    """The pipeline over every group; columns aligned to wave order."""
+    """The pipeline over every group; columns aligned to wave order.
 
-    async def one_group(group: Group) -> dict[str, list[float]]:
-        data: dict[str, list[float]] = {}
+    `given` seeds each group's `data` with columns produced elsewhere (the
+    Scorer's part), so a processor consumes one exactly as it consumes a
+    neighbour's — and the return value stays THIS call's own produces, never
+    the given columns echoed back. What makes that identical to running the
+    whole pipeline in one process is the contract `consumes` already states: a
+    processor reads its declared inputs and nothing else, and every declared
+    input is produced earlier (checked at Phase 0), so no processor can observe
+    which half of the split it is in.
+    """
+
+    async def one_group(index: int, group: Group) -> dict[str, list[float]]:
+        data: dict[str, list[float]] = (
+            group_slice(given, wave, index) if given else {})
+        produced: dict[str, None] = {}
         for name in pipeline:
             pdef = POST.get(name)
             # a processor's declared sampling (a judge's own budget) wins
@@ -70,9 +104,11 @@ async def run_pipeline(
                                     in zip(group.trajectories, values)]
                 else:
                     data[column] = [float(v) for v in values]
-        return data
+                produced[column] = None
+        return {column: data[column] for column in produced}
 
-    per_group = await asyncio.gather(*[one_group(g) for g in wave.groups])
+    per_group = await asyncio.gather(
+        *[one_group(index, group) for index, group in enumerate(wave.groups)])
 
     columns: dict[str, list[float]] = {}
     for data in per_group:

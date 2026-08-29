@@ -11,10 +11,15 @@ validation failing with it, and a new declaration kind gets a node here once.
 The loss is pure math: its `requires` may only name nodes of this graph — post
 columns, records, bank-provided forward tensors — never a pass the runner would
 have to plan.
+
+`split_pipeline` lives here for the same reason: it is one more query over the
+same declarations, read by the submit gate and by the runner, and putting it
+anywhere else would make the spec depend on the runtime that obeys it.
 """
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 
 from rlstack.registry import ADAPTER_TYPES, LOSSES, POST
@@ -29,6 +34,42 @@ RAILS = ("loss", "mean_ratio", "logprob_gap", "grad_norm")
 # Trainer bookkeeping in the same ledger summary — stored, plottable,
 # panel-addressable, but not the loss's rails.
 TRAIN_STATS = ("tokens", "microbatches")
+
+
+@dataclass(frozen=True)
+class PipelineSplit:
+    """One post pipeline cut by WHERE its processors run.
+
+    `pooled` addresses pools, so it is the Scorer daemon's half, run beside the
+    metal it talks to; `inline` touches no pool, so it is arithmetic over
+    columns and stays in the Trainer's own post phase. Each half keeps the
+    pipeline's declared order, and their concatenation is a permutation of it —
+    nothing is dropped and nothing is run twice.
+    """
+
+    pooled: tuple[str, ...]
+    inline: tuple[str, ...]
+
+
+def split_pipeline(pipeline: Sequence[str]) -> PipelineSplit:
+    """THE SPLIT RULE: a processor declaring `pools` is SCORER-RUN, a pool-less
+    one is TRAINER-INLINE.
+
+    Declared, never guessed. `pools` already names every pool a processor sends
+    traffic to — the submit gate vets it and the runner admits engines for it —
+    so the same declaration answers WHICH daemon runs it: sending traffic is
+    what makes a processor slow, and slow is what has to leave the gradient's
+    critical path. A pipeline with no pooled half plans no Scorer at all and
+    the Trainer's post phase is exactly what it always was.
+
+    An unregistered name is inline: `check_names_are_registered` owns that
+    failure, so this walk never raises.
+    """
+    pooled: list[str] = []
+    inline: list[str] = []
+    for name in pipeline:
+        (pooled if name in POST and POST.get(name).pools else inline).append(name)
+    return PipelineSplit(tuple(pooled), tuple(inline))
 
 
 @dataclass(frozen=True)
@@ -192,11 +233,24 @@ def flow_graph(spec: ExperimentSpec) -> FlowGraph:
                 consumers=(f"loss:{loss}",) if record in requires else (),
                 feeds_loss=record in requires, stored=True))
         for provided in sorted(adapter_type.provides):
+            # TWO nodes per provide, and the second is not decoration. The
+            # forward node is the tensor itself — recomputed, never stored, and
+            # what a loss's requires resolves against. The STAT TWIN is the
+            # per-update float the Trainer means into the ledger (TrainStats
+            # .provided), which exists whether or not any loss requires the
+            # tensor: an adapter type declares what a reader should WATCH, not
+            # only what a loss may eat, and this is what makes the run's own
+            # dictionary describe it with no special-casing anywhere (I11).
             nodes.append(FlowNode(
                 name=provided, kind="provided", phase="forward",
                 producer=f"adapter:{adapter_spec.adapter_type}",
                 consumers=(f"loss:{loss}",) if provided in requires else (),
                 feeds_loss=provided in requires, stored=False))
+            nodes.append(FlowNode(
+                name=provided, kind="stat", phase="train",
+                producer=f"adapter:{adapter_spec.adapter_type}",
+                consumers=(), feeds_loss=False, stored=True,
+                granularity="update"))
 
     if loss is not None:
         for rail in RAILS:
