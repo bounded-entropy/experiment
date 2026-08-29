@@ -2499,6 +2499,80 @@ specs; backends (local/modal/skypilot) and GPU topology are semantics-neutral.
     are different experiments); and there is no tag autocomplete, no tag
     index, and no way to remove one tag but the whole list.
 
+60. THE TASK-SET PATH: WHERE A DATASET BECOMES CONTENT (settled by execution;
+    DAPO-Math-17k is on the rlstack-store volume). #59 made a plan name tasks
+    by ID and a task set pure content; this is the other half — how content
+    gets made. rlstack/data/tasks/, two files, and a CLI verb over them.
+    - THE VERBS ARE DATASET-BLIND, THE DATASET FILES ARE ONE FUNCTION EACH.
+      base.py: write_tasks (canonical jsonl -> cas_put, ids unique WITHIN the
+      set refused where the set is made), load_tasks (MOVED here from
+      runner/traffic.py — it is write_tasks' inverse and the pair belongs
+      together; load_task_sets stayed in the runner, because its rule is about
+      a plan's leaves across DECLARED sets), split_tasks. dapo_math.py: one
+      function, pyarrow/huggingface_hub/transformers imported INSIDE it (rule
+      7), so the package root stays free to import.
+    - THE SPLIT IS A PER-TASK DRAW, NOT A SHUFFLE. A task's split is
+      h(seed, its id) placed in the fractions' half-open intervals — a
+      function of the task ALONE, not of its position or of the set it
+      arrived in. The property bought: re-splitting a superset leaves every
+      earlier task where it was, so held-out stays held out when the source
+      grows. The price, stated in the docstring: counts are DRAWN, not dealt
+      (17,917 at 2% gave 370, not 358). Fractions must sum to 1 — a task
+      belongs to exactly one split, so the splits must cover the set.
+    - THE SCHEMA AS IT ACTUALLY IS (inspected on Modal, not remembered):
+      data_source · prompt (list<struct<content, role>>) · ability ·
+      reward_model (struct<ground_truth: string, style>) · extra_info
+      (struct<index: string>). THE FILE IS NOT 17k ROWS: 1,791,700 rows over
+      17,917 distinct extra_info.index values, each repeated EXACTLY 100
+      times — verl's rollout fan-out baked into the parquet. We keep one row
+      per index (a task is a problem; how many samples it gets is the plan's
+      business), which is sound because no index carries two different
+      payloads. Left standing deliberately: 17,398 distinct prompt TEXTS, so
+      ~500 problems appear under two uuids, and 7 texts carry two different
+      ground truths — collapsing those needs a rule for which answer wins and
+      there isn't an honest one. Every ground_truth is a plain integer
+      (1,791,700 / 1,791,700), so the integer filter dropped ZERO rows; it
+      stays as the stated rule, by the verifier's own `-?\d+` pattern.
+    - THE PROMPT IS BUILT IN data/tasks/, NOT IN deploy/ AND NOT IN THE ENV,
+      because it is the interface between task content and the environment
+      and building it there is what pins it into the cas hash and so into
+      identity (I3). DAPO's own instruction is kept VERBATIM — it already
+      asks for a last line "Answer: $Answer", which is exactly what the
+      last-integer `verifier` reads, and a second instruction of ours would
+      only compete with it. The Qwen3-14B chat template is applied HERE at
+      build time because VllmEngine's stated v0 choice is that a prompt is
+      the raw token concatenation of its messages with no template applied.
+    - THINKING MODE: OFF, DELIBERATELY. Qwen3's template thinks by default
+      (no kwarg and enable_thinking=True render identically); we pin
+      enable_thinking=False, which appends `<think>\n\n</think>\n\n`. The
+      consequence is length: the model answers directly in the low hundreds
+      of tokens instead of reasoning for thousands, so a wave fits a sane
+      max_tokens and microbatch_tokens budget, and the closed think block
+      costs PROMPT tokens (prefill) not completion tokens (decode). It is
+      content, not a knob — a thinking-mode set is a different cas uri, and
+      the two are compared by pinning one or the other.
+    - WHAT LANDED, seed 17, train 0.98 / eval 0.02, on modal://rlstack-store:
+      17,917 tasks, ids `dapo-math-17k/<uuid>`, meta {"answer": int} and
+      nothing else.
+        train  17547  cas://09499d32b51e5e1b2a644b1c65e01b44aa42ff1a5bfac78ead41f98f89f09c93
+        eval     370  cas://82ae4626dbb59a2c50e2b13cbe7250c5f1ddd02dfb81edc7495efb77759d420b
+      Read back off the volume: disjoint, 17,917 between them, prompts
+      rendering as intended. A second build after switching the parquet read
+      to streamed batches reproduced BOTH uris exactly — the content hash is
+      the proof that the read path is not part of the content.
+    - deploy/tasks_dapo.py IS 52 LINES AND HOLDS NO SEMANTICS (I5): the
+      pinned layer (vllm 0.28.0 / torch 2.13.0 / transformers 5.16.1) is kept
+      byte-identical with the campaign images so it stays cached, pyarrow
+      rides in a layer of its own after it, and the body constructs a
+      ModalVolumeStore and calls the CLI's own build_task_sets — the same
+      function `python -m rlstack tasks dapo_math --store <root>` calls, so
+      local and volume runs print the same table. A cas write is not a commit
+      point, so the volume is committed explicitly once the sets are whole.
+    - NOT DONE, deliberately: no spec pins these uris yet (that is the run's
+      decision, not the task set's), no second dataset, and no eval `terminal`
+      bit. The 7 ambiguous ground truths and the ~500 double-uuid problems are
+      recorded above rather than repaired.
+
 ## Open threads (do NOT treat as settled; flag when your answer touches them)
 
 - TODO (Samarth, settled intent — future, nothing now): BUNDLE LRU EVICTION

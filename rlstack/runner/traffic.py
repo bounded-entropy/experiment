@@ -10,11 +10,11 @@ deterministically given (master, update), assigning group keys.
 from __future__ import annotations
 
 import asyncio
-import json
 import random
 from collections.abc import Mapping, Sequence
 
 from rlstack.data.stores.base import Store
+from rlstack.data.tasks import load_tasks
 from rlstack.data.trajectory import Group, Message, Role, Task, Trajectory, Turn, Wave
 from rlstack.registry import ENVS
 from rlstack.policy.compile import Bundle
@@ -97,13 +97,6 @@ class EnginePoolClient:
             token_extras={k: tuple(v) for k, v in columns.items()},
             turn_extras=dict(finish.turn_extras),
         )
-
-
-def load_tasks(store: Store, uri: str) -> list[Task]:
-    """Materialize a cas://-addressed jsonl of {id, prompt, meta} rows."""
-    rows = [json.loads(line) for line in
-            store.cas_get(uri).decode("utf-8").splitlines() if line]
-    return [Task(id=r["id"], prompt=r["prompt"], meta=r.get("meta", {})) for r in rows]
 
 
 def load_task_sets(store: Store, uris: Sequence[str]) -> dict[str, Task]:
