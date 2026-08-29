@@ -2650,6 +2650,112 @@ specs; backends (local/modal/skypilot) and GPU topology are semantics-neutral.
       the measurement from sealed checkpoints because a committed version is
       re-derivable with its content-addressed id as the proof.
 
+63. **STORE RETENTION: a run may forget what nothing will ever read again —
+    an abstract policy, and one default that keeps every adapter.** The
+    measurement that forced it, from run `803578405216` (a 21M-param LoRA,
+    50 updates):
+
+        optim     50 files   8.0 GiB   160 MiB each (Adam: TWO fp32 moments)
+        adapters  50 files   4.0 GiB    80 MiB each
+        waves     50 files    42 MiB
+        postdata  50 files      ~0
+
+    Optimizer state is TWO THIRDS of the footprint, and exactly one blob of
+    it has a reader. The same run against a 1B-param adapter is ~400 GB of
+    moments and ~200 GB of deltas, which is the number this exists for.
+    - THE CONTRACT IS A CLASS, NOT A CONFIG (Samarth's ruling, followed
+      exactly): `RetentionPolicy(ABC)` in `data/stores/retention.py` with one
+      abstract method, `expendable(ledger) -> (section, name, version)
+      triples`. No `optim="tail"`, no `every:k` — the policy IS a function
+      someone implements, mirroring Environment / PostProcessor /
+      AdapterType / the rollout lowering: base class in its own file, the
+      rule in the docstring, one implementation per file.
+    - A POLICY IS A PURE FUNCTION OF THE LEDGER. It is handed the commit
+      record and nothing else: no store, no spec, no clock, no arguments. So
+      it is testable with no bytes on disk (the policy suite never opens a
+      store), the same ledger always frees the same blobs, and a sweep that
+      never ran costs only the sweep that follows it.
+    - THE TRIPLE IS THE BLOB ADDRESS, and that is the safety property: a
+      policy can name `adapters/<name>@<v>.bin` or `optim/<name>@<v>.bin`
+      and NOTHING ELSE. The ledger, the manifest, a sealed wave and its
+      postdata are not expressible from here, so retention cannot weaken the
+      append-only guards by construction rather than by promise. Every
+      deletion is addressed through `_blob_key`, which already refused a
+      section outside BLOB_SECTIONS.
+    - THE DEFAULT IS `KeepRestorable`, named for what it keeps. ITS RULE:
+      every optim blob below the ledger tail is expendable; NO adapter blob
+      ever is. The asymmetry is the store-side reading of what
+      `runner/restore.py` already states — serving state is immutable and
+      versioned, training state is mutable and exists only at the last
+      commit. The reader census is complete and short: OPTIM has two readers
+      (`restore_tenant`, only ever at the tail, because a learner is
+      restorable only at a commit boundary; and `_warm_start` with
+      `optim="load"`), while ADAPTERS have four that pin HISTORICAL versions
+      — the evaluator's `bundle_for`, `restore_bundle_on` for an evicted
+      pool or a restarted container, a `WarmStart` naming `@v`, and
+      `dapo_grpo::evaluate` measuring a finished run from sealed
+      checkpoints. Deleting an adapter breaks restore for that version
+      forever; deleting stale optim cannot break anything.
+    - THE SEVENTH BYTE VERB IS `_size`, not `_delete` — `_delete` was
+      already one of the six. A sweep must report what it freed, and reading
+      a 160 MiB blob to measure it would cost more than keeping it. Beside
+      it, `_persist` is promoted from ModalVolumeStore to a no-op Store
+      hook: on a mounted Volume A DELETION STAGES EXACTLY LIKE A WRITE, so a
+      sweep that freed bytes commits once at the end (and one that freed
+      nothing commits not at all). LocalStore's verbs are durable as they
+      land, so its hook does nothing.
+    - `RunHandle.sweep(policy) -> Swept` reads the ledger, asks the policy,
+      CHECKS THE WHOLE BATCH, then deletes — so a policy that names live
+      state frees nothing at all rather than half of what it asked for. One
+      named guard, `_refuse_live_version`, refuses the tail's version
+      whatever a policy says: the floor under every policy, enforced in the
+      store and not in the policy, is that a swept run still resumes.
+    - TWO ENTRY POINTS AND ONE RULE. (a) THE TRAINER, right after
+      `append_ledger` — the moment a version went stale and the moment the
+      design already serializes on. Never fatal: the update is committed,
+      and a failed unlink leaves bytes on a volume, the cheapest failure in
+      the system. What was freed is journaled NOWHERE — it is a fact about a
+      directory, not the experiment, and a run directory holding it would
+      stop being a pure function of (spec, code, data). (b) THE OPERATOR:
+      `python -m rlstack sweep <store-root> <run-id>` prints what the policy
+      names, frees it, and reports the bytes. It is the CLI's first verb
+      that writes INSIDE a run directory and the only one that ATTACHES —
+      so it is for a run that has stopped, never one that is training.
+    - A THIRD MOMENT THE BRIEF DID NOT ASK FOR, AND WHY: the Trainer also
+      sweeps WHEN IT STARTS. Resume-equivalence found this — a process
+      killed between the last commit and its sweep leaves one stale blob
+      that no later commit will ever name, because the run's last commit has
+      no successor. Sweeping on attach makes the store CONVERGE: after any
+      commit and after any attach it holds every adapter and exactly one
+      optim per delta, which is what keeps a run directory byte-identical
+      across a crash even though bytes now leave it. `tests/test_resume.py`
+      is green unmodified.
+    - IDENTITY IS UNTOUCHED, verified: retention reaches no ExperimentSpec
+      field, is registered in nothing, and hashes into nothing. `run_id` for
+      the arith specs is identical to the pre-change checkout's, and one
+      test recomputes identity and compares manifest bytes across a sweep.
+      Retention changes what is RECOVERABLE, never what was COMPUTED
+      (I3, I11).
+    - THE ONE CONSEQUENCE FOR AN EXISTING PATH, stated rather than hidden: a
+      `WarmStart` with `optim="load"` naming a MID-RUN version of a swept
+      parent has no moments to read. `::extend` warm-starts from the
+      parent's tail, which is unaffected. `_parent_moments` in loop.py is
+      one named refusal that says where they went and names the parent's
+      tail, instead of surfacing as a bare missing file.
+    628 tests green (19 new in tests/test_retention.py). `test_loop` now
+    states the new truth — every adapter, moments only at the tail.
+    DELIBERATELY NOT DONE: no policy that touches waves/postdata (42 MiB
+    against 8 GiB — the measurement says do not bother), and none that
+    thins adapters (every k-th version would break `bundle_for` and
+    `WarmStart` for the versions it dropped, which is the one thing this
+    design refuses). The CLI attaches rather than sweeping a LIVE run: a
+    handle without attach-time recovery would make that safe and is a
+    separate decision, not a flag. Retention is not on the spec and there is
+    no per-run override — the Trainer takes a `retention=` argument
+    defaulting to `DEFAULT_RETENTION`, so swapping one is construction, not
+    configuration. Not measured on real metal: the main session runs it
+    against the real store (this was local work only).
+
 
 ## Open threads (do NOT treat as settled; flag when your answer touches them)
 
