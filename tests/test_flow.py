@@ -64,9 +64,10 @@ class FlowGraphTest(unittest.TestCase):
         self.assertFalse(node(measured, "reward", "post").feeds_loss)
 
     def test_records_rails_and_lag_are_in_the_graph(self) -> None:
-        graph = self.graph(schedule=Schedule(
-            group_size=2, trajectories_per_wave=4, n_updates=4,
-            microbatch_tokens=64, max_policy_lag=2))
+        # the wave's SHAPE is the plan's (#59); what the schedule still says —
+        # and so what the graph can still read off it — is the lag buffer
+        graph = self.graph(schedule=Schedule(microbatch_tokens=64,
+                                             max_policy_lag=2))
         self.assertEqual(node(graph, "behavior_logprobs", "wave").kind, "record")
         for rail in RAILS:
             self.assertEqual(node(graph, rail, "train").producer, "loss:grpo")

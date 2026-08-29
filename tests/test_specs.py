@@ -1,10 +1,17 @@
-"""Specs (SPEC.md §2A): construction, frozen-ness, identity, vocabularies, sugar."""
+"""Specs (SPEC.md §2A): construction, frozen-ness, identity, vocabularies, sugar.
+
+One vocabulary a spec speaks is not a spec value: a plan's leaf names an
+already-sealed trajectory by REF, and that grammar lives with its resolver
+(rlstack.runner.refs). It is tested here beside the other closed grammars
+because it is the one TrajectorySource's three forms became (#59).
+"""
 
 from __future__ import annotations
 
 import unittest
-from dataclasses import FrozenInstanceError, replace
+from dataclasses import FrozenInstanceError, fields, replace
 
+from rlstack.runner.refs import parse
 from rlstack.spec.canonical import content_hash
 from rlstack.spec.specs import (
     AdapterSpec,
@@ -48,10 +55,9 @@ def example_1(bank: dict[str, AdapterSpec] | None = None) -> ExperimentSpec:
             bank=dict(BANK) if bank is None else bank,
         ),
         gen=GenSpec(envs=("math_single_turn",),
-                    tasks=("cas://3fa9c2.../math_train.jsonl",),
-
-        ),
-        plans=Plans(train="cas://plan/train", rollout="cas://plan/roll"),
+                    tasks=("cas://3fa9c2.../math_train.jsonl",)),
+        plans=Plans(train="cas://plan/train", rollout="cas://plan/roll",
+                    eval="cas://plan/eval"),
         algo=AlgoSpec(
             loss="grpo",
             post=("verifier", "grpo_advantage"),
@@ -78,7 +84,8 @@ class TestConstruction(unittest.TestCase):
         self.assertEqual(self.exp.policy.base, "Qwen/Qwen3-8B")
         self.assertEqual(self.exp.policy.bank["attn"].init["r"], 16)
         self.assertEqual(self.exp.algo.optim.overrides["head"]["lr"], 3e-6)
-        self.assertEqual(self.exp.algo.schedule.trajectories_per_wave, 512)
+        self.assertEqual(self.exp.algo.schedule.microbatch_tokens, 16384)
+        self.assertEqual(self.exp.plans.train, "cas://plan/train")
         self.assertIsNone(self.exp.init)
         self.assertEqual(self.exp.tier, "lab")
 
@@ -123,7 +130,7 @@ class TestFrozen(unittest.TestCase):
         for obj, field_name, value in [
             (exp, "seeds", Seeds(master=0)),
             (exp.policy, "base", "other"),
-            (exp.algo.schedule, "group_size", 1),
+            (exp.algo.schedule, "microbatch_tokens", 1),
             (exp.gpu_config.groups[0], "sharing", "sleep"),
         ]:
             with self.assertRaises(FrozenInstanceError):
@@ -153,14 +160,33 @@ class TestIdentity(unittest.TestCase):
 
 
 class TestVocabularies(unittest.TestCase):
-    def test_rollout_source_accepts_the_three_forms(self) -> None:
-        for source in ("live", "store://run/waves", "cas://3fa9/tasks.jsonl"):
-            self.assertEqual(TrajectorySource(source).source, source)
+    def test_a_ref_accepts_the_three_locations(self) -> None:
+        """Where an already-sealed trajectory lives — the vocabulary a plan's
+        Replay leaf speaks (runner/refs.py), and the one TrajectorySource's
+        "live" / "store://" / "cas://" grammar became when live/replay/static
+        stopped being kinds of RUN and became kinds of LEAF (#59). Three
+        locations, plus an optional `#index` picking one row out of a wave."""
+        for ref, location, index in (
+            ("self://rollouts/3", "self://rollouts/3", None),
+            ("self://rollouts/3#2", "self://rollouts/3", 2),
+            ("store://a1b2c3/waves/7#0", "store://a1b2c3/waves/7", 0),
+            ("cas://3fa9/anchors.jsonl#41", "cas://3fa9/anchors.jsonl", 41),
+        ):
+            with self.subTest(ref=ref):
+                parsed = parse(ref)
+                self.assertEqual((parsed.location, parsed.index),
+                                 (location, index))
+        # and only this run's own rollouts may still answer "not yet"
+        self.assertTrue(parse("self://rollouts/3#2").pending_allowed)
+        self.assertFalse(parse("store://a1b2c3/waves/7#0").pending_allowed)
 
-    def test_rollout_source_rejects_anything_else(self) -> None:
-        for source in ("s3://bucket/x", "/tmp/rollouts", "", "LIVE"):
-            with self.assertRaises(ValueError):
-                TrajectorySource(source)
+    def test_a_ref_rejects_anything_else(self) -> None:
+        """An unknown location, and a row index that is not a row number."""
+        for ref in ("live", "s3://bucket/x", "/tmp/rollouts", "", "SELF://x",
+                    "self://rollouts/3#last"):
+            with self.subTest(ref=ref):
+                with self.assertRaises(ValueError):   # PlanError is one
+                    parse(ref)
 
     def test_sharing_vocabulary(self) -> None:
         group = GpuGroup(gpus(n=1), (learner(),), sharing="sleep")
@@ -192,15 +218,33 @@ class TestDefaults(unittest.TestCase):
         s = SamplingSpec()
         self.assertEqual((s.temperature, s.top_p, s.max_tokens), (1.0, 1.0, 1024))
 
+    def test_plans(self) -> None:
+        """`train` is mandatory — its LENGTH is the run's length. The other two
+        are absent when a run makes nothing (every train leaf is sealed
+        elsewhere) or measures nothing."""
+        p = Plans(train="cas://plan/train")
+        self.assertEqual((p.rollout, p.eval), (None, None))
+
     def test_eval_spec(self) -> None:
+        """Eval keeps only when it runs, what scores it, and where the traffic
+        goes: `tasks`, `env` and `n_samples` left with the SHAPE (#59), which
+        is plans.eval — one wave per eval point, held out leaf by leaf."""
         e = EvalSpec()
-        self.assertEqual((e.every, e.env, e.post, e.n_samples, e.pool),
-                         (10, None, (), 1, "main"))
+        self.assertEqual((e.every, e.post, e.pool), (10, (), "main"))
+        self.assertEqual([f.name for f in fields(EvalSpec)],
+                         ["every", "post", "pool"])
 
     def test_schedule(self) -> None:
+        """Schedule has exactly TWO fields, because the plan states the rest:
+        group_size, trajectories_per_wave and n_updates are the plan's by
+        construction, and epochs_per_wave left with the invariant it violated —
+        one wave is one gradient update. What remains is one engineering knob
+        (how a wave's compute is chunked) and one statistical one (how stale a
+        behavior policy the trainer tolerates)."""
         s = Schedule()
-        self.assertEqual((s.epochs_per_wave, s.microbatch_tokens, s.max_policy_lag),
-                         (1, 16384, 0))
+        self.assertEqual((s.microbatch_tokens, s.max_policy_lag), (16384, 0))
+        self.assertEqual([f.name for f in fields(Schedule)],
+                         ["microbatch_tokens", "max_policy_lag"])
 
     def test_optim_spec(self) -> None:
         o = OptimSpec("adamw", lr=1e-5)

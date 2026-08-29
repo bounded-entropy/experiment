@@ -142,12 +142,14 @@ class TestUnknownNames(unittest.TestCase):
         self.assertIn("unknown-post", codes(spec))
 
     def test_unknown_env(self) -> None:
-        spec = clean_spec(gen=replace(clean_spec().gen, env="nope"))
+        spec = clean_spec(gen=replace(clean_spec().gen, envs=("nope",)))
         self.assertIn("unknown-env", codes(spec))
 
-    def test_unknown_eval_env(self) -> None:
+    def test_eval_without_a_plan(self) -> None:
+        # eval's SHAPE is its plan (#59): declaring eval without one measures
+        # nothing, and silence would read as a passing run
         spec = clean_spec(eval=EvalSpec(), plans=Plans(train="cas://p/t"))
-        self.assertIn("unknown-env", codes(spec))
+        self.assertIn("eval-without-plan", codes(spec))
 
     def test_unknown_eval_post(self) -> None:
         spec = clean_spec(eval=EvalSpec(post=("nope",)))
@@ -213,9 +215,11 @@ class TestDeclarationWiring(unittest.TestCase):
     def test_eval_pipeline_is_checked_independently(self) -> None:
         # the same processors reused in eval are fine; a broken EVAL pipeline
         # is flagged even when algo.post is clean
-        clean = clean_spec(eval=EvalSpec(post=("verifier",)))
+        clean = clean_spec(eval=EvalSpec(post=("verifier",)),
+                           plans=Plans(train="cas://p/t", eval="cas://p/e"))
         self.assertEqual(validate(clean, SCHEMA), [])
-        broken = clean_spec(eval=EvalSpec(post=("grpo_advantage",)))
+        broken = clean_spec(eval=EvalSpec(post=("grpo_advantage",)),
+                            plans=Plans(train="cas://p/t", eval="cas://p/e"))
         self.assertEqual(codes(broken), {"post-unwired"})
 
 
@@ -371,27 +375,25 @@ class TestTopology(unittest.TestCase):
         self.assertEqual(codes(spec), {"main-pool-missing"})
 
     def test_eval_pool_missing(self) -> None:
-        spec = clean_spec(eval=EvalSpec(pool="evalpool"))
+        spec = clean_spec(eval=EvalSpec(pool="evalpool"),
+                          plans=Plans(train="cas://p/t", eval="cas://p/e"))
         self.assertEqual(codes(spec), {"eval-pool-missing"})
 
 
 class TestCoherence(unittest.TestCase):
-    def test_live_without_gen(self) -> None:
+    def test_rollout_plan_without_gen(self) -> None:
+        # a rollout plan samples; gen is what declares the environments it may
+        # run and the task sets it may draw from
         spec = clean_spec(gen=None)
-        self.assertEqual(codes(spec), {"live-without-gen"})
+        self.assertEqual(codes(spec), {"rollout-without-gen"})
 
     def test_store_source_without_gen_is_fine(self) -> None:
         spec = clean_spec(gen=None, plans=Plans(train="cas://plan/train"))
         self.assertEqual(validate(spec, SCHEMA), [])
 
-    def test_eval_train_overlap(self) -> None:
-        spec = clean_spec(eval=EvalSpec(), plans=Plans(train="cas://p/t"))
-        self.assertEqual(codes(spec), {"eval-train-overlap"})
-
     def test_bad_schedule_non_positive_count(self) -> None:
-        laggy = replace(clean_spec().algo,
-                        schedule=Schedule())
-        self.assertEqual(codes(clean_spec(algo=laggy)), {"bad-schedule"})
+        bad = replace(clean_spec().algo, schedule=Schedule(microbatch_tokens=0))
+        self.assertEqual(codes(clean_spec(algo=bad)), {"bad-schedule"})
 
     def test_bad_schedule_negative_lag(self) -> None:
         laggy = replace(clean_spec().algo,
@@ -418,7 +420,7 @@ class TestSpecError(unittest.TestCase):
         broken = clean_spec(
             algo=AlgoSpec(loss="nope", post=("also_nope",),
                           optim=OptimSpec("adamw", lr=1e-5),
-                          schedule=Schedule()),
+                          schedule=Schedule(microbatch_tokens=0)),
             gpu_config=GpuConfig(groups=()),
         )
         with self.assertRaises(SpecError) as caught:

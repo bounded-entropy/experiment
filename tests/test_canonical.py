@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 import math
 import unittest
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import Enum, IntEnum
 from types import MappingProxyType
 
@@ -61,9 +61,7 @@ def _small_spec() -> ExperimentSpec:
             bank={"pi": lora("layers.*.mlp.*", r=16)},
         ),
         gen=GenSpec(envs=("math_single_turn",),
-                    tasks=("cas://abc/train.jsonl",),
-
-        ),
+                    tasks=("cas://abc/train.jsonl",)),
         plans=Plans(train="cas://plan/train", rollout="cas://plan/roll"),
         algo=AlgoSpec(
             loss="grpo",
@@ -90,13 +88,15 @@ class TestCanonicalJsonShape(unittest.TestCase):
         )
 
     def test_golden_nested_dataclass_and_tuple(self) -> None:
+        # gen DECLARES: both envs and tasks are tuples, and a tuple canonicalizes
+        # as a json array in declaration order (never sorted — order is content).
         self.assertEqual(
             canonical_json(GenSpec(envs=("math_single_turn",),
-                    tasks=("cas://abc/train.jsonl",),
+                                   tasks=("cas://abc/train.jsonl",),
                                    sampling=SamplingSpec(top_p=0.9))),
-            '{"__type__":"GenSpec","env":"math_single_turn",'
+            '{"__type__":"GenSpec","envs":["math_single_turn"],'
             '"sampling":{"__type__":"SamplingSpec","max_tokens":1024,'
-            '"temperature":1.0,"top_p":0.9},"tasks":"cas://abc/train.jsonl"}',
+            '"temperature":1.0,"top_p":0.9},"tasks":["cas://abc/train.jsonl"]}',
         )
 
     def test_golden_full_small_spec(self) -> None:
@@ -109,24 +109,34 @@ class TestCanonicalJsonShape(unittest.TestCase):
             '"optim":{"__type__":"OptimSpec","betas":[0.9,0.95],"lr":1e-05,'
             '"name":"adamw","overrides":{},"weight_decay":0.0},'
             '"post":["verifier","grpo_advantage"],'
-            '"schedule":{"__type__":"Schedule","epochs_per_wave":1,"group_size":8,'
-            '"max_policy_lag":0,"microbatch_tokens":16384,"n_updates":10,'
-            '"trajectories_per_wave":64}},"eval":null,'
-            '"gen":{"__type__":"GenSpec","env":"math_single_turn",'
+            '"schedule":{"__type__":"Schedule","max_policy_lag":0,'
+            '"microbatch_tokens":16384}},"eval":null,'
+            '"gen":{"__type__":"GenSpec","envs":["math_single_turn"],'
             '"sampling":{"__type__":"SamplingSpec",'
             '"max_tokens":1024,"temperature":1.0,"top_p":1.0},'
-            '"tasks":"cas://abc/train.jsonl"},'
+            '"tasks":["cas://abc/train.jsonl"]},'
             '"gpu_config":{"__type__":"GpuConfig","groups":[{"__type__":"GpuGroup",'
             '"gpus":{"__type__":"GpuSet","ids":null,"n":1,"nodes":1},'
             '"members":[{"__type__":"PoolMember","base":null,"fraction":null,'
             '"n":1,"name":"main","tp":1},{"__type__":"LearnerMember",'
             '"fraction":null,"fsdp":1}],"sharing":"concurrent"}]},"init":null,'
+            '"plans":{"__type__":"Plans","eval":null,'
+            '"rollout":"cas://plan/roll","train":"cas://plan/train"},'
             '"policy":{"__type__":"PolicySpec","bank":{"pi":{"__type__":'
             '"AdapterSpec","adapter_type":"lora","init":{"r":16,"tie":false},'
             '"site":"layers.*.mlp.*","trainable":true}},"base":"Qwen/Qwen3-1.7B"},'
-            '"seeds":{"__type__":"Seeds","master":0},"tier":"lab",'
-            '"trajectories":{"__type__":"TrajectorySource","source":"live"}}',
+            '"seeds":{"__type__":"Seeds","master":0},"tier":"lab"}',
         )
+
+    def test_the_plans_are_in_the_identity_by_reference(self) -> None:
+        """A plan hashes in as its cas uri — the sha IS the plan's content, so
+        naming a different plan is a different experiment without the spec
+        having to carry the waves (#59)."""
+        other = replace(_small_spec(),
+                        plans=Plans(train="cas://plan/other",
+                                    rollout="cas://plan/roll"))
+        self.assertNotEqual(content_hash(_small_spec()), content_hash(other))
+        self.assertIn('"train":"cas://plan/other"', canonical_json(other))
 
     def test_type_tag_separates_structurally_identical_classes(self) -> None:
         self.assertNotEqual(canonical_json(_Pair(1, "x")), canonical_json(_OtherPair(1, "x")))

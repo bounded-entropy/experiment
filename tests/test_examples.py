@@ -8,6 +8,7 @@ membrane by hand: fill → seal → advantage → flatten → pack.
 
 from __future__ import annotations
 
+import hashlib
 import unittest
 from dataclasses import replace
 from typing import Any
@@ -22,11 +23,14 @@ from rlstack import (
     GpuConfig,
     GpuGroup,
     Group,
+    GroupPlan,
     Message,
     OptimSpec,
     PolicySpec,
     Role,
     Plans,
+    RunPlan,
+    Sample,
     Schedule,
     PostProcessor,
     Rollout,
@@ -35,10 +39,13 @@ from rlstack import (
     Task,
     Turn,
     Wave,
+    WavePlan,
+    WaveRef,
     attn_bias,
     broadcast,
     canonical_json,
     code_hashes,
+    encode,
     pool,
     environment,
     flatten,
@@ -62,6 +69,8 @@ SCHEMA_35B = fake_qwen_schema(32, base="Qwen/Qwen3.5-35B-A3B")
 SCHEMA_17B = fake_qwen_schema(32, base="Qwen/Qwen3-1.7B")
 TASKS = "cas://3fa9c2/math_train.jsonl"
 HELD_OUT = "cas://8c31f0/gsm_heldout.jsonl"
+HELD_OUT_IDS = tuple(f"gsm-{i:04d}" for i in range(4))   # ids inside HELD_OUT
+UPDATES = 30
 
 
 # --- Example 4's registrations. math_single_turn and verifier are REAL
@@ -86,6 +95,58 @@ class ToolUse(Environment):
 
 
 # --- Example 1 — a basic LoRA experiment, end to end -------------------------
+#
+# §3 wrote this run's shape as schedule knobs: group_size=4,
+# trajectories_per_wave=16, n_updates=30, eval n_samples=2. Those knobs are
+# gone (#59) — a run's shape IS its plan, so the same numbers are written
+# below as data and the spec names each plan by the sha of its bytes.
+
+def cas(plan: RunPlan) -> str:
+    """The uri a store returns for a plan's bytes. Content addressing is what
+    lets a spec name a plan before anyone writes it — and what makes a changed
+    plan a different experiment without anyone saying so (I3)."""
+    return f"cas://{hashlib.sha256(encode(plan)).hexdigest()}"
+
+
+def group_of_four(task: str, env: str) -> GroupPlan:
+    """One group: four samples of ONE task under one environment — GRPO's
+    baseline scope, assigned here rather than derived from task identity."""
+    return GroupPlan(task, tuple(Sample(task, env) for _ in range(4)))
+
+
+def rollout_plan(env: str) -> RunPlan:
+    """What the Generator MAKES: thirty waves of four groups of four — §3's
+    "wave of 16", written out. WHICH task runs under WHICH environment is the
+    plan's business; gen only declares which are nameable."""
+    return RunPlan(tuple(
+        WavePlan(tuple(group_of_four(f"math-{4 * u + g:04d}", env)
+                       for g in range(4)))
+        for u in range(UPDATES)))
+
+
+def train_plan() -> RunPlan:
+    """What the Trainer TAKES: update u trains on rollout u, whole — the
+    on-policy pairing, one WaveRef instead of sixteen restated leaves. One
+    wave is one gradient update, so this plan's LENGTH is the run's length."""
+    return RunPlan(tuple(WaveRef(f"self://rollouts/{u}")
+                         for u in range(1, UPDATES + 1)))
+
+
+def eval_plan(env: str) -> RunPlan:
+    """What the Evaluator MEASURES: one wave per eval point, two samples of
+    each held-out task. Held-out-ness is a property of the PLANS now — no id
+    an eval wave names is one a rollout wave sampled."""
+    return RunPlan(tuple(
+        WavePlan(tuple(GroupPlan(task, (Sample(task, env), Sample(task, env)))
+                       for task in HELD_OUT_IDS))
+        for _ in range(UPDATES // 10)))
+
+
+def plans_for(env: str) -> Plans:
+    """The three plans of a run that makes, takes, and measures."""
+    return Plans(train=cas(train_plan()), rollout=cas(rollout_plan(env)),
+                 eval=cas(eval_plan(env)))
+
 
 def example_1() -> ExperimentSpec:
     return ExperimentSpec(
@@ -97,8 +158,10 @@ def example_1() -> ExperimentSpec:
                 "head": lora(site="layers.28-31.self_attn.o_proj", r=8),
             },
         ),
-        gen=GenSpec(envs=("math_single_turn",), tasks=(TASKS,)),
-        plans=Plans(train="cas://plan/train", rollout="cas://plan/roll"),
+        # both task sets are DECLARED here; the firewall between them is the
+        # plans', which is why eval no longer carries a task file of its own
+        gen=GenSpec(envs=("math_single_turn",), tasks=(TASKS, HELD_OUT)),
+        plans=plans_for("math_single_turn"),
         algo=AlgoSpec(
             loss="grpo",
             post=("verifier", "grpo_advantage"),
@@ -118,6 +181,15 @@ def example_1() -> ExperimentSpec:
 class TestExample1BasicLora(unittest.TestCase):
     def test_validates_clean(self) -> None:
         validate_or_raise(example_1(), SCHEMA)
+
+    def test_the_plan_states_the_shape_the_schedule_used_to(self) -> None:
+        """§3's narrative — "a wave of 16 (4 groups of 4)", thirty updates —
+        read off the plan, which is where those numbers live now."""
+        wave = rollout_plan("math_single_turn").wave(1)
+        self.assertEqual([len(group.leaves) for group in wave.groups],
+                         [4, 4, 4, 4])
+        self.assertEqual(len(train_plan()), UPDATES)   # the run's length IS this
+        self.assertEqual(train_plan().wave(1), WaveRef("self://rollouts/1"))
 
     def test_run_id_is_computed_never_typed(self) -> None:
         spec = example_1()
@@ -262,7 +334,10 @@ class TestExample5MultiNode(unittest.TestCase):
             example_1(),
             policy=PolicySpec(base="Qwen/Qwen3.5-35B-A3B",
                               bank={"pi": lora("layers.0-31.self_attn.*", r=32)}),
-            gen=GenSpec(envs=("tool_use",), tasks=(TASKS,)),
+            # a leaf names its environment, so a run under a different env is a
+            # different plan — the declaration and the plan move together
+            gen=replace(example_1().gen, envs=("tool_use",)),
+            plans=plans_for("tool_use"),
             algo=replace(example_1().algo,
                          schedule=Schedule(max_policy_lag=1)),
             gpu_config=GpuConfig(groups=(
@@ -285,7 +360,9 @@ class TestExample6Replicates(unittest.TestCase):
             example_1(),
             policy=PolicySpec(base="Qwen/Qwen3-1.7B",
                               bank={"pi": lora("layers.0-31.mlp.*", r=16)}),
+            # no eval, and so no eval plan: measurement is a plan, not a flag
             eval=None,
+            plans=replace(example_1().plans, eval=None),
             gpu_config=GpuConfig(groups=(
                 GpuGroup(gpus(ids=("0",)),
                       (pool("main", n=2, fraction=0.30), learner(fraction=0.25))),
