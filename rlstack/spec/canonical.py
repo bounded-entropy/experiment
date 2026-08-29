@@ -101,3 +101,8 @@ def run_id(spec: object, code_hashes: Mapping[str, str], data_fingerprint: str) 
     return content_hash(
         {"spec": spec, "code": code_hashes, "data": data_fingerprint}
     )[:12]
+
+# The tag _canonicalize stamps on every dataclass, exported for the wire's
+# decoder (runner/remote.py) — canonical.py itself stays a pure-value module
+# and never learns the spec classes' names.
+TYPE_KEY = _TYPE_KEY

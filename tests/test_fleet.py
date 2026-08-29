@@ -29,8 +29,8 @@ from dataclasses import replace
 from common import arith_spec, arith_store
 from rlstack import (
     Acquire, Carve, FakeEngine, FakeLearner, Fleet, FleetError, GpuConfig,
-    GpuGroup, Host, Join, Metal, Partition, Regime, Seeds, demands_of,
-    fake_qwen_schema, fraction_for_gb, gpus, learner, pool,
+    GpuGroup, Host, Join, Metal, Partition, Regime, Seeds, Tenancy,
+    demands_of, fake_qwen_schema, fraction_for_gb, gpus, learner, pool,
 )
 from rlstack.observe import render_hosts
 
@@ -103,6 +103,27 @@ class FleetTest(unittest.TestCase):
         wants the tp-2 judge worker contacts that host — no new metal."""
         fleet = self.fleet(devices=4)
         fleet.apply(fleet.place(self.judged_spec()))
+        again = fleet.place(self.judged_spec(seeds=Seeds(master=99)))
+        self.assertTrue(all(isinstance(s, Join) for s in again.steps))
+
+    def test_an_occupied_solo_host_is_skipped_by_the_join_rung(self) -> None:
+        """Soloness is a birth fact, so it belongs to PLACEMENT: the ladder
+        falls through to carve exactly as it would for a host that lacks the
+        capability, rather than offering a join the host would then refuse."""
+        fleet = self.fleet(devices=8)          # residual left to carve into
+        fleet.apply(fleet.place(self.judged_spec()))
+        for host in fleet.hosts.values():
+            host.solo = True
+            host.roster["some-other-run"] = Tenancy("some-other-run", pools={})
+
+        again = fleet.place(self.judged_spec(seeds=Seeds(master=99)))
+        self.assertTrue(all(isinstance(s, Carve) for s in again.steps))
+
+    def test_a_free_solo_host_is_joined_like_any_other(self) -> None:
+        fleet = self.fleet(devices=4)
+        fleet.apply(fleet.place(self.judged_spec()))
+        for host in fleet.hosts.values():
+            host.solo = True                      # solo, but nothing running
         again = fleet.place(self.judged_spec(seeds=Seeds(master=99)))
         self.assertTrue(all(isinstance(s, Join) for s in again.steps))
         self.assertEqual(len(fleet.hosts), 3)         # nothing new carved

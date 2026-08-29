@@ -30,7 +30,7 @@ from rlstack.spec.specs import (
     AdapterSpec, AlgoSpec, BackendProfile, PoolMember, EvalSpec, ExperimentSpec,
     GenSpec, GpuConfig, GpuSet, GpuGroup, LearnerMember, OptimSpec, PolicySpec,
     Plans, SamplingSpec, Schedule, Seeds, WarmStart,
-    attn_bias, gpus, learner, lora, pool, soft_prompt,
+    attn_bias, gpus, learner, lora, plora, pool, soft_prompt,
 )
 from rlstack.registry import (
     ADAPTER_TYPES, ENVS, LOSSES, POST,
@@ -77,7 +77,7 @@ from rlstack.runner.refs import RefReader
 from rlstack.runner.post import run_pipeline
 from rlstack.runner.signals import RunSignals
 from rlstack.runner.arbiter import GpuArbiter
-from rlstack.runner.daemons import Daemon, Evaluator, Generator, Trainer
+from rlstack.runner.daemons import Daemon, Evaluator, Generator, Scorer, Trainer
 from rlstack.runner.host import (
     Host, HostError, Partition, Regime, Tenancy,
 )

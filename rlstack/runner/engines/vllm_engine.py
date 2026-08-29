@@ -48,7 +48,8 @@ from rlstack.spec.specs import SamplingSpec
 class VllmEngine:
     def __init__(self, base: str, *, gpu_memory_utilization: float = 0.45,
                  max_model_len: int = 1024, max_bundles: int = 8,
-                 max_rank: int = 32, enforce_eager: bool = True,
+                 max_rank: int = 32, max_members: int = 0,
+                 cas_get=None, enforce_eager: bool = True,
                  tp: int = 1, serves: Sequence[str] = ("lora",),
                  enable_sleep_mode: bool = False) -> None:
         from transformers import AutoConfig, AutoTokenizer
@@ -64,14 +65,18 @@ class VllmEngine:
         self._tokenizer = AutoTokenizer.from_pretrained(base)
         self._config = AutoConfig.from_pretrained(base)
         self._workdir = Path(tempfile.mkdtemp(prefix="rlstack-bundles-"))
-        # max_bundles / max_rank are plain capacity, spelled the way
-        # ServingBuild spells them: how many bundles' state may be resident and
-        # the widest delta rank served. Only the adapter type that SPENDS them
-        # turns them into an engine arg (lora_vllm names vLLM's own max_loras /
-        # max_lora_rank), so no mechanism-flavored word survives in this file.
+        # max_bundles / max_rank / max_members are plain capacity, spelled the
+        # way ServingBuild spells them: how many bundles' state may be resident,
+        # the widest delta rank served, and the widest ENSEMBLE one bundle may
+        # be served as. Only the adapter type that SPENDS them turns them into
+        # an engine arg (lora_vllm names vLLM's own max_loras / max_lora_rank),
+        # so no mechanism-flavored word survives in this file. `cas_get` is the
+        # same kind of build fact: how a lowering resolves an address its
+        # payload carried, handed in by the deploy that owns the store.
         self._build = ServingBuild(base=base, config=self._config,
                                    workdir=self._workdir,
-                                   max_bundles=max_bundles, max_rank=max_rank)
+                                   max_bundles=max_bundles, max_rank=max_rank,
+                                   max_members=max_members, cas=cas_get)
         self._lowerings = self._serving_adapter_types()
         self._engine_args = dict(
             model=base, max_model_len=max_model_len,
@@ -226,7 +231,7 @@ class VllmEngine:
         self._request_count += 1
         request_id = f"rlstack-{self._request_count}-{seed}"
         with self._residency.pinned(bundle_id):
-            levers = self._levers_for(prompt_ids, bundle_id)
+            levers = self._levers_for(prompt_ids, bundle_id, seed)
             # the prefill is known BEFORE the request leaves, and the clock for
             # time-to-first-token starts on the same line
             self.meter.opened_request(len(prompt_ids))
@@ -254,7 +259,10 @@ class VllmEngine:
                 emitted += len(new_ids)
                 text_len = len(completion.text)
                 final = completion
-            yield _finish_event(final)
+            # the merged levers' recorded facts leave with the stream's last
+            # event: what the bundle's adapter types DREW for this request is
+            # sampling-time truth, sealed into Turn.turn_extras (I6)
+            yield _finish_event(final, levers.turn_extras)
 
     async def score_tokens(self, messages: Sequence[Message],
                            token_ids: Sequence[int],
@@ -279,7 +287,10 @@ class VllmEngine:
         self._request_count += 1
         request_id = f"rlstack-score-{self._request_count}"
         with self._residency.pinned(bundle_id):
-            levers = self._levers_for(full_ids, bundle_id)
+            # score traffic is SEEDLESS by contract — it draws nothing and must
+            # be deterministic, so an adapter type that chooses per request is
+            # told there is no seed rather than handed one
+            levers = self._levers_for(full_ids, bundle_id, None)
             # one prefill of known length, no decode loop: it costs the metal a
             # prefill and the window says so
             self.meter.opened_request(len(full_ids))
@@ -357,7 +368,8 @@ class VllmEngine:
 
     # ---- one unit of work ---------------------------------------------------
 
-    def _levers_for(self, prompt_ids: list[int], bundle_id: str) -> Levers:
+    def _levers_for(self, prompt_ids: list[int], bundle_id: str,
+                    seed: int | None) -> Levers:
         """Every attached adapter type's apply(), merged into ONE request —
         where a bundle becomes USED (I8).
 
@@ -366,10 +378,14 @@ class VllmEngine:
         is unambiguous because add_bundle refused any bundle whose adapter types
         claim the same lever. Nothing attached: the raw token ids, as if no bank
         existed.
+
+        The request's seed travels with it because an adapter type may have a
+        per-request CHOICE to make; None says this is score traffic, which is
+        seedless and deterministic by contract.
         """
         from vllm import TokensPrompt
 
-        request = Request(token_ids=tuple(prompt_ids))
+        request = Request(token_ids=tuple(prompt_ids), seed=seed)
         levers = Levers(prompt=TokensPrompt(prompt_token_ids=prompt_ids))
         for adapter_type, attached in self._residency.attached(bundle_id).items():
             levers = levers.merged_with(
@@ -385,11 +401,15 @@ class VllmEngine:
                    in self._residency.attached(bundle_id).items())
 
 
-def _finish_event(completion) -> FinishEvent:
+def _finish_event(completion, turn_extras: Mapping[str, object]) -> FinishEvent:
+    """Why generation stopped, plus whatever this request's adapter types
+    recorded about it — one terminal event carries both."""
+    extras = dict(turn_extras)
     if completion is None:
-        return FinishEvent("length")
+        return FinishEvent("length", turn_extras=extras)
     if completion.finish_reason == "length":
-        return FinishEvent("length")
+        return FinishEvent("length", turn_extras=extras)
     if isinstance(completion.stop_reason, str):
-        return FinishEvent("stop", stop_hit=completion.stop_reason)
-    return FinishEvent("eos")
+        return FinishEvent("stop", stop_hit=completion.stop_reason,
+                           turn_extras=extras)
+    return FinishEvent("eos", turn_extras=extras)

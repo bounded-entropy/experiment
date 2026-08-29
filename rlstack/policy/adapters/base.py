@@ -17,6 +17,7 @@ training-time TENSORS, recomputed by each forward.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import StrEnum
 from typing import TYPE_CHECKING, Any
@@ -53,9 +54,22 @@ class AdapterType:
     instance for Phase-0 predicate calls."""
 
     engine_plugin: str | None = None          # module the engine image must carry
-    serving: Mechanism | None = None          # None: trainer-only, never served
-    provides: frozenset[str] = frozenset()    # PolicyOutputs fields the replay adds
     records: tuple[str, ...] = ()             # per-token columns the rollout writes
+    serving: Mechanism | None = None          # None: trainer-only, never served
+
+    provides: frozenset[str] = frozenset()
+    """Training-forward tensors this adapter type computes, by name.
+
+    NOT ONLY THE LOSS-INPUT CHANNEL. A declared provide is emitted per update
+    into the ledger's train block and described in the run's own
+    dictionary.json (spec/flow.py gives each one a forward node AND a
+    per-update stat twin), so an adapter type should provide everything a
+    reader of the run would want to WATCH — a posterior's scale, a gate's norm,
+    whatever internal state explains the adapter's behavior — and not merely
+    what some loss happens to require. Observability is free once the name is
+    declared, and a provide nothing requires is first-class: it costs one
+    recomputed tensor and buys a curve.
+    """
 
     def site_ok(self, meta: SiteMeta) -> bool:
         """Can this adapter type live at a site with this metadata? Checked at
@@ -71,6 +85,37 @@ class AdapterType:
     def params(self, sites: tuple[SiteMeta, ...], init: dict) -> Any:
         """Build the trainable parameterization for the matched sites."""
         raise NotImplementedError
+
+    def provide(self, params: Any) -> Mapping[str, Any]:
+        """The COMPUTE half of the `provides` declaration: training-forward
+        tensors, recomputed by every pass.
+
+        Called inside the routed forward, once per microbatch, and merged into
+        PolicyOutputs.provided under the declared names — which is how a loss
+        may `require` one (a latent KL, a value head's values) without the
+        runner planning any work for it (I9). Grad flows: what comes back here
+        is part of the same graph the objective backwards through. An adapter
+        type declaring nothing provides nothing.
+
+        Every returned tensor is ALSO summarized to one float for the update's
+        ledger line, by the same rule for all of them: a 0-dim tensor is its own
+        value, anything else is its mean. Return something that means something
+        under that rule — see the `provides` note above on declaring what a
+        reader should watch, not only what a loss requires.
+        """
+        return {}
+
+    def param_groups(self, params: Any) -> Mapping[str, list]:
+        """Named optimizer groups for one bank entry — how OptimSpec.overrides
+        addresses PARTS of an adapter.
+
+        The default is the whole entry under the empty name: one group, exactly
+        the optimizer this learner always built. An adapter type whose pieces
+        want different treatment (a hypernet that should decay against a
+        posterior that must not) names them here, and `entry.group` in the
+        overrides reaches one of them.
+        """
+        return {"": params.parameters()}
 
     def rollout_lowering(self, build: "ServingBuild") -> "RolloutLowering":
         """Build this adapter type's ROLLOUT lowering for one engine build

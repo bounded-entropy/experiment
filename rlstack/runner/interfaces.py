@@ -61,13 +61,20 @@ class FinishEvent:
 class TrainStats:
     """One forward_backward's rails. logprob_gap is |trainer − behavior| mean —
     the silent-off-policy alarm; the fake learner reports zeros, the torch
-    learner makes these real, the loop's handling never changes."""
+    learner makes these real, the loop's handling never changes.
+
+    `provided` is the bank's PROVIDED tensors, summarized to one float each
+    under their declared names — a declaration-keyed column family exactly like
+    postdata, not a bag: every key is some adapter type's `provides` entry, so
+    the flow graph already named it and dictionary.json already describes it.
+    The Trainer means them across an update's microbatches into the ledger."""
 
     loss: float
     mean_ratio: float
     logprob_gap: float
     grad_norm: float
     tokens: int
+    provided: Mapping[str, float] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)

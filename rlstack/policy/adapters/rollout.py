@@ -18,7 +18,7 @@ type's own *_vllm.py is the compute.
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, ClassVar
@@ -42,6 +42,13 @@ class ServingBuild:
     workdir: Path              # scratch this build's lowerings may write into
     max_bundles: int           # how many bundles' state may be resident at once
     max_rank: int              # the widest delta rank this build serves
+    max_members: int = 0       # widest ENSEMBLE one bundle may be served as
+    # How this build reads a content-addressed object ("cas://<sha>" -> bytes).
+    # An adapter type whose state is too large to ride in a payload ships the
+    # ADDRESS instead and resolves it here; a build handed no reader cannot
+    # serve such an adapter type and refuses it at construction, exactly as it
+    # refuses a plugin it does not install.
+    cas: Callable[[str], bytes] | None = None
 
 
 @dataclass(frozen=True)
@@ -66,9 +73,16 @@ class Request:
     to place itself relative to them. It is deliberately NOT the assembled vLLM
     prompt: an adapter type shapes its own contribution and the bus merges, so
     no adapter type has to understand another's lever.
+
+    `seed` is the request's own seed off the episode's sequence, or None for
+    score traffic, which draws nothing and is deterministic by contract. An
+    adapter type that must CHOOSE something per request draws it from here —
+    the same seed tree the rest of the run derives from — so the choice is
+    reproducible and the seedless case is a stated branch, never a silent RNG.
     """
 
     token_ids: tuple[int, ...]
+    seed: int | None = None
 
 
 @dataclass(frozen=True)
@@ -80,22 +94,31 @@ class Levers:
     `kwargs` are the generate() keywords that select this adapter type's state
     per request. An adapter type contributes one or the other or neither, never
     a bag of untyped extras.
+
+    `turn_extras` is the RECORDING half of the same answer: the sampling-time
+    facts this adapter type's choice for this request produced, which the
+    engine folds into the FinishEvent and the seal freezes into
+    Turn.turn_extras (I6). A fact recorded here is one replay cannot re-derive
+    — the draw already happened — so it is data, exactly like the token ids.
     """
 
     prompt: Any | None = None
     kwargs: Mapping[str, Any] = field(default_factory=dict)
+    turn_extras: Mapping[str, Any] = field(default_factory=dict)
 
     def merged_with(self, other: "Levers") -> "Levers":
         """Fold one adapter type's contribution into the request so far.
 
-        A later adapter type's prompt form replaces the earlier one and its
-        keywords join — which is only ever unambiguous because add_bundle already
-        refused a bundle whose adapter types claim the same lever
-        (check_levers_compose below), so this fold never has to choose a winner.
+        A later adapter type's prompt form replaces the earlier one, and its
+        keywords and recorded facts JOIN — which is only ever unambiguous
+        because add_bundle already refused a bundle whose adapter types claim
+        the same lever (check_levers_compose below), so this fold never has to
+        choose a winner.
         """
         return Levers(
             prompt=self.prompt if other.prompt is None else other.prompt,
-            kwargs={**self.kwargs, **other.kwargs})
+            kwargs={**self.kwargs, **other.kwargs},
+            turn_extras={**self.turn_extras, **other.turn_extras})
 
 
 @dataclass(frozen=True)

@@ -20,7 +20,9 @@ import torch
 from safetensors.torch import load as st_load
 from safetensors.torch import save as st_save
 
-from rlstack.policy.adapters.replay import ReplayRows, RowPlan, row_plan
+from rlstack.policy.adapters.replay import (
+    ReplayRows, RowPlan, leaf_module, row_plan,
+)
 from rlstack.policy.siteschema import SiteMeta
 
 PEFT_PREFIX = "base_model.model."
@@ -159,15 +161,6 @@ def build(sites: tuple[SiteMeta, ...], init: dict) -> LoraState:
     return LoraState(r=r, a=a, b=b)
 
 
-def _leaf(model: torch.nn.Module, path: str) -> tuple[torch.nn.Module, str]:
-    """The (parent module, attribute) a site path addresses."""
-    parent = model
-    *walk, leaf = path.split(".")
-    for step in walk:
-        parent = getattr(parent, step)
-    return parent, leaf
-
-
 def install(model: torch.nn.Module, state: LoraState) -> None:
     """Wrap the Linear once at each path, then ADD this state to the site.
 
@@ -178,7 +171,7 @@ def install(model: torch.nn.Module, state: LoraState) -> None:
     """
     plan = row_plan(model)
     for path in state.a:
-        parent, leaf = _leaf(model, path)
+        parent, leaf = leaf_module(model, path)
         site = getattr(parent, leaf)
         if not isinstance(site, LoraSite):
             site = LoraSite(site, path, plan)
@@ -195,7 +188,7 @@ def uninstall(model: torch.nn.Module, state: LoraState) -> None:
     survives untouched (its tensors are held by reference, not copied), so
     re-install restores identical numerics."""
     for path in state.a:
-        parent, leaf = _leaf(model, path)
+        parent, leaf = leaf_module(model, path)
         site = getattr(parent, leaf)
         if not isinstance(site, LoraSite):
             raise RuntimeError(

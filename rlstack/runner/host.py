@@ -23,7 +23,7 @@ from __future__ import annotations
 import asyncio
 import subprocess
 import time
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 
 from rlstack.data.stores.base import Store
@@ -34,6 +34,7 @@ from rlstack.runner.loop import (
     RunReport, experiment_identity, run_experiment_async,
 )
 from rlstack.runner.meters import HostJournal, TrafficMeter
+from rlstack.runner.remote import spec_from_json
 from rlstack.spec.specs import ExperimentSpec, PoolMember
 
 
@@ -106,7 +107,10 @@ class Host:
                  arbiter: GpuArbiter | None = None,
                  partition: Partition | None = None,
                  regimes: tuple[Regime, ...] = (),
-                 capacity: float = 1.0, sampler=None) -> None:
+                 capacity: float = 1.0, solo: bool = False,
+                 dial: Callable[[str], Engine] | None = None,
+                 schema_for: Callable[[str], SiteSchema] | None = None,
+                 sampler=None) -> None:
         self.name = name
         self.engines = tuple(engines)
         self.learner = learner
@@ -115,6 +119,20 @@ class Host:
         self.partition = partition
         self.regimes = regimes
         self.capacity = capacity
+        # A birth fact like the partition and the regimes (I12): this host's
+        # purpose is ONE experiment at a time. Nothing about it is discovered
+        # or negotiated later — a deploy that means it says so at construction.
+        self.solo = solo
+        # Two more birth facts, both for ADOPTION — an experiment arriving
+        # over the wire instead of in-process. `dial` turns a pool ADDRESS
+        # from an adopt frame into a live Engine (a RemotePool over the
+        # venue's transport): address formats are venue (I5), so the deploy
+        # that knows them hands the resolver in. `schema_for` compiles the
+        # base's SiteSchema HERE — an adopted spec never ships a schema,
+        # because the schema must describe the checkpoint THIS metal serves.
+        self.dial = dial
+        self.schema_for = schema_for
+        self._adoptions: dict[str, asyncio.Task] = {}
         self.sampler = sampler or sample_gpu
         self.meter = TrafficMeter()
         self.roster: dict[str, Tenancy] = {}
@@ -128,6 +146,7 @@ class Host:
             "partition": partition.row() if partition is not None else None,
             "regimes": [{"name": r.name, "capability": r.capability,
                          "base": r.base, "shape": r.shape} for r in regimes],
+            "solo": self.solo,
             "store": store.describe()})
 
     # ---- birth facts, one named method per rule -----------------------------
@@ -164,6 +183,35 @@ class Host:
                     f"host {self.name!r} declares training regime "
                     f"{regime.name!r} at fsdp={regime.shape} but the learner "
                     f"handed is built fsdp={built}")
+
+    def occupied(self) -> bool:
+        """Is an experiment RUNNING on this host right now? THE one reading of
+        "has a tenant" — the roster keeps finished tenancies for the observer,
+        and a host that finished a run is free again. Both the solo refusal and
+        the fleet's join rung ask here, so the rule has one home."""
+        return any(t.status == "running" for t in self.roster.values())
+
+    def check_solo(self, run_id: str) -> None:
+        """A SOLO host serves one experiment at a time, and says no to the
+        second at SUBMIT — after the cheap spec-shaped refusals, before the
+        roster and the journal, which is where a tenancy actually begins.
+
+        The multi-tenancy invariant (I8) says tenants cannot disturb each
+        other's RESULTS; it never promised they cannot disturb each other's
+        THROUGHPUT, and a partition small enough that one tenant fills it is
+        exactly where that matters. Resubmitting the SAME run_id is a resume,
+        not a second tenancy.
+        """
+        if not self.solo:
+            return
+        others = sorted(rid for rid, t in self.roster.items()
+                        if rid != run_id and t.status == "running")
+        if others:
+            raise HostError(
+                f"host {self.name!r} was born solo: it serves ONE experiment "
+                f"at a time and {others[0]} is still running. Submit elsewhere, "
+                f"or carve a second host — the partition is the unit, not the "
+                f"queue")
 
     def _attach_regimes(self) -> None:
         """A regime-host's residents attach AT BIRTH: the partition is the
@@ -265,7 +313,7 @@ class Host:
                      store: Store | None = None,
                      max_inflight: int = 64,
                      remotes: Mapping[str, Engine] | None = None) -> RunReport:
-        """Run one experiment on this host's metal: bind, fit, attest, run.
+        """Run one experiment on this host's metal: bind, fit, solo, attest, run.
         `remotes` maps pool names served by OTHER hosts to their RemotePools —
         the runner goes to the learner's host and reaches every other
         partition over the wire — so this host binds, fits and journals only
@@ -276,6 +324,7 @@ class Host:
         self.check_fit(spec, binding, remotes=frozenset(remote_pools))
         binding |= remote_pools
         rid = experiment_identity(spec, schema)
+        self.check_solo(rid)
         self.roster[rid] = Tenancy(rid, pools={
             name: (engine.base or "*") for name, engine in sorted(binding.items())},
             store=run_store.describe())
@@ -304,6 +353,87 @@ class Host:
             "event": "detach", "t": time.time(), "run_id": rid,
             "status": "done", "updates_completed": report.updates_completed})
         return report
+
+    # ---- adopt: the submission door -----------------------------------------
+
+    async def adopt(self, spec_row: Mapping,
+                    routes: Mapping[str, str] | None = None) -> dict:
+        """Take an experiment IN OVER THE WIRE and run it as one more tenancy
+        on this host's own loop — submit, without the submitter in-process.
+
+        The frame is the spec's canonical JSON plus `routes` (pool name ->
+        ADDRESS, only for demanded pools this host does not serve — placement's
+        answer, authored by the fleet, never by hand). The schema is derived
+        HERE from this host's own `schema_for`, so identity is computed where
+        the code that will run lives (I3), and a client cannot ship a schema
+        the metal disagrees with.
+
+        The reply is ACCEPTANCE, never completion: {run_id, state} out at
+        once, the run continuing as a background task — the ledger is the
+        result channel and peeks are the door, exactly as for any run. What
+        acceptance means is only that this host can HOLD the experiment
+        (bind, fit, solo — the fail-fast custody checks); the submit gate
+        still runs at Phase 0 inside the task, and a gate refusal lands in
+        the roster and journal as a failed tenancy. Adopting a run_id this
+        host already finished is a RESUME, the same way resubmitting one is.
+        """
+        try:
+            spec = self.decode_adoption(spec_row)
+            schema = self.derive_schema(spec)
+            remotes = self.dial_routes(routes or {})
+            binding = self.bind_pools(spec, remotes=frozenset(remotes))
+            self.check_fit(spec, binding, remotes=frozenset(remotes))
+            rid = experiment_identity(spec, schema)
+            self.check_solo(rid)
+        except (HostError, TypeError, ValueError) as refusal:
+            return {"accepted": False, "error": str(refusal)}
+        live = self._adoptions.get(rid)
+        if live is not None and not live.done():
+            return {"accepted": True, "run_id": rid, "state": "running"}
+        task = asyncio.create_task(self.submit(spec, schema, remotes=remotes))
+        # a failed run already journals and rosters its failure (submit's own
+        # except path); retrieving the exception here only keeps asyncio from
+        # shouting about a result nobody awaits
+        task.add_done_callback(lambda done: done.exception())
+        self._adoptions[rid] = task
+        return {"accepted": True, "run_id": rid, "state": "adopted"}
+
+    def decode_adoption(self, spec_row: Mapping) -> ExperimentSpec:
+        """The frame's spec, decoded and TYPED: an adopt frame carries exactly
+        one ExperimentSpec, and anything else is refused before it can reach
+        identity."""
+        spec = spec_from_json(spec_row)
+        if not isinstance(spec, ExperimentSpec):
+            raise TypeError(
+                f"adopt expects an ExperimentSpec's canonical form, decoded "
+                f"{type(spec).__name__}")
+        return spec
+
+    def derive_schema(self, spec: ExperimentSpec) -> SiteSchema:
+        """This host's own schema for the spec's base — or the honest refusal:
+        a host born without `schema_for` cannot compute an adopted run's
+        identity, and says so at the door rather than serving a wrong one."""
+        if self.schema_for is None:
+            raise HostError(
+                f"host {self.name!r} was born with no schema_for: it cannot "
+                f"derive {spec.policy.base!r}'s site schema, so it cannot "
+                f"adopt (pass schema_for=hf_schema on metal, or the fake "
+                f"schema in tests)")
+        return self.schema_for(spec.policy.base)
+
+    def dial_routes(self, routes: Mapping[str, str]) -> dict[str, Engine]:
+        """Every route dialed into a live Engine, ONCE, at the door. An
+        address is venue vocabulary, so a host born without a dialer refuses
+        routed adoption rather than guessing what an address means."""
+        if not routes:
+            return {}
+        if self.dial is None:
+            raise HostError(
+                f"host {self.name!r} was born with no dial: it cannot resolve "
+                f"pool addresses {sorted(routes)} (pass dial= at construction "
+                f"— the deploy that owns the venue knows the address format)")
+        return {name: self.dial(address)
+                for name, address in sorted(routes.items())}
 
     # ---- observability ------------------------------------------------------
 
@@ -338,6 +468,7 @@ class Host:
             "engines": [engine.base or "*" for engine in self.engines],
             "partition": self.partition.row() if self.partition else None,
             "regimes": [regime.name for regime in self.regimes],
+            "solo": self.solo,
             "declared_load": round(self.arbiter.declared_load(), 3),
             "residency": self.arbiter.residency(),
             "tenants": {rid: {"status": t.status, "pools": t.pools,

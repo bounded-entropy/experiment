@@ -239,9 +239,17 @@ class Fleet:
     def find_join(self, unit: tuple[Demand, ...]) -> Host | None:
         """Rung one: ONE host whose regimes cover every demand in the unit.
         Coverage is capability equality — same capability, base, and shape; a
-        fraction never enters (the weights already live there)."""
+        fraction never enters (the weights already live there).
+
+        A SOLO host that is already running an experiment is skipped rather
+        than offered and then refused: soloness is a birth fact, so it belongs
+        to placement, and the ladder falls through to carve exactly as it does
+        for a host that lacks the capability at all.
+        """
         for name in sorted(self.hosts):
             host = self.hosts[name]
+            if host.solo and host.occupied():
+                continue
             if all(self._covers(host, demand) for demand in unit):
                 return host
         return None

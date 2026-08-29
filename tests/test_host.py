@@ -349,6 +349,70 @@ class ShapeAndRegimeTest(unittest.TestCase):
         self.assertIn("learner-shape-mismatch", str(caught.exception))
 
 
+class SoloTest(unittest.TestCase):
+    """A SOLO host is a birth fact (I12): this partition's purpose is one
+    experiment at a time, attested at construction like the regimes, journaled
+    with them, and enforced at submit before any roster line exists."""
+
+    def setUp(self) -> None:
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.store, self.train, self.heldout = arith_store(tmp.name)
+
+    def host(self, solo: bool) -> Host:
+        return Host("solo-host", engines=(FakeEngine(),),
+                    learner=FakeLearner(), store=self.store, solo=solo)
+
+    def test_the_default_stays_multi_tenant(self) -> None:
+        host = self.host(solo=False)
+        self.assertFalse(host.solo)
+
+        async def both():
+            return await asyncio.gather(
+                host.submit(arith_spec(self.train), SCHEMA),
+                host.submit(arith_spec(self.train, seeds=Seeds(master=99)),
+                            SCHEMA))
+
+        a, b = go(both())
+        self.assertNotEqual(a.run_id, b.run_id)
+
+    def test_a_solo_host_refuses_a_second_tenancy(self) -> None:
+        host = self.host(solo=True)
+
+        async def both():
+            return await asyncio.gather(
+                host.submit(arith_spec(self.train), SCHEMA),
+                host.submit(arith_spec(self.train, seeds=Seeds(master=99)),
+                            SCHEMA))
+
+        with self.assertRaises(HostError) as caught:
+            go(both())
+        self.assertIn("born solo", str(caught.exception))
+
+    def test_a_finished_run_frees_the_host_again(self) -> None:
+        """`occupied` is about what is RUNNING: the roster keeps finished
+        tenancies for the observer, and a host that finished a run is free."""
+        host = self.host(solo=True)
+        go(host.submit(arith_spec(self.train), SCHEMA))
+        self.assertFalse(host.occupied())
+        go(host.submit(arith_spec(self.train, seeds=Seeds(master=99)), SCHEMA))
+        self.assertEqual(len(host.roster), 2)
+
+    def test_resubmitting_the_same_experiment_is_a_resume(self) -> None:
+        host = self.host(solo=True)
+        spec = arith_spec(self.train)
+        first = go(host.submit(spec, SCHEMA))
+        second = go(host.submit(spec, SCHEMA))
+        self.assertEqual(first.run_id, second.run_id)
+
+    def test_the_birth_fact_is_journaled_and_reported(self) -> None:
+        host = self.host(solo=True)
+        up = [e for e in self.store.read_host_log("solo-host")
+              if e["event"] == "host-up"]
+        self.assertTrue(up[0]["solo"])
+        self.assertTrue(host.status()["solo"])
+
+
 class StoreForTest(unittest.TestCase):
     def test_paths_and_schemes(self) -> None:
         tmp = tempfile.TemporaryDirectory()

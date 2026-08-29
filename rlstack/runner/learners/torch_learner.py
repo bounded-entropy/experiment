@@ -97,13 +97,41 @@ class TorchLearner:
             adapter_type.install_replay(self._model, params, resolved_sites[entry])
             self._claim_slot(state, resolved_sites[entry], params)
             if entry in state.trainable:
-                overrides = dict(spec.algo.optim.overrides.get(entry, {}))
-                state.optimizers[entry] = torch.optim.AdamW(
-                    params.parameters(),
-                    lr=float(overrides.get("lr", spec.algo.optim.lr)),
-                    betas=spec.algo.optim.betas,
-                    weight_decay=spec.algo.optim.weight_decay)
+                state.optimizers[entry] = self._optimizer_for(
+                    entry, params, adapter_type, spec.algo.optim)
         self._tenants[tenant] = state
+
+    def _optimizer_for(self, entry: str, params: object, adapter_type: object,
+                       optim) -> torch.optim.Optimizer:
+        """ONE AdamW per trainable entry, over the adapter type's NAMED param
+        groups — so an entry stays one optim blob in the store however many
+        groups it has.
+
+        The groups come from the adapter type (AdapterType.param_groups); the
+        settings come from OptimSpec, overridden by name. The grammar is dotted:
+        `"pi"` reaches every group of entry `pi`, `"pi.mapper"` reaches one of
+        them, and the dotted form wins where both apply — specific over general,
+        the only reading under which writing both is not a contradiction.
+        Groups are taken in sorted name order, which is what keeps a resumed
+        optimizer's state_dict addressable by the same indices.
+        """
+        groups = adapter_type.param_groups(params)
+        return torch.optim.AdamW(
+            [{"params": list(groups[name]),
+              **self._group_settings(optim, entry, name)}
+             for name in sorted(groups)],
+            lr=optim.lr, betas=optim.betas, weight_decay=optim.weight_decay)
+
+    @staticmethod
+    def _group_settings(optim, entry: str, group: str) -> dict:
+        """This group's optimizer settings: the spec's defaults, then the
+        entry-wide override, then the group's own. The default group (name "")
+        is the whole entry, so only the entry-wide form addresses it."""
+        settings: dict = {"lr": optim.lr, "weight_decay": optim.weight_decay}
+        settings.update(optim.overrides.get(entry, {}))
+        if group:
+            settings.update(optim.overrides.get(f"{entry}.{group}", {}))
+        return settings
 
     def forward_backward(self, tenant: str, batch: TokenBatch) -> TrainStats:
         state = self._tenant(tenant)
@@ -112,13 +140,37 @@ class TorchLearner:
         # forward is run again inside backward(), and a recomputed forward that
         # found no plan would be a forward with no deltas — the rows have to be
         # pinned for as long as the forward can RUN, not just until it returns
-        with row_plan(self._model).route(self._rows_of(state, len(spans))):
+        with row_plan(self._model).route(self._rows_of(state, batch, len(spans))):
             logprobs = self._batched_logprobs(batch, spans)
-            result = state.loss_fn(PolicyOutputs(logprobs=logprobs), batch)
+            provided = self._provided(state)
+            result = state.loss_fn(
+                PolicyOutputs(logprobs=logprobs, provided=provided), batch)
             result.loss.backward()
         return TrainStats(loss=float(result.loss), mean_ratio=result.mean_ratio,
                           logprob_gap=result.logprob_gap,
-                          grad_norm=self._grad_norm(state), tokens=len(batch))
+                          grad_norm=self._grad_norm(state), tokens=len(batch),
+                          provided=_summarize(provided))
+
+    def _provided(self, state: _Tenant) -> dict[str, Any]:
+        """The bank's PROVIDED tensors for this forward, merged under their
+        declared names — computed INSIDE the routed forward because they are
+        part of this pass's graph and grad flows back through them.
+
+        One owner per name, exactly as the post pipeline has one owner per
+        column: two entries providing the same string would leave a loss
+        reading whichever the bank order happened to put last, so it is refused
+        here instead.
+        """
+        provided: dict[str, Any] = {}
+        for entry in state.entries:
+            for name, value in state.adapter_types[entry].provide(
+                    state.params[entry]).items():
+                if name in provided:
+                    raise ValueError(
+                        f"two bank entries provide {name!r} to the forward — a "
+                        f"loss requiring it could not say whose it meant")
+                provided[name] = value
+        return provided
 
     def optim_step(self, tenant: str) -> None:
         state = self._tenant(tenant)
@@ -235,14 +287,22 @@ class TorchLearner:
 
     # ---- the forward --------------------------------------------------------
 
-    def _rows_of(self, state: _Tenant, rows: int) -> ReplayRows:
+    def _rows_of(self, state: _Tenant, batch: TokenBatch,
+                 rows: int) -> ReplayRows:
         """Every row of a microbatch pins the verb's tenant: ONE slot, index
         all zeros. The replay lowering is per-row either way, so a coalesced
         microbatch is this same record with more slots and a mixed index —
-        the sites need no change to serve it."""
+        the sites need no change to serve it.
+
+        The batch's per-document turn extras ride along as the rows' FACTS: the
+        rows of a padded forward ARE the documents, so row r's facts are
+        document r's. Adapter-blind by construction — this passes the mappings
+        through and never reads a key.
+        """
         return ReplayRows(slots=(state.slot,),
                           index=torch.zeros(rows, dtype=torch.long,
-                                            device=self.device))
+                                            device=self.device),
+                          facts=batch.doc_turn_extras or None)
 
     def _batched_logprobs(self, batch: TokenBatch,
                           spans: list[tuple[int, int]]) -> torch.Tensor:
@@ -271,7 +331,13 @@ class TorchLearner:
                 batch.token_ids[start:stop], dtype=torch.long,
                 device=self.device)
             attention[row, :stop - start] = 1
-        logits = self._model(input_ids=ids, attention_mask=attention).logits
+        # use_cache=False is load-bearing under checkpoint_the_blocks: a
+        # checkpointed block runs AGAIN inside backward(), and a block that
+        # appended K/V to a DynamicCache on the first pass would append a
+        # second copy on the recompute — the replay forward decodes nothing,
+        # so there is no cache to want
+        logits = self._model(input_ids=ids, attention_mask=attention,
+                             use_cache=False).logits
         given_prefix = torch.log_softmax(logits[:, :-1].float(), dim=-1)
         chosen = given_prefix.gather(2, ids[:, 1:, None])[..., 0]   # [R, W-1]
         zero = torch.zeros(1, dtype=chosen.dtype, device=self.device)
@@ -285,6 +351,19 @@ class TorchLearner:
                 if p.grad is not None:
                     total += float(p.grad.detach().pow(2).sum())
         return total ** 0.5
+
+
+def _summarize(provided: Mapping[str, Any]) -> dict[str, float]:
+    """Each provided tensor as ONE float, so it can be journaled: a scalar is
+    itself, anything else is its mean.
+
+    The summary is what makes `provides` an observability channel and not only a
+    loss-input channel — every declared name lands in the ledger per update
+    whether or not any loss requires it, for free and with no per-adapter
+    plumbing. Detached, because this number is a report, not a gradient path.
+    """
+    return {name: float(value.detach().reshape(-1).mean())
+            for name, value in provided.items()}
 
 
 def _doc_spans(batch: TokenBatch) -> list[tuple[int, int]]:

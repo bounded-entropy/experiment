@@ -76,6 +76,19 @@ export async function drawRun() {
       grid.append(card(r, "loss:" + (dict.loss ?? "?"),
                        [{label: r, color: C.rail, points: trainOf("train", r)}]));
   }
+  // the bank's declared per-update stats: kind "stat" train-phase dictionary
+  // nodes from adapter types (a latent KL, a posterior scale) — the trainer's
+  // own bookkeeping (producer "trainer") already renders with the rails
+  const adapterStats = cols.filter(c =>
+      c.phase === "train" && c.kind === "stat" &&
+      c.producer.startsWith("adapter:"));
+  if (adapterStats.length) {
+    const grid = section("adapter stats", "declared provides, per update");
+    for (const c of adapterStats)
+      grid.append(card(c.name, c.producer.replace("adapter:", ""),
+                       [{label: c.name, color: C.feed,
+                         points: trainOf("train", c.name)}]));
+  }
   const derived = data.derived || [];
   if (derived.length) {
     const grid = section("derived", "your panels.json");

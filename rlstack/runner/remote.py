@@ -33,6 +33,7 @@ from rlstack.policy.compile import Bundle
 from rlstack.policy.siteschema import SiteMeta
 from rlstack.runner.interfaces import Engine, FinishEvent, TokenEvent
 from rlstack.runner.meters import TrafficMeter
+from rlstack.spec.canonical import TYPE_KEY
 from rlstack.spec.specs import SamplingSpec
 
 if TYPE_CHECKING:
@@ -111,6 +112,87 @@ def decode_bundle(row: dict) -> Bundle:
                   adapter_types=row["adapter_types"])
 
 
+def _spec_classes() -> dict[str, type]:
+    """THE closed table of types a canonical spec tree may name.
+
+    canonical_json tags every dataclass with its class name, so decoding is
+    dispatch over this table and nothing else — an unknown tag is refused,
+    never duck-typed into whatever fits (we own both sides of the wire). The
+    decoder lives HERE with the other wire codecs because canonical.py is a
+    pure-value module: the encode side needs no class names, only the decode
+    side does, and only the wire decodes.
+    """
+    from rlstack.spec import specs
+
+    classes = (
+        specs.SamplingSpec, specs.GenSpec, specs.EvalSpec, specs.AdapterSpec,
+        specs.PolicySpec, specs.Plans, specs.OptimSpec, specs.Schedule,
+        specs.AlgoSpec, specs.GpuSet, specs.PoolMember, specs.LearnerMember,
+        specs.GpuGroup, specs.GpuConfig, specs.Seeds, specs.WarmStart,
+        specs.ExperimentSpec,
+    )
+    return {cls.__name__: cls for cls in classes}
+
+
+def _wants_tuple(hint: object) -> bool:
+    """Does this declared field type hold a tuple? JSON has only lists, so a
+    decoded list becomes a tuple exactly where the dataclass declares one —
+    including through an optional (`tuple[str, ...] | None`)."""
+    import typing
+
+    origin = typing.get_origin(hint)
+    if origin is tuple:
+        return True
+    if origin is typing.Union or type(hint).__name__ == "UnionType":
+        return any(_wants_tuple(arg) for arg in typing.get_args(hint))
+    return False
+
+
+def from_canonical(tree: object) -> object:
+    """canonical_json's typed inverse: tagged dicts become their spec
+    dataclasses (fields recursed, lists re-tupled where the field declares a
+    tuple); untagged dicts and scalars pass through — they were plain data
+    going in."""
+    if isinstance(tree, dict):
+        if TYPE_KEY in tree:
+            return _decode_dataclass(tree)
+        return {key: from_canonical(value) for key, value in tree.items()}
+    if isinstance(tree, list):
+        return [from_canonical(item) for item in tree]
+    return tree
+
+
+def _decode_dataclass(tree: dict) -> object:
+    import dataclasses
+    import typing
+
+    classes = _spec_classes()
+    tag = tree[TYPE_KEY]
+    if tag not in classes:
+        raise TypeError(
+            f"from_canonical: unknown spec type {tag!r} — the decode table "
+            f"holds {sorted(classes)}, and an untabled tag is refused rather "
+            f"than guessed at")
+    cls = classes[tag]
+    hints = typing.get_type_hints(cls)
+    kwargs = {}
+    for spec_field in dataclasses.fields(cls):
+        value = from_canonical(tree[spec_field.name])
+        if isinstance(value, list) and _wants_tuple(hints[spec_field.name]):
+            value = tuple(value)
+        kwargs[spec_field.name] = value
+    return cls(**kwargs)
+
+
+def spec_from_json(row: Mapping | str) -> object:
+    """An ExperimentSpec (or any spec value) back from its canonical form —
+    what the adoption door decodes. Roundtrip law, pinned by test:
+    spec_from_json(json.loads(canonical_json(spec))) == spec, and therefore
+    the two hash to one identity."""
+    tree = json.loads(row) if isinstance(row, str) else dict(row)
+    return from_canonical(tree)
+
+
 def encode_sites(sites: Sequence[SiteMeta]) -> list[dict]:
     return [{"name": s.name, "path": s.path, "has_weight": s.has_weight,
              "shape": list(s.shape) if s.shape is not None else None,
@@ -174,7 +256,15 @@ class HostService:
         """One admitted verb, admission included: enter the owning host's
         arbiter, run, leave. A regime-host's engines are attached at birth; a
         bare host's attach here on first remote use, at zero footprint — a
-        joiner never re-counts a fraction the partition already owns."""
+        joiner never re-counts a fraction the partition already owns.
+
+        `adopt` rides this async path but is NOT admitted: it registers a
+        tenancy whose daemons admit their own work, so the door itself
+        occupies nothing — and it is host-addressed, so it resolves no
+        engine."""
+        if verb == "adopt":
+            return await self.host.adopt(payload["spec"],
+                                         payload.get("routes", {}))
         engine = self._engine(payload["base"], payload["tp"])
         if not self.host.arbiter.is_attached(engine):
             self.host.arbiter.attach(
@@ -197,7 +287,11 @@ class HostService:
     def answer(self, verb: str, payload: dict) -> dict:
         """One admission-free verb: additive registration (add_bundle never
         disturbs traffic — the multi-tenancy invariant) and build facts
-        (reachability, tokenize), all callable from sync call sites."""
+        (reachability, tokenize), all callable from sync call sites. `status`
+        is host-addressed (the roster, the partition, the adoptions' fates)
+        and resolves no engine."""
+        if verb == "status":
+            return self.host.status()
         engine = self._engine(payload["base"], payload["tp"])
         if verb == "add_bundle":
             engine.add_bundle(decode_bundle(payload["bundle"]))
@@ -302,3 +396,27 @@ class RemotePool:
         reply = self._transport.ask("tokenize", {
             **self._address(), "text": text})
         return tuple(reply["token_ids"])
+
+
+class RemoteHost:
+    """The client end of ADOPTION: hand a standing host an experiment.
+
+    `adopt` ships the spec's canonical JSON plus placement's pool routes and
+    returns the host's acceptance — {run_id, state} or a refusal — never a
+    result: the ledger is the result channel, and `status` (the roster over
+    the wire) is how a client watches its tenancy without a second channel
+    existing. A campaign that wants to WAIT tails the run's own store."""
+
+    def __init__(self, transport: Transport) -> None:
+        self._transport = transport
+
+    async def adopt(self, spec: object,
+                    routes: Mapping[str, str] | None = None) -> dict:
+        from rlstack.spec.canonical import canonical_json
+
+        return await self._transport.call("adopt", {
+            "spec": json.loads(canonical_json(spec)),
+            "routes": dict(routes or {})})
+
+    def status(self) -> dict:
+        return self._transport.ask("status", {})

@@ -10,7 +10,8 @@ along.
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
+from typing import Any
 
 from rlstack.data.trajectory import DataError, Trajectory
 
@@ -22,6 +23,12 @@ class Flat:
     token_extras carries the per-token columns the bank's adapter types
     recorded at rollout (e.g. adapter draws); injected positions hold None in
     each column.
+
+    turn_extras is the other granularity of the same recording channel: one
+    mapping per TURN, in traj.turns order — a per-request fact (the latent a
+    probabilistic adapter drew) has no per-token column to live in, so it rides
+    beside the tokens rather than inside them. It is deliberately NOT
+    token-aligned, which is why the length rule below leaves it alone.
     """
 
     token_ids: tuple[int, ...]
@@ -30,6 +37,7 @@ class Flat:
     behavior_logprobs: tuple[float, ...]    # recorded at generation (I6); 0.0 injected
     doc_len: int
     token_extras: Mapping[str, tuple] = field(default_factory=dict)
+    turn_extras: tuple[Mapping[str, Any], ...] = ()
 
     def __post_init__(self) -> None:
         n = len(self.token_ids)
@@ -55,6 +63,10 @@ def flatten(traj: Trajectory, tokenize: Callable[[str], tuple[int, ...]]) -> Fla
     Every other message was injected by the env (system prompt, tool result,
     ...) and is tokenized here with loss_mask=0, logprob 0.0, and None in each
     extras column.
+
+    Each turn's turn_extras come across whole, in turn order: a per-request
+    fact belongs to the request, and injected messages are not requests, so
+    they contribute none.
     """
     turn_index = {id(t.message): i for i, t in enumerate(traj.turns)}
     columns = sorted({name for t in traj.turns for name in t.token_extras})
@@ -84,7 +96,8 @@ def flatten(traj: Trajectory, tokenize: Callable[[str], tuple[int, ...]]) -> Fla
                 extras[name] += (list(column) if column is not None
                                  else [None] * len(turn.token_ids))
     return Flat(tuple(ids), tuple(mask), tuple(seg), tuple(logprobs), len(ids),
-                token_extras={k: tuple(v) for k, v in extras.items()})
+                token_extras={k: tuple(v) for k, v in extras.items()},
+                turn_extras=tuple(dict(t.turn_extras) for t in traj.turns))
 
 
 def broadcast(columns: Mapping[str, Sequence],
@@ -127,6 +140,17 @@ class TokenBatch:
 
     `postdata` carries the postprocessing pipeline's columns, broadcast per token —
     a loss reads the ones it declared in `requires` (e.g. postdata["advantage"]).
+
+    `doc_turn_extras` is the per-REQUEST recording channel at microbatch scope:
+    one tuple of turn-extras mappings per document, aligned with doc_starts. The
+    rows of a padded forward ARE the documents, so this is what lets the replay
+    routing hand each row the facts its own turns recorded.
+
+    `microbatches_in_update` is how many microbatches this one belongs to.
+    ONE WAVE IS ONE GRADIENT UPDATE (#59), so a per-UPDATE quantity a loss adds
+    (a KL over parameters, which every microbatch would otherwise count again)
+    is divided by this. pack() stamps it once the split is known; a
+    hand-built batch is the degenerate single microbatch.
     """
 
     token_ids: tuple[int, ...]
@@ -136,6 +160,8 @@ class TokenBatch:
     doc_starts: tuple[int, ...]
     postdata: Mapping[str, tuple[float, ...]] = field(default_factory=dict)
     token_extras: Mapping[str, tuple] = field(default_factory=dict)
+    doc_turn_extras: tuple[tuple[Mapping[str, Any], ...], ...] = ()
+    microbatches_in_update: int = 1
 
     def __post_init__(self) -> None:
         n = len(self.token_ids)
@@ -149,6 +175,16 @@ class TokenBatch:
         bad = {k: v for k, v in lengths.items() if v != n}
         if bad:
             raise DataError(f"TokenBatch field lengths disagree with token_ids={n}: {bad}")
+        self.check_turn_extras_are_per_document()
+
+    def check_turn_extras_are_per_document(self) -> None:
+        """Per-request facts are addressed BY DOCUMENT: either the batch
+        carries one entry per doc_start or it carries none at all. A partial
+        tuple would silently give some row another row's latent."""
+        if self.doc_turn_extras and len(self.doc_turn_extras) != len(self.doc_starts):
+            raise DataError(
+                f"doc_turn_extras has {len(self.doc_turn_extras)} entries for "
+                f"{len(self.doc_starts)} documents — one per document, or none")
 
     def __len__(self) -> int:
         return len(self.token_ids)
@@ -164,6 +200,10 @@ def pack(items: Sequence[Doc], microbatch_tokens: int) -> list[TokenBatch]:
     A single document longer than microbatch_tokens gets its own oversized batch.
     Injected tokens arrive with zeroed postdata columns (broadcast) and behavior
     logprob 0.0 (flatten).
+
+    The split is only known once it is done, so every batch is STAMPED with the
+    final count afterwards: a loss adding a per-update term needs to know how
+    many times it is about to be asked (TokenBatch.microbatches_in_update).
     """
     if microbatch_tokens <= 0:
         raise DataError(f"microbatch_tokens must be positive, got {microbatch_tokens}")
@@ -184,7 +224,8 @@ def pack(items: Sequence[Doc], microbatch_tokens: int) -> list[TokenBatch]:
         used += flat.doc_len
     if current:
         batches.append(_concatenate(current))
-    return batches
+    return [replace(batch, microbatches_in_update=len(batches))
+            for batch in batches]
 
 
 def _concatenate(docs: Sequence[Doc]) -> TokenBatch:
@@ -229,4 +270,5 @@ def _concatenate(docs: Sequence[Doc]) -> TokenBatch:
         doc_starts=tuple(starts),
         postdata={k: tuple(v) for k, v in postdata_out.items()},
         token_extras={k: tuple(v) for k, v in extras.items()},
+        doc_turn_extras=tuple(flat.turn_extras for flat, _ in docs),
     )

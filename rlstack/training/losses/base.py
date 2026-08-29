@@ -19,7 +19,8 @@ it. torch is imported inside bodies (rule 7): declarations validate without it.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from collections.abc import Mapping
+from dataclasses import dataclass, field
 from typing import Any
 
 
@@ -27,9 +28,16 @@ from typing import Any
 class PolicyOutputs:
     """What the training forward produced for one microbatch, token-aligned
     with the TokenBatch: logprobs[t] is the trainer's logprob of token t
-    given its prefix (0.0 at injected positions — masked out anyway)."""
+    given its prefix (0.0 at injected positions — masked out anyway).
+
+    `provided` carries the bank's PROVIDED tensors under their declared names
+    (AdapterType.provides, computed by AdapterType.provide) — recomputed by
+    this forward, part of this graph, and NOT token-aligned: a provided tensor
+    is whatever its adapter type says it is. A loss reads only the names it
+    declared in `requires`."""
 
     logprobs: Any                 # torch.Tensor [T], grad flows through it
+    provided: Mapping[str, Any] = field(default_factory=dict)
 
 
 @dataclass

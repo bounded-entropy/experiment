@@ -33,10 +33,20 @@ class ReplayRows:
     Every Learner verb pins one tenant, so today each microbatch is the
     degenerate one-slot case; a coalesced microbatch is the same record with
     more slots and a mixed index.
+
+    `facts` is the other half of the routing: row r's RECORDED turn extras, one
+    mapping per turn of that row's document. Deltas are what a slot holds and
+    facts are what its rows carry, so a lowering whose math depends on a
+    sampling-time draw (a probabilistic latent) reads the draw from here rather
+    than re-deriving something the rollout already decided (I6). The learner
+    fills it ADAPTER-BLIND — it copies the batch's per-document mappings across
+    and never looks inside — so a new recording adapter type needs no change
+    here. None means the batch recorded nothing.
     """
 
     slots: tuple[Mapping[str, Any], ...]
     index: torch.Tensor                 # [rows], long
+    facts: tuple[tuple[Mapping[str, Any], ...], ...] | None = None
 
     def __post_init__(self) -> None:
         if not self.slots:
@@ -45,6 +55,10 @@ class ReplayRows:
             raise ValueError(
                 f"row plan reaches slot {int(self.index.max())} of "
                 f"{len(self.slots)} — rows carry installed slots only")
+        if self.facts is not None and len(self.facts) != int(self.index.shape[0]):
+            raise ValueError(
+                f"row plan carries facts for {len(self.facts)} rows but routes "
+                f"{int(self.index.shape[0])} — facts are addressed BY ROW")
 
     def uniform(self) -> Mapping[str, Any] | None:
         """The one slot every row carries, or None when the rows disagree.
@@ -93,6 +107,21 @@ class RowPlan:
                 "this replay forward carries no row plan: the learner routes "
                 "one per forward (policy.adapters.replay.row_plan)")
         return self._rows
+
+
+def leaf_module(model: Any, path: str) -> tuple[Any, str]:
+    """The (parent module, attribute name) a site path addresses.
+
+    A module-replacing replay lowering has to reach INTO the tree to swap a
+    leaf, and every one of them addresses it the same way — the site's path is
+    the base's own dotted `named_modules()` name (siteschema.SiteMeta.path), so
+    the walk belongs here beside the routing rather than once per adapter type.
+    """
+    parent = model
+    *walk, leaf = path.split(".")
+    for step in walk:
+        parent = getattr(parent, step)
+    return parent, leaf
 
 
 def row_plan(model: Any) -> RowPlan:
