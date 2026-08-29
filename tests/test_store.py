@@ -9,6 +9,7 @@ import unittest
 from pathlib import Path
 from typing import Any
 
+from rlstack.data.plan import RunPlan, WaveRef, encode, wave_count
 from rlstack.data.stores import (
     LedgerError, LocalStore, ManifestMismatch, RunHandle, Store, StoreError, bump,
 )
@@ -180,6 +181,32 @@ class WavesTest(StoreTestCase):
         with self.assertRaises(StoreError):
             run.write_wave(1, [{"a": 2}])
         self.assertEqual(run.read_wave(1), [{"a": 1}])
+
+
+class PlansTest(StoreTestCase):
+    """plans/ beside waves/: the run holds the SHAPE it ran (#59), copied in
+    verbatim, and an observer reads it without ever attaching."""
+
+    def plan(self) -> bytes:
+        return encode(RunPlan((WaveRef("self://rollouts/1"),
+                               WaveRef("self://rollouts/2"))))
+
+    def test_a_plan_is_copied_in_verbatim_and_peekable(self) -> None:
+        run = self.open()
+        run.write_plan("train", self.plan())
+        self.assertTrue(rpath(run, "plans", "train.jsonl").exists())
+        self.assertEqual(run.read_plan("train"), self.plan())   # byte for byte
+        self.assertEqual(self.store.peek_plan("run-abc", "train"), self.plan())
+        # what a progress view counts up to: one line is one wave is one update
+        self.assertEqual(wave_count(self.plan()), 2)
+        self.assert_no_tmp_files()
+
+    def test_a_kind_this_run_declared_no_plan_for(self) -> None:
+        run = self.open()
+        with self.assertRaises(FileNotFoundError):
+            run.read_plan("eval")
+        self.assertIsNone(self.store.peek_plan("run-abc", "eval"))
+        self.assertIsNone(self.store.peek_plan("no-such-run", "train"))
 
 
 class BlobTest(StoreTestCase):

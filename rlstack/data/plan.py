@@ -152,6 +152,13 @@ def encode(plan: RunPlan) -> bytes:
                    for wave in plan.waves).encode("utf-8")
 
 
+def wave_count(data: bytes) -> int:
+    """How many waves a plan's bytes describe — one line per wave, so a run's
+    LENGTH is readable without decoding a single leaf. What an observer needs
+    to say how far along a run is, now that no schedule states n_updates."""
+    return sum(1 for line in data.decode("utf-8").splitlines() if line)
+
+
 def decode(data: bytes) -> RunPlan:
     return RunPlan(tuple(_wave(json.loads(line))
                          for line in data.decode("utf-8").splitlines() if line))

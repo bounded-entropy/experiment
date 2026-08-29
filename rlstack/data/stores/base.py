@@ -249,6 +249,18 @@ class Store(ABC):
             return None
         return payload["columns"]
 
+    def peek_plan(self, run_id: str, kind: str) -> bytes | None:
+        """One of the plans the run was created with, WITHOUT attaching: the
+        run's SHAPE, copied in verbatim at creation and never rewritten, so
+        reading it is as safe as reading the ledger. This is where a run's
+        length lives (#59) — an observer counts its waves to know what the
+        committed updates are counting up to. None when the run declared no
+        plan of that kind."""
+        try:
+            return self._read(plan_key(run_id, kind))
+        except FileNotFoundError:
+            return None
+
     def peek_eval_summaries(self, run_id: str) -> list[dict[str, Any]]:
         """Every completed eval summary for a run, WITHOUT attaching —
         the observer's held-out series. Unparseable files are skipped."""

@@ -17,10 +17,10 @@ are flavortext, rendered here and consulted nowhere else.
 
 from __future__ import annotations
 
-import json
 import time
 from collections.abc import Sequence
 
+from rlstack.data.plan import wave_count
 from rlstack.data.stores.base import ANNOTATION_FIELDS, Store
 from rlstack.observe.locate import Root, rooted
 
@@ -44,15 +44,15 @@ def _events_by_host(roots: Sequence[Store | Root]) -> list[tuple[Root, str, list
 
 
 def _progress(store: Store, run_id: str) -> tuple[int, object]:
-    """(committed, target) from read-only peeks — an observer never attaches."""
+    """(committed, target) from read-only peeks — an observer never attaches.
+
+    The target is the TRAIN PLAN's length: one wave is one gradient update, so
+    a run is done when its plan is exhausted (#59). "?" for a run whose store
+    holds no train plan — a pre-#59 run, or one still being created."""
     entries = store.peek_ledger(run_id)
     committed = int(entries[-1]["update"]) if entries else 0
-    manifest = store.peek_manifest(run_id)
-    try:
-        target = json.loads(manifest["spec"])["algo"]["schedule"]["n_updates"]
-    except (TypeError, KeyError, json.JSONDecodeError):
-        target = "?"
-    return committed, target
+    plan = store.peek_plan(run_id, "train")
+    return committed, "?" if plan is None else wave_count(plan)
 
 
 # ---------------------------------------------------------------------------

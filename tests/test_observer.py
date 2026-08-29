@@ -40,9 +40,11 @@ RUN = "wave0000"
 IMPORTS = re.compile(r'from "\./([a-z_]+\.js)"')
 
 
-def manifest(n_updates: int = 2) -> dict:
-    return {"run_id": RUN,
-            "spec": json.dumps({"algo": {"schedule": {"n_updates": n_updates}}})}
+def manifest() -> dict:
+    """The minimum open_run needs. A run's LENGTH is deliberately NOT in here:
+    it is the train plan's, copied into the run dir (#59), which is what a
+    progress view counts committed updates against."""
+    return {"run_id": RUN, "spec": "{}"}
 
 
 def trajectory(task_id: str, answer: str, finish: str = "stop") -> Trajectory:

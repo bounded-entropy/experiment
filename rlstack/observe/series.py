@@ -9,8 +9,7 @@ committed bytes.
 
 from __future__ import annotations
 
-import json
-
+from rlstack.data.plan import wave_count
 from rlstack.data.stores.base import Store
 from rlstack.observe.panels import PanelError, evaluate, missing_args
 
@@ -21,11 +20,10 @@ def run_series(store: Store, run_id: str,
     manifest = store.peek_manifest(run_id)
     if manifest is None:
         return None
-    try:
-        spec = json.loads(manifest["spec"])
-        target = spec["algo"]["schedule"]["n_updates"]
-    except (KeyError, TypeError, json.JSONDecodeError):
-        target = None
+    # what the committed updates count up to: the train plan's length, since
+    # one wave is one gradient update (#59). None for a run with no plan bytes.
+    plan = store.peek_plan(run_id, "train")
+    target = wave_count(plan) if plan is not None else None
 
     entries = store.peek_ledger(run_id)
     updates = [{
