@@ -87,6 +87,10 @@ class SoftPromptRollout(RolloutLowering):
         prompt starts n later."""
         return Alignment(int(attached.shape[0]))
 
+    def detach(self, attached: torch.Tensor) -> None:
+        """The rows were precomputed into one tensor and nothing else; dropping
+        the engine's reference to it is the whole release."""
+
     def _served_dtype(self) -> Any:
         """The dtype the served weights carry — a virtual row IS an embedding
         and must arrive in the same one."""

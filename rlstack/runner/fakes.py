@@ -88,6 +88,11 @@ class FakeEngine:
         self.bundle_log.append(bundle.bundle_id)
         self._known.add(bundle.bundle_id)
 
+    def knows_bundle(self, bundle_id: str) -> bool:
+        """The fake never evicts — it has no residency to bound — so this is
+        exactly "was it ever registered here"."""
+        return bundle_id in self._known
+
     async def score_tokens(self, messages: Sequence[Message],
                            token_ids: Sequence[int],
                            bundle_id: str) -> tuple[float, ...]:

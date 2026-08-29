@@ -145,6 +145,17 @@ class Engine(Protocol):
         """Register a compiled bundle (the add_lora analog)."""
         ...
 
+    def knows_bundle(self, bundle_id: str) -> bool:
+        """Is this bundle resident on this engine right now?
+
+        Residency is not durable: a bounded pool evicts, a restarted container
+        starts empty. Neither is a failure, because a committed version is
+        re-derivable from the store — so a caller ASKS, and rebuilds on a miss
+        (runner/restore.py). The ledger says what a version is; this says only
+        whether we happen to be holding it.
+        """
+        ...
+
     def reachability(self, sites: Sequence[SiteMeta]) -> Mapping[str, Mechanism]:
         """This build's inventory: for each site, the mechanism that reaches it
         (Mechanism.NONE when nothing does). Self-reported, per build."""

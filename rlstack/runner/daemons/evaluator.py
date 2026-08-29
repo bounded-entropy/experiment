@@ -18,7 +18,7 @@ from typing import Callable
 
 from rlstack.data.stores.base import RunHandle, Store
 from rlstack.data.trajectory import Group, Task, Trajectory, Wave
-from rlstack.policy.compile import Bundle, compile_bundle
+from rlstack.policy.compile import Bundle, restore_bundle
 from rlstack.registry import ADAPTER_TYPES
 from rlstack.runner.traffic import EnginePoolClient, Routes
 from rlstack.runner.interfaces import Engine
@@ -75,20 +75,17 @@ class Evaluator(Daemon):
     # ---- pinning ------------------------------------------------------------
 
     def bundle_for(self, entry: dict) -> Bundle:
-        """Recompile the committed bundle the entry names, out of the store.
+        """The committed bundle this entry names, restored from the store.
 
-        Content addressing makes it exact — same blobs, same versions, same
-        bundle_id — and add_bundle is additive-idempotent, so re-adding costs
-        nothing. (v0 limit: a servable-but-frozen delta has no blob to read.)"""
+        Eval pins a version the run may have moved far past, so this is the
+        canonical restore caller: the id in the ledger line plus the blobs at
+        its version map, with the content-addressed id as the proof
+        (policy/compile.py). The rebuild is exact, so re-registering it is
+        additive and idempotent.
+        """
         versions = {name: int(v) for name, v in entry["versions"].items()}
-        payloads = {name: self.run.read_blob("adapters", name, versions[name])
-                    for name in self.servable}
-        bundle = compile_bundle(payloads, versions, self.servable, self.adapter_types)
-        if bundle.bundle_id != entry["bundle_id"]:
-            raise RuntimeError(
-                f"recompiled bundle {bundle.bundle_id} != committed "
-                f"{entry['bundle_id']} for update {entry['update']}")
-        return bundle
+        return restore_bundle(versions, entry["bundle_id"], self.run.read_blob,
+                              self.servable, self.adapter_types)
 
     # ---- the daemon ---------------------------------------------------------
 

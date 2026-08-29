@@ -155,6 +155,26 @@ class RolloutLowering:
         a lever that does not add positions leaves the geometry alone."""
         return Alignment()
 
+    def detach(self, attached: Any) -> None:
+        """attach's exact inverse: release everything it made resident for one
+        bundle — scratch on disk, an id, a tensor — so a BOUNDED pool can evict.
+
+        The replay side has had this since #3 (uninstall_replay); the serving
+        side did not, and that is precisely why no eviction policy could exist
+        here: nothing could release what attach created, so residency only ever
+        grew. An adapter type without detach is honestly un-evictable and says
+        so, exactly as one without uninstall_replay cannot share a multi-tenant
+        learner.
+
+        Detaching is never a loss. A bundle is a committed policy version, and
+        restore rebuilds it from the store with the content-addressed id as
+        proof it is the same one.
+        """
+        raise NotImplementedError(
+            f"{type(self).__name__} has no detach: what attach made resident "
+            f"cannot be released, so a pool serving this adapter type can only "
+            f"grow")
+
 
 def check_levers_compose(bundle_id: str,
                          lowerings: Sequence[RolloutLowering]) -> None:

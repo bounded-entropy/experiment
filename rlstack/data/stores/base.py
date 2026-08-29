@@ -511,6 +511,12 @@ class RunHandle:
     def write_blob(self, section: str, name: str, version: int, data: bytes) -> None:
         self.store._write(self._blob_key(section, name, version), data)
 
+    def has_blob(self, section: str, name: str, version: int) -> bool:
+        """Is this exact version's blob already written? Blobs are immutable
+        per version, so this is what lets a once-only write stay idempotent
+        across resumes."""
+        return self.store._exists(self._blob_key(section, name, version))
+
     def read_blob(self, section: str, name: str, version: int) -> bytes:
         key = self._blob_key(section, name, version)
         if not self.store._exists(key):
