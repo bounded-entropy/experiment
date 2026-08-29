@@ -115,7 +115,7 @@ def spec_for(store, train_tasks, eval_tasks, updates, master):
         eval=EvalSpec(every=10, post=("final_answer",)),
         gpu_config=GpuConfig(groups=(
             GpuGroup(gpus=GpuSet(n=2), members=(PoolMember("main", tp=2),)),
-            GpuGroup(gpus=GpuSet(n=2), members=(LearnerMember(fsdp=2),)))),
+            GpuGroup(gpus=GpuSet(n=4), members=(LearnerMember(fsdp=4),)))),
         seeds=Seeds(master=master))
 
 
@@ -161,6 +161,17 @@ class PolicyHost:
     def ask(self, verb: str, payload: dict) -> dict:
         return self.service.answer(verb, payload)
 
+    @modal.exit()
+    def bring_down(self) -> None:
+        """End vLLM's background machinery inside the grace period.
+
+        Without this the EngineCore child outlives the container's last call,
+        the async output handler raises on a closed loop, and Modal kills the
+        runner after 30s — so a run that COMMITTED every update still exits
+        looking failed (#61)."""
+        self.host.engine_for(BASE, self.tp).shutdown()
+        print("[host dapo-policy] down")
+
 
 class ModalTransport:
     """The client end: `call` awaits an admitted verb, `ask` is admission-free.
@@ -193,11 +204,11 @@ def _run(train_tasks: str, eval_tasks: str, updates: int, master: int,
     pool = RemotePool(ModalTransport(PolicyHost(tp=2)), base=BASE, tp=2)
     # rank 0 starts the chorus and then IS the learner; the followers exist
     # only to stand in its collectives, and stop() is what ends them
-    learner = lead_fsdp_learner(2)
+    learner = lead_fsdp_learner(4)
     host = Host("dapo-learner", engines=(), learner=learner, store=store,
-                partition=Partition("modal-a100", (0, 1), 0.90, "A100-80GB"),
-                regimes=(Regime("train-fsdp2", "training", BASE, 2),))
-    print(f"[chorus] rank 0 of 2, learner.fsdp={learner.fsdp}")
+                partition=Partition("modal-l4", (0, 1, 2, 3), 0.90, "L4"),
+                regimes=(Regime("train-fsdp4", "training", BASE, 4),))
+    print(f"[chorus] rank 0 of 4, learner.fsdp={learner.fsdp}")
     try:
         report = asyncio.run(host.submit(spec, hf_schema(BASE), store,
                                          remotes={"main": pool}))
@@ -214,7 +225,7 @@ def _run(train_tasks: str, eval_tasks: str, updates: int, master: int,
     return {"run_id": report.run_id, "updates": report.updates_completed}
 
 
-@app.function(image=image, gpu="A100-80GB:2", volumes={"/store": store_volume, "/hf": hf_cache},
+@app.function(image=image, gpu="L4:4", volumes={"/store": store_volume, "/hf": hf_cache},
               timeout=7200)
 def shakeout(train_tasks: str = TRAIN_TASKS, eval_tasks: str = EVAL_TASKS,
              master: int = 7) -> dict:
@@ -223,7 +234,7 @@ def shakeout(train_tasks: str = TRAIN_TASKS, eval_tasks: str = EVAL_TASKS,
                 label="shakeout")
 
 
-@app.function(image=image, gpu="A100-80GB:2", volumes={"/store": store_volume, "/hf": hf_cache},
+@app.function(image=image, gpu="L4:4", volumes={"/store": store_volume, "/hf": hf_cache},
               timeout=86400)
 def full(train_tasks: str = TRAIN_TASKS, eval_tasks: str = EVAL_TASKS,
          master: int = 7, updates: int = 50, go: bool = False) -> dict:

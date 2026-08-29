@@ -323,6 +323,26 @@ class VllmEngine:
         await self._llm.wake_up()
         self._asleep = False
 
+    def shutdown(self) -> None:
+        """End the engine's background machinery, so the container can exit.
+
+        vLLM v1 runs its EngineCore in a child process with a shared-memory
+        queue. Nothing stops it when the owning process merely returns: the
+        core keeps its loop, the async output handler wakes on a closed loop
+        and raises, and the container is still tearing down when a venue's
+        grace period expires — a finished run then exits looking failed
+        (#61 measured that against Modal's 30s). This is the verb a container
+        calls on its way out.
+
+        Idempotent, and quiet on an engine that was never built, for the same
+        reason sleep() is: the vLLM build is lazy, so a host may be told to
+        shut down before it ever served a request.
+        """
+        if self._llm is None:
+            return
+        self._llm.shutdown()
+        self._llm = None
+
     def check_sleeps(self) -> None:
         """Alternation is a BUILD fact: vLLM allocates its weights into a
         releasable memory pool only when built with enable_sleep_mode. A build
