@@ -75,13 +75,18 @@ def train_plan(updates):
 
 
 def eval_plan(task_ids, updates, every):
-    """One held-out wave at every eval point, empty elsewhere: eval is a plan,
-    so "measure here, not there" is data rather than a flag."""
+    """ONE WAVE PER EVAL POINT — not one per update.
+
+    The evaluator reads its k-th wave for its k-th measurement
+    (`plan.wave(update // every)`), and the plan's LENGTH is how many
+    measurements the run takes. Padding it out to one entry per update, with
+    empties in between, makes every point read an empty wave and measure
+    nothing — which is exactly what run 803578405216 did (#61).
+    """
     from rlstack import GroupPlan, RunPlan, Sample, WavePlan
     measured = WavePlan(tuple(GroupPlan(task, (Sample(task, "dapo_math"),))
                               for task in task_ids))
-    return RunPlan(tuple(measured if u % every == 0 else WavePlan(())
-                         for u in range(1, updates + 1)))
+    return RunPlan((measured,) * (updates // every))
 
 
 def spec_for(store, train_tasks, eval_tasks, updates, master):
@@ -243,3 +248,58 @@ def full(train_tasks: str = TRAIN_TASKS, eval_tasks: str = EVAL_TASKS,
         raise SystemExit("refusing to spend: pass --go once the shakeout is read")
     return _run(train_tasks, eval_tasks, updates=updates, master=master,
                 label="full")
+
+
+@app.function(image=image, gpu="L4", volumes={"/store": store_volume, "/hf": hf_cache},
+              timeout=7200)
+def evaluate(run_id: str, eval_tasks: str = EVAL_TASKS, n_tasks: int = 32) -> dict:
+    """Measure a finished run's sealed checkpoints against the held-out set.
+
+    The evaluator daemon measures DURING a run; this measures after one, and it
+    can because a committed version is re-derivable: every ledger line names a
+    version map whose blobs are still in the store, so `restore_bundle` rebuilds
+    the exact policy that was sealed and the content-addressed id proves it.
+    That is what makes an empty in-run eval recoverable rather than lost (#61).
+
+    This GPU is a client, not metal: the sampling happens on the policy host.
+    """
+    import asyncio
+
+    from rlstack import ModalVolumeStore
+    from rlstack.data.plan import GroupPlan, Sample, WavePlan
+    from rlstack.data.tasks import load_tasks
+    from rlstack.policy.compile import restore_bundle
+    from rlstack.runner.assemble import sample_wave
+    from rlstack.runner.post import run_pipeline
+    from rlstack.runner.remote import RemotePool
+    from rlstack.spec.specs import SamplingSpec
+
+    store = ModalVolumeStore("/store", volume=store_volume, locator=STORE)
+    run = store.open_run(run_id)
+    tasks = {t.id: t for t in load_tasks(store, eval_tasks)[:n_tasks]}
+    plan = WavePlan(tuple(GroupPlan(t, (Sample(t, "dapo_math"),)) for t in tasks))
+    pool = RemotePool(ModalTransport(PolicyHost(tp=2)), base=BASE, tp=2)
+    sampling = SamplingSpec(temperature=1.0, max_tokens=MAX_TOKENS)
+
+    async def measure(entry: dict) -> float:
+        versions = {n: int(v) for n, v in entry["versions"].items()}
+        bundle = restore_bundle(versions, entry["bundle_id"], run.read_blob,
+                                ["pi"], {"pi": "lora"})
+        pool.add_bundle(bundle)
+        wave = await sample_wave(plan, index=int(entry["update"]), tasks=tasks,
+                                 sampling=sampling, routes={"main": (pool, bundle)},
+                                 master=7, phase="eval")
+        scored = await run_pipeline(("final_answer",), wave,
+                                    {"main": (pool, bundle)}, sampling, 7,
+                                    int(entry["update"]))
+        rewards = scored["reward"]
+        return sum(rewards) / len(rewards)
+
+    out = {}
+    for entry in run.read_ledger():
+        if int(entry["update"]) % 10:
+            continue
+        out[int(entry["update"])] = asyncio.run(measure(entry))
+        print(f"[eval] update {entry['update']}: heldout accuracy "
+              f"{out[int(entry['update'])]:.3f} over {len(tasks)} tasks")
+    return out
