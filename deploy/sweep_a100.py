@@ -1,9 +1,15 @@
 """The plora-vs-lora sweep: ~40 tenants on ONE A100, two doors in.
 
-    modal run deploy/sweep_a100.py::sweep            # boot, seed 32 arms in-process
+    modal deploy deploy/sweep_a100.py                # the STANDING container
+    modal run deploy/sweep_a100.py::sweep            # seed 32 arms in-process
     modal run deploy/sweep_a100.py::via_desk         # the OTHER 8, from a NEW
                                                      # process, through the desk
     modal run deploy/sweep_a100.py::progress         # committed updates per arm
+
+Deployed, not ephemeral, on purpose: every door below looks the container up
+BY NAME, so `sweep`, `via_desk` and `progress` are genuinely different
+processes knocking on ONE standing host — and an entrypoint exiting kills
+nothing (an ephemeral app would take its spawned work down with it).
 
 WHAT THE SWEEP VARIES (the science): how the STARTING DISTRIBUTION
 (plora's prior_std) and the SIZE of the delta (plora's k / lora's r, plus
@@ -310,13 +316,18 @@ def ensure_tasks(store) -> None:
 # the two doors
 # ---------------------------------------------------------------------------
 
+def deployed_metal():
+    """The STANDING container, by name — every door knocks on the same one."""
+    return modal.Cls.from_name("rlstack-sweep-a100", "SweepMetal")()
+
+
 @app.local_entrypoint()
 def sweep(desk_arms: int = 8) -> None:
     """Seed the grid: the LAST `desk_arms` arms are left for via_desk (the
     separate-process proof); everything else goes through the classic
     in-process door now."""
     arms = grid()
-    handle = SweepMetal()
+    handle = deployed_metal()
     rows = handle.build_rows_here.remote(arms[:-desk_arms])
     print(f"[sweep] {len(arms)} arms; {len(rows)} in-process now, "
           f"{desk_arms} held for via_desk")
@@ -332,7 +343,7 @@ async def via_desk(desk_arms: int = 8) -> None:
     the same roster as the in-process arms."""
     from rlstack.runner.remote import RemoteFleet
 
-    handle = SweepMetal()
+    handle = deployed_metal()
     rows = handle.build_rows_here.remote(grid()[-desk_arms:])
     fleet = RemoteFleet(ClsTransport(handle))
     print(f"[via_desk] status before: "
@@ -347,4 +358,4 @@ async def via_desk(desk_arms: int = 8) -> None:
 @app.local_entrypoint()
 def progress() -> None:
     """Committed updates per arm, straight off the roster and the ledgers."""
-    print(json.dumps(SweepMetal().roster.remote(), indent=2))
+    print(json.dumps(deployed_metal().roster.remote(), indent=2))
