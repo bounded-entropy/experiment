@@ -1,11 +1,12 @@
 """The runner: Phase 0 (identity), Phase 1 (idempotent setup), Phase 2 (daemons).
 
 Phase 2 is a blackboard, not a choreography: plan_daemons derives one daemon
-per GPU responsibility from the spec — a Generator iff trajectories are live,
-the Trainer always, an Evaluator iff eval is declared — and they run
-concurrently, synchronized ONLY through the store (signals.py) and admitted
-onto shared metal by the arbiter. Nobody calls anybody: the ledger is the
-commit bus and waves/ the data bus.
+per GPU responsibility from the spec — a Generator iff trajectories are live, a
+Scorer iff the post pipeline addresses a pool, the Trainer always, an Evaluator
+iff eval is declared — and they run concurrently, synchronized ONLY through the
+store (signals.py) and admitted onto shared metal by the arbiter. Nobody calls
+anybody: the ledger is the commit bus, waves/ the data bus, and postdata parts
+the scoring bus.
 
 Resume is re-running Phases 0-1 — attach discards everything the ledger never
 committed, and the daemons pick up from the ledger tail.
@@ -21,7 +22,7 @@ from rlstack.data.stores.base import RunHandle, Store
 from rlstack.policy.compile import Bundle, compile_bundle
 from rlstack.policy.siteschema import SiteSchema, resolve
 from rlstack.registry import ADAPTER_TYPES, POST, code_hashes
-from rlstack.runner.daemons import Daemon, Evaluator, Generator, Trainer
+from rlstack.runner.daemons import Daemon, Evaluator, Generator, Scorer, Trainer
 from rlstack.runner.interfaces import Engine, Learner
 from rlstack.runner.arbiter import GpuArbiter
 from rlstack.runner.meters import HostJournal
@@ -32,7 +33,7 @@ from rlstack.runner.restore import restore_bundle_on, restore_tenant
 from rlstack.runner.traffic import Routes, load_task_sets
 from rlstack.runner.signals import RunSignals
 from rlstack.spec.canonical import canonical_json, run_id
-from rlstack.spec.flow import flow_graph
+from rlstack.spec.flow import flow_graph, split_pipeline
 from rlstack.spec.specs import ExperimentSpec, Plans, PoolMember, WarmStart
 from rlstack.runner.remote import RemotePool
 from rlstack.spec.validate import (
@@ -257,25 +258,43 @@ def plan_daemons(spec: ExperimentSpec, *, run, store, engine_map, learner,
                  journal: HostJournal | None = None) -> list[Daemon]:
     """The spec already declares the daemons; this reads them off.
 
-    a rollout plan → a Generator makes its waves; an eval plan → an Evaluator
-    watches the commit bus; the Trainer always. Each daemon admits
-    the RESIDENTS its work occupies: the trainer's post phase the engines of
-    its pipeline's declared pools, its train phase the learner, the generator
-    and evaluator their serving pool's engine (plus the eval pipeline's).
+    a rollout plan → a Generator makes its waves; a post pipeline with a POOLED
+    half → a Scorer runs it; an eval plan → an Evaluator watches the commit
+    bus; the Trainer always. Each daemon admits the RESIDENTS its work
+    occupies: the scorer the engines of its processors' declared pools, the
+    trainer's train phase the learner, the generator and evaluator their
+    serving pool's engine (plus the eval pipeline's).
+
+    ONE Scorer owns the WHOLE pooled half of the TRAIN pipeline, in this
+    process, beside whatever engines the routes map holds. Two v1 limits stated
+    rather than hidden: the eval pipeline keeps its single inline path (the
+    Evaluator is firewalled measurement, and its cadence is a modulus, not a
+    critical path), and a scorer standing on its own host is placement work
+    that belongs with host adoption, not here.
 
     Only the Trainer takes the host journal: an update is the unit of progress
     the other daemons orbit, so its phase timings are the run's own clock.
     """
     signals = RunSignals()
     tasks = load_task_sets(store, spec.gen.tasks) if spec.gen is not None else {}
+    split = split_pipeline(spec.algo.post)
     daemons: list[Daemon] = [
         Trainer(signals, arbiter, run,
                 spec=spec, plan=plans["train"], refs=RefReader(store, run),
                 engine=engine_map["main"], learner=learner, tenant=tenant,
-                post_residents=pipeline_residents(spec.algo.post, engine_map),
+                # empty by the split rule — a processor that occupies metal is
+                # the Scorer's — but read off the pipeline rather than written
+                # as (), so the Trainer stays right if the rule ever moves
+                post_residents=pipeline_residents(split.inline, engine_map),
                 routes_at=routes_at, journal=journal,
                 initial_bundle=initial_bundle, initial_version=initial_version),
     ]
+    if split.pooled:
+        daemons.append(Scorer(
+            signals, arbiter, run,
+            spec=spec, plan=plans["train"], refs=RefReader(store, run),
+            residents=pipeline_residents(split.pooled, engine_map),
+            routes_at=routes_at, initial_bundle=initial_bundle))
     if "rollout" in plans:
         daemons.append(Generator(
             signals, arbiter, run,

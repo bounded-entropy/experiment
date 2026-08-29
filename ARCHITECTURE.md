@@ -88,7 +88,10 @@ a behavior policy the trainer tolerates (0 = strict alternation).
 every named artifact a run will contain, edges are `produces` / `consumes` /
 `requires` verbatim, and `feeds_loss` is transitive reachability into the
 loss's requires. The submit gate's pipeline checks and the run's
-`dictionary.json` are two consumers of this one walk.
+`dictionary.json` are two consumers of this one walk. Each bank `provides` gets
+TWO nodes: the forward one (the tensor a loss may require) and its **stat
+twin** — the per-update float the Trainer means into the ledger — emitted
+unconditionally, so observability-only provides describe themselves.
 `rlstack/spec/flow.py`
 
 **dictionary.json** — the flow graph serialized into the run directory at
@@ -128,7 +131,27 @@ puts in the `ADAPTER_TYPES` registry, which `AdapterSpec.adapter_type` names by
 string. An adapter type owns the declaration (`serving`, `provides`, `records`,
 `site_ok`, `exports`) and both lowerings; an adapter is one *use* of an adapter
 type.
-`rlstack/policy/adapters/base.py`, `rlstack/policy/adapters/{lora,soft_prompt,attn_bias,value_head}.py`
+`rlstack/policy/adapters/base.py`, `rlstack/policy/adapters/{lora,plora,soft_prompt,attn_bias,value_head}.py`
+
+**records / provides** — the two halves of the same mirror. `records` are
+sampling-time FACTS, frozen at the seal and never recomputable (per token in
+`Turn.token_extras`, per request in `Turn.turn_extras`); `provides` are
+training-time TENSORS, recomputed by every forward. `provides` is not only the
+loss-input channel: every declared provide is also summarized per update into
+the ledger and described in `dictionary.json`, so an adapter type declares
+everything a reader should WATCH, and a provide nothing requires is
+first-class.
+`rlstack/policy/adapters/base.py`
+
+**plora** — a probabilistic low-rank delta: each matched weight's top-k
+singular directions are frozen (`U_k`, `A = Σ_k V_kᵀ`, a content-addressed
+factors artifact), a hypernet maps a latent `z` to a k×k core per site, and the
+delta is `U_k C_s A` — a rank-k LoRA served through punica. The latent carries
+a posterior against a prior, so the run learns a DISTRIBUTION over adapters;
+the engine serves one version as an ensemble of drawn members plus the mean,
+records the noise it drew, and replay reparameterizes it against the current
+posterior.
+`rlstack/policy/adapters/{plora,plora_torch,plora_vllm,plora_factors}.py`
 
 **Site** — a canonical attachment point named by the checkpoint's own module
 path, resolved at Phase 0 against `site_space` = the schema ∪ every bank
@@ -183,7 +206,9 @@ from the training world back to the inference world (I2).
 **Slot / row plan** — the trainer's routing unit. A **slot** is one tenant's
 installed deltas at a set of sites; a **RowPlan** says which slot each row of
 one padded microbatch carries, and raises if a lowering runs unrouted. The
-trainer-side twin of punica's per-token adapter index (I8).
+trainer-side twin of punica's per-token adapter index (I8). `ReplayRows.facts`
+is the other half: row r's RECORDED turn extras, threaded adapter-blind by the
+learner, for a lowering whose math depends on a draw the rollout already made.
 `rlstack/policy/adapters/replay.py`
 
 **Engine plugin** — a serving mechanism the stock engine lacks, shipped in the
@@ -236,8 +261,10 @@ derived from tasks.
 complete flat token record; `broadcast` turns a per-trajectory column into a
 per-token channel; `pack` fills microbatches bounded by `microbatch_tokens`. A
 `TokenBatch` carries token ids, loss mask, behavior logprobs, segment ids, doc
-starts, the per-token `postdata` columns and token extras — and nothing
-estimator-shaped.
+starts, the per-token `postdata` columns and token extras, the per-DOCUMENT
+turn extras (`doc_turn_extras`, the per-request recording channel at microbatch
+scope), and `microbatches_in_update` — how many microbatches this one belongs
+to, which a per-update term divides by — and nothing estimator-shaped.
 `rlstack/data/flatten.py`
 
 ### The training world
@@ -251,7 +278,10 @@ needs a GPU is a postprocessor's job (I9).
 
 **Postdata** — the pipeline's columns for one wave, stored beside it as
 `postdata/<update>.json` — never inside the sealed record (I6). Columnar,
-aligned to wave order.
+aligned to wave order. A **part** (`postdata/<update>.<producer>.json`) is one
+producer's share of those columns, written ahead of the merged file by the
+Scorer; the Trainer merges every part into the one file readers see, and attach
+sweeps parts whose update never committed, exactly as it sweeps the rest.
 `rlstack/data/stores/base.py`, `rlstack/runner/post.py`
 
 **token_level** — the declaration marking produced columns as per-token vectors
@@ -298,7 +328,9 @@ matches joins against regimes; the host attests its metal against them at birth.
 at construction and never grown or reshaped (I12). It owns its engines, at most
 ONE multi-tenant learner, its arbiter, and its journal store. One regime =
 dedicated; several = it ALTERNATES them on its own arbiter group, one host
-wearing masks rather than two hosts coordinating.
+wearing masks rather than two hosts coordinating. `solo` is one more birth
+fact: this partition serves ONE experiment at a time — I8 promises tenants
+cannot disturb each other's RESULTS, never their THROUGHPUT.
 `rlstack/runner/host.py`
 
 **Residual** — capacity no partition owns. A carve draws from residual only,
@@ -435,10 +467,19 @@ is the arbiter.
 **Daemon** — one GPU responsibility, four beats: await its condition, admit the
 residents its work occupies, do the work, write the store and notify. The
 **Generator** samples waves at the newest committed bundle within the lag
-buffer; the **Trainer** runs post + gradient + commit and is the ledger's only
-writer; the **Evaluator** does firewalled measurement on the eval modulus. Each
-condition method is a named, overridable seam.
+buffer; the **Scorer** runs the pooled half of the post pipeline beside the
+pools it addresses and writes it as a postdata part; the **Trainer** runs the
+inline half + gradient + commit and is the ledger's only writer; the
+**Evaluator** does firewalled measurement on the eval modulus. Each condition
+method is a named, overridable seam.
 `rlstack/runner/daemons/`
+
+**The split rule** — a postprocessor declaring `pools` is SCORER-RUN, a
+pool-less one is TRAINER-INLINE: sending traffic is what makes a processor
+slow, so the same declaration that names the traffic names the daemon. The two
+halves meet once, at the part, so the gate refuses a pooled processor consuming
+an inline one's column. A pipeline with no pooled half plans no Scorer.
+`rlstack/spec/flow.py` (`split_pipeline`)
 
 **WaveFeed / source** — where the trainer's rows come from: `live` (this run's
 own Generator), `replay` (another run's sealed waves), `static` (a
@@ -493,6 +534,13 @@ The declaration half is class attributes (`serving`, `engine_plugin`,
 `provides`, `records`) plus `site_ok` and `exports`. The compute half:
 
 - **params** — build the trainable parameterization for the matched sites.
+- **provide** — the compute half of `provides`: the training-forward tensors,
+  recomputed each pass, merged into `PolicyOutputs.provided` under the declared
+  names and summarized to one float each (0-dim is its value, anything else its
+  mean) for the update's ledger line.
+- **param_groups** — named optimizer groups for one bank entry; `""` is the
+  whole entry (the default), and `OptimSpec.overrides` addresses them by
+  `entry` or `entry.group`, the dotted form winning.
 - **install_replay** — wire the replay lowering into the trainer forward.
   Additive: every installed tenant stays wired (I8).
 - **uninstall_replay** — its exact inverse. Install is additive, so without the
@@ -552,6 +600,8 @@ One currency and one decider per rung (I12):
 - **open_run** — attach-or-create; attach discards everything the ledger never
   committed.
 - **write_wave / read_wave**, **write_postdata / read_postdata**,
+  **write_postdata_part / read_postdata_part** (one producer's columns; the
+  read answers None while absent, because it is an await predicate),
   **write_blob / read_blob**, **write_eval** — the run's data sections.
 - **append_ledger** — THE commit point, and the Trainer's alone.
 - **sweep** — deletion's second meaning, the same rule read twice: attach

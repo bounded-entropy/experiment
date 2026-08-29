@@ -11,6 +11,9 @@ the reference):
                   ledger.jsonl                 the commit record, append-only
                   waves/<update>.jsonl.gz      sealed waves (trajectory rows)
                   postdata/<update>.json       the pipeline's columns per wave
+                  postdata/<update>.<who>.json ONE producer's columns (the
+                                               Scorer's half), merged into the
+                                               file above at the commit
                   adapters/<name>@<v>.bin      delta payloads
                   optim/<name>@<v>.bin         optimizer moments (lockstep)
                   eval/<update>/...            firewalled measurement output
@@ -108,6 +111,20 @@ def plan_key(run_id: str, kind: str) -> str:
 def postdata_key(run_id: str, update: int) -> str:
     """Where one update's postprocessor columns live, beside its wave."""
     return f"runs/{run_id}/postdata/{update:06d}.json"
+
+
+def postdata_part_key(run_id: str, update: int, producer: str) -> str:
+    """Where ONE producer's postdata columns live: beside the merged file,
+    named by who wrote them.
+
+    The producer is one NAME segment, and the assertion is the same rule the
+    host journal's key states: a "/" would shear the key, and a "." would shear
+    the update out of it — `_parse_update` reads this name to decide what
+    attach discards.
+    """
+    assert "/" not in producer and "." not in producer, (
+        f"postdata producer {producer!r} must be one dot-free name segment")
+    return f"runs/{run_id}/postdata/{update:06d}.{producer}.json"
 
 
 class Store(ABC):
@@ -562,6 +579,35 @@ class RunHandle:
             raise FileNotFoundError(f"no postdata for update {update}: {key}")
         return json.loads(self.store._read(key).decode("utf-8"))["columns"]
 
+    def write_postdata_part(self, update: int, producer: str,
+                            columns: Mapping[str, list[float]]) -> None:
+        """One producer's share of a wave's columns, written BEFORE the merged
+        file — the handshake between the Scorer and the Trainer.
+
+        Same discipline as the merged write: atomic, and refused once the
+        ledger has committed the update, because a committed update's postdata
+        is immutable in every one of its pieces. The merge stays the Trainer's
+        job, so `read_postdata`, flatten, the observer and the wave browser
+        keep reading exactly one file per update.
+        """
+        self._refuse_committed_overwrite(update, "postdata")
+        self.store._write(postdata_part_key(self.run_id, update, producer),
+                          _canonical({"columns": dict(columns)}).encode("utf-8"))
+
+    def read_postdata_part(self, update: int,
+                           producer: str) -> dict[str, list[float]] | None:
+        """One producer's columns, or None while it has not written them.
+
+        None rather than FileNotFoundError because this read is an AWAIT
+        PREDICATE: the Trainer blocks on exactly this absence, and a daemon
+        waiting on a store predicate should be reading a value, not catching an
+        exception.
+        """
+        key = postdata_part_key(self.run_id, update, producer)
+        if not self.store._exists(key):
+            return None
+        return json.loads(self.store._read(key).decode("utf-8"))["columns"]
+
     def _refuse_committed_overwrite(self, update: int, section: str) -> None:
         """An update the ledger committed is immutable; only unsealed work
         may be rewritten."""
@@ -675,8 +721,13 @@ class RunHandle:
         ledger entry and nothing else.
 
         A torn final ledger line is repaired away; per-update artifacts (waves,
-        postdata) beyond the tail are deleted; blob versions above each delta's
-        committed version are deleted; backend write debris is swept.
+        postdata, and the postdata PARTS a Scorer wrote ahead of the Trainer)
+        beyond the tail are deleted; blob versions above each delta's committed
+        version are deleted; backend write debris is swept.
+
+        Sweeping a part costs nothing to recover: scoring is deterministic
+        seedless prefill at a pinned bundle, so the daemon that wrote it writes
+        the same bytes again on the next attach.
         """
         self._repair_ledger()
         entries = self.read_ledger()
@@ -718,12 +769,19 @@ def _committed_versions(entries: list[dict[str, Any]]) -> dict[str, int] | None:
 
 
 def _parse_update(key: str, suffix: str) -> int | None:
-    """.../<update><suffix> -> update, or None if the name is not ours."""
+    """.../<update><suffix> -> update, or None if the name is not ours.
+
+    A postdata PART (.../<update>.<producer><suffix>) parses to the same
+    update, which is the whole reason the producer may not carry a dot: a part
+    is a per-update artifact like any other, so attach discards it by exactly
+    the rule that discards the merged file, and neither survives an update the
+    ledger never committed.
+    """
     name = key.rsplit("/", 1)[-1]
     if not name.endswith(suffix):
         return None
     try:
-        return int(name[: -len(suffix)])
+        return int(name[: -len(suffix)].split(".")[0])
     except ValueError:
         return None
 

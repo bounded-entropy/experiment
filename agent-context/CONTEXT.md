@@ -2756,6 +2756,275 @@ specs; backends (local/modal/skypilot) and GPU topology are semantics-neutral.
     configuration. Not measured on real metal: the main session runs it
     against the real store (this was local work only).
 
+64. **plora: THE POLICY BECOMES A DISTRIBUTION OVER ADAPTERS — a probabilistic
+    low-rank delta, and the five contract growths it needed.** The adapter
+    type, first, because everything else follows from its shape. Each matched
+    weight `M` is factored ONCE into its top-k singular directions and frozen
+    there: `A = Σ_k V_kᵀ` and `U_k` never move again. What trains is a small
+    hypernet mapping a latent `z ∈ R^n` to a k×k core `C_s` per site, so the
+    delta is `Δ_s = U_k C_s A` — which is EXACTLY a rank-k LoRA whose `lora_A`
+    is frozen and identical at every version and whose `lora_B` is `U_k C_s`.
+    That last sentence is the whole reason this needed no new mechanism: an
+    ensemble of drawn latents is an ensemble of ordinary peft adapters, and
+    punica already serves those.
+    - THE LATENT IS WHERE THE PROBABILITY LIVES: `q = N(mu, diag(exp(log_std)²))`
+      against `p = N(0, prior_std² I)`, both trainable, both initialized so the
+      run starts at the identity element in TWO senses at once. The heads are
+      zero-initialized (ControlNet-style), so every core is zero and version 0
+      is the base for EVERY draw — lora's `B = 0`, earned the same way. And
+      `mu = 0, log_std = log(prior_std)` puts q exactly on p, so `KL(q‖p)`
+      starts at exactly 0.0 and the loss's KL term begins as a term that is not
+      yet pushing anything. Both are pinned by tests, the second by equality
+      with 0.0 rather than a tolerance.
+    - RECORD THE NOISE, NOT THE LATENT. The engine draws `members` noise
+      vectors per version, materializes `members + 1` peft dirs (the ensemble
+      plus the posterior MEAN), and a request picks one by
+      `derive(seed, "plora") % members`; score traffic, which is seedless and
+      deterministic by contract, gets the mean. What the turn RECORDS is `eps`,
+      and replay recomputes `z = mu + σ⊙eps` with the CURRENT posterior — which
+      is what puts mu and log_std on the gradient path of a sample taken before
+      either had its present value. Recording `z` would have frozen the
+      posterior out of its own gradient, which is a silent failure, not a loud
+      one, and is the single most important line in the design.
+    - THE FROZEN HALF IS A CAS ARTIFACT, AND THAT IS AN IDENTITY MOVE. `U` and
+      `A` are megabytes per site and IDENTICAL at every policy version, so a
+      bundle carrying them would pay for them once per update forever. They
+      live in `cas://`, the spec names the address, and the payload carries the
+      address rather than the bytes (`plora` payloads are kilobytes). The price
+      is that the two sides must agree about a coordinate system, so
+      `ALGO_ID = "gram-eigh-fp32-canonical-sign-v1"` is stamped into the
+      artifact and checked when it is read, alongside base and k. Sign
+      canonicalization is not fussiness: `(u_i, v_i)` and `(-u_i, -v_i)` span
+      the same subspace and `eigh` may return either, and a core trained
+      against one sign is the WRONG POLICY under the other.
+    - ONE DELIBERATE ASYMMETRY, stated rather than hidden: the REPLAY side
+      recomputes the factors from the base's own weights at install instead of
+      reading the artifact. `install_replay(model, params, sites)` has no store
+      handle and cannot be given one without widening the Learner contract, and
+      the trainer is already holding the checkpoint — so the artifact exists
+      for the side that ISN'T holding it, the engine, whose copy lives inside
+      vLLM. `ALGO_ID` is what makes them agree, and one test builds the
+      artifact and compares it to the direct computation, which is where that
+      claim is actually pinned.
+    - ONE PLORA PER BANK, refused at `attach` while the bundle is still just an
+      id. The recorded facts are a flat namespace — a turn has one `plora_eps`
+      — so two entries would record over each other and leave replay unable to
+      say whose latent it held. This is correctness, not a limitation.
+
+    THE FIVE CONTRACT GROWTHS, each small, each useful beyond plora:
+    - **`provide` and `param_groups` on AdapterType**, both with working
+      defaults, so every existing adapter type is untouched (`provide` → `{}`,
+      `param_groups` → `{"": params.parameters()}`, one group = the optimizer
+      the learner always built). `provide` is the compute half of the
+      long-declared `provides`; `param_groups` grows `OptimSpec.overrides` a
+      DOTTED grammar — `"pi"` reaches every group of entry `pi`, `"pi.mapper"`
+      reaches one, and the dotted form wins where both apply, the only reading
+      under which writing both is not a contradiction. plora uses it for the
+      thing that motivated it: the hypernet may be weight-decayed, the
+      posterior must not, since decay on `log_std` is an unstated second prior
+      pulling the scale toward 1.
+    - **THE TURN-EXTRAS MEMBRANE CROSSING**, which existed as a documented
+      channel (`Turn.turn_extras`, `FinishEvent.turn_extras`) with nothing
+      travelling down it. Now: `Levers.turn_extras` unions in `merged_with`
+      (disjointness already guaranteed by `claims`), `VllmEngine` folds the
+      merged facts into the FinishEvent it yields, `Flat.turn_extras` carries
+      one mapping per TURN (deliberately not token-aligned), `TokenBatch
+      .doc_turn_extras` carries one tuple per DOCUMENT, and
+      `ReplayRows.facts` hands row r its own document's facts. The learner
+      fills it ADAPTER-BLIND — it copies mappings across and never reads a key
+      — so the next recording adapter type needs no change to any of it.
+      `Request` also gained `seed`, because an adapter type with a per-request
+      CHOICE must draw it off the seed tree and not an RNG.
+    - **`microbatches_in_update`**, stamped by `pack()` on every batch once the
+      split is known. ONE WAVE IS ONE GRADIENT UPDATE (#59), so a term that is
+      a function of the PARAMETERS alone — a latent KL — is identical in every
+      microbatch, and adding it whole to each would multiply it by the
+      microbatch count. The effective beta would then depend on
+      `microbatch_tokens`: an engineering knob silently changing the objective,
+      which is exactly the class of bug #59 was written to kill.
+    - **`Host.solo`**, a birth fact attested and journaled like the partition
+      and the regimes (I12). I8 promises tenants cannot disturb each other's
+      RESULTS; it never promised they cannot disturb each other's THROUGHPUT,
+      and a fractional partition small enough that one tenant fills it is
+      exactly where that matters. `submit` refuses a second RUNNING tenancy
+      (resubmitting the same run_id is a resume, and a finished run frees the
+      host); the fleet's join rung SKIPS an occupied solo host rather than
+      offering a join it would then refuse — soloness is a birth fact, so it
+      belongs to placement, and the ladder falls through to carve exactly as
+      for a host lacking the capability. Default stays multi-tenant.
+    - **DECLARATION-DRIVEN EMISSION OF PROVIDED TENSORS** (scope added
+      mid-build, and it turned out to be the most reusable piece). Every
+      provided tensor is summarized to one float by ONE rule — 0-dim is its
+      value, anything else is its mean — onto `TrainStats.provided`, meaned
+      across an update's microbatches into the ledger's `train` block by the
+      Trainer, and given a SECOND flow-graph node: a `kind="stat"`,
+      `phase="train"`, `granularity="update"` twin beside the forward node, so
+      `dictionary.json` self-describes the per-update summary and the UI
+      renders it with no special-casing. `observe/` and the web assets were not
+      touched, which is the point. The standing rails are written OVER the
+      folded-in provides, so a provide can never shadow `loss`.
+    - THE RULING THAT FALLS OUT OF IT, now stated in `base.py`,
+      ARCHITECTURE.md and here: **`provides` is not only the loss-input
+      channel.** Declaration-driven emission makes every provide observable for
+      free, so an adapter type should provide everything a reader of the run
+      would want to WATCH — a posterior's scale, a gate's norm, whatever
+      internal state explains its behavior — not merely what some loss
+      requires. UN-REQUIRED PROVIDES ARE FIRST-CLASS. plora declares
+      `plora_sigma_mean` for exactly this reason (a posterior collapsing to
+      zero IS plora turning back into a plain LoRA, and it should be visible in
+      the ledger the update it starts), and one test pins the whole property:
+      a provide no loss requires still reaches the ledger and still appears in
+      `dictionary.json`, with `feeds_loss` False and empty consumers on BOTH
+      nodes.
+
+    THE COUNTER IS THE VERSION. `emit` uses the counter it holds, RECORDS it,
+    and only then advances; `load` restores it. So the n-th emit of a run always
+    draws the n-th ensemble whether it happened in this process or the one that
+    crashed — Phase 1's re-emit after a resume reproduces the bundle bytes
+    the crashed process had, which is what keeps `bundle_id` (and therefore
+    every sealed `Turn`) identical across a kill. This is the one adapter type
+    whose payload is not a pure function of its parameters, because the served
+    ensemble is a fresh DRAW at each version. The SEED is deliberately NOT in
+    the payload: seeds come from the spec (I3), so a warm start's child uses
+    its own seed tree rather than inheriting its parent's noise stream.
+
+    `grpo_latent_kl` calls `grpo` rather than restating it (the two cannot
+    drift) and adds `BETA * kl / batch.microbatches_in_update`. BETA is a
+    module constant at 1e-3, deliberately: the loss's source hashes into
+    `run_id`, so sweeping it is an edit producing a different experiment —
+    which is what a different beta IS. A knob on the spec would let two runs of
+    one run_id disagree about the objective.
+
+    697 tests green (69 new: `tests/test_plora.py` plus solo-host tests in
+    `test_host.py` and join-rung tests in `test_fleet.py`), and — a first for
+    this repo's local work — the torch-gated half was actually RUN, in a scratch
+    venv, rather than only written: 62/62, including the per-row replay math
+    against a loop reference, the SVD reconstruction against `torch.linalg.svd`,
+    and the gradient reaching mu / log_std / trunk / heads. `test_resume.py`
+    is green unmodified. `deploy/plora_l4.py` is authored and UNRUN: three
+    hosts on fractional partitions of one L4 (0.30 sampling / 0.20 eval / 0.40
+    training) over `LocalTransport`, test-time training on ONE DAPO problem,
+    four groups of eight per wave. DELIBERATELY NOT DONE: no parity certificate
+    (`logprob_gap` is still the rail); no cross-tenant plora coalescing beyond
+    what the row plan already expresses; `hf_weight_reader` is unexercised
+    locally, having no HF checkout to read; and nothing in `observe/` learned
+    the word plora, because the dictionary is what the UI reads.
+
+APPEND VERBATIM to agent-context/CONTEXT.md, immediately after entry 64's last
+line ("...the word plora, because the dictionary is what the UI reads.") and
+before the "## Open threads" heading. Renumber to 66 if the adopt workstream
+lands 65 first.
+
+---8<--- cut here ---8<---
+
+65. **THE SCORER: the fourth daemon, and post traffic leaves the gradient's
+    critical path.** #47 measured the problem and named it: a teacher column
+    computed inside the Trainer's post phase makes every gradient wait on a fan
+    of sequential 32B prefills. The fix is not a faster prefill, it is a
+    DAEMON — `rlstack/runner/daemons/scorer.py` — and the whole build is four
+    rules.
+    - THE SPLIT RULE, one function (`split_pipeline`, in `spec/flow.py` beside
+      the flow graph, because it is one more query over the same declarations):
+      a postprocessor declaring `pools` is SCORER-RUN, a pool-less one is
+      TRAINER-INLINE. Declared, never guessed and never timed — `pools` already
+      names every pool a processor addresses, the gate already vets it and the
+      runner already admits engines for it, so the same declaration answers
+      WHICH daemon runs it. Sending traffic is what makes a processor slow;
+      slow is what has to leave the critical path. A pipeline with no pooled
+      half (DAPO, plora — every campaign running today) plans NO Scorer, and
+      the Trainer is byte-for-byte the daemon it was.
+    - THE PARTS, in `data/stores/base.py`: `write_postdata_part(update,
+      producer, columns)` / `read_postdata_part` → `postdata/<u>.<who>.json`,
+      beside the merged file, same atomicity, same refusal once the ledger has
+      committed the update. The Trainer still writes the ONE
+      `postdata/<u>.json`, so flatten, the ledger's column means, `observe/`
+      and the wave browser read exactly what they read before and not one line
+      of them changed. The read answers None rather than raising, because it IS
+      an await predicate. `_parse_update` grew one `split(".")`, which is the
+      whole of making attach sweep a part exactly as it sweeps everything else
+      the ledger never committed — and sweeping one costs nothing, since
+      scoring is deterministic seedless prefill at a pinned bundle. The
+      producer is one dot-free name segment, asserted at the key, for the same
+      reason a host name may hold no slash.
+    - THE VERSION-PINNING RULE, and it is the ONLY place where running beside
+      the Trainer instead of inside it changes what has to be ASKED. The
+      Trainer scored inline and therefore always held the current bundle; a
+      daemon that may be an update ahead — or, after a crash, behind — holds no
+      such thing, so it asks the DATA: policy-pool traffic is scored under the
+      bundle THE WAVE'S OWN TURNS RECORDED (I6), restored through the same
+      `routes_at` closure that already restores on a miss. Scoring the newest
+      bundle instead would make a column depend on when the Scorer got round to
+      it, which is the one thing a run directory may never depend on. Two edges
+      stated rather than hidden: a wave whose turns pin two bundles is REFUSED
+      (blending two policies into one column silently is the wrong number this
+      design exists to prevent), and a pipeline that never addresses the policy
+      pool needs no pin at all — demanding one would make another run's
+      replayed trajectories, whose versions this store does not hold,
+      unscoreable by a teacher that never looks at the policy.
+    - THE EQUIVALENCE OBLIGATION, which is what the other three are for: a
+      run's postdata must be the same bytes whether a column was computed by
+      the daemon or inline. It holds because the split changes only WHERE — the
+      same `run_pipeline`, the same `derive(master, "post", update, group,
+      processor)` seed path, the same order within each half, and `given`:
+      wave-order columns sliced back per group into each group's starting
+      `data`, so an inline processor consumes a scorer column exactly as it
+      consumes a neighbour's. What makes that airtight is a contract that
+      already existed — a processor reads its declared `consumes` and nothing
+      else, and every declared input is produced earlier — so no processor can
+      observe which half of the split it is in. `tests/test_scorer.py` runs the
+      A/B directly: the same spec, once with the daemon and once with the split
+      patched to "everything inline", two stores, one run_id, byte-identical
+      run directories with the part file the only difference. The judge is a
+      COIN (p_correct=0.5) deliberately, so the reward column actually depends
+      on the seed path; the same A/B runs for the policy-pool (opsd) shape,
+      where the pin is load-bearing.
+    - THE GATE grew one check, `check_pooled_post_follows_inline`
+      (`post-split-order`): a POOLED processor may not consume an INLINE
+      processor's column. The two halves meet exactly once, at the part, so the
+      pooled half runs first and whole; the inversion is a deadlock by
+      declaration and is refused while it is still text. The other direction is
+      the normal case (`llm_judge` → `grpo_advantage`) and is what `given`
+      exists for. TRAIN pipeline only: eval keeps its single inline path, so
+      nothing constrains its order.
+
+    THE PACING FALLS OUT RATHER THAN BEING BUILT. The Scorer's await mirrors
+    `Trainer.next_rows` with one difference — it READS `waves/<u>` when the
+    Trainer has written it and otherwise `realize`s the same rows WITHOUT
+    writing them, because one writer per artifact is the rule. Realize is a
+    pure function of the plan and the sealed rollouts, so the two agree byte
+    for byte, and realizing rather than waiting is exactly what lets the Scorer
+    work an update ahead. How far ahead is not this daemon's policy: realize
+    answers None until the Generator has sealed the leaves, so the Scorer
+    inherits the lag buffer that paces the Generator (#59) and needs no bound
+    of its own. The Trainer's measured `post` phase now covers the WAIT plus
+    the arithmetic, which is the number that says whether the Scorer is keeping
+    up — a scorer far enough ahead collapses it to the arithmetic alone.
+
+    734 tests green on fakes (29 new in `tests/test_scorer.py`);
+    `test_resume.py` and `test_post.py` unmodified and green, and the two
+    existing end-to-end pipelines that turn out to be POOLED —
+    `("verifier", "teacher_logprobs")` and `("verifier", "hinted_logprobs")` —
+    now run through the daemon in `test_post.py` without a line of that file
+    changing, which is the equivalence claim asserting itself. Mutation-checked
+    three ways: a changed seed phase, a broken group slice and an ignored
+    recorded bundle each fail the suite.
+    V1 LIMITS, deliberate: ONE Scorer owns the WHOLE pooled half of the TRAIN
+    pipeline, IN THE RUNNER'S PROCESS beside whatever engines the routes map
+    holds — a scorer standing on its own host is placement work that belongs
+    with host adoption, not here. The EVAL pipeline keeps its single inline
+    path (the Evaluator is firewalled measurement and its cadence is a modulus,
+    not a critical path), so `run_pipeline`'s unbounded eval fan (#53's
+    leftover) is still unbounded. NOT DONE, and unchanged by this: teacher
+    scoring is still un-batched (one `score_tokens` per turn) and un-cached
+    (identical prefixes re-prefill) — this entry moved the work off the
+    gradient's path, it did not make the work cheaper. Nothing is proven on
+    metal: the fakes suite is the whole evidence, and the number this build was
+    designed against is still the one the OPD stress test would produce. A part
+    is never deleted at the merge: deletion has exactly two meanings in this
+    store and neither is "a reader is done".
+
+---8<--- cut here ---8<---
+
 
 ## Open threads (do NOT treat as settled; flag when your answer touches them)
 

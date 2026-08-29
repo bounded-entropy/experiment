@@ -22,8 +22,10 @@ from rlstack.data.trajectory import Message
 from rlstack.policy.adapters.base import Mechanism
 from rlstack.policy.compile import Bundle
 from rlstack.policy.siteschema import SiteMeta
+from rlstack.registry import ADAPTER_TYPES
 from rlstack.runner.interfaces import Emitted, FinishEvent, TokenEvent, TrainStats
 from rlstack.runner.meters import TrafficMeter
+from rlstack.runner.seeds import derive
 from rlstack.spec.canonical import content_hash
 from rlstack.spec.specs import ExperimentSpec, SamplingSpec
 
@@ -36,19 +38,23 @@ class FakeEngine:
     A prompt containing "a+b" is answered correctly with probability
     `p_correct` (a per-seed coin), wrongly otherwise — enough reward variance
     to make group normalization nontrivial. `record_draws=True` deposits a
-    fake per-token "adapter_draw" into TokenEvent.extras, exercising the
-    recording channel end to end. `plugins` is this fake build's set of
-    installed plugin mechanisms — reachability honestly reports NONE for a
-    plugin mechanism that is not in it.
+    fake per-token "adapter_draw" into TokenEvent.extras and
+    `record_latent=True` deposits fake PER-REQUEST facts into the stream's
+    FinishEvent — the two granularities of the recording channel, both
+    exercisable with no GPU. `plugins` is this fake build's set of installed
+    plugin mechanisms — reachability honestly reports NONE for a plugin
+    mechanism that is not in it.
     """
 
     def __init__(self, p_correct: float = 0.5, record_draws: bool = False,
+                 record_latent: bool = False,
                  plugins: frozenset[Mechanism] = frozenset(),
                  base: str | None = None, tp: int = 1) -> None:
         self.base = base            # None: fake metal serves any base
         self.tp = tp                # build fact: a fake TP-2 engine is tp=2
         self.p_correct = p_correct
         self.record_draws = record_draws
+        self.record_latent = record_latent
         self.plugins = plugins
         self.bundle_log: list[str] = []       # every add_bundle, in order
         self._known: set[str] = set()
@@ -125,10 +131,12 @@ class FakeEngine:
         self.meter.opened_request(sum(len(m.content) for m in messages))
         submitted = time.time()
 
+        turn_extras = self.latent_draw(seed)
+
         emitted = ""
         for ch in text:
             if len(emitted) >= sampling.max_tokens:
-                yield FinishEvent("length")
+                yield FinishEvent("length", turn_extras=turn_extras)
                 return
             if not emitted:
                 self.meter.first_token_after(time.time() - submitted)
@@ -139,9 +147,26 @@ class FakeEngine:
                              text_delta=ch, extras=extras)
             hit = next((s for s in stop if emitted.endswith(s)), None)
             if hit is not None:
-                yield FinishEvent("stop", stop_hit=hit)
+                yield FinishEvent("stop", stop_hit=hit, turn_extras=turn_extras)
                 return
-        yield FinishEvent("eos")
+        yield FinishEvent("eos", turn_extras=turn_extras)
+
+    def latent_draw(self, seed: int) -> dict:
+        """Fake PER-REQUEST facts, the FinishEvent mirror of record_draws.
+
+        A probabilistic adapter type draws once per request and the draw seals
+        into Turn.turn_extras, so the membrane needs a stdlib-only way to be
+        exercised at that granularity — one vector and one index, the two
+        shapes a real one records. Drawn off the SEED TREE rather than the
+        token stream's generator, so switching it on shifts no other byte of a
+        run.
+        """
+        if not self.record_latent:
+            return {}
+        rng = random.Random(derive(seed, "fake-latent"))
+        return {"latent_draw": [round(rng.uniform(-1.0, 1.0), 6)
+                                for _ in range(4)],
+                "member_draw": rng.randrange(4)}
 
     # ---- generation policy --------------------------------------------------
 
@@ -161,6 +186,7 @@ class _FakeTenant:
 
     trainable: list[str]
     all_names: list[str]
+    provides: list[str]                 # every name the bank DECLARES it provides
     init: str
     state: str
     steps: int = 0
@@ -200,7 +226,11 @@ class FakeLearner:
         self._tenants[tenant] = _FakeTenant(
             trainable=sorted(name for name, a in spec.policy.bank.items()
                              if a.trainable),
-            all_names=all_names, init=init, state=init)
+            all_names=all_names,
+            provides=sorted({
+                name for a in spec.policy.bank.values()
+                for name in ADAPTER_TYPES.get(a.adapter_type).instance.provides}),
+            init=init, state=init)
 
     def forward_backward(self, tenant: str, batch: TokenBatch) -> TrainStats:
         state = self._tenant(tenant)
@@ -217,7 +247,22 @@ class FakeLearner:
             logprob_gap=0.0,
             grad_norm=int(state.state[8:16], 16) / 16 ** 8,
             tokens=len(batch),
+            provided=self.provided_digest(state),
         )
+
+    def provided_digest(self, state: _FakeTenant) -> dict[str, float]:
+        """One digest-derived float per DECLARED provided name.
+
+        No numerics, honest choreography — the fake's charter. What it exercises
+        is the emission path: a bank that declares a provided tensor makes that
+        name reach TrainStats and then the ledger's train block, so the whole
+        route from `provides` to a run's own dictionary is testable with no GPU.
+        The values are a pure function of the digest state, like everything else
+        here, so resume-equivalence is untouched.
+        """
+        return {name: int(content_hash({"state": state.state,
+                                        "provided": name})[:8], 16) / 16 ** 8
+                for name in state.provides}
 
     def optim_step(self, tenant: str) -> None:
         state = self._tenant(tenant)
