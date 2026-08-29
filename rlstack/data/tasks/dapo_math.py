@@ -78,20 +78,23 @@ def dapo_math_tasks(base: str = CHAT_BASE) -> list[Task]:
     snapshot = snapshot_download(DATASET, repo_type="dataset")
     tasks: dict[str, Task] = {}
     for file in sorted(Path(snapshot).rglob("*.parquet")):
-        for row in pq.read_table(file).to_pylist():
-            task_id = f"dapo-math-17k/{row['extra_info']['index']}"
-            answer = row["reward_model"]["ground_truth"].strip()
-            if task_id in tasks or not _is_integer(answer):
-                continue
-            messages = [{"role": m["role"], "content": m["content"]}
-                        for m in row["prompt"]]
-            tasks[task_id] = Task(
-                id=task_id,
-                prompt=tokenizer.apply_chat_template(
-                    messages, tokenize=False, add_generation_prompt=True,
-                    enable_thinking=False),
-                meta={ANSWER: int(answer)},
-            )
+        # streamed, not materialized: 99 of every 100 rows are a repeat we are
+        # about to drop, and the whole file as python objects is ~10 GiB
+        for batch in pq.ParquetFile(file).iter_batches(batch_size=4096):
+            for row in batch.to_pylist():
+                task_id = f"dapo-math-17k/{row['extra_info']['index']}"
+                answer = row["reward_model"]["ground_truth"].strip()
+                if task_id in tasks or not _is_integer(answer):
+                    continue
+                messages = [{"role": m["role"], "content": m["content"]}
+                            for m in row["prompt"]]
+                tasks[task_id] = Task(
+                    id=task_id,
+                    prompt=tokenizer.apply_chat_template(
+                        messages, tokenize=False, add_generation_prompt=True,
+                        enable_thinking=False),
+                    meta={ANSWER: int(answer)},
+                )
     return list(tasks.values())
 
 
