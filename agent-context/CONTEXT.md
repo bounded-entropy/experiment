@@ -2573,6 +2573,51 @@ specs; backends (local/modal/skypilot) and GPU topology are semantics-neutral.
       bit. The 7 ambiguous ground truths and the ~500 double-uuid problems are
       recorded above rather than repaired.
 
+61. **The DAPO campaign meets the metal — and the activation ceiling is
+    named.** The campaign is `deploy/dapo_grpo.py` (212 lines, ~98 of them
+    science): three plans written out as literal nesting, the `dapo_math`
+    environment, and `final_answer` as the reward. Two updates committed on
+    a tp=2 policy host beside an fsdp=2 learner, run c-id `e6811ab59a4c`.
+    - THE CEILING IS ONE DOCUMENT'S ACTIVATIONS, MEASURED NOT GUESSED. Four
+      L4 attempts died in update 1's forward at 21.53 / 21.47 / 21.49 /
+      21.49 GiB of 22.03 — the last two BYTE-IDENTICAL across a 4x
+      microbatch cut, which looked like proof that memory was committed
+      before the batch mattered. It was the opposite: a sealed wave says
+      completions run 578..2048 tokens (median 1357, 28% at the cap) over a
+      ~136-token prompt, so EVERY document exceeds both 2048 and 512,
+      `pack` gives each its own oversized batch (it never splits one), and
+      both runs ran the same first document through the same forward.
+      Byte-identity was evidence FOR the activation story, not against it.
+      One ~1500-token document through 40 layers stores ~250-350 MB of
+      interiors per layer (the MLP is 17408 wide) = ~14 GiB, plus a 6.88 GiB
+      shard and 0.3 GiB of bank and optimizer: 21.5 on a 22.03 GiB card.
+      The ledger's `microbatches: 64` for 64 trajectories is the same fact
+      from the other side — one document per forward, always.
+    - THE FIX IS RECOMPUTE, and it belongs to TorchLearner, not to FSDP:
+      `checkpoint_the_blocks` replaces each decoder block's forward IN PLACE
+      (a checkpoint_wrapper would rename every submodule, and both the site
+      schema and adapter installation address blocks by path),
+      use_reentrant=False so kwargs work and so it composes with FSDP's
+      backward re-gather, applied BEFORE the wrap. Under no_grad it passes
+      through, so scoring stays cheap. Exact: the base is frozen and in
+      eval, so recompute is the same arithmetic. UNPROVEN ON METAL.
+    - THE SCIENCE IS BLOCKED WHERE THE PLUMBING IS NOT. logprob_gap 0.0145 /
+      0.0167 is at the kernel floor, so the wire served exactly the adapters
+      the trainer recomputed. But reward was 0.266 then 0.047 and ADVANTAGE
+      WAS -0.0 IN BOTH WAVES: at group_size 8 on unfiltered DAPO the 14B
+      scores all-or-nothing per group, the z-score vanishes, and the updates
+      were arithmetically real and informationally empty. A pass-rate filter
+      that keeps problems strictly between 0 and 1 is the standard answer and
+      is NOT built.
+    - TWO OPERATIONAL FINDINGS. The served host has no clean shutdown: vLLM
+      raises `Event loop is closed`, leaks a shared-memory object, and the
+      container exceeds Modal's 30s grace, so a finished run exits looking
+      failed (results are safe — they commit before teardown). And
+      ModalVolumeStore.commit() emits an AsyncUsageWarning on every write,
+      which now dominates every campaign log and buried this run's own
+      peak-memory print.
+
+
 ## Open threads (do NOT treat as settled; flag when your answer touches them)
 
 - TODO (Samarth, settled intent — future, nothing now): BUNDLE LRU EVICTION

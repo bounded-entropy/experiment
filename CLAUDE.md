@@ -44,6 +44,21 @@ continue is in the repo.
 
 ## State at handover
 
+- THE RUN'S SHAPE IS DATA (#59/#60/#61): a RunPlan is waves x groups x
+  leaves, written as a cas artifact and pinned in the spec, so group_size /
+  trajectories_per_wave / n_updates / epochs_per_wave are gone from Schedule
+  (one wave IS one gradient update). A leaf is Sample (make it — the only
+  "not yet" a daemon awaits) or Replay (take one already sealed), which
+  collapses live/replay/static into leaf constructors and lets one wave mix
+  them. Residency is not durable and need not be: `detach` is the fifth
+  rollout-lowering verb, BundleResidency bounds a pool (LRU, never a pinned
+  bundle), and restore rebuilds any committed version from the store with the
+  content-addressed id as the proof. DAPO-Math-17k is on the volume
+  (17,547 train / 370 eval, thinking OFF); deploy/dapo_grpo.py is the
+  campaign. THE OPEN BLOCKER IS SCIENCE, NOT PLUMBING: at group_size 8 the
+  14B scores all-or-nothing per group, so advantage was -0.0 and the updates
+  carried no signal — a pass-rate filter is the standard answer and is not
+  built. Activation checkpointing (#61) is committed but UNPROVEN on metal.
 - THE VOCABULARY IS RENAMED (#54/#55): ARCHITECTURE.md is the universal
   reference and docstrings speak it. "Kind" (for adapters) is dead — the
   registered class is AdapterType (`@adapter_type`, ADAPTER_TYPES,
@@ -53,7 +68,7 @@ continue is in the repo.
   The identity move is ACCEPTED: registry strings + class sources hash
   into run_id, so pre-rename stores are read-only history (the observer
   tolerates old journal keys; one regression test pins that).
-- 547 tests green on fakes (torch-gated skips run in the image). Real
+- 609 tests green on fakes (torch-gated skips run in the image). Real
   metal is PROVEN through the stress matrix (deploy/stress_l4.py): seven
   concurrent tenants — grpo/ppo/gspo/sft/sdft/replay_distill/self_anchor,
   live + replay + static sources, a judge pool, lag=2 — on one Modal L4
