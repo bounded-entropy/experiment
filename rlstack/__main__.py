@@ -4,6 +4,7 @@
     python -m rlstack runs <top-dir> [--grep <substring>]
     python -m rlstack ui <top-dir> ... [--port N] [--panels panels.json]
     python -m rlstack tag <store-root> <run_id> [--name N] [--tag T ...] [--note ...]
+    python -m rlstack tasks <dataset> --store <root> [--split name=frac ...]
 
 A TOP DIRECTORY, not a store (#58): the views discover every store root
 beneath it — a directory holding runs/, hosts/, fleet/ or annotations.jsonl —
@@ -13,8 +14,9 @@ paths and file:// resolve where mounted; modal:// tells you to run the reader
 beside the volume. With none given, $RLSTACK_STORES (colon-separated) is used.
 
 Every VIEW is peek-only: this entry point reads journals and manifests and
-never attaches a run. `tag` is the one verb that writes, and it writes
-flavortext beside runs/ — never inside a run directory, never into identity.
+never attaches a run. `tag` and `tasks` are the two verbs that write, and
+neither writes inside a run directory: `tag` puts flavortext beside runs/,
+`tasks` puts content-addressed task sets in the store's cas/.
 """
 
 from __future__ import annotations
@@ -22,12 +24,17 @@ from __future__ import annotations
 import argparse
 import os
 
+from rlstack.data.stores.base import Store
+from rlstack.data.tasks import dapo_math_tasks, split_tasks, write_tasks
 from rlstack.observe import (
     render_gpu, render_hosts, render_runs, roots_for, store_for,
 )
 from rlstack.observe.ui import serve as serve_ui
 
 VIEWS = {"hosts": render_hosts, "runs": render_runs, "gpu": render_gpu}
+
+# dataset name -> the one function turning that dataset into Task rows
+BUILDERS = {"dapo_math": dapo_math_tasks}
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -56,10 +63,24 @@ def main(argv: list[str] | None = None) -> None:
     tag.add_argument("--tag", action="append", dest="tags", default=None,
                      help="repeatable; a later `tag` call replaces the list")
     tag.add_argument("--note", default=None)
+    tasks = sub.add_parser("tasks", help="build a dataset into task sets")
+    tasks.add_argument("dataset", choices=sorted(BUILDERS))
+    tasks.add_argument("--store", required=True,
+                       help="the store root the sets are written into")
+    tasks.add_argument("--split", action="append", dest="splits", default=None,
+                       metavar="NAME=FRACTION", help="repeatable; fractions "
+                       "must sum to 1 (default: train=0.98 eval=0.02)")
+    tasks.add_argument("--seed", type=int, default=17,
+                       help="the split draw's seed (a task's split is a "
+                            "function of this and its id alone)")
     args = parser.parse_args(argv)
 
     if args.command == "tag":
         annotate(args)
+        return
+    if args.command == "tasks":
+        build_task_sets(store_for(args.store), args.dataset,
+                        fractions(args.splits), args.seed)
         return
 
     locators = args.store_locators or [
@@ -74,6 +95,31 @@ def main(argv: list[str] | None = None) -> None:
         print(render_runs(roots, grep=args.grep), end="")
         return
     print(VIEWS[args.command](roots), end="")
+
+
+def fractions(splits: list[str] | None) -> dict[str, float]:
+    """`--split train=0.98` pairs as a mapping, in the order given (which is
+    the order split_tasks lays the intervals out in)."""
+    if not splits:
+        return {"train": 0.98, "eval": 0.02}
+    return {name: float(value)
+            for name, _, value in (s.partition("=") for s in splits)}
+
+
+def build_task_sets(store: Store, dataset: str, splits: dict[str, float],
+                    seed: int) -> dict[str, str]:
+    """Build one dataset, split it, write each split — the whole task-set path.
+
+    Prints and returns {split name: cas uri}: those uris are what a spec pins,
+    and the printing is why this lives in the CLI rather than under data/.
+    """
+    tasks = BUILDERS[dataset]()
+    print(f"{dataset}: {len(tasks)} tasks, split {splits} at seed {seed}")
+    uris = {}
+    for name, members in split_tasks(tasks, splits, seed).items():
+        uris[name] = write_tasks(store, members)
+        print(f"  {name:<8} {len(members):>7}  {uris[name]}")
+    return uris
 
 
 def annotate(args) -> None:

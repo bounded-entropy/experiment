@@ -58,6 +58,7 @@ from rlstack.data.trajectory import (
     trajectory_from_row, trajectory_to_row, wave_from_rows, wave_to_rows,
 )
 from rlstack.data.flatten import Flat, TokenBatch, broadcast, flatten, pack
+from rlstack.data.tasks import load_tasks, split_tasks, write_tasks
 from rlstack.data.stores import (
     LedgerError, LocalStore, ManifestMismatch, ModalVolumeStore, RunHandle,
     Store, StoreError, bump,
@@ -69,9 +70,7 @@ from rlstack.runner.interfaces import (
     Emitted, Engine, FinishEvent, Learner, TokenEvent, TrainStats,
 )
 from rlstack.runner.seeds import derive
-from rlstack.runner.traffic import (
-    EnginePoolClient, Routes, load_task_sets, load_tasks,
-)
+from rlstack.runner.traffic import EnginePoolClient, Routes, load_task_sets
 from rlstack.runner.assemble import realize, rollouts_needed, sample_wave
 from rlstack.runner.refs import RefReader
 from rlstack.runner.post import run_pipeline
