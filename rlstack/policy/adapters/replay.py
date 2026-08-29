@@ -109,6 +109,89 @@ class RowPlan:
         return self._rows
 
 
+class SiteWrapper(torch.nn.Module):
+    """The shared half of every module-replacing replay site: one wrapper per
+    (family, path), a roster that makes install additive, and CHAIN mechanics
+    so two FAMILIES at one path nest instead of colliding.
+
+    A site path carries at most one delta PER TENANT (the bank rule), but a
+    shared learner's tenants may bring different families to one path — a
+    lora tenant and a plora tenant both at q_proj. Each family's wrapper
+    applies only the rows whose routed state IS its own (the family filter is
+    the subclass's forward), and passes every other row through to `inner` —
+    which is the base Linear, or the OTHER family's wrapper, whichever
+    join_site found standing there first.
+    """
+
+    def __init__(self, inner: torch.nn.Module, path: str, plan: RowPlan) -> None:
+        super().__init__()
+        self.inner = inner
+        self.path = path
+        self.plan = plan
+        self.installed: list[Any] = []
+
+    def add(self, state: Any) -> None:
+        """Additive install: this state's delta becomes routable here."""
+        if any(present is state for present in self.installed):
+            raise RuntimeError(f"install at {self.path}: this state is already "
+                               f"installed — install/uninstall out of balance")
+        self.installed.append(state)
+
+    def drop(self, state: Any) -> None:
+        """install's inverse at one site; leave_site unwraps when empty."""
+        kept = [present for present in self.installed if present is not state]
+        if len(kept) == len(self.installed):
+            raise RuntimeError(f"uninstall at {self.path}: this state was never "
+                               f"installed — install/uninstall out of balance")
+        self.installed = kept
+
+
+def join_site(model: Any, path: str, wrapper: type,
+              state: Any) -> "SiteWrapper":
+    """Find this FAMILY's wrapper in the chain at `path` — joining it if it
+    stands, wrapping the chain's head if it does not — and add the state.
+
+    The chain is walked, not assumed: another family may already hold the
+    path, and wrapping AROUND it is exactly right — each wrapper transparently
+    passes rows that are not its own, so nesting order never changes a number.
+    """
+    parent, leaf = leaf_module(model, path)
+    node = getattr(parent, leaf)
+    probe = node
+    while isinstance(probe, SiteWrapper):
+        if isinstance(probe, wrapper):
+            probe.add(state)
+            return probe
+        probe = probe.inner
+    site = wrapper(node, path, row_plan(model))
+    setattr(parent, leaf, site)
+    site.add(state)
+    return site
+
+
+def leave_site(model: Any, path: str, wrapper: type, state: Any) -> None:
+    """join_site's exact inverse: drop the state from this family's wrapper,
+    and splice the wrapper OUT of the chain when its last state leaves —
+    whether it is the chain's head (the module attribute) or nested inside
+    another family's wrapper."""
+    parent, leaf = leaf_module(model, path)
+    node = getattr(parent, leaf)
+    outer: SiteWrapper | None = None
+    while isinstance(node, SiteWrapper) and not isinstance(node, wrapper):
+        outer = node
+        node = node.inner
+    if not isinstance(node, wrapper):
+        raise RuntimeError(
+            f"uninstall at {path}: no {wrapper.__name__} in the chain — "
+            f"install/uninstall out of balance")
+    node.drop(state)
+    if not node.installed:
+        if outer is None:
+            setattr(parent, leaf, node.inner)
+        else:
+            outer.inner = node.inner
+
+
 def leaf_module(model: Any, path: str) -> tuple[Any, str]:
     """The (parent module, attribute name) a site path addresses.
 
