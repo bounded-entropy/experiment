@@ -89,8 +89,9 @@ def eval_plan(task_ids, updates, every):
     return RunPlan((measured,) * (updates // every))
 
 
-def spec_for(store, train_tasks, eval_tasks, updates, master):
-    """The experiment as one value."""
+def spec_for(store, train_tasks, eval_tasks, updates, master, init=None):
+    """The experiment as one value. `init` starts it from another run's
+    sealed policy — a birth fact, consumed once at Phase 1 and never again."""
     from rlstack import (AlgoSpec, EvalSpec, ExperimentSpec, GenSpec, GpuConfig,
                          GpuGroup, GpuSet, LearnerMember, OptimSpec, Plans,
                          PolicySpec, PoolMember, SamplingSpec, Schedule, Seeds,
@@ -118,6 +119,7 @@ def spec_for(store, train_tasks, eval_tasks, updates, master):
                       # single document was longer than the budget).
                       schedule=Schedule(microbatch_tokens=512, max_policy_lag=1)),
         eval=EvalSpec(every=10, post=("final_answer",)),
+        init=init,
         gpu_config=GpuConfig(groups=(
             GpuGroup(gpus=GpuSet(n=2), members=(PoolMember("main", tp=2),)),
             GpuGroup(gpus=GpuSet(n=2), members=(LearnerMember(fsdp=2),)))),
@@ -193,7 +195,7 @@ class ModalTransport:
 
 
 def _run(train_tasks: str, eval_tasks: str, updates: int, master: int,
-         label: str) -> dict:
+         label: str, init=None) -> dict:
     """Drive the experiment from the learner's container: local learner,
     remote policy pool, one shared store on the volume."""
     import asyncio
@@ -205,7 +207,7 @@ def _run(train_tasks: str, eval_tasks: str, updates: int, master: int,
     from rlstack.runner.remote import RemotePool
 
     store = ModalVolumeStore("/store", volume=store_volume, locator=STORE)
-    spec = spec_for(store, train_tasks, eval_tasks, updates, master)
+    spec = spec_for(store, train_tasks, eval_tasks, updates, master, init)
     pool = RemotePool(ModalTransport(PolicyHost(tp=2)), base=BASE, tp=2)
     # rank 0 starts the chorus and then IS the learner; the followers exist
     # only to stand in its collectives, and stop() is what ends them
@@ -303,3 +305,28 @@ def evaluate(run_id: str, eval_tasks: str = EVAL_TASKS, n_tasks: int = 32) -> di
         print(f"[eval] update {entry['update']}: heldout accuracy "
               f"{out[int(entry['update'])]:.3f} over {len(tasks)} tasks")
     return out
+
+
+@app.function(image=image, gpu="A100-80GB:2", volumes={"/store": store_volume, "/hf": hf_cache},
+              timeout=86400)
+def extend(run_id: str, version: int = 50, updates: int = 10, master: int = 8) -> dict:
+    """Carry a sealed run's policy further: a NEW experiment, warm-started.
+
+    NOT a longer version of the parent, and deliberately so: a plan's length IS
+    its run's length and the plan hashes into run_id (I3), so a run that saw 60
+    updates cannot be the run that saw 50. This makes the lineage explicit
+    instead — the parent stays immutable history, the child records it in its
+    manifest, and `optim="load"` carries Adam's moments so the first update
+    behaves like update 51 rather than a fresh optimizer meeting a trained
+    policy.
+
+    `master` defaults to a different seed than the parent's, so the rollout plan
+    draws problems the parent did not already train on. Pass the parent's seed
+    to redraw the same ones.
+    """
+    from rlstack import WarmStart
+
+    return _run(TRAIN_TASKS, EVAL_TASKS, updates=updates, master=master,
+                label=f"extend@{run_id}",
+                init=WarmStart(policy=f"store://{run_id}@{version}",
+                               optim="load"))
