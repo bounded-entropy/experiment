@@ -2669,6 +2669,35 @@ specs; backends (local/modal/skypilot) and GPU topology are semantics-neutral.
 - Wave / ArchiveContext typing for the advantage stage (least-specified interface;
   matters for tree-credit / TTT-Discover-style work).
 
+- OPEN (never resolved, only SIDESTEPPED — #61): THE BANK IS REPLICATED, NOT
+  SHARDED. FsdpTorchLearner shards the frozen base and nothing else: every
+  rank holds the whole bank plus its whole optimizer state (fp32 param + grad
+  + two Adam moments) and steps its own copy, so `fsdp` divides the base and
+  divides NOTHING a tenant trains. That is ZeRO-3's parameter mechanic on the
+  base (where gradient and optimizer sharding are vacuous — the base is
+  frozen) and not even ZeRO-1 on the bank. Measured consequence: Samarth's
+  asked-for rank-256 all-linear bank on a 14B is 1.03B trainable = 15.3 GiB
+  per rank of replicated state, which does not fit beside a 6.88 GiB base
+  shard on a 22 GiB card AT ANY WIDTH. The campaign runs only because the
+  ruling dropped the bank to r=16 (21M params, 0.31 GiB), which hides the
+  gap rather than closing it.
+  THE LADDER, in the order the value arrives: (1) ZeRO-1 — shard the fp32
+  master and the two moments across ranks, each rank steps its slice of the
+  (identical) grads, all-gather the params after the step. Removes 12.3 of
+  the 15.3 GiB, touches only optim_step, and leaves #44's additive install
+  and the width-free emit bytes alone. (2) Gradient sharding is meaningless
+  here without splitting DATA across ranks — today every rank recomputes the
+  SAME microbatch, so fsdp is a memory tool, not data parallelism; changing
+  that is its own design decision. (3) Full param-sharding of the bank is
+  last: it collides with additive install/uninstall and turns emit into a
+  distributed gather, which the width-independence invariant would then have
+  to be re-proven against.
+  Also unresolved from the same measurement: emit writes fp32 and
+  RemotePool.add_bundle base64s it into ONE JSON frame, so a 1B bank is
+  ~4.1 GB on the wire per update (~5.5 GB/update, ~275 GB over 50) plus a
+  4.1 GB peft dir per bundle. Both gate any large-adapter run; neither gates
+  r=16.
+
 ## Ground rules for you
 
 - Do NOT edit rl-stack-spec.md, rl-stack-design.md, or any artifact — the main
