@@ -7,6 +7,15 @@ committing right after the ledger append persists them together. A crash
 before that loses only work no ledger line sealed — precisely what attach-time
 recovery (`_discard_unsealed`) already assumes.
 
+A DELETION STAGES EXACTLY LIKE A WRITE, which is what makes retention work
+here at all: a sweep's unlinks are invisible to the volume until a commit, so
+without one the freed bytes come back with the next container. `_persist` is
+the Store's durability hook and this class's whole answer to it — the sweep
+calls it once, after the batch, and it commits the same way the ledger line
+does. Committing there is safe for the same reason it is safe at the ledger:
+it persists whatever else is staged, and the sweep runs immediately after a
+commit, so there is nothing else.
+
 The volume object is passed in and only `.commit()` is called on it, so this
 module needs no modal import and the fakes suite can exercise the commit
 discipline with a recorder.
@@ -32,6 +41,8 @@ class ModalVolumeStore(LocalStore):
         return self._locator or str(self.root)
 
     def _persist(self) -> None:
+        """The durability hook: stage -> volume. Called at every durable point
+        below, and once by a sweep, whose deletions stage like writes."""
         if self._volume is not None:
             self._volume.commit()
 

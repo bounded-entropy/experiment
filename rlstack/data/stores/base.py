@@ -1,8 +1,9 @@
 """The store: ONE key tree, many backends.
 
 The tree and all orchestration — attach-or-create, the append-only ledger,
-crash recovery — live HERE, written against six abstract byte verbs; a backend
-subclasses Store and implements only the verbs (local.py is the reference):
+crash recovery, retention — live HERE, written against seven abstract byte
+verbs; a backend subclasses Store and implements only the verbs (local.py is
+the reference):
 
     runs/<run_id>/manifest.json                identity (I3), written once
                   dictionary.json              the run's self-description
@@ -26,6 +27,11 @@ subclasses Store and implements only the verbs (local.py is the reference):
 Writes are atomic; the ledger is append-only, strictly increasing, and the
 commit bit; resume is attach plus the ledger tail, and work no ledger line
 committed is UNSEALED and is discarded on attach.
+
+Deletion has exactly two meanings, and they are the same rule read twice:
+attach deletes what the ledger NEVER COMMITTED, and a sweep (retention.py)
+deletes what the ledger has MOVED PAST. Neither can reach a byte the run's
+identity or its commit record is made of.
 """
 
 from __future__ import annotations
@@ -39,6 +45,8 @@ from abc import ABC, abstractmethod
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
+
+from rlstack.data.stores.retention import RetentionPolicy, Swept
 
 BLOB_SECTIONS = ("adapters", "optim")
 
@@ -129,8 +137,24 @@ class Store(ABC):
     @abstractmethod
     def _delete(self, key: str) -> None: ...
 
+    @abstractmethod
+    def _size(self, key: str) -> int:
+        """Bytes at key WITHOUT reading them; FileNotFoundError if absent.
+
+        The seventh verb, and deletion's: a sweep has to report what it freed,
+        and reading a 160 MiB optimizer blob to measure it would cost more than
+        leaving it where it is."""
+
     def _sweep_partial(self, prefix: str) -> None:
         """Remove backend-specific write debris (default: nothing)."""
+
+    def _persist(self) -> None:
+        """Make staged verb calls durable (default: nothing — a backend whose
+        verbs are durable as they land has nothing to do here).
+
+        A backend that STAGES (a Modal Volume mount) persists on commit, and a
+        deletion stages exactly like a write: without this, a sweep's freed
+        bytes come back when the container ends."""
 
     # ---- runs ---------------------------------------------------------------
 
@@ -577,6 +601,55 @@ class RunHandle:
         if not self.store._exists(key):
             raise FileNotFoundError(f"no {section} blob {name}@{version}: {key}")
         return self.store._read(key)
+
+    # ---- retention (the second meaning of deletion) --------------------------
+
+    def sweep(self, policy: RetentionPolicy) -> Swept:
+        """Free what `policy` says nothing will ever read again; report it.
+
+        Attach sweeps what the ledger never committed; this sweeps what the
+        ledger has moved past. Every triple is addressed through `_blob_key`,
+        so a policy can name nothing but a versioned blob under adapters/ or
+        optim/ — the ledger, the manifest, a sealed wave and its postdata are
+        unreachable from here and the append-only guards stand untouched.
+
+        The whole batch is checked BEFORE the first delete, so a policy that
+        names live state frees nothing at all rather than half of what it
+        asked for. A blob already gone is skipped, which is what makes
+        sweeping twice free nothing the second time.
+        """
+        tail = self.ledger_tail()
+        named = []
+        for section, name, version in policy.expendable(self.read_ledger()):
+            self._refuse_live_version(tail, section, name, version)
+            named.append(((section, name, version),
+                          self._blob_key(section, name, version)))
+
+        freed, gone = 0, []
+        for triple, key in named:
+            if not self.store._exists(key):
+                continue
+            freed += self.store._size(key)
+            self.store._delete(key)
+            gone.append(triple)
+        self.store._persist()
+        return Swept(tuple(gone), freed)
+
+    def _refuse_live_version(self, tail: dict[str, Any] | None, section: str,
+                             name: str, version: int) -> None:
+        """The version the ledger tail names is the run's LIVE state — resume
+        reads exactly it — so no policy may free it, whatever it says.
+
+        The floor under every retention policy, enforced here and not there: a
+        swept run still resumes.
+        """
+        if tail is None:
+            return
+        live = tail.get("versions")
+        if isinstance(live, dict) and name in live and int(version) == int(live[name]):
+            raise StoreError(
+                f"retention named {section}/{name}@{version}, the version the "
+                f"ledger tail commits: the tail is what resume reads")
 
     # ---- eval ---------------------------------------------------------------
 

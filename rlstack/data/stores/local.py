@@ -1,8 +1,9 @@
 """LocalStore: the key tree on a local filesystem, with real durability.
 
-The store's six byte verbs under the tmp+fsync+rename discipline: readers see
+The store's seven byte verbs under the tmp+fsync+rename discipline: readers see
 old bytes or new bytes, never a tear; renames are recorded in the parent
-directory; ledger appends are flushed and fsynced.
+directory; ledger appends are flushed and fsynced. Every verb lands durably as
+it is called, so the durability hook (`_persist`) has nothing to do here.
 """
 
 from __future__ import annotations
@@ -66,6 +67,9 @@ class LocalStore(Store):
 
     def _delete(self, key: str) -> None:
         self.path_of(key).unlink()
+
+    def _size(self, key: str) -> int:
+        return self.path_of(key).stat().st_size
 
     def _sweep_partial(self, prefix: str) -> None:
         """Stray *.tmp files from interrupted atomic writes."""

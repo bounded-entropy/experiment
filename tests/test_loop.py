@@ -43,8 +43,13 @@ class LoopTest(unittest.TestCase):
         self.assertEqual([e["versions"]["pi"] for e in entries], [1, 2, 3, 4])
         for k in range(1, 5):
             run.read_blob("adapters", "pi", k)   # raises if missing
-            run.read_blob("optim", "pi", k)
             self.assertTrue(run.read_wave(k))
+        # ...and the moments only at the tail: retention swept the rest as
+        # each commit made it unreadable-by-anyone (stores/retention.py)
+        run.read_blob("optim", "pi", 4)
+        for k in range(1, 4):
+            with self.assertRaises(FileNotFoundError):
+                run.read_blob("optim", "pi", k)
 
         # phase-1 bundle + one per update, all distinct, ledger agrees
         self.assertEqual(len(engine.bundle_log), 5)

@@ -60,8 +60,9 @@ from rlstack.data.trajectory import (
 from rlstack.data.flatten import Flat, TokenBatch, broadcast, flatten, pack
 from rlstack.data.tasks import load_tasks, split_tasks, write_tasks
 from rlstack.data.stores import (
-    LedgerError, LocalStore, ManifestMismatch, ModalVolumeStore, RunHandle,
-    Store, StoreError, bump,
+    DEFAULT_RETENTION, KeepRestorable, LedgerError, LocalStore,
+    ManifestMismatch, ModalVolumeStore, RetentionPolicy, RunHandle, Store,
+    StoreError, Swept, bump,
 )
 from rlstack.policy.compile import (
     Bundle, compile_bundle, group_by_adapter_type, group_by_mechanism,

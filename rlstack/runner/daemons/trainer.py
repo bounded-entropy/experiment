@@ -30,6 +30,7 @@ from rlstack.data.plan import RunPlan
 from rlstack.runner.assemble import realize
 from rlstack.runner.refs import RefReader
 from rlstack.data.stores.base import RunHandle, bump
+from rlstack.data.stores.retention import DEFAULT_RETENTION, RetentionPolicy
 from rlstack.data.trajectory import wave_from_rows
 from rlstack.policy.compile import Bundle, compile_bundle
 from rlstack.registry import ADAPTER_TYPES
@@ -52,10 +53,12 @@ class Trainer(Daemon):
                  routes_at: Callable[[Bundle], Routes],
                  initial_bundle: Bundle,
                  initial_version: dict[str, int],
-                 journal: HostJournal | None = None) -> None:
+                 journal: HostJournal | None = None,
+                 retention: RetentionPolicy = DEFAULT_RETENTION) -> None:
         super().__init__(signals, arbiter, run)
         self.tenant = tenant
         self.journal = journal
+        self.retention = retention
         self.post_residents = post_residents
         self.spec = spec
         self.schedule = spec.algo.schedule
@@ -95,6 +98,7 @@ class Trainer(Daemon):
     # ---- the daemon ---------------------------------------------------------
 
     async def run_forever(self) -> None:
+        self.sweep_stale()          # converge what an interrupted process left
         for update in range(self.committed() + 1, len(self.plan) + 1):
             clock = UpdateClock()
             rows = await self.signals.wait_for(lambda: self.next_rows(update))
@@ -142,9 +146,41 @@ class Trainer(Daemon):
                 "post": _column_means(postdata),
                 "train": _train_summary(stats),
             })
+            self.sweep_stale()
             clock.sealed()
             self.journal_update(clock, update)
             await self.signals.notify()
+
+    # ---- retention (at the commit, because that is when a version goes stale)
+
+    def sweep_stale(self) -> None:
+        """Free what the ledger has moved past — every optimizer blob below the
+        tail, and nothing else the default policy can name.
+
+        AT THE COMMIT, because that is the moment the previous update's moments
+        stopped having a reader, and the moment the whole design already
+        serializes on — no daemon, no clock, no second authority. AND WHEN THIS
+        DAEMON STARTS, because a process killed between a commit and its sweep
+        leaves one stale blob nobody would ever come back for: the run's LAST
+        commit has no later commit to sweep after it. Sweeping on attach makes
+        the store CONVERGE — after any commit and after any attach it holds
+        every adapter and exactly one optim per delta — which is what keeps a
+        run directory a pure function of (spec, code, data) even though bytes
+        now leave it.
+
+        NEVER FATAL. The update is committed; the ledger says so, and a failed
+        unlink leaves bytes on a volume, which is the cheapest failure in the
+        system. It also heals: the policy is a pure function of the ledger, so
+        every later commit names the same blobs again, and `python -m rlstack
+        sweep` is the backstop for the last one. What was freed is deliberately
+        recorded NOWHERE — it is a fact about a directory, not about the
+        experiment, and a run directory holding it would no longer be a pure
+        function of (spec, code, data).
+        """
+        try:
+            self.run.sweep(self.retention)
+        except Exception:      # any backend failure; see the rule above
+            pass
 
     # ---- the emission (observability; never a run-directory byte) -----------
 
