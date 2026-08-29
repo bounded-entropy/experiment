@@ -128,7 +128,7 @@ class FsdpTorchLearner(TorchLearner):
         from torch.distributed.fsdp import fully_shard
 
         mesh = self.ranks.mesh()
-        for block in self.frozen_blocks():
+        for block in self.decoder_blocks():
             block.to(self.device)          # one block whole: the peak's bound
             fully_shard(block, mesh=mesh, reshard_after_forward=True)
         self.move_what_no_block_owns()
@@ -170,13 +170,6 @@ class FsdpTorchLearner(TorchLearner):
             for name, buffer in list(module._buffers.items()):
                 if buffer is not None and buffer.device.type == "cpu":
                     module._buffers[name] = buffer.to(self.device)
-
-    def frozen_blocks(self) -> list[torch.nn.Module]:
-        """The units FSDP shards: the base's decoder blocks, named
-        `model.layers` in an HF causal LM — the same path the site schema
-        resolves against (`model.layers.N.self_attn.q_proj`), so this reads
-        the tree in the schema's own vocabulary."""
-        return list(self._model.model.layers)
 
     def base_parameters(self) -> list[torch.nn.Parameter]:
         """The frozen base's own parameters — the module tree MINUS every
@@ -324,6 +317,11 @@ class FsdpTorchLearner(TorchLearner):
         model.eval()
         self._model = model
         self._base = base
+        # recompute BEFORE the wrap: checkpointing replaces each block's
+        # forward in place, and fully_shard's hooks then wrap the recomputing
+        # one, so the backward's re-gather and the recompute compose in the
+        # order FSDP expects
+        self.checkpoint_the_blocks()
         self.shard_the_frozen_base()
 
 

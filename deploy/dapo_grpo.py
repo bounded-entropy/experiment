@@ -13,7 +13,6 @@ The plans are written out rather than helper-built: waves x groups x leaves is
 the run's shape, and this file is where a campaign states it.
 """
 
-import json
 import random
 
 import modal
@@ -107,11 +106,16 @@ def spec_for(store, train_tasks, eval_tasks, updates, master):
         plans=plans,
         algo=AlgoSpec(loss="grpo", post=("final_answer", "grpo_advantage"),
                       optim=OptimSpec("adamw", lr=1e-4),
-                      schedule=Schedule(microbatch_tokens=2048, max_policy_lag=1)),
+                      # 512, not 2048: `pack` fills a forward TO this budget,
+                      # so short documents alone never shrink one. Thinking-off
+                      # completions are a few hundred tokens, which is what
+                      # makes the knob bite again (#58 measured it stuck when a
+                      # single document was longer than the budget).
+                      schedule=Schedule(microbatch_tokens=512, max_policy_lag=1)),
         eval=EvalSpec(every=10, post=("final_answer",)),
         gpu_config=GpuConfig(groups=(
             GpuGroup(gpus=GpuSet(n=2), members=(PoolMember("main", tp=2),)),
-            GpuGroup(gpus=GpuSet(n=4), members=(LearnerMember(fsdp=4),)))),
+            GpuGroup(gpus=GpuSet(n=2), members=(LearnerMember(fsdp=2),)))),
         seeds=Seeds(master=master))
 
 
@@ -181,23 +185,36 @@ def _run(train_tasks: str, eval_tasks: str, updates: int, master: int,
     from rlstack import ModalVolumeStore
     from rlstack.policy.siteschema import hf_schema
     from rlstack.runner.host import Host, Partition, Regime
-    from rlstack.runner.learners.fsdp_torch import FsdpTorchLearner
+    from rlstack.runner.learners.fsdp_torch import lead_fsdp_learner
     from rlstack.runner.remote import RemotePool
 
     store = ModalVolumeStore("/store", volume=store_volume, locator=STORE)
     spec = spec_for(store, train_tasks, eval_tasks, updates, master)
     pool = RemotePool(ModalTransport(PolicyHost(tp=2)), base=BASE, tp=2)
-    learner = FsdpTorchLearner(BASE, fsdp=4)
+    # rank 0 starts the chorus and then IS the learner; the followers exist
+    # only to stand in its collectives, and stop() is what ends them
+    learner = lead_fsdp_learner(2)
     host = Host("dapo-learner", engines=(), learner=learner, store=store,
-                partition=Partition("modal-l4", (0, 1, 2, 3), 0.90, "L4"),
-                regimes=(Regime("train-fsdp4", "training", BASE, 4),))
-    report = asyncio.run(host.submit(spec, hf_schema(BASE), store,
-                                     remotes={"main": pool}))
-    print(f"[{label}] {json.dumps(report, default=str)[:400]}")
-    return report
+                partition=Partition("modal-a100", (0, 1), 0.90, "A100-80GB"),
+                regimes=(Regime("train-fsdp2", "training", BASE, 2),))
+    print(f"[chorus] rank 0 of 2, learner.fsdp={learner.fsdp}")
+    try:
+        report = asyncio.run(host.submit(spec, hf_schema(BASE), store,
+                                         remotes={"main": pool}))
+    finally:
+        learner.stop()
+    store_volume.commit()
+    # the measurement the L4 attempts could not survive to report: if the peak
+    # is near one shard the blocks reshard as designed and the L4 was simply
+    # too small; if it is near the whole base they accumulate, and that is ours
+    import torch
+    print(f"[{label}] rank0 peak {torch.cuda.max_memory_allocated()/2**30:.2f} GiB")
+    print(f"[{label}] run_id={report.run_id} "
+          f"updates={report.updates_completed}")
+    return {"run_id": report.run_id, "updates": report.updates_completed}
 
 
-@app.function(image=image, gpu="L4:4", volumes={"/store": store_volume, "/hf": hf_cache},
+@app.function(image=image, gpu="A100-80GB:2", volumes={"/store": store_volume, "/hf": hf_cache},
               timeout=7200)
 def shakeout(train_tasks: str = TRAIN_TASKS, eval_tasks: str = EVAL_TASKS,
              master: int = 7) -> dict:
@@ -206,7 +223,7 @@ def shakeout(train_tasks: str = TRAIN_TASKS, eval_tasks: str = EVAL_TASKS,
                 label="shakeout")
 
 
-@app.function(image=image, gpu="L4:4", volumes={"/store": store_volume, "/hf": hf_cache},
+@app.function(image=image, gpu="A100-80GB:2", volumes={"/store": store_volume, "/hf": hf_cache},
               timeout=86400)
 def full(train_tasks: str = TRAIN_TASKS, eval_tasks: str = EVAL_TASKS,
          master: int = 7, updates: int = 50, go: bool = False) -> dict:

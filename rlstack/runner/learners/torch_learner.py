@@ -61,10 +61,12 @@ class _Tenant:
 class TorchLearner:
     def __init__(self, device: str | None = None,
                  dtype: torch.dtype = torch.bfloat16,
-                 grad_clip: float = 1.0) -> None:
+                 grad_clip: float = 1.0,
+                 checkpoint_activations: bool = True) -> None:
         self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
         self.dtype = dtype
         self.grad_clip = grad_clip
+        self.checkpoint_activations = checkpoint_activations
         self.fsdp = 1               # build fact: this build is unsharded
         self._base: str | None = None
         self._model: torch.nn.Module | None = None
@@ -160,10 +162,47 @@ class TorchLearner:
             self._model.requires_grad_(False)
             self._model.eval()   # replay is exact recompute: no dropout, ever
             self._base = base
+            self.checkpoint_the_blocks()
         elif self._base != base:
             raise ValueError(
                 f"this learner holds base {self._base!r}; tenant wants "
                 f"{base!r} — one learner serves one base")
+
+    def decoder_blocks(self) -> list[torch.nn.Module]:
+        """The base's decoder blocks, named `model.layers` in an HF causal LM —
+        the same path the site schema resolves against."""
+        return list(self._model.model.layers)
+
+    def checkpoint_the_blocks(self) -> None:
+        """Trade compute for memory: recompute each block's interior in the
+        backward instead of keeping it from the forward.
+
+        WHY THIS IS NOT OPTIONAL AT SCALE. A wave's documents are packed into
+        forwards under `microbatch_tokens`, but pack never SPLITS a document
+        (flatten.py), so the floor on one forward is the longest document — and
+        a competition-math answer is ~1500 tokens. Storing every layer's
+        interior for one such document costs ~14 GiB on a 14B base (#61
+        measured it), which no batch knob can reduce, because the knob cannot
+        go below one document. Checkpointing keeps only each block's INPUT
+        (~15 MB) and pays about a third more backward compute.
+
+        The forward is replaced in place rather than by wrapping the module:
+        adapter installation and the site schema both address blocks by their
+        module path (`model.layers.7.self_attn.q_proj`), and a wrapper would
+        rename every one of them. use_reentrant=False because the blocks take
+        keyword arguments and because it is the form that composes with FSDP's
+        re-gather in the backward.
+
+        Exactness is unaffected: the base is frozen and in eval, so a recomputed
+        forward is the same arithmetic on the same weights — this buys memory,
+        never a different number.
+        """
+        if not self.checkpoint_activations:
+            return
+        from torch.utils.checkpoint import checkpoint
+
+        for block in self.decoder_blocks():
+            block.forward = _recomputed(block.forward, checkpoint)
 
     def _claim_slot(self, state: _Tenant, sites: tuple[SiteMeta, ...],
                     params: object) -> None:
@@ -260,3 +299,18 @@ def _state_from(payload: bytes) -> dict:
     import io
     return torch.load(io.BytesIO(payload), map_location="cpu",
                       weights_only=False)
+
+
+def _recomputed(forward, checkpoint):
+    """One block's forward, run again in the backward instead of remembered.
+
+    A closure over the ORIGINAL bound method, so the module tree is untouched
+    and every site path still resolves. Under no_grad there is nothing to
+    recompute for, and checkpoint would only add bookkeeping, so the plain
+    forward runs — which is what keeps a scoring pass as cheap as it was.
+    """
+    def run(*args, **kwargs):
+        if not torch.is_grad_enabled():
+            return forward(*args, **kwargs)
+        return checkpoint(forward, *args, use_reentrant=False, **kwargs)
+    return run
