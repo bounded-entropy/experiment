@@ -12,7 +12,7 @@ payload digests, so identical banks compile to identical bundle ids everywhere.
 from __future__ import annotations
 
 import hashlib
-from collections.abc import Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field
 
 from rlstack.policy.adapters.base import Mechanism
@@ -65,6 +65,38 @@ def compile_bundle(
                   payloads=served,
                   adapter_types={name: (adapter_types or {})[name] for name in served}
                   if adapter_types else {})
+
+
+ReadBlob = Callable[[str, str, int], bytes]     # (section, name, version) -> bytes
+
+
+def restore_bundle(policy_version: Mapping[str, int], bundle_id: str,
+                   read_blob: ReadBlob, servable: Iterable[str],
+                   adapter_types: Mapping[str, str] | None = None) -> Bundle:
+    """Rebuild a committed bundle from the store, and PROVE it is the same one.
+
+    A pinned version map plus the store is all a bundle ever was: read each
+    servable delta's blob at its pinned version, recompile, and compare ids.
+    Since bundle_id = h(version map ⊕ payload digests), a matching id is proof
+    the rebuild IS the policy that was committed — no trust, no drift.
+
+    This is why serving residency need not be durable. An evicted bundle, a
+    restarted container and a resumed run are one situation with one answer, and
+    the caller that decides WHEN to ask lives in runner/restore.py.
+
+    `read_blob` is a callable rather than a store so this file keeps knowing
+    nothing about storage — the caller chooses the run, which is what lets a
+    warm start read a parent's blobs through the same door.
+    """
+    payloads = {name: read_blob("adapters", name, policy_version[name])
+                for name in sorted(servable)}
+    rebuilt = compile_bundle(payloads, policy_version, servable, adapter_types)
+    if rebuilt.bundle_id != bundle_id:
+        raise ValueError(
+            f"restored bundle {rebuilt.bundle_id} is not the committed "
+            f"{bundle_id}: the blobs at this version map do not compile to the "
+            f"policy that was sealed under it")
+    return rebuilt
 
 
 def group_by_adapter_type(bundle: Bundle) -> dict[str, dict[str, bytes]]:

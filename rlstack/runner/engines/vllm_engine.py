@@ -41,6 +41,7 @@ from rlstack.policy.compile import Bundle, group_by_adapter_type
 from rlstack.registry import ADAPTER_TYPES
 from rlstack.runner.interfaces import FinishEvent, TokenEvent
 from rlstack.runner.meters import TrafficMeter
+from rlstack.runner.residency import BundleResidency
 from rlstack.spec.specs import SamplingSpec
 
 
@@ -84,9 +85,9 @@ class VllmEngine:
         # traffic is counted HERE, at our own seam — never inside vLLM, whose
         # statistics are version-coupled. A host wires its own meter in.
         self.meter = TrafficMeter()
-        self._known: set[str] = set()          # every registered bundle_id
-        # id -> adapter type -> state
-        self._attached: dict[str, dict[str, object]] = {}
+        # what this engine is holding, and the rule for letting go: bounded,
+        # least-recently-used first, never a bundle a request is pinning.
+        self._residency = BundleResidency(max_bundles, self._detach_all)
         self._request_count = 0
 
     def _serving_adapter_types(self) -> dict[str, RolloutLowering]:
@@ -151,17 +152,33 @@ class VllmEngine:
         (I8), and a bundle whose adapter types cannot compose into one request is
         refused here, before any request can pin it.
         """
-        if bundle.bundle_id in self._known:
+        if self._residency.knows(bundle.bundle_id):
             return
         payloads = group_by_adapter_type(bundle)
         lowerings = [self._lowering_for(bundle.bundle_id, adapter_type)
                      for adapter_type in payloads]
         check_levers_compose(bundle.bundle_id, lowerings)
-        self._attached[bundle.bundle_id] = {
+        self._residency.hold(bundle.bundle_id, {
             lowering.adapter_type: lowering.attach(
                 bundle.bundle_id, payloads[lowering.adapter_type])
-            for lowering in lowerings}
-        self._known.add(bundle.bundle_id)   # no payloads: serve the bare base
+            for lowering in lowerings})       # no payloads: serve the bare base
+
+    def knows_bundle(self, bundle_id: str) -> bool:
+        """Is this bundle resident HERE, right now?
+
+        The one question that makes restore demand-driven: a caller asks before
+        reading the store, so the common path (still resident) costs nothing and
+        the miss path costs one rebuild. It is a fact about this engine at this
+        instant, never about the run — the ledger says what a version IS, this
+        says whether we happen to be holding it.
+        """
+        return self._residency.knows(bundle_id)
+
+    def _detach_all(self, attached: Mapping[str, object]) -> None:
+        """Give one bundle's state back, adapter type by adapter type —
+        the callback residency calls when it evicts."""
+        for adapter_type, state in attached.items():
+            self._lowerings[adapter_type].detach(state)
 
     def _lowering_for(self, bundle_id: str, adapter_type: str) -> RolloutLowering:
         """The lowering that serves `adapter_type` here, or the honest refusal."""
@@ -176,16 +193,13 @@ class VllmEngine:
         """What each adapter type made resident for this bundle (adapter type ->
         its state): the bus's own inventory, read by probes. Requests go through
         levers."""
-        return self._attached.get(bundle_id, {})
+        return self._residency.attached(bundle_id)
 
     def residency(self) -> Mapping[str, int]:
         """How many registered bundles each served adapter type holds state for —
         the census of I8 on this engine, one number per adapter type."""
         counts = {adapter_type: 0 for adapter_type in self.serves}
-        for attached in self._attached.values():
-            for adapter_type in attached:
-                counts[adapter_type] += 1
-        return counts
+        return {**counts, **self._residency.census()}
 
     async def sample_tokens(
         self,
@@ -195,8 +209,11 @@ class VllmEngine:
         bundle_id: str,
         seed: int,
     ) -> AsyncIterator[TokenEvent | FinishEvent]:
-        if bundle_id not in self._known:
-            raise RuntimeError(f"bundle {bundle_id!r} was never registered")
+        if not self._residency.knows(bundle_id):
+            raise RuntimeError(
+                f"bundle {bundle_id!r} is not resident on this engine; a"
+                f" caller restores a committed version before pinning it"
+                f" (runner/restore.py)")
         from vllm import SamplingParams
 
         # Each message tokenized separately, then concatenated — the EXACT
@@ -208,35 +225,36 @@ class VllmEngine:
             logprobs=0)
         self._request_count += 1
         request_id = f"rlstack-{self._request_count}-{seed}"
-        levers = self._levers_for(prompt_ids, bundle_id)
-        # the prefill is known BEFORE the request leaves, and the clock for
-        # time-to-first-token starts on the same line
-        self.meter.opened_request(len(prompt_ids))
-        submitted = time.time()
+        with self._residency.pinned(bundle_id):
+            levers = self._levers_for(prompt_ids, bundle_id)
+            # the prefill is known BEFORE the request leaves, and the clock for
+            # time-to-first-token starts on the same line
+            self.meter.opened_request(len(prompt_ids))
+            submitted = time.time()
 
-        emitted = 0
-        text_len = 0
-        final = None
-        async for output in self._ensure_llm().generate(
-                levers.prompt, params, request_id, **levers.kwargs):
-            completion = output.outputs[0]
-            new_ids = list(completion.token_ids)[emitted:]
-            if new_ids and not emitted:
-                self.meter.first_token_after(time.time() - submitted)
-            self.meter.decoded(len(new_ids))
-            for offset, token_id in enumerate(new_ids):
-                position = emitted + offset
-                logprob = completion.logprobs[position][token_id].logprob
-                # attribute the whole text delta to the last new token: the
-                # concatenation (the Message content) stays exact either way
-                last = offset == len(new_ids) - 1
-                delta = completion.text[text_len:] if last else ""
-                yield TokenEvent(token_id=int(token_id), logprob=float(logprob),
-                                 text_delta=delta)
-            emitted += len(new_ids)
-            text_len = len(completion.text)
-            final = completion
-        yield _finish_event(final)
+            emitted = 0
+            text_len = 0
+            final = None
+            async for output in self._ensure_llm().generate(
+                    levers.prompt, params, request_id, **levers.kwargs):
+                completion = output.outputs[0]
+                new_ids = list(completion.token_ids)[emitted:]
+                if new_ids and not emitted:
+                    self.meter.first_token_after(time.time() - submitted)
+                self.meter.decoded(len(new_ids))
+                for offset, token_id in enumerate(new_ids):
+                    position = emitted + offset
+                    logprob = completion.logprobs[position][token_id].logprob
+                    # attribute the whole text delta to the last new token: the
+                    # concatenation (the Message content) stays exact either way
+                    last = offset == len(new_ids) - 1
+                    delta = completion.text[text_len:] if last else ""
+                    yield TokenEvent(token_id=int(token_id), logprob=float(logprob),
+                                     text_delta=delta)
+                emitted += len(new_ids)
+                text_len = len(completion.text)
+                final = completion
+            yield _finish_event(final)
 
     async def score_tokens(self, messages: Sequence[Message],
                            token_ids: Sequence[int],
@@ -245,8 +263,11 @@ class VllmEngine:
         returns each prompt position's logprob under the pinned bundle, and we
         read off the scored suffix. max_tokens=1 because vLLM must generate
         something — the one decoded token is discarded."""
-        if bundle_id not in self._known:
-            raise RuntimeError(f"bundle {bundle_id!r} was never registered")
+        if not self._residency.knows(bundle_id):
+            raise RuntimeError(
+                f"bundle {bundle_id!r} is not resident on this engine; a"
+                f" caller restores a committed version before pinning it"
+                f" (runner/restore.py)")
         if not token_ids:
             return ()
         from vllm import SamplingParams
@@ -257,22 +278,23 @@ class VllmEngine:
                                 prompt_logprobs=0)
         self._request_count += 1
         request_id = f"rlstack-score-{self._request_count}"
-        levers = self._levers_for(full_ids, bundle_id)
-        # one prefill of known length, no decode loop: it costs the metal a
-        # prefill and the window says so
-        self.meter.opened_request(len(full_ids))
+        with self._residency.pinned(bundle_id):
+            levers = self._levers_for(full_ids, bundle_id)
+            # one prefill of known length, no decode loop: it costs the metal a
+            # prefill and the window says so
+            self.meter.opened_request(len(full_ids))
 
-        final = None
-        async for output in self._ensure_llm().generate(
-                levers.prompt, params, request_id, **levers.kwargs):
-            final = output
-        assert final is not None and final.prompt_logprobs is not None
-        # the scored suffix sits after the context — and after everything the
-        # bundle's adapter types put in front of it
-        start = self._occupied(bundle_id) + len(context_ids)
-        return tuple(
-            float(final.prompt_logprobs[start + j][int(tok)].logprob)
-            for j, tok in enumerate(token_ids))
+            final = None
+            async for output in self._ensure_llm().generate(
+                    levers.prompt, params, request_id, **levers.kwargs):
+                final = output
+            assert final is not None and final.prompt_logprobs is not None
+            # the scored suffix sits after the context — and after everything the
+            # bundle's adapter types put in front of it
+            start = self._occupied(bundle_id) + len(context_ids)
+            return tuple(
+                float(final.prompt_logprobs[start + j][int(tok)].logprob)
+                for j, tok in enumerate(token_ids))
 
     # ---- the sleep seam (a build capability, NOT the Engine protocol) -------
 
@@ -329,7 +351,7 @@ class VllmEngine:
 
         request = Request(token_ids=tuple(prompt_ids))
         levers = Levers(prompt=TokensPrompt(prompt_token_ids=prompt_ids))
-        for adapter_type, attached in self._attached[bundle_id].items():
+        for adapter_type, attached in self._residency.attached(bundle_id).items():
             levers = levers.merged_with(
                 self._lowerings[adapter_type].apply(attached, request))
         return levers
@@ -340,7 +362,7 @@ class VllmEngine:
         front of the same first real token."""
         return sum(self._lowerings[adapter_type].align(attached).positions
                    for adapter_type, attached
-                   in self._attached[bundle_id].items())
+                   in self._residency.attached(bundle_id).items())
 
 
 def _finish_event(completion) -> FinishEvent:

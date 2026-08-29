@@ -57,3 +57,7 @@ class AttnBiasRollout(RolloutLowering):
         raise NotImplementedError(
             f"{PLUGIN} is not installed on this build — nothing ever attaches, "
             f"so no request carries this adapter type's levers")
+
+    def detach(self, attached: Any) -> None:
+        """Nothing ever attached, so nothing is ever released — the honest
+        inverse of an attach that refuses."""

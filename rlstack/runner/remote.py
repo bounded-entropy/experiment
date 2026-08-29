@@ -202,6 +202,8 @@ class HostService:
         if verb == "add_bundle":
             engine.add_bundle(decode_bundle(payload["bundle"]))
             return {}
+        if verb == "knows_bundle":
+            return {"known": engine.knows_bundle(payload["bundle_id"])}
         if verb == "reachability":
             reach = engine.reachability(decode_sites(payload["sites"]))
             return {"mechanisms": {name: mech.name
@@ -280,6 +282,15 @@ class RemotePool:
     def add_bundle(self, bundle: Bundle) -> None:
         self._transport.ask("add_bundle", {
             **self._address(), "bundle": encode_bundle(bundle)})
+
+    def knows_bundle(self, bundle_id: str) -> bool:
+        """Admission-free, like the registration it guards: asking what a pool
+        holds never disturbs traffic, and the answer is about the SERVING
+        engine's residency — which is why it has to cross the wire rather than
+        be remembered here."""
+        reply = self._transport.ask("knows_bundle", {
+            **self._address(), "bundle_id": bundle_id})
+        return bool(reply["known"])
 
     def reachability(self, sites: Sequence[SiteMeta]) -> Mapping[str, Mechanism]:
         reply = self._transport.ask("reachability", {

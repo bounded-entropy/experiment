@@ -14,6 +14,7 @@ Lora.rollout_lowering, never from the package root (STYLE rule 7).
 
 from __future__ import annotations
 
+import shutil
 from collections.abc import Mapping
 from typing import Any
 
@@ -79,3 +80,18 @@ class LoraRollout(RolloutLowering):
     def align(self, attached: Any) -> Alignment:
         """A weight delta adds no positions — the prompt is exactly the tokens."""
         return Alignment(0)
+
+    def detach(self, attached: LoRARequest) -> None:
+        """Delete the fused adapter this bundle wrote, and forget its id.
+
+        There is nothing to tell the engine: attach never registered anything
+        with vLLM — it built a LoRARequest that each request carries — so
+        releasing IS removing the directory that request pointed at. vLLM's own
+        LoRA caches evict on their own schedule and reload from that path, so
+        the one rule is that no request may pin this bundle again, which is what
+        the engine's pin-aware eviction guarantees.
+
+        Int ids are drawn monotonically and never reused, so a later bundle can
+        never be confused with a stale cached copy of this one.
+        """
+        shutil.rmtree(attached.lora_path, ignore_errors=True)

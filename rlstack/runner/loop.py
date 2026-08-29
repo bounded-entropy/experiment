@@ -28,6 +28,7 @@ from rlstack.runner.meters import HostJournal
 from rlstack.data.plan import RunPlan, decode
 from rlstack.runner.assemble import rollouts_needed
 from rlstack.runner.refs import RefReader
+from rlstack.runner.restore import restore_bundle_on, restore_tenant
 from rlstack.runner.traffic import Routes, load_task_sets
 from rlstack.runner.signals import RunSignals
 from rlstack.spec.canonical import canonical_json, run_id
@@ -171,19 +172,15 @@ async def run_experiment_async(
     tail = run.ledger_tail()
     if tail is not None:
         policy_version = {name: int(v) for name, v in tail["versions"].items()}
-        learner.load(
-            rid,
-            adapters={name: run.read_blob("adapters", name, policy_version[name])
-                      for name in trainable},
-            optim={name: run.read_blob("optim", name, policy_version[name])
-                   for name in trainable},
-        )
+        restore_tenant(learner, rid, policy_version, run.read_blob, trainable)
         resumed_from = int(tail["update"])
     elif spec.init is not None:
         _warm_start(spec.init, tenant=rid, bank_names=set(bank),
                     trainable=trainable, store=store, learner=learner)
 
     emitted = learner.emit(rid)
+    write_frozen_blobs(run, emitted.adapters, policy_version,
+                       set(servable) - set(trainable))
     bundle = compile_bundle(emitted.adapters, policy_version, servable,
                             adapter_types)
     engine_map["main"].add_bundle(bundle)
@@ -195,6 +192,15 @@ async def run_experiment_async(
         engine_map[name].add_bundle(base_bundle)
 
     def routes_at(current: Bundle) -> Routes:
+        """Where this wave's traffic goes — and the one place that makes sure
+        the policy pool can still serve the version it is about to pin.
+
+        Residency is not durable (a bounded pool evicts, a restarted container
+        starts empty), so the route is established by ASKING and restoring on a
+        miss. It runs once per wave, never per request.
+        """
+        restore_bundle_on(engine_map["main"], current, run.read_blob,
+                          servable, adapter_types)
         return {name: (eng, current if name == "main" else base_bundles[name])
                 for name, eng in engine_map.items()}
 
@@ -225,6 +231,24 @@ def load_plans(declared: Plans, store: Store) -> dict[str, RunPlan]:
         if uri is not None:
             out[kind] = decode(store.cas_get(uri))
     return out
+
+
+def write_frozen_blobs(run, adapters: Mapping[str, bytes],
+                       policy_version: Mapping[str, int],
+                       frozen_servable: set[str]) -> None:
+    """Persist the servable deltas that never advance, once, at their version.
+
+    The trainer writes a blob per TRAINABLE entry per update, so a frozen
+    servable delta — served on every request, changed by nothing — would have no
+    blob at all, and restore could not rebuild the bundles that carry it. It is
+    written here instead: emitted once at Phase 1, at the version it will hold
+    for the run's life. Without this the store is complete only for the deltas
+    that happen to move, and a restore is total only by luck.
+    """
+    for name in sorted(frozen_servable):
+        if not run.has_blob("adapters", name, policy_version[name]):
+            run.write_blob("adapters", name, policy_version[name],
+                           adapters[name])
 
 
 def plan_daemons(spec: ExperimentSpec, *, run, store, engine_map, learner,
