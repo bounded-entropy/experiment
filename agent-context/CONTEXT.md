@@ -2618,6 +2618,39 @@ specs; backends (local/modal/skypilot) and GPU topology are semantics-neutral.
       peak-memory print.
 
 
+62. **The campaign ran: 50 updates of GRPO on DAPO-Math-17k, and the policy
+    learned.** Run `803578405216` — Qwen3-14B, r=16 LoRA on attention sites,
+    tp=2 policy host over the wire beside an fsdp=2 A100 learner, 8 groups x 8
+    completions a wave, 4.94M tokens trained, final bundle
+    `bundle:29b5f7b25f1a` at `pi@50`. ~$35 on the credits workspace.
+    - TRAINING REWARD DOUBLED, block means over ten updates: 0.222, 0.358,
+      0.467, 0.495, 0.464 — monotone through update 40, then flat.
+    - HELD OUT IT GENERALIZED, measured after the fact over sealed
+      checkpoints: 0.312 at u20, 0.438 at u30, 0.344 at u40, 0.531 at u50 on
+      32 tasks the policy never trained on. The rise corroborates the training
+      curve instead of contradicting it, which is the distinction that
+      mattered; a 32-task set moves 3 points per problem, so u40 is noise.
+    - THE PARITY RAIL HELD ALL 50: logprob_gap median 0.0181, max 0.0257,
+      never off the kernel floor, so the remote pool served exactly the
+      adapters the learner recomputed for every update. grad_norm median 1.9.
+    - PACE: 267 s/update (collect 143, train 122, seal 9) — collect-bound with
+      lag=1 overlapping the two, which is why the A100 learner was the right
+      economics (an L4 learner was train-bound at ~800 s).
+    - MEASUREMENT GAPS, stated: update 10's post-hoc eval never printed (absent
+      from the logs, not an error — the path wants a look before it is trusted
+      unattended), and there is NO version-0 baseline, because ::evaluate walks
+      ledger entries and an untrained policy has none. The nearest reference is
+      the training-wave reward of 0.266 at update 1 under the same sampling.
+      Quote 0.531 only beside that caveat until a base measurement exists.
+    - THE IN-RUN EVAL MEASURED NOTHING, and the bug was in the campaign, not
+      the runner: the evaluator reads `plan.wave(update // every)` — ONE WAVE
+      PER EVAL POINT — and the eval plan was built with one entry per update
+      and empties between, so every point read an empty wave. Fixed
+      (`RunPlan((measured,) * (updates // every))`), and `::evaluate` recovers
+      the measurement from sealed checkpoints because a committed version is
+      re-derivable with its content-addressed id as the proof.
+
+
 ## Open threads (do NOT treat as settled; flag when your answer touches them)
 
 - TODO (Samarth, settled intent — future, nothing now): BUNDLE LRU EVICTION
