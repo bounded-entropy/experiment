@@ -363,8 +363,8 @@ runner cannot tell remote from local.
 ### The store
 
 **Store** — one abstract key tree with all the orchestration (attach-or-create,
-the append-only ledger, crash recovery) written against six abstract byte
-verbs; a backend implements only the verbs.
+the append-only ledger, crash recovery, retention) written against seven
+abstract byte verbs; a backend implements only the verbs.
 `rlstack/data/stores/base.py`, `local.py`, `modal_volume.py`
 
 **Run store** — the per-experiment binding: one experiment, one store, for life
@@ -382,6 +382,16 @@ before an update's ledger line is UNSEALED and is discarded on attach.
 the whole blackboard is ordered around; kill -9 at any other point loses only
 work that regenerates.
 `rlstack/runner/daemons/trainer.py`
+
+**Retention** — what a run's store may forget, as a policy class: a pure
+function of the ledger naming expendable blob versions — a versioned blob
+under `adapters/` or `optim/` and nothing else, so the append-only guards are
+out of reach by construction. The default, `KeepRestorable`, keeps every
+adapter (restore pins historical versions forever) and only the ledger tail's
+optimizer moments (`restore_tenant` reads nothing else). Retention changes
+what is RECOVERABLE, never what was COMPUTED: nothing about it is hashed,
+journaled, or written to a run directory.
+`rlstack/data/stores/retention.py`
 
 **CAS** — `cas/<sha256>/blob`: content-addressed objects, how task files and
 static trajectory datasets are named (`cas://<sha>/...`).
@@ -544,6 +554,11 @@ One currency and one decider per rung (I12):
 - **write_wave / read_wave**, **write_postdata / read_postdata**,
   **write_blob / read_blob**, **write_eval** — the run's data sections.
 - **append_ledger** — THE commit point, and the Trainer's alone.
+- **sweep** — deletion's second meaning, the same rule read twice: attach
+  sweeps what the ledger NEVER COMMITTED; `RunHandle.sweep(policy)` frees what
+  the ledger has MOVED PAST. The Trainer sweeps at every commit and on start;
+  `python -m rlstack sweep` is the operator's backstop for a stopped run (it
+  attaches, so never point it at a live one).
 - **append_host_event / read_host_log / list_hosts**, **append_fleet_event /
   read_fleet_log** — the journals.
 - **peek_\*** — the observer's only door.
