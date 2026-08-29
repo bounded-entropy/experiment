@@ -27,7 +27,8 @@ The map, by responsibility — read top to bottom:
     remote.py       the wire: HostService serves pool verbs on its own metal
                     under its own arbiter, RemotePool is the whole Engine
                     protocol over a Transport
-    sources/        WaveFeed: where the trainer's waves come from
+    assemble.py     a planned wave becomes real: sample it, or take it
+    refs.py         where an already-sealed trajectory lives
                     (live / replay / static), one file each
     seeds.py        the seed tree: derive(master, *path)
     meters.py       the emission plane: the TrafficMeter engines and the
@@ -43,6 +44,6 @@ This is the one package allowed to import both worlds.
 """
 
 from rlstack.runner import (  # noqa: F401
-    meters, interfaces, seeds, traffic, signals, arbiter, sources, post,
+    meters, interfaces, seeds, traffic, signals, arbiter, post,
     daemons, loop, host, fakes,
 )

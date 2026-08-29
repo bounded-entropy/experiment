@@ -11,29 +11,30 @@ re-serve ANY committed version exactly.
 
 from __future__ import annotations
 
-import asyncio
 import json
 import math
+from collections.abc import Mapping
 from typing import Callable
 
-from rlstack.data.stores.base import RunHandle, Store
-from rlstack.data.trajectory import Group, Task, Trajectory, Wave
+from rlstack.data.plan import RunPlan, WavePlan
+from rlstack.data.stores.base import RunHandle
+from rlstack.runner.assemble import sample_wave
+from rlstack.data.trajectory import Task, Wave
 from rlstack.policy.compile import Bundle, compile_bundle
 from rlstack.registry import ADAPTER_TYPES
-from rlstack.runner.traffic import EnginePoolClient, Routes
+from rlstack.runner.traffic import Routes
 from rlstack.runner.interfaces import Engine
 from rlstack.runner.arbiter import GpuArbiter
 from rlstack.runner.post import run_pipeline
 from rlstack.runner.daemons.base import Daemon
-from rlstack.runner.seeds import derive
 from rlstack.runner.signals import RunSignals
-from rlstack.runner.traffic import load_tasks, run_episode
 from rlstack.spec.specs import ExperimentSpec, SamplingSpec
 
 
 class Evaluator(Daemon):
     def __init__(self, signals: RunSignals, arbiter: GpuArbiter, run: RunHandle, *,
-                 spec: ExperimentSpec, store: Store, engine: Engine,
+                 spec: ExperimentSpec, plan: RunPlan,
+                 tasks: Mapping[str, Task], engine: Engine,
                  post_residents: tuple[Engine, ...],
                  routes_at: Callable[[Bundle], Routes],
                  max_inflight: int) -> None:
@@ -45,16 +46,12 @@ class Evaluator(Daemon):
         self.servable = sorted(n for n, a in bank.items()
                                if ADAPTER_TYPES.get(a.adapter_type).instance.serving is not None)
         self.adapter_types = {n: bank[n].adapter_type for n in self.servable}
-        self.env_name = spec.eval.env or (spec.gen.env if spec.gen else None)
-        if self.env_name is None:
-            raise ValueError("eval on a run without gen must set eval.env")
+        self.plan = plan
         self.pipeline = spec.eval.post
         self.every = spec.eval.every
-        self.n_samples = spec.eval.n_samples
-        self.n_updates = spec.algo.schedule.n_updates
         self.sampling = spec.gen.sampling if spec.gen else SamplingSpec()
         self.master = spec.seeds.master
-        self.tasks = load_tasks(store, spec.eval.tasks)
+        self.tasks = tasks
         self.routes_at = routes_at
         self.max_inflight = max_inflight
 
@@ -68,9 +65,22 @@ class Evaluator(Daemon):
         return None
 
     def due_updates(self) -> list[int]:
-        """Every N-th update of the run."""
-        return [u for u in range(1, self.n_updates + 1)
-                if u % self.every == 0]
+        """One update per wave of the eval plan, `every` updates apart.
+
+        The plan's LENGTH is how many measurements this run takes — the same
+        rule the train plan sets for how many updates it has, so neither is a
+        count anyone types twice.
+        """
+        return [k * self.every for k in range(1, len(self.plan) + 1)]
+
+    def wave_for(self, update: int) -> WavePlan:
+        """The eval wave measured at `update` — the k-th, for the k-th point."""
+        entry = self.plan.wave(update // self.every)
+        if not isinstance(entry, WavePlan):
+            raise TypeError(
+                f"eval wave for update {update} is a WaveRef: eval MAKES its "
+                f"trajectories, so it names them leaf by leaf")
+        return entry
 
     # ---- pinning ------------------------------------------------------------
 
@@ -106,7 +116,10 @@ class Evaluator(Daemon):
             await self.signals.notify()
 
     async def _evaluate(self, update: int, routes: Routes) -> None:
-        wave = Wave(await self.sample_heldout(update, routes))
+        wave = await sample_wave(
+            self.wave_for(update), index=update, tasks=self.tasks,
+            sampling=self.sampling, routes=routes, master=self.master,
+            phase="eval", max_inflight=self.max_inflight)
         columns = await run_pipeline(self.pipeline, wave, routes, self.sampling,
                                      self.master, update, phase="eval-post")
         rows, summary = self.reduce_in_task_order(update, wave, columns)
@@ -114,36 +127,6 @@ class Evaluator(Daemon):
         self.run.write_eval(update, "summary.json",
                             json.dumps(summary, sort_keys=True,
                                        separators=(",", ":")))
-
-    async def sample_heldout(self, update: int,
-                             routes: Routes) -> list[Group]:
-        """Every held-out (task, sample) episode at once, bounded by
-        max_inflight — and grouped back in TASK order.
-
-        Held-out tasks are independent, so they are launched together and the
-        engine batches whatever arrives, under the same bound the Generator's
-        wave runs under.
-
-        Concurrency may not reach the bytes. Each episode's seed is derived
-        from (task.id, sample_index) — fixed before it is scheduled, so WHICH
-        episodes ran together cannot change what any of them sampled — and
-        `gather` returns in ARGUMENT order, so the wave this builds is a
-        function of self.tasks alone, never of who finished first."""
-        limiter = asyncio.Semaphore(self.max_inflight)
-
-        async def one(task: Task, sample_index: int) -> Trajectory:
-            async with limiter:
-                seed = derive(self.master, "eval", update, task.id, sample_index)
-                client = EnginePoolClient(routes, self.sampling, seed)
-                return await run_episode(self.env_name, task, client)
-
-        jobs = [one(task, sample_index)
-                for task in self.tasks
-                for sample_index in range(self.n_samples)]
-        episodes = await asyncio.gather(*jobs)
-        n = self.n_samples
-        return [Group(task.id, episodes[i * n:(i + 1) * n])
-                for i, task in enumerate(self.tasks)]
 
     def reduce_in_task_order(
             self, update: int, wave: Wave,

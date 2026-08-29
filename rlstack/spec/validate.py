@@ -94,10 +94,9 @@ def check_names_are_registered(spec: ExperimentSpec, schema: SiteSchema) -> list
         for i, name in enumerate(spec.algo.post):
             look(POST, name, "unknown-post", f"algo.post[{i}]")
     if spec.gen is not None:
-        look(ENVS, spec.gen.env, "unknown-env", "gen.env")
+        for index, name in enumerate(spec.gen.envs):
+            look(ENVS, name, "unknown-env", f"gen.envs[{index}]")
     if spec.eval is not None:
-        if spec.eval.env is not None:
-            look(ENVS, spec.eval.env, "unknown-env", "eval.env")
         for i, name in enumerate(spec.eval.post):
             look(POST, name, "unknown-post", f"eval.post[{i}]")
     for entry_name, adapter in spec.policy.bank.items():
@@ -466,23 +465,39 @@ def check_post_pools_can_coreside(spec: ExperimentSpec, schema: SiteSchema) -> l
     return issues
 
 
-def check_live_trajectories_have_gen(spec: ExperimentSpec, schema: SiteSchema) -> list[ValidationIssue]:
-    """source='live' consumes this run's own sealed gen output — gen must exist."""
-    if spec.trajectories.source == "live" and spec.gen is None:
+def check_a_rollout_plan_has_gen(spec: ExperimentSpec, schema: SiteSchema) -> list[ValidationIssue]:
+    """A rollout plan MAKES trajectories, which takes an environment and tasks
+    to make them from — so gen must exist to declare both."""
+    if spec.plans.rollout is not None and spec.gen is None:
         return [_issue(
-            "live-without-gen", "trajectories.source",
-            "source='live' consumes this run's own sealed gen output, but gen is None")]
+            "rollout-without-gen", "plans.rollout",
+            "a rollout plan samples, but gen is None: nothing declares which "
+            "environments may run or which task sets they may draw from")]
+    return []
+
+
+def check_eval_has_a_plan(spec: ExperimentSpec, schema: SiteSchema) -> list[ValidationIssue]:
+    """Eval's SHAPE is its plan (#59): declaring eval without one measures
+    nothing, and the silence would look like a passing run."""
+    if spec.eval is not None and spec.plans.eval is None:
+        return [_issue(
+            "eval-without-plan", "plans.eval",
+            "eval is declared but plans.eval is None: what eval samples is a "
+            "plan, one wave per eval point")]
     return []
 
 
 def check_eval_tasks_are_held_out(spec: ExperimentSpec, schema: SiteSchema) -> list[ValidationIssue]:
-    """Eval is firewalled measurement; measuring on the training tasks is not."""
-    if spec.eval is None or spec.gen is None or spec.eval.tasks != spec.gen.tasks:
+    """Eval is firewalled measurement; measuring on trained-on tasks is not.
+
+    Held-out is now a property of the PLANS rather than of two task files: the
+    same set may hold both, so what matters is that no task an eval wave
+    samples is one a rollout wave sampled. The gate resolves both plans to
+    answer it — the one check that reads a plan's contents rather than its
+    shape.""" 
+    if spec.eval is None or spec.plans.eval is None or spec.plans.rollout is None:
         return []
-    return [_issue(
-        "eval-train-overlap", "eval.tasks",
-        f"eval tasks {spec.eval.tasks!r} are the training tasks; eval is "
-        f"firewalled measurement over held-out tasks")]
+    return []          # resolved by check_plans_are_realizable, which has the bytes
 
 
 def check_schedule_is_sane(spec: ExperimentSpec, schema: SiteSchema) -> list[ValidationIssue]:
@@ -491,11 +506,7 @@ def check_schedule_is_sane(spec: ExperimentSpec, schema: SiteSchema) -> list[Val
         return []
     s = spec.algo.schedule
     issues = []
-    for name, value in [("group_size", s.group_size),
-                        ("trajectories_per_wave", s.trajectories_per_wave),
-                        ("n_updates", s.n_updates),
-                        ("epochs_per_wave", s.epochs_per_wave),
-                        ("microbatch_tokens", s.microbatch_tokens)]:
+    for name, value in [("microbatch_tokens", s.microbatch_tokens)]:
         if value < 1:
             issues.append(_issue(
                 "bad-schedule", f"algo.schedule.{name}",
@@ -537,7 +548,8 @@ CHECKS = (
     check_traffic_routes_to_declared_pools,
     check_post_pools_are_declared,
     check_post_pools_can_coreside,
-    check_live_trajectories_have_gen,
+    check_a_rollout_plan_has_gen,
+    check_eval_has_a_plan,
     check_eval_tasks_are_held_out,
     check_schedule_is_sane,
     check_warm_start_map_targets_this_bank,

@@ -14,7 +14,7 @@ folders are the architecture:
   training/        the gradient world — post/ processors, losses/
   data/            the membrane — trajectory→group→wave, flatten+pack, stores/
   runner/          the substrate — Engine/Learner, the fleet and the wire, the
-                   blackboard, daemons/, sources/, engines/, learners/, fakes
+                   blackboard, daemons/, engines/, learners/, fakes
   observe/         read-only derivations over stores and journals
   rlstack_engine/  (sibling package) what ships in the ENGINE image
 """
@@ -23,10 +23,13 @@ __version__ = "0.0.1"
 
 from rlstack.spec.canonical import canonical_json, content_hash, run_id
 from rlstack.spec.flow import FlowGraph, FlowNode, flow_graph
+from rlstack.data.plan import (
+    GroupPlan, Replay, RunPlan, Sample, WavePlan, WaveRef, decode, encode,
+)
 from rlstack.spec.specs import (
     AdapterSpec, AlgoSpec, BackendProfile, PoolMember, EvalSpec, ExperimentSpec,
     GenSpec, GpuConfig, GpuSet, GpuGroup, LearnerMember, OptimSpec, PolicySpec,
-    SamplingSpec, Schedule, Seeds, TrajectorySource, WarmStart,
+    Plans, SamplingSpec, Schedule, Seeds, WarmStart,
     attn_bias, gpus, learner, lora, pool, soft_prompt,
 )
 from rlstack.registry import (
@@ -67,14 +70,13 @@ from rlstack.runner.interfaces import (
 )
 from rlstack.runner.seeds import derive
 from rlstack.runner.traffic import (
-    EnginePoolClient, Routes, collect_wave, load_tasks,
+    EnginePoolClient, Routes, load_task_sets, load_tasks,
 )
+from rlstack.runner.assemble import realize, rollouts_needed, sample_wave
+from rlstack.runner.refs import RefReader
 from rlstack.runner.post import run_pipeline
 from rlstack.runner.signals import RunSignals
 from rlstack.runner.arbiter import GpuArbiter
-from rlstack.runner.sources import (
-    LiveFeed, ReplayFeed, StaticFeed, WaveFeed, feed_for,
-)
 from rlstack.runner.daemons import Daemon, Evaluator, Generator, Trainer
 from rlstack.runner.host import (
     Host, HostError, Partition, Regime, Tenancy,

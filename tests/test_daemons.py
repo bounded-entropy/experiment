@@ -258,8 +258,7 @@ class BlackboardRunTest(unittest.TestCase):
     def spec_with_lag(self, lag: int):
         base = arith_spec(self.train)
         return replace(base, algo=replace(
-            base.algo, schedule=Schedule(group_size=2, trajectories_per_wave=4,
-                                         n_updates=4, microbatch_tokens=64,
+            base.algo, schedule=Schedule(microbatch_tokens=64,
                                          max_policy_lag=lag)))
 
     def test_lag_buffer_completes_and_behavior_is_always_committed(self) -> None:

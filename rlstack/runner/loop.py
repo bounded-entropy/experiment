@@ -25,12 +25,14 @@ from rlstack.runner.daemons import Daemon, Evaluator, Generator, Trainer
 from rlstack.runner.interfaces import Engine, Learner
 from rlstack.runner.arbiter import GpuArbiter
 from rlstack.runner.meters import HostJournal
-from rlstack.runner.traffic import Routes, load_tasks
+from rlstack.data.plan import RunPlan, decode
+from rlstack.runner.assemble import rollouts_needed
+from rlstack.runner.refs import RefReader
+from rlstack.runner.traffic import Routes, load_task_sets
 from rlstack.runner.signals import RunSignals
-from rlstack.runner.sources import feed_for
 from rlstack.spec.canonical import canonical_json, run_id
 from rlstack.spec.flow import flow_graph
-from rlstack.spec.specs import ExperimentSpec, PoolMember, WarmStart
+from rlstack.spec.specs import ExperimentSpec, Plans, PoolMember, WarmStart
 from rlstack.runner.remote import RemotePool
 from rlstack.spec.validate import (
     SpecError, check_members_match_their_shape, check_pools_serve_their_base,
@@ -61,15 +63,26 @@ def run_experiment(spec: ExperimentSpec, schema: SiteSchema, store: Store,
                              arbiter))
 
 
+def data_fingerprint(spec: ExperimentSpec) -> str:
+    """What the run READ, as one content-addressed string.
+
+    The plans and the task sets are both cas uris, so their shas already are
+    their contents: a plan that draws different tasks, or a task file whose
+    rows changed, is a different experiment without anyone saying so (I3).
+    """
+    parts = [spec.plans.train, spec.plans.rollout or "-", spec.plans.eval or "-"]
+    if spec.gen is not None:
+        parts.extend(spec.gen.tasks)
+    return "|".join(parts)
+
+
 def experiment_identity(spec: ExperimentSpec, schema: SiteSchema) -> str:
     """Phase 0's identity, importable: validate, hash the referenced code,
     fingerprint the data, derive the run_id — computed, never typed (I3).
     The host journals under this id before the run opens."""
     validate_or_raise(spec, schema)
     hashes = code_hashes(spec)
-    data_fingerprint = (spec.gen.tasks if spec.gen is not None
-                        else spec.trajectories.source)
-    return run_id(spec, hashes, data_fingerprint)
+    return run_id(spec, hashes, data_fingerprint(spec))
 
 
 async def run_experiment_async(
@@ -123,20 +136,23 @@ async def run_experiment_async(
     if binding_issues:
         raise SpecError(binding_issues)
     hashes = code_hashes(spec)
-    # both forms are content-addressed: live → the task file, else the source
-    data_fingerprint = spec.gen.tasks if spec.gen is not None else spec.trajectories.source
-    rid = run_id(spec, hashes, data_fingerprint)
+    fingerprint = data_fingerprint(spec)
+    rid = run_id(spec, hashes, fingerprint)
     run = store.open_run(rid, manifest={
         "run_id": rid,
         "spec": canonical_json(spec),
         "code": hashes,
-        "data": data_fingerprint,
+        "data": fingerprint,
         "schema": schema.fingerprint(),   # same base name, different schema → loud
         "parent": spec.init.policy if spec.init is not None else None,
     })
     # the run describes its own observability: a UI reads THIS, never the
     # registries (spec/flow.py — same walk the submit gate validated with)
     run.write_dictionary(flow_graph(spec).to_json())
+    # ...and its own shape: the plans it actually ran, copied in verbatim (I11)
+    plans = load_plans(spec.plans, store)
+    for kind, plan in plans.items():
+        run.write_plan(kind, store.cas_get(getattr(spec.plans, kind)))
 
     # ---- Phase 1: idempotent setup ------------------------------------------
     bank = spec.policy.bank
@@ -184,7 +200,7 @@ async def run_experiment_async(
 
     # ---- Phase 2: the blackboard --------------------------------------------
     daemons = plan_daemons(spec, run=run, store=store, engine_map=engine_map,
-                           learner=learner, routes_at=routes_at,
+                           learner=learner, routes_at=routes_at, plans=plans,
                            initial_bundle=bundle,
                            initial_version=policy_version,
                            max_inflight=max_inflight,
@@ -196,18 +212,29 @@ async def run_experiment_async(
     except ExceptionGroup as failures:
         raise failures.exceptions[0] from None
 
-    return RunReport(run_id=rid, updates_completed=spec.algo.schedule.n_updates,
+    return RunReport(run_id=rid, updates_completed=len(plans["train"]),
                      resumed_from=resumed_from)
 
 
+def load_plans(declared: Plans, store: Store) -> dict[str, RunPlan]:
+    """Resolve the declared plan uris. `train` is mandatory — it is the run's
+    length; the other two are absent when the run makes or measures nothing."""
+    out = {"train": decode(store.cas_get(declared.train))}
+    for kind in ("rollout", "eval"):
+        uri = getattr(declared, kind)
+        if uri is not None:
+            out[kind] = decode(store.cas_get(uri))
+    return out
+
+
 def plan_daemons(spec: ExperimentSpec, *, run, store, engine_map, learner,
-                 routes_at, initial_bundle, initial_version,
+                 routes_at, plans, initial_bundle, initial_version,
                  max_inflight, arbiter, tenant,
                  journal: HostJournal | None = None) -> list[Daemon]:
     """The spec already declares the daemons; this reads them off.
 
-    live trajectories → a Generator writes the data bus; eval declared → an
-    Evaluator watches the commit bus; the Trainer always. Each daemon admits
+    a rollout plan → a Generator makes its waves; an eval plan → an Evaluator
+    watches the commit bus; the Trainer always. Each daemon admits
     the RESIDENTS its work occupies: the trainer's post phase the engines of
     its pipeline's declared pools, its train phase the learner, the generator
     and evaluator their serving pool's engine (plus the eval pipeline's).
@@ -216,24 +243,27 @@ def plan_daemons(spec: ExperimentSpec, *, run, store, engine_map, learner,
     the other daemons orbit, so its phase timings are the run's own clock.
     """
     signals = RunSignals()
+    tasks = load_task_sets(store, spec.gen.tasks) if spec.gen is not None else {}
     daemons: list[Daemon] = [
         Trainer(signals, arbiter, run,
-                spec=spec, feed=feed_for(spec, store, run),
+                spec=spec, plan=plans["train"], refs=RefReader(store, run),
                 engine=engine_map["main"], learner=learner, tenant=tenant,
                 post_residents=pipeline_residents(spec.algo.post, engine_map),
                 routes_at=routes_at, journal=journal,
                 initial_bundle=initial_bundle, initial_version=initial_version),
     ]
-    if spec.trajectories.source == "live":
+    if "rollout" in plans:
         daemons.append(Generator(
             signals, arbiter, run,
-            spec=spec, tasks=load_tasks(store, spec.gen.tasks),
+            spec=spec, plan=plans["rollout"],
+            due_at=rollouts_needed(plans["train"].waves), tasks=tasks,
             engine=engine_map["main"], routes_at=routes_at,
             initial_bundle=initial_bundle, max_inflight=max_inflight))
     if spec.eval is not None:
         daemons.append(Evaluator(
             signals, arbiter, run,
-            spec=spec, store=store, engine=engine_map[spec.eval.pool],
+            spec=spec, plan=plans["eval"], tasks=tasks,
+            engine=engine_map[spec.eval.pool],
             post_residents=pipeline_residents(spec.eval.post, engine_map),
             routes_at=routes_at, max_inflight=max_inflight))
     return daemons

@@ -2,7 +2,7 @@
 
 One update, and the commit protocol that makes kill -9 safe at any point:
 
-    await waves/<u> (the feed) → POST PIPELINE → write postdata →
+    await the plan's wave → POST PIPELINE → write postdata →
     flatten/broadcast/pack → forward_backward × microbatches × epochs →
     optim_step → bump → write blobs → register bundle → APPEND LEDGER
     (the commit point) → notify
@@ -26,6 +26,9 @@ import math
 from typing import Callable
 
 from rlstack.data.flatten import broadcast, flatten, pack
+from rlstack.data.plan import RunPlan
+from rlstack.runner.assemble import realize
+from rlstack.runner.refs import RefReader
 from rlstack.data.stores.base import RunHandle, bump
 from rlstack.data.trajectory import wave_from_rows
 from rlstack.policy.compile import Bundle, compile_bundle
@@ -37,13 +40,13 @@ from rlstack.runner.meters import HostJournal, UpdateClock
 from rlstack.runner.post import run_pipeline
 from rlstack.runner.daemons.base import Daemon
 from rlstack.runner.signals import RunSignals
-from rlstack.runner.sources import WaveFeed
 from rlstack.spec.specs import ExperimentSpec, SamplingSpec
 
 
 class Trainer(Daemon):
     def __init__(self, signals: RunSignals, arbiter: GpuArbiter, run: RunHandle, *,
-                 spec: ExperimentSpec, feed: WaveFeed, engine: Engine,
+                 spec: ExperimentSpec, plan: RunPlan, refs: RefReader,
+                 engine: Engine,
                  learner: Learner, tenant: str,
                  post_residents: tuple[Engine, ...],
                  routes_at: Callable[[Bundle], Routes],
@@ -57,7 +60,8 @@ class Trainer(Daemon):
         self.spec = spec
         self.schedule = spec.algo.schedule
         self.sampling = spec.gen.sampling if spec.gen else SamplingSpec()
-        self.feed = feed
+        self.plan = plan
+        self.refs = refs
         self.engine = engine
         self.learner = learner
         self.routes_at = routes_at
@@ -72,14 +76,26 @@ class Trainer(Daemon):
     # ---- the acquisition condition (override to change the alternation) -----
 
     def next_rows(self, update: int) -> list[dict] | None:
-        """Update u's rows, from this run's own waves/ — the feed puts
-        storage-backed data there; the Generator puts live data there."""
-        return self.feed.obtain(update)
+        """Update u's rows as its plan names them, or None while a leaf is
+        still unsealed — the ONE await this daemon has (#59).
+
+        Realized rows are written into this run's own waves/ before they are
+        used, so a wave is self-contained however far its leaves reached.
+        """
+        try:
+            return self.run.read_wave(update)          # already realized
+        except FileNotFoundError:
+            pass
+        rows = realize(self.plan.wave(update), self.refs)
+        if rows is None:
+            return None
+        self.run.write_wave(update, rows)
+        return rows
 
     # ---- the daemon ---------------------------------------------------------
 
     async def run_forever(self) -> None:
-        for update in range(self.committed() + 1, self.schedule.n_updates + 1):
+        for update in range(self.committed() + 1, len(self.plan) + 1):
             clock = UpdateClock()
             rows = await self.signals.wait_for(lambda: self.next_rows(update))
             wave = wave_from_rows(rows)
@@ -97,12 +113,14 @@ class Trainer(Daemon):
             flats = [flatten(t, tokenize) for t in wave.trajectories]
             docs = list(zip(flats, broadcast(postdata, flats)))
 
+            # ONE WAVE IS ONE GRADIENT UPDATE: every microbatch accumulates
+            # into a single step, and the ledger line below is written only
+            # after all of them — so a checkpoint is never half a wave (#59).
             stats: list[TrainStats] = []
             async with self.arbiter.admit(self.learner):
-                for _ in range(self.schedule.epochs_per_wave):
-                    for batch in pack(docs, self.schedule.microbatch_tokens):
-                        stats.append(
-                            self.learner.forward_backward(self.tenant, batch))
+                for batch in pack(docs, self.schedule.microbatch_tokens):
+                    stats.append(
+                        self.learner.forward_backward(self.tenant, batch))
                 self.learner.optim_step(self.tenant)
                 emitted = self.learner.emit(self.tenant)
             clock.trained()

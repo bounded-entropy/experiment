@@ -20,7 +20,7 @@ from rlstack.spec.specs import (
     LearnerMember,
     OptimSpec,
     PolicySpec,
-    TrajectorySource,
+    Plans,
     SamplingSpec,
     Schedule,
     Seeds,
@@ -47,22 +47,20 @@ def example_1(bank: dict[str, AdapterSpec] | None = None) -> ExperimentSpec:
             base="Qwen/Qwen3-8B",
             bank=dict(BANK) if bank is None else bank,
         ),
-        gen=GenSpec(
-            env="math_single_turn",
-            tasks="cas://3fa9c2.../math_train.jsonl",
+        gen=GenSpec(envs=("math_single_turn",),
+                    tasks=("cas://3fa9c2.../math_train.jsonl",),
 
         ),
-        trajectories=TrajectorySource("live"),
+        plans=Plans(train="cas://plan/train", rollout="cas://plan/roll"),
         algo=AlgoSpec(
             loss="grpo",
             post=("verifier", "grpo_advantage"),
             optim=OptimSpec("adamw", lr=1e-5, betas=(0.9, 0.95),
                             overrides={"head": {"lr": 3e-6}}),
-            schedule=Schedule(group_size=8, trajectories_per_wave=512, n_updates=300,
-                              epochs_per_wave=1, microbatch_tokens=16384,
+            schedule=Schedule(microbatch_tokens=16384,
                               max_policy_lag=0),
         ),
-        eval=EvalSpec(tasks="cas://8c31f0.../gsm_heldout.jsonl", every=10),
+        eval=EvalSpec(every=10),
         gpu_config=GpuConfig(groups=(
             GpuGroup(gpus(n=6), (pool("main", tp=2, n=3), learner(fsdp=2)),
                   sharing="concurrent"),
@@ -98,7 +96,7 @@ class TestConstruction(unittest.TestCase):
 
     def test_optional_halves(self) -> None:
         offline = replace(self.exp, gen=None, eval=None,
-                          trajectories=TrajectorySource("store://parent/waves"))
+                          plans=Plans(train="cas://plan/train"))
         self.assertIsNone(offline.gen)
         generation_only = replace(self.exp, algo=None)
         self.assertIsNone(generation_only.algo)
@@ -195,12 +193,12 @@ class TestDefaults(unittest.TestCase):
         self.assertEqual((s.temperature, s.top_p, s.max_tokens), (1.0, 1.0, 1024))
 
     def test_eval_spec(self) -> None:
-        e = EvalSpec(tasks="cas://x/y")
+        e = EvalSpec()
         self.assertEqual((e.every, e.env, e.post, e.n_samples, e.pool),
                          (10, None, (), 1, "main"))
 
     def test_schedule(self) -> None:
-        s = Schedule(group_size=8, trajectories_per_wave=512, n_updates=300)
+        s = Schedule()
         self.assertEqual((s.epochs_per_wave, s.microbatch_tokens, s.max_policy_lag),
                          (1, 16384, 0))
 

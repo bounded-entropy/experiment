@@ -282,7 +282,7 @@ class Host:
         self.store.append_host_event(self.name, {
             "event": "attach", "t": time.time(), "run_id": rid,
             "pools": sorted(binding), "remotes": sorted(remote_pools),
-            "n_updates": spec.algo.schedule.n_updates if spec.algo else None,
+            "plan": spec.plans.train,     # the shape, by reference (#59)
             "store": run_store.describe()})
         try:
             report = await run_experiment_async(

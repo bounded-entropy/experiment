@@ -81,6 +81,22 @@ def wave_key(run_id: str, update: int) -> str:
     return f"runs/{run_id}/waves/{update:06d}.jsonl.gz"
 
 
+def rollout_key(run_id: str, index: int) -> str:
+    """Where one GENERATED wave lives, before any update consumes it.
+
+    Separate from waves/ because the generator's output and the trainer's input
+    stopped being the same thing (#59): a plan may train on rollout 7 at update
+    9, on two rollouts at once, or on none at all."""
+    return f"runs/{run_id}/rollouts/{index:06d}.jsonl.gz"
+
+
+def plan_key(run_id: str, kind: str) -> str:
+    """Where a run's copy of one plan lives. The spec pins the plan by cas uri;
+    this copy is what makes the run self-describing (I11) and what an observer
+    reads without resolving anything."""
+    return f"runs/{run_id}/plans/{kind}.jsonl"
+
+
 def postdata_key(run_id: str, update: int) -> str:
     """Where one update's postprocessor columns live, beside its wave."""
     return f"runs/{run_id}/postdata/{update:06d}.json"
@@ -466,6 +482,33 @@ class RunHandle:
             raise FileNotFoundError(f"no wave for update {update}: {key}")
         raw = gzip.decompress(self.store._read(key)).decode("utf-8")
         return [json.loads(line) for line in raw.split("\n") if line]
+
+    def _rollout_key(self, index: int) -> str:
+        return rollout_key(self.run_id, index)
+
+    def write_rollout(self, index: int, rows: list[dict[str, Any]]) -> None:
+        """Seal one generated wave. Never refused against the ledger: a rollout
+        belongs to whichever updates their plan says, so it has no update of
+        its own to be committed under."""
+        self.store._write(self._rollout_key(index), _gzip_jsonl(rows))
+
+    def read_rollout(self, index: int) -> list[dict[str, Any]]:
+        key = self._rollout_key(index)
+        if not self.store._exists(key):
+            raise FileNotFoundError(f"no rollout {index}: {key}")
+        raw = gzip.decompress(self.store._read(key)).decode("utf-8")
+        return [json.loads(line) for line in raw.split("\n") if line]
+
+    def write_plan(self, kind: str, data: bytes) -> None:
+        """Copy one plan into the run, verbatim: the bytes the spec's cas uri
+        addresses, so the run holds the shape it actually ran."""
+        self.store._write(plan_key(self.run_id, kind), data)
+
+    def read_plan(self, kind: str) -> bytes:
+        key = plan_key(self.run_id, kind)
+        if not self.store._exists(key):
+            raise FileNotFoundError(f"no {kind} plan: {key}")
+        return self.store._read(key)
 
     def _postdata_key(self, update: int) -> str:
         return postdata_key(self.run_id, update)

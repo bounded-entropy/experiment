@@ -9,7 +9,7 @@ import tempfile
 import unittest
 
 from rlstack import (
-    AlgoSpec, GpuConfig, GpuGroup, OptimSpec, Schedule, TrajectorySource,
+    AlgoSpec, GpuConfig, GpuGroup, OptimSpec, Plans, Schedule,
     fake_qwen_schema, gpus, learner, pool, validate,
 )
 from tests.common import arith_spec, arith_store
@@ -33,8 +33,7 @@ TEACHER = {"opd"}      # distils from ANOTHER model: a second pool, declared
 
 def algo(loss: str, post: tuple[str, ...], lag: int = 0) -> AlgoSpec:
     return AlgoSpec(loss=loss, post=post, optim=OptimSpec("adamw", lr=1e-5),
-                    schedule=Schedule(group_size=2, trajectories_per_wave=4,
-                                      n_updates=4, microbatch_tokens=64,
+                    schedule=Schedule(microbatch_tokens=64,
                                       max_policy_lag=lag))
 
 
@@ -50,7 +49,7 @@ class LossZooTest(unittest.TestCase):
                                   lag=2 if loss == "self_anchor" else 0)}
         if loss in OFFLINE:
             overrides["gen"] = None
-            overrides["trajectories"] = TrajectorySource("store://parent/waves")
+            overrides["plans"] = Plans(train="cas://plan/replay")
         if loss in TEACHER:
             overrides["gpu_config"] = GpuConfig(groups=(
                 GpuGroup(gpus(n=1), (pool("main"),

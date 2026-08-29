@@ -5,9 +5,10 @@ from __future__ import annotations
 import asyncio
 import unittest
 
+from rlstack.data.plan import PlanError
 from rlstack import (
     Bundle, FakeEngine, Message, Role, SamplingSpec, Task, Trajectory,
-    collect_wave,
+    GroupPlan, Replay, Sample, WavePlan, sample_wave,
 )
 from rlstack.runner.traffic import EnginePoolClient
 from rlstack.runner.traffic import run_episode
@@ -94,27 +95,26 @@ class RunEpisodeTest(unittest.TestCase):
         self.assertEqual(traj.turns[0].message.content, "5")
 
 
-class CollectWaveTest(unittest.TestCase):
-    TASKS = [Task(f"t{i}", f"What is {i}+{i}?", {"answer": 2 * i})
-             for i in range(8)]
+class SampleWaveTest(unittest.TestCase):
+    """The Generator's half of assembly: a planned wave becomes trajectories."""
 
-    def collect(self, update: int = 1):
-        return go(collect_wave(
-            update,
-            env_name="math_single_turn",
-            sampling=SAMPLING,
-            tasks=self.TASKS,
-            group_size=4,
-            trajectories_per_wave=16,
-            routes=make_pools(),
-            master=17,
-        ))
+    TASKS = {f"t{i}": Task(f"t{i}", f"What is {i}+{i}?", {"answer": 2 * i})
+             for i in range(8)}
+    PLAN = WavePlan(tuple(
+        GroupPlan(f"t{i}", tuple(Sample(f"t{i}", "math_single_turn")
+                                 for _ in range(4)))
+        for i in range(4)))
 
-    def test_group_structure(self) -> None:
+    def collect(self, index: int = 1):
+        return go(sample_wave(self.PLAN, index=index, tasks=self.TASKS,
+                              sampling=SAMPLING, routes=make_pools(), master=17))
+
+    def test_the_plan_is_the_group_structure(self) -> None:
         wave = self.collect()
         self.assertEqual(len(wave), 16)
-        self.assertEqual(len(wave.groups), 4)             # 4 distinct tasks
-        self.assertEqual({len(g) for g in wave.groups}, {4})  # group_size each
+        self.assertEqual(len(wave.groups), 4)
+        self.assertEqual({len(g) for g in wave.groups}, {4})
+        self.assertEqual([g.key for g in wave.groups], [f"t{i}" for i in range(4)])
         for group in wave.groups:
             self.assertEqual({t.task.id for t in group.trajectories}, {group.key})
         self.assertTrue(all(isinstance(t, Trajectory) for t in wave.trajectories))
@@ -124,22 +124,22 @@ class CollectWaveTest(unittest.TestCase):
         rows_b = [t.turns[0].token_ids for t in self.collect().trajectories]
         self.assertEqual(rows_a, rows_b)
 
-    def test_updates_get_different_waves(self) -> None:
-        seeds_1 = [t.turns[0].seed for t in self.collect(update=1).trajectories]
-        seeds_2 = [t.turns[0].seed for t in self.collect(update=2).trajectories]
+    def test_indexes_get_different_waves(self) -> None:
+        seeds_1 = [t.turns[0].seed for t in self.collect(index=1).trajectories]
+        seeds_2 = [t.turns[0].seed for t in self.collect(index=2).trajectories]
         self.assertNotEqual(seeds_1, seeds_2)
 
-    def test_indivisible_wave_is_rejected(self) -> None:
-        with self.assertRaises(ValueError):
-            go(collect_wave(1, env_name="math_single_turn", sampling=SAMPLING,
-                            tasks=self.TASKS, group_size=3, trajectories_per_wave=16,
-                            routes=make_pools(), master=17))
+    def test_a_leaf_naming_no_declared_task_is_refused(self) -> None:
+        plan = WavePlan((GroupPlan("gone", (Sample("gone", "math_single_turn"),)),))
+        with self.assertRaises(PlanError):
+            go(sample_wave(plan, index=1, tasks=self.TASKS, sampling=SAMPLING,
+                           routes=make_pools(), master=17))
 
-    def test_too_few_tasks_is_rejected(self) -> None:
-        with self.assertRaises(ValueError):
-            go(collect_wave(1, env_name="math_single_turn", sampling=SAMPLING,
-                            tasks=self.TASKS[:2], group_size=4,
-                            trajectories_per_wave=16, routes=make_pools(), master=17))
+    def test_a_replay_leaf_is_refused_on_the_making_side(self) -> None:
+        plan = WavePlan((GroupPlan("g", (Replay("cas://x#0"),)),))
+        with self.assertRaises(PlanError):
+            go(sample_wave(plan, index=1, tasks=self.TASKS, sampling=SAMPLING,
+                           routes=make_pools(), master=17))
 
 
 if __name__ == "__main__":

@@ -13,7 +13,7 @@ from rlstack.runner.fakes import FakeEngine
 from rlstack.training.post.base import PostProcessor, postprocessor
 from rlstack.spec.specs import (
     AdapterSpec, AlgoSpec, EvalSpec, ExperimentSpec, GenSpec, GpuConfig, GpuGroup,
-    OptimSpec, PolicySpec, TrajectorySource, Schedule, Seeds, WarmStart,
+    OptimSpec, PolicySpec, Plans, Schedule, Seeds, WarmStart,
     gpus, learner, lora, pool,
 )
 from rlstack.spec.validate import (
@@ -84,11 +84,11 @@ def clean_spec(**overrides: Any) -> ExperimentSpec:
     fields: dict[str, Any] = dict(
         policy=PolicySpec(base="Qwen/Qwen3-1.7B",
                           bank={"pi": lora("layers.0-3.self_attn.*", r=16)}),
-        gen=GenSpec(env="noop_env", tasks="cas://x/train.jsonl"),
-        trajectories=TrajectorySource("live"),
+        gen=GenSpec(envs=("noop_env",), tasks=("cas://x/train.jsonl",)),
+        plans=Plans(train="cas://plan/train", rollout="cas://plan/roll"),
         algo=AlgoSpec(loss="grpo", post=("verifier", "grpo_advantage"),
                       optim=OptimSpec("adamw", lr=1e-5),
-                      schedule=Schedule(group_size=8, trajectories_per_wave=64, n_updates=10)),
+                      schedule=Schedule()),
         gpu_config=GpuConfig(groups=(
             GpuGroup(gpus(n=2), (pool("main"), learner())),)),
         seeds=Seeds(master=0),
@@ -110,7 +110,7 @@ class TestHappyPath(unittest.TestCase):
 
     def test_offline_spec_without_gen_or_algo_validates(self) -> None:
         spec = clean_spec(gen=None, algo=None,
-                          trajectories=TrajectorySource("store://parent/waves"))
+                          plans=Plans(train="cas://plan/train"))
         self.assertEqual(validate(spec, SCHEMA), [])
 
     def test_bank_provides_satisfy_requires(self) -> None:
@@ -146,12 +146,11 @@ class TestUnknownNames(unittest.TestCase):
         self.assertIn("unknown-env", codes(spec))
 
     def test_unknown_eval_env(self) -> None:
-        spec = clean_spec(eval=EvalSpec(tasks="cas://y/heldout.jsonl", env="nope"))
+        spec = clean_spec(eval=EvalSpec(), plans=Plans(train="cas://p/t"))
         self.assertIn("unknown-env", codes(spec))
 
     def test_unknown_eval_post(self) -> None:
-        spec = clean_spec(eval=EvalSpec(tasks="cas://y/heldout.jsonl",
-                                        post=("nope",)))
+        spec = clean_spec(eval=EvalSpec(post=("nope",)))
         self.assertIn("unknown-post", codes(spec))
 
     def test_unknown_adapter_type(self) -> None:
@@ -214,11 +213,9 @@ class TestDeclarationWiring(unittest.TestCase):
     def test_eval_pipeline_is_checked_independently(self) -> None:
         # the same processors reused in eval are fine; a broken EVAL pipeline
         # is flagged even when algo.post is clean
-        clean = clean_spec(eval=EvalSpec(tasks="cas://y/heldout.jsonl",
-                                         post=("verifier",)))
+        clean = clean_spec(eval=EvalSpec(post=("verifier",)))
         self.assertEqual(validate(clean, SCHEMA), [])
-        broken = clean_spec(eval=EvalSpec(tasks="cas://y/heldout.jsonl",
-                                          post=("grpo_advantage",)))
+        broken = clean_spec(eval=EvalSpec(post=("grpo_advantage",)))
         self.assertEqual(codes(broken), {"post-unwired"})
 
 
@@ -342,8 +339,7 @@ class TestTopology(unittest.TestCase):
         sleepy = GpuConfig(groups=(
             GpuGroup(gpus(n=1), (pool("main"), learner()), sharing="sleep"),))
         laggy = replace(clean_spec().algo,
-                        schedule=Schedule(group_size=8, trajectories_per_wave=64,
-                                          n_updates=10, max_policy_lag=1))
+                        schedule=Schedule(max_policy_lag=1))
         spec = clean_spec(gpu_config=sleepy, algo=laggy)
         self.assertEqual(codes(spec), {"sleep-lag-conflict"})
 
@@ -375,7 +371,7 @@ class TestTopology(unittest.TestCase):
         self.assertEqual(codes(spec), {"main-pool-missing"})
 
     def test_eval_pool_missing(self) -> None:
-        spec = clean_spec(eval=EvalSpec(tasks="cas://y/heldout.jsonl", pool="evalpool"))
+        spec = clean_spec(eval=EvalSpec(pool="evalpool"))
         self.assertEqual(codes(spec), {"eval-pool-missing"})
 
 
@@ -385,23 +381,21 @@ class TestCoherence(unittest.TestCase):
         self.assertEqual(codes(spec), {"live-without-gen"})
 
     def test_store_source_without_gen_is_fine(self) -> None:
-        spec = clean_spec(gen=None, trajectories=TrajectorySource("store://parent/waves"))
+        spec = clean_spec(gen=None, plans=Plans(train="cas://plan/train"))
         self.assertEqual(validate(spec, SCHEMA), [])
 
     def test_eval_train_overlap(self) -> None:
-        spec = clean_spec(eval=EvalSpec(tasks="cas://x/train.jsonl"))  # = gen.tasks
+        spec = clean_spec(eval=EvalSpec(), plans=Plans(train="cas://p/t"))
         self.assertEqual(codes(spec), {"eval-train-overlap"})
 
     def test_bad_schedule_non_positive_count(self) -> None:
         laggy = replace(clean_spec().algo,
-                        schedule=Schedule(group_size=0, trajectories_per_wave=64,
-                                          n_updates=10))
+                        schedule=Schedule())
         self.assertEqual(codes(clean_spec(algo=laggy)), {"bad-schedule"})
 
     def test_bad_schedule_negative_lag(self) -> None:
         laggy = replace(clean_spec().algo,
-                        schedule=Schedule(group_size=8, trajectories_per_wave=64,
-                                          n_updates=10, max_policy_lag=-1))
+                        schedule=Schedule(max_policy_lag=-1))
         self.assertEqual(codes(clean_spec(algo=laggy)), {"bad-schedule"})
 
     def test_algo_none_skips_schedule_and_loss_checks(self) -> None:
@@ -424,8 +418,7 @@ class TestSpecError(unittest.TestCase):
         broken = clean_spec(
             algo=AlgoSpec(loss="nope", post=("also_nope",),
                           optim=OptimSpec("adamw", lr=1e-5),
-                          schedule=Schedule(group_size=0, trajectories_per_wave=64,
-                                            n_updates=10)),
+                          schedule=Schedule()),
             gpu_config=GpuConfig(groups=()),
         )
         with self.assertRaises(SpecError) as caught:
@@ -467,14 +460,13 @@ class TestPostPools(unittest.TestCase):
         self.assertEqual(validate(spec, SCHEMA), [])
 
     def test_eval_pipeline_pools_are_checked_too(self) -> None:
-        spec = clean_spec(eval=EvalSpec(tasks="cas://y/heldout.jsonl",
-                                        post=("llm_judge",)))
+        spec = clean_spec(eval=EvalSpec(post=("llm_judge",)))
         self.assertIn("post-pool-missing", codes(spec))
 
     def test_traffic_pools_collects_every_route(self) -> None:
         spec = clean_spec(
             algo=self.judge_algo(),
-            eval=EvalSpec(tasks="cas://y/heldout.jsonl", pool="scorer"))
+            eval=EvalSpec(pool="scorer"))
         self.assertEqual(traffic_pools(spec), {"main", "judge", "scorer"})
 
 
@@ -495,7 +487,7 @@ class TestPostPoolCoresidency(unittest.TestCase):
         admission — main+judge alternating in one sleep group cannot serve it."""
         spec = clean_spec(
             gpu_config=self.sleep_both(),
-            eval=EvalSpec(tasks="cas://y/heldout.jsonl", pool="main",
+            eval=EvalSpec(pool="main",
                           post=("llm_judge",)))
         self.assertIn("post-pools-conflict", codes(spec))
 
@@ -514,6 +506,6 @@ class TestPostPoolCoresidency(unittest.TestCase):
                 GpuGroup(gpus(n=1), (pool("main"), learner()),
                          sharing="sleep"),
                 GpuGroup(gpus(n=1), (pool("judge"),)),)),
-            eval=EvalSpec(tasks="cas://y/heldout.jsonl", pool="main",
+            eval=EvalSpec(pool="main",
                           post=("verifier",)))
         self.assertNotIn("post-pools-conflict", codes(spec))

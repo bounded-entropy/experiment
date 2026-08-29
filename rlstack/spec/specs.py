@@ -31,23 +31,32 @@ class SamplingSpec:
 
 @dataclass(frozen=True)
 class GenSpec:
-    """Everything needed for the policy to complete rollouts: the env, its
-    tasks, the sampling knobs. Scoring is NOT here — that is postprocessing."""
+    """What the policy may draw on to complete rollouts: the environments it
+    MAY run, the task sets it MAY draw from, and the sampling knobs. WHICH task
+    runs under WHICH environment is the plan's business, not the spec's.
 
-    env: str                      # registered @environment
-    tasks: str                    # content-addressed: "cas://<sha>/..."
+    `envs` is a declaration, not a use: identity is a pure function of the spec
+    value (I3), so the environments whose source hashes into run_id have to be
+    nameable without fetching a plan. The submit gate refuses any leaf naming
+    an environment not declared here. Scoring is NOT here — that is
+    postprocessing."""
+
+    envs: tuple[str, ...]         # registered @environment names
+    tasks: tuple[str, ...]        # content-addressed: "cas://<sha>/..." each
     sampling: SamplingSpec = SamplingSpec()
 
 
 @dataclass(frozen=True)
 class EvalSpec:
-    """Firewalled measurement: immutable bundle versions + held-out tasks only."""
+    """Firewalled measurement: immutable bundle versions + held-out tasks only.
 
-    tasks: str
+    WHAT eval samples is Plans.eval — one wave per eval point, held-out tasks
+    named leaf by leaf — so `tasks`, `env` and `n_samples` are not knobs here
+    any more than they are in a rollout. What remains is when it runs, what
+    scores it, and where the traffic goes."""
+
     every: int = 10               # run after every N optim updates
-    env: str | None = None        # None → gen.env
     post: tuple[str, ...] = ()    # scoring pipeline over eval trajectories
-    n_samples: int = 1
     pool: str = "main"            # which engine pool carries eval traffic
 
 
@@ -80,23 +89,21 @@ class PolicySpec:
 # ---------------------------------------------------------------------------
 
 @dataclass(frozen=True)
-class TrajectorySource:
-    """What training consumes — always sealed store data (I1).
+class Plans:
+    """The shape of the run, by reference: three content-addressed plans.
 
-    "live" means this run's own gen output; "store://<run>/..." and "cas://<sha>"
-    replay another run's sealed data (off-policy distillation, SFT) through the
-    exact same training contract.
+    `train` is what the Trainer consumes, one wave per update, and its LENGTH
+    is the run's length. `rollout` is what the Generator makes, one wave per
+    rollout index; None means the run samples nothing (every train leaf is
+    already sealed elsewhere). `eval` is one wave per eval point.
+
+    Each uri's sha IS the plan's content hash, so a plan hashes into run_id
+    exactly as if it were written inline, while the spec stays readable.
     """
 
-    source: str
-
-    def __post_init__(self) -> None:
-        ok = self.source == "live" or self.source.startswith(("store://", "cas://"))
-        if not ok:
-            raise ValueError(
-                f"TrajectorySource.source must be 'live', 'store://...', or "
-                f"'cas://...', got {self.source!r}"
-            )
+    train: str                    # "cas://<sha>"
+    rollout: str | None = None
+    eval: str | None = None
 
 
 @dataclass(frozen=True)
@@ -112,15 +119,21 @@ class OptimSpec:
 
 @dataclass(frozen=True)
 class Schedule:
-    """The wave shape. Mostly statistical knobs (they change the estimator),
-    one engineering knob (microbatch_tokens changes only how compute is
-    chunked). max_policy_lag is the lag BUFFER — how stale a behavior policy
-    the trainer tolerates, 0 meaning strict alternation."""
+    """How a wave is CONSUMED — its shape is the plan's (#59).
 
-    group_size: int
-    trajectories_per_wave: int
-    n_updates: int
-    epochs_per_wave: int = 1
+    group_size, trajectories_per_wave and n_updates left with the plan, which
+    states all three by construction; epochs_per_wave left with the invariant
+    it violated: ONE WAVE IS ONE GRADIENT UPDATE, so training a wave twice is
+    two updates whose plans name the same trajectories, and the ledger keeps
+    one commit per wave either way.
+
+    What is left is one engineering knob and one statistical one:
+    microbatch_tokens changes only how compute is chunked (a wave's documents
+    are packed into forwards under this token budget and their gradients
+    accumulate into a single step), and max_policy_lag is the lag BUFFER — how
+    stale a behavior policy the trainer tolerates, 0 meaning strict
+    alternation."""
+
     microbatch_tokens: int = 16384
     max_policy_lag: int = 0
 
@@ -253,7 +266,7 @@ class ExperimentSpec:
 
     policy: PolicySpec            # the bridge (I2)
     gen: GenSpec | None           # inference world; None = pure-offline run
-    trajectories: TrajectorySource   # the training world's ONLY input (I1)
+    plans: Plans                  # the shape: which trajectories, which wave
     algo: AlgoSpec | None         # training world; None = generation-only run
     gpu_config: GpuConfig         # semantics-neutral (I5)
     seeds: Seeds

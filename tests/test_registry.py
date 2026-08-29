@@ -21,7 +21,7 @@ from rlstack.registry import (
 )
 from rlstack.spec.specs import (
     AlgoSpec, EvalSpec, ExperimentSpec, GenSpec, GpuConfig, GpuGroup, OptimSpec,
-    PolicySpec, TrajectorySource, Schedule, Seeds, gpus, learner, lora, pool,
+    PolicySpec, Plans, Schedule, Seeds, gpus, learner, lora, pool,
 )
 
 
@@ -208,11 +208,11 @@ def minimal_spec(**overrides: Any) -> ExperimentSpec:
     fields: dict[str, Any] = dict(
         policy=PolicySpec(base="Qwen/Qwen3-1.7B",
                           bank={"pi": lora("layers.*.mlp.*", r=16)}),
-        gen=GenSpec(env="noop_env", tasks="cas://x/train.jsonl"),
-        trajectories=TrajectorySource("live"),
+        gen=GenSpec(envs=("noop_env",), tasks=("cas://x/train.jsonl",)),
+        plans=Plans(train="cas://plan/train", rollout="cas://plan/roll"),
         algo=AlgoSpec(loss="grpo", post=("verifier", "grpo_advantage"),
                       optim=OptimSpec("adamw", lr=1e-5),
-                      schedule=Schedule(group_size=8, trajectories_per_wave=64, n_updates=10)),
+                      schedule=Schedule()),
         gpu_config=GpuConfig(groups=(
             GpuGroup(gpus(n=1), (pool("main"), learner())),)),
         seeds=Seeds(master=0),
@@ -235,12 +235,12 @@ class TestCodeHashes(unittest.TestCase):
 
     def test_offline_run_without_gen_or_algo(self) -> None:
         spec = minimal_spec(gen=None, algo=None,
-                            trajectories=TrajectorySource("store://parent/waves"))
+                            plans=Plans(train="cas://plan/train"))
         self.assertEqual(set(code_hashes(spec)), {"adapter_type:lora"})
 
     def test_eval_names_are_covered(self) -> None:
-        spec = minimal_spec(eval=EvalSpec(tasks="cas://y/heldout.jsonl",
-                                          env="noop_env", post=("constant",)))
+        spec = minimal_spec(eval=EvalSpec(post=("constant",)),
+                             plans=Plans(train="cas://p/t", eval="cas://p/e"))
         hashes = code_hashes(spec)
         self.assertIn("environment:noop_env", hashes)
         self.assertIn("postprocessor:constant", hashes)
@@ -249,7 +249,7 @@ class TestCodeHashes(unittest.TestCase):
         spec = minimal_spec(algo=AlgoSpec(
             loss="not_registered", post=("verifier", "grpo_advantage"),
             optim=OptimSpec("adamw", lr=1e-5),
-            schedule=Schedule(group_size=8, trajectories_per_wave=64, n_updates=10)))
+            schedule=Schedule()))
         with self.assertRaises(KeyError) as caught:
             code_hashes(spec)
         self.assertIn("not_registered", str(caught.exception))

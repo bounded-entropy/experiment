@@ -146,11 +146,10 @@ def code_hashes(spec: ExperimentSpec) -> dict[str, str]:
             add(POST, name)
 
     if spec.gen is not None:
-        add(ENVS, spec.gen.env)
+        for name in spec.gen.envs:
+            add(ENVS, name)
 
     if spec.eval is not None:
-        if spec.eval.env is not None:
-            add(ENVS, spec.eval.env)
         for name in spec.eval.post:
             add(POST, name)
 

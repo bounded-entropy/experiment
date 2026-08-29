@@ -106,61 +106,27 @@ def load_tasks(store: Store, uri: str) -> list[Task]:
     return [Task(id=r["id"], prompt=r["prompt"], meta=r.get("meta", {})) for r in rows]
 
 
+def load_task_sets(store: Store, uris: Sequence[str]) -> dict[str, Task]:
+    """Every declared task set, keyed by task id — what a plan's leaves name.
+
+    Ids are global across a run's sets: a leaf carries an id alone, so two sets
+    sharing one id would make a leaf ambiguous, and the collision is refused
+    here rather than silently resolved by set order.
+    """
+    tasks: dict[str, Task] = {}
+    for uri in uris:
+        for task in load_tasks(store, uri):
+            if task.id in tasks:
+                raise ValueError(
+                    f"task id {task.id!r} appears in two declared task sets; "
+                    f"a plan's leaf names an id alone, so ids must be unique")
+            tasks[task.id] = task
+    return tasks
+
+
 async def run_episode(env_name: str, task: Task,
                       client: EnginePoolClient) -> Trajectory:
     """One episode across the membrane: the Environment produces the Rollout,
     the seal turns it into a Trajectory (I1)."""
     rollout = await ENVS.get(env_name).instance.run(client, task)
     return rollout.seal()
-
-
-def choose_tasks(tasks: Sequence[Task], n_groups: int, master: int,
-                 phase: str, update: int) -> list[Task]:
-    """Deterministic without-replacement draw of this wave's tasks."""
-    if n_groups > len(tasks):
-        raise ValueError(
-            f"wave needs {n_groups} distinct tasks but the set has {len(tasks)}")
-    rng = random.Random(derive(master, phase, update, "tasks"))
-    return rng.sample(list(tasks), n_groups)
-
-
-async def collect_wave(
-    update: int,
-    *,
-    env_name: str,
-    sampling: SamplingSpec,
-    tasks: Sequence[Task],
-    group_size: int,
-    trajectories_per_wave: int,
-    routes: Routes,
-    master: int,
-    phase: str = "rollout",
-    max_inflight: int = 64,
-) -> Wave:
-    """One wave of sealed groups, deterministic given (master, update).
-
-    Group keys are ASSIGNED here — one group per chosen task, keyed by the
-    task id — never derived from the tasks; a wave of many groups over one
-    task is the same primitive assembled differently at this spot.
-    """
-    if trajectories_per_wave % group_size:
-        raise ValueError(
-            f"trajectories_per_wave={trajectories_per_wave} is not a multiple "
-            f"of group_size={group_size}")
-    chosen = choose_tasks(tasks, trajectories_per_wave // group_size,
-                          master, phase, update)
-
-    limiter = asyncio.Semaphore(max_inflight)
-
-    async def one(task: Task, sample_index: int) -> Trajectory:
-        async with limiter:
-            episode_seed = derive(master, phase, update, task.id, sample_index)
-            client = EnginePoolClient(routes, sampling, episode_seed)
-            return await run_episode(env_name, task, client)
-
-    jobs = [one(task, s) for task in chosen for s in range(group_size)]
-    trajectories = await asyncio.gather(*jobs)
-    return Wave([
-        Group(task.id, trajectories[i * group_size:(i + 1) * group_size])
-        for i, task in enumerate(chosen)
-    ])

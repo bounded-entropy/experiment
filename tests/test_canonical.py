@@ -20,7 +20,7 @@ from rlstack.spec.specs import (
     GpuGroup,
     OptimSpec,
     PolicySpec,
-    TrajectorySource,
+    Plans,
     SamplingSpec,
     Schedule,
     Seeds,
@@ -60,17 +60,16 @@ def _small_spec() -> ExperimentSpec:
             base="Qwen/Qwen3-1.7B",
             bank={"pi": lora("layers.*.mlp.*", r=16)},
         ),
-        gen=GenSpec(
-            env="math_single_turn",
-            tasks="cas://abc/train.jsonl",
+        gen=GenSpec(envs=("math_single_turn",),
+                    tasks=("cas://abc/train.jsonl",),
 
         ),
-        trajectories=TrajectorySource("live"),
+        plans=Plans(train="cas://plan/train", rollout="cas://plan/roll"),
         algo=AlgoSpec(
             loss="grpo",
             post=("verifier", "grpo_advantage"),
             optim=OptimSpec("adamw", lr=1e-5),
-            schedule=Schedule(group_size=8, trajectories_per_wave=64, n_updates=10),
+            schedule=Schedule(),
         ),
         gpu_config=GpuConfig(
             groups=(GpuGroup(gpus(n=1), (pool("main"), learner())),)
@@ -92,8 +91,8 @@ class TestCanonicalJsonShape(unittest.TestCase):
 
     def test_golden_nested_dataclass_and_tuple(self) -> None:
         self.assertEqual(
-            canonical_json(GenSpec(env="math_single_turn",
-                                   tasks="cas://abc/train.jsonl",
+            canonical_json(GenSpec(envs=("math_single_turn",),
+                    tasks=("cas://abc/train.jsonl",),
                                    sampling=SamplingSpec(top_p=0.9))),
             '{"__type__":"GenSpec","env":"math_single_turn",'
             '"sampling":{"__type__":"SamplingSpec","max_tokens":1024,'
