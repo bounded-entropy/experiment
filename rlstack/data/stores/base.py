@@ -632,7 +632,10 @@ class RunHandle:
             freed += self.store._size(key)
             self.store._delete(key)
             gone.append(triple)
-        self.store._persist()
+        if gone:
+            # a deletion STAGES like a write: a backend that needs a commit to
+            # make one durable gets exactly one, and only if bytes moved
+            self.store._persist()
         return Swept(tuple(gone), freed)
 
     def _refuse_live_version(self, tail: dict[str, Any] | None, section: str,
