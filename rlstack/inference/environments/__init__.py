@@ -7,4 +7,6 @@ defining it was imported, and importing this package registers the builtins.
 from rlstack.inference.environments.base import (  # noqa: F401
     Environment, EnvironmentDef, PoolClient, environment,
 )
-from rlstack.inference.environments import math_single_turn, noop  # noqa: F401
+from rlstack.inference.environments import (  # noqa: F401  (registers builtins)
+    dapo_math, math_single_turn, noop,
+)
