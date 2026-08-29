@@ -108,10 +108,14 @@ class TorchLearner:
     def forward_backward(self, tenant: str, batch: TokenBatch) -> TrainStats:
         state = self._tenant(tenant)
         spans = _doc_spans(batch)
+        # the routing spans the BACKWARD too: with the blocks checkpointed the
+        # forward is run again inside backward(), and a recomputed forward that
+        # found no plan would be a forward with no deltas — the rows have to be
+        # pinned for as long as the forward can RUN, not just until it returns
         with row_plan(self._model).route(self._rows_of(state, len(spans))):
             logprobs = self._batched_logprobs(batch, spans)
-        result = state.loss_fn(PolicyOutputs(logprobs=logprobs), batch)
-        result.loss.backward()
+            result = state.loss_fn(PolicyOutputs(logprobs=logprobs), batch)
+            result.loss.backward()
         return TrainStats(loss=float(result.loss), mean_ratio=result.mean_ratio,
                           logprob_gap=result.logprob_gap,
                           grad_norm=self._grad_norm(state), tokens=len(batch))

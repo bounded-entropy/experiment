@@ -70,7 +70,13 @@ class RowPlan:
 
     @contextmanager
     def route(self, rows: ReplayRows):
-        """Pin `rows` for the duration of one forward."""
+        """Pin `rows` for one forward AND the backward that recomputes it.
+
+        Checkpointed blocks run their forward a second time inside backward()
+        (torch_learner.checkpoint_the_blocks), so a plan released at the end of
+        the first pass would leave the recomputed one unrouted — the caller
+        holds this open across loss.backward() for that reason.
+        """
         if self._rows is not None:
             raise RuntimeError("this base is already routed — replay forwards "
                                "on one model do not nest")
