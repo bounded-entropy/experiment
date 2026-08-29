@@ -1,7 +1,7 @@
 """GRPO on DAPO-Math-17k: Qwen3-14B, LoRA, tp=2 inference beside fsdp=4 training.
 
-    modal run deploy/dapo_grpo.py::shakeout --train-tasks cas://... --eval-tasks cas://...
-    modal run deploy/dapo_grpo.py::full --train-tasks ... --eval-tasks ... --go
+    modal run deploy/dapo_grpo.py::shakeout      # 2 updates, the defaults below
+    modal run deploy/dapo_grpo.py::full --go     # the 50-update campaign
 
 Two containers and one wire: PolicyHost serves the sampling partition (its own
 Host, its own arbiter, admission at the partition), and `run` drives the whole
@@ -36,6 +36,10 @@ image = (
 )
 
 BASE = "Qwen/Qwen3-14B"
+# the task sets built by deploy/tasks_dapo.py (#60): 17,547 train / 370 held out,
+# prompts chat-formatted with thinking OFF and DAPO's own "Answer: N" instruction
+TRAIN_TASKS = "cas://09499d32b51e5e1b2a644b1c65e01b44aa42ff1a5bfac78ead41f98f89f09c93"
+EVAL_TASKS = "cas://82ae4626dbb59a2c50e2b13cbe7250c5f1ddd02dfb81edc7495efb77759d420b"
 STORE = "modal://rlstack-store"
 GROUPS_PER_WAVE = 8          # tasks per update
 GROUP_SIZE = 8               # completions per task: the advantage's baseline
@@ -87,7 +91,7 @@ def spec_for(store, train_tasks, eval_tasks, updates, master):
                          GpuGroup, GpuSet, LearnerMember, OptimSpec, Plans,
                          PolicySpec, PoolMember, SamplingSpec, Schedule, Seeds,
                          encode, lora)
-    from rlstack.runner.traffic import load_tasks
+    from rlstack.data.tasks import load_tasks
 
     train_ids = [t.id for t in load_tasks(store, train_tasks)]
     eval_ids = [t.id for t in load_tasks(store, eval_tasks)][:32]
@@ -101,10 +105,10 @@ def spec_for(store, train_tasks, eval_tasks, updates, master):
         gen=GenSpec(envs=("dapo_math",), tasks=(train_tasks, eval_tasks),
                     sampling=SamplingSpec(temperature=1.0, max_tokens=MAX_TOKENS)),
         plans=plans,
-        algo=AlgoSpec(loss="grpo", post=("boxed_verifier", "grpo_advantage"),
+        algo=AlgoSpec(loss="grpo", post=("final_answer", "grpo_advantage"),
                       optim=OptimSpec("adamw", lr=1e-4),
                       schedule=Schedule(microbatch_tokens=2048, max_policy_lag=1)),
-        eval=EvalSpec(every=10, post=("boxed_verifier",)),
+        eval=EvalSpec(every=10, post=("final_answer",)),
         gpu_config=GpuConfig(groups=(
             GpuGroup(gpus=GpuSet(n=2), members=(PoolMember("main", tp=2),)),
             GpuGroup(gpus=GpuSet(n=4), members=(LearnerMember(fsdp=4),)))),
@@ -195,7 +199,8 @@ def _run(train_tasks: str, eval_tasks: str, updates: int, master: int,
 
 @app.function(image=image, gpu="L4:4", volumes={"/store": store_volume, "/hf": hf_cache},
               timeout=7200)
-def shakeout(train_tasks: str, eval_tasks: str, master: int = 7) -> dict:
+def shakeout(train_tasks: str = TRAIN_TASKS, eval_tasks: str = EVAL_TASKS,
+             master: int = 7) -> dict:
     """Two updates end to end: the wire, the chorus, one real gradient."""
     return _run(train_tasks, eval_tasks, updates=2, master=master,
                 label="shakeout")
@@ -203,8 +208,8 @@ def shakeout(train_tasks: str, eval_tasks: str, master: int = 7) -> dict:
 
 @app.function(image=image, gpu="L4:4", volumes={"/store": store_volume, "/hf": hf_cache},
               timeout=86400)
-def full(train_tasks: str, eval_tasks: str, master: int = 7,
-         updates: int = 50, go: bool = False) -> dict:
+def full(train_tasks: str = TRAIN_TASKS, eval_tasks: str = EVAL_TASKS,
+         master: int = 7, updates: int = 50, go: bool = False) -> dict:
     """The campaign. Gated: real money, and the shakeout's numbers decide."""
     if not go:
         raise SystemExit("refusing to spend: pass --go once the shakeout is read")

@@ -12,7 +12,7 @@ end-of-turn token ends the completion, and a stop string here could only cut it
 earlier and wrongly.
 
 WHAT IT DELIBERATELY DOES NOT OWN: the answer. Whether a completion contains a
-right answer is postprocessing (boxed_verifier), and whether it ran out of room
+right answer is postprocessing (final_answer), and whether it ran out of room
 before saying one is readable at the seal from the turn's finish reason. A
 reasoning model spends most of its tokens in a think block, so the ANSWER is
 what post reads and the LENGTH is what the campaign has to budget — the
