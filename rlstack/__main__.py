@@ -5,6 +5,7 @@
     python -m rlstack ui <top-dir> ... [--port N] [--panels panels.json]
     python -m rlstack tag <store-root> <run_id> [--name N] [--tag T ...] [--note ...]
     python -m rlstack tasks <dataset> --store <root> [--split name=frac ...]
+    python -m rlstack sweep <store-root> <run_id>
 
 A TOP DIRECTORY, not a store (#58): the views discover every store root
 beneath it — a directory holding runs/, hosts/, fleet/ or annotations.jsonl —
@@ -14,9 +15,11 @@ paths and file:// resolve where mounted; modal:// tells you to run the reader
 beside the volume. With none given, $RLSTACK_STORES (colon-separated) is used.
 
 Every VIEW is peek-only: this entry point reads journals and manifests and
-never attaches a run. `tag` and `tasks` are the two verbs that write, and
-neither writes inside a run directory: `tag` puts flavortext beside runs/,
-`tasks` puts content-addressed task sets in the store's cas/.
+never attaches a run. Three verbs write. `tag` puts flavortext beside runs/
+and `tasks` puts content-addressed task sets in the store's cas/, neither
+inside a run directory; `sweep` is the one that reaches inside one, and the
+one that ATTACHES — so it is for a run that has stopped (attaching discards
+unsealed work, I10), never for one that is training right now.
 """
 
 from __future__ import annotations
@@ -25,6 +28,7 @@ import argparse
 import os
 
 from rlstack.data.stores.base import Store
+from rlstack.data.stores.retention import DEFAULT_RETENTION, RetentionPolicy
 from rlstack.data.tasks import dapo_math_tasks, split_tasks, write_tasks
 from rlstack.observe import (
     render_gpu, render_hosts, render_runs, roots_for, store_for,
@@ -73,10 +77,18 @@ def main(argv: list[str] | None = None) -> None:
     tasks.add_argument("--seed", type=int, default=17,
                        help="the split draw's seed (a task's split is a "
                             "function of this and its id alone)")
+    sweep = sub.add_parser("sweep", help="free what a finished run's store "
+                                         "will never read again")
+    sweep.add_argument("store_root", help="THE run's own store root — the "
+                                          "folder it was born in")
+    sweep.add_argument("run_id")
     args = parser.parse_args(argv)
 
     if args.command == "tag":
         annotate(args)
+        return
+    if args.command == "sweep":
+        sweep_run(store_for(args.store_root), args.run_id, DEFAULT_RETENTION)
         return
     if args.command == "tasks":
         build_task_sets(store_for(args.store), args.dataset,
@@ -134,6 +146,39 @@ def annotate(args) -> None:
           f"  name : {merged.get('name') or '—'}\n"
           f"  tags : {', '.join(merged.get('tags') or []) or '—'}\n"
           f"  note : {merged.get('note') or '—'}")
+
+
+def sweep_run(store: Store, run_id: str, policy: RetentionPolicy) -> None:
+    """`sweep` applies a retention policy to ONE run: it prints the blob
+    versions the policy says nothing can read again, frees them, and reports
+    the bytes recovered.
+
+    The operator's half of retention — the Trainer sweeps at every commit, and
+    this is for a run that has already stopped (a campaign that finished, or
+    one interrupted before its last sweep). It ATTACHES, which is what makes it
+    the one verb here that must never be pointed at a live run: attach discards
+    work no ledger line committed, and a running trainer's unsealed update is
+    exactly that.
+    """
+    run = store.open_run(run_id)
+    named = list(policy.expendable(run.read_ledger()))
+    print(f"{run_id} in {store.describe()}\n"
+          f"  {type(policy).__name__}: {len(named)} blob version(s) expendable")
+    swept = run.sweep(policy)
+    for section, name, version in swept.blobs:
+        print(f"    freed {section}/{name}@{version}")
+    print(f"  {len(swept.blobs)} blob(s) deleted, {human_bytes(swept.freed)} "
+          f"recovered")
+
+
+def human_bytes(count: int) -> str:
+    """Bytes as an operator reads them: binary units, one decimal."""
+    size = float(count)
+    for unit in ("B", "KiB", "MiB", "GiB"):
+        if size < 1024 or unit == "GiB":
+            return f"{size:.1f} {unit}"
+        size /= 1024
+    return f"{size:.1f} GiB"
 
 
 if __name__ == "__main__":

@@ -17,7 +17,7 @@ import asyncio
 from collections.abc import Mapping
 from dataclasses import dataclass
 
-from rlstack.data.stores.base import Store
+from rlstack.data.stores.base import RunHandle, Store
 from rlstack.policy.compile import Bundle, compile_bundle
 from rlstack.policy.siteschema import SiteSchema, resolve
 from rlstack.registry import ADAPTER_TYPES, POST, code_hashes
@@ -385,5 +385,27 @@ def _warm_start(init: WarmStart, *, tenant: str, bank_names: set[str],
         except FileNotFoundError:
             continue  # no sealed state for this delta: it starts fresh
         if init.optim == "load" and name in trainable:
-            optim[name] = parent.read_blob("optim", source, version)
+            optim[name] = _parent_moments(parent, source, version)
     learner.load(tenant, adapters, optim if init.optim == "load" else None)
+
+
+def _parent_moments(parent: RunHandle, source: str, version: int) -> bytes:
+    """The parent's Adam moments at the version this warm start names — or a
+    refusal that says where they went.
+
+    Retention keeps only the LEDGER TAIL's moments (data/stores/retention.py),
+    because that is the only version `restore_tenant` can read. So
+    `optim="load"` against a MID-RUN version of a swept parent finds nothing,
+    and it must say so rather than surface as a bare missing file: warm start
+    from the parent's tail (what `extend` does), or take its deltas with fresh
+    moments.
+    """
+    try:
+        return parent.read_blob("optim", source, version)
+    except FileNotFoundError:
+        raise FileNotFoundError(
+            f"no optimizer moments for {source}@{version} in run "
+            f"{parent.run_id}: retention keeps only the ledger tail's moments, "
+            f"so optim='load' works from the parent's LAST committed version "
+            f"(its tail is {(parent.ledger_tail() or {}).get('versions')}) — "
+            f"or use optim='fresh' to take the deltas alone") from None
