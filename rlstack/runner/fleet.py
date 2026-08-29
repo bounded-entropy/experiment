@@ -451,6 +451,17 @@ class Listing:
         return any(t.get("status") == "running"
                    for t in self.host.status().get("tenants", {}).values())
 
+    def alive(self) -> bool:
+        """Does the container behind this listing still answer? A listing is
+        a description, so the only way to know is to ask — at placement time,
+        never cached: a host that died between placements must not be offered,
+        and one that came back must not stay buried."""
+        try:
+            self.host.status()
+            return True
+        except Exception:
+            return False
+
 
 class FleetService:
     """The standing fleet: placement as a SERVICE, and the fleet journal's
@@ -490,6 +501,8 @@ class FleetService:
         for event in store.read_fleet_log():
             if event.get("event") == "list":
                 desk.listings[event["host"]] = _listing_from(event, connect)
+            elif event.get("event") == "delist":
+                desk.listings.pop(event["host"], None)
         return desk
 
     def list_host(self, name: str, regimes: Sequence[Regime], address: str,
@@ -510,18 +523,35 @@ class FleetService:
             "regimes": [{"name": r.name, "capability": r.capability,
                          "base": r.base, "shape": r.shape} for r in regimes]})
 
+    def delist(self, name: str) -> None:
+        """A host leaves the standing fleet — its container is gone, or the
+        deploy is retiring it. Journaled like the listing was, so a rebuilt
+        desk knows the departure too; the metal itself was never the desk's
+        to touch."""
+        if name not in self.listings:
+            raise FleetError(f"host {name!r} is not listed with this desk")
+        del self.listings[name]
+        self.store.append_fleet_event({
+            "event": "delist", "t": time.time(), "host": name})
+
     # ---- placement over listings (the join rung; carve is a venue action) ---
 
     def find_listing(self, unit: tuple[Demand, ...]) -> Listing | None:
-        """Rung one over listings: sorted-name order, solo-and-occupied
-        skipped, coverage by capability equality — Fleet.find_join's rule,
-        matched against descriptions instead of objects."""
+        """Rung one over listings: sorted-name order, coverage by capability
+        equality (Fleet.find_join's rule, matched against descriptions),
+        solo-and-occupied skipped — and so is a listing whose container no
+        longer ANSWERS: placement must never offer a host it cannot reach,
+        and a dead listing is a fact discovered here, reported by the boot
+        refusal, and cured by a delist or a reboot."""
         for name in sorted(self.listings):
             listing = self.listings[name]
+            if not all(_covers_regimes(listing.regimes, d) for d in unit):
+                continue
+            if not listing.alive():
+                continue
             if listing.solo and listing.occupied():
                 continue
-            if all(_covers_regimes(listing.regimes, d) for d in unit):
-                return listing
+            return listing
         return None
 
     def place_listings(self, spec: ExperimentSpec
@@ -573,7 +603,15 @@ class FleetService:
         routes = {pool: listing.address
                   for pool, listing in placement.items()
                   if pool is not None and listing is not learner_listing}
-        reply = await learner_listing.host.adopt(spec_row, routes)
+        try:
+            reply = await learner_listing.host.adopt(spec_row, routes)
+        except Exception as down:
+            # alive() passed and the container died between the probe and the
+            # knock: the reply says so instead of the desk falling over, and
+            # the cure is a delist or a reboot, both venue actions
+            return {"accepted": False, "host": learner_listing.name,
+                    "error": f"host {learner_listing.name!r} did not answer "
+                             f"the adopt: {down}"}
         self.store.append_fleet_event({
             "event": "place", "t": time.time(),
             "run_id": reply.get("run_id"),

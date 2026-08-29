@@ -202,3 +202,31 @@ def _row(spec) -> dict:
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class LivenessTest(DeskFixture):
+    def test_a_dead_listing_is_skipped_and_a_delist_survives_rebuild(self) -> None:
+        """A listing whose container stopped answering is invisible to
+        placement; a delist is journaled, so the rebuilt desk agrees."""
+        class Dead:
+            async def call(self, verb, payload):
+                raise ConnectionError("container gone")
+
+            def ask(self, verb, payload):
+                raise ConnectionError("container gone")
+
+        living = self.stand_up("alive-a", "fleet://a", serves_pool=True,
+                               trains=True)
+        desk = self.desk()
+        self.transports["fleet://dead"] = Dead()
+        desk.list_host("dead-z", living.regimes, "fleet://dead")
+        desk.list_host("alive-a", living.regimes, "fleet://a")
+
+        placement, boot = desk.place_listings(arith_spec(self.train))
+        self.assertEqual(boot, [])
+        self.assertEqual(placement[None].name, "alive-a")
+
+        desk.delist("dead-z")
+        reborn = FleetService.from_journal(
+            self.store, connect=lambda addr: RemoteHost(self.transports[addr]))
+        self.assertEqual(sorted(reborn.listings), ["alive-a"])
