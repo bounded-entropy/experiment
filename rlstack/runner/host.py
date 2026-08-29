@@ -108,7 +108,7 @@ class Host:
                  partition: Partition | None = None,
                  regimes: tuple[Regime, ...] = (),
                  capacity: float = 1.0, solo: bool = False,
-                 dial: Callable[[str], Engine] | None = None,
+                 dial: Callable[[str], "Transport"] | None = None,
                  schema_for: Callable[[str], SiteSchema] | None = None,
                  sampler=None) -> None:
         self.name = name
@@ -125,11 +125,13 @@ class Host:
         self.solo = solo
         # Two more birth facts, both for ADOPTION — an experiment arriving
         # over the wire instead of in-process. `dial` turns a pool ADDRESS
-        # from an adopt frame into a live Engine (a RemotePool over the
-        # venue's transport): address formats are venue (I5), so the deploy
-        # that knows them hands the resolver in. `schema_for` compiles the
-        # base's SiteSchema HERE — an adopted spec never ships a schema,
-        # because the schema must describe the checkpoint THIS metal serves.
+        # from an adopt frame into a TRANSPORT to the host serving it:
+        # address formats are venue (I5), so the deploy that knows them hands
+        # the resolver in, and THIS host wraps the transport with the pool's
+        # own capability facts (base, tp) read off the spec — the venue knows
+        # where, the spec knows what. `schema_for` compiles the base's
+        # SiteSchema HERE — an adopted spec never ships a schema, because the
+        # schema must describe the checkpoint THIS metal serves.
         self.dial = dial
         self.schema_for = schema_for
         self._adoptions: dict[str, asyncio.Task] = {}
@@ -380,7 +382,7 @@ class Host:
         try:
             spec = self.decode_adoption(spec_row)
             schema = self.derive_schema(spec)
-            remotes = self.dial_routes(routes or {})
+            remotes = self.dial_routes(spec, routes or {})
             binding = self.bind_pools(spec, remotes=frozenset(remotes))
             self.check_fit(spec, binding, remotes=frozenset(remotes))
             rid = experiment_identity(spec, schema)
@@ -390,6 +392,16 @@ class Host:
         live = self._adoptions.get(rid)
         if live is not None and not live.done():
             return {"accepted": True, "run_id": rid, "state": "running"}
+        # ACCEPTANCE IS VISIBLE THE MOMENT IT IS GIVEN: the tenancy enters the
+        # roster HERE, synchronously, not when the background task gets its
+        # first tick — otherwise two adopts in one breath both pass check_solo
+        # against an empty roster, and the door's own rule races itself.
+        # submit() re-writes this row (and journals it); the eager copy is
+        # in-memory custody only.
+        self.roster[rid] = Tenancy(rid, pools={
+            name: (engine.base or "*")
+            for name, engine in sorted((binding | remotes).items())},
+            store=self.store.describe())
         task = asyncio.create_task(self.submit(spec, schema, remotes=remotes))
         # a failed run already journals and rosters its failure (submit's own
         # except path); retrieving the exception here only keeps asyncio from
@@ -421,10 +433,15 @@ class Host:
                 f"schema in tests)")
         return self.schema_for(spec.policy.base)
 
-    def dial_routes(self, routes: Mapping[str, str]) -> dict[str, Engine]:
-        """Every route dialed into a live Engine, ONCE, at the door. An
-        address is venue vocabulary, so a host born without a dialer refuses
-        routed adoption rather than guessing what an address means."""
+    def dial_routes(self, spec: ExperimentSpec,
+                    routes: Mapping[str, str]) -> dict[str, Engine]:
+        """Every route dialed into a live Engine, ONCE, at the door: the
+        venue's dialer resolves the ADDRESS to a transport, and the pool's
+        declared capability (base, tp — read off the spec, the only side that
+        knows it) wraps it into the RemotePool the runner will route to. A
+        host born without a dialer refuses routed adoption rather than
+        guessing what an address means; a route naming no declared pool is a
+        placement bug and refused the same way."""
         if not routes:
             return {}
         if self.dial is None:
@@ -432,8 +449,24 @@ class Host:
                 f"host {self.name!r} was born with no dial: it cannot resolve "
                 f"pool addresses {sorted(routes)} (pass dial= at construction "
                 f"— the deploy that owns the venue knows the address format)")
-        return {name: self.dial(address)
-                for name, address in sorted(routes.items())}
+        from rlstack.runner.remote import RemotePool
+
+        members = {member.name: member
+                   for group in spec.gpu_config.groups
+                   for member in group.members
+                   if isinstance(member, PoolMember)}
+        remotes: dict[str, Engine] = {}
+        for name, address in sorted(routes.items()):
+            member = members.get(name)
+            if member is None:
+                raise HostError(
+                    f"route {name!r} names no pool this spec declares "
+                    f"({sorted(members)}) — routes are placement's answer to "
+                    f"the spec's own demands")
+            remotes[name] = RemotePool(self.dial(address),
+                                       base=member.base or spec.policy.base,
+                                       tp=member.tp)
+        return remotes
 
     # ---- observability ------------------------------------------------------
 

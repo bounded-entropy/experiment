@@ -151,10 +151,12 @@ class AdoptTest(unittest.TestCase):
         """A demanded pool this host does not serve arrives as an ADDRESS and
         leaves as a live engine — dial, once, at the door."""
         dialed: list[str] = []
+        aux = Host("aux-host", engines=(FakeEngine(),), learner=None,
+                   store=self.store)
 
-        def dial(address: str) -> FakeEngine:
+        def dial(address: str) -> LocalTransport:
             dialed.append(address)
-            return FakeEngine()
+            return LocalTransport(HostService(aux))
 
         host = self.host(dial=dial)
         spec = arith_spec(self.train, gpu_config=GpuConfig(groups=(

@@ -420,3 +420,24 @@ class RemoteHost:
 
     def status(self) -> dict:
         return self._transport.ask("status", {})
+
+
+class RemoteFleet:
+    """The client end of the STANDING fleet: a campaign's whole surface.
+
+    One frame carries the spec to the desk; the desk places it over the
+    listings, adopts it at the learner's host, and the reply says where
+    everything landed (or what to boot). After that the campaign watches the
+    run's own store — the desk holds no results, exactly as no host does."""
+
+    def __init__(self, transport: Transport) -> None:
+        self._transport = transport
+
+    async def submit(self, spec: object) -> dict:
+        from rlstack.spec.canonical import canonical_json
+
+        return await self._transport.call("submit", {
+            "spec": json.loads(canonical_json(spec))})
+
+    def status(self) -> dict:
+        return self._transport.ask("status", {})

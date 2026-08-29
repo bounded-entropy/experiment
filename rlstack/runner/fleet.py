@@ -19,7 +19,7 @@ is never remote — and reaches every other partition through RemotePools.
 from __future__ import annotations
 
 import time
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 
 from rlstack.data.stores.base import Store
@@ -27,7 +27,9 @@ from rlstack.policy.siteschema import SiteSchema
 from rlstack.runner.host import Host, Partition, Regime
 from rlstack.runner.interfaces import Engine, Learner
 from rlstack.runner.loop import RunReport, experiment_identity
-from rlstack.runner.remote import HostService, LocalTransport, RemotePool
+from rlstack.runner.remote import (
+    HostService, LocalTransport, RemoteHost, RemotePool,
+)
 from rlstack.spec.specs import ExperimentSpec, PoolMember
 
 
@@ -423,3 +425,201 @@ def _step_row(step: Join | Carve | Acquire) -> dict:
                 "regimes": [r.name for r in step.regimes]}
     return {"rung": "acquire", "gpu": step.gpu, "devices": step.devices,
             "pools": sorted(d.pool or "learner" for d in step.demands)}
+
+
+# ---------------------------------------------------------------------------
+# the standing fleet: one desk, many partitions, none of them in-process
+# ---------------------------------------------------------------------------
+
+@dataclass(frozen=True)
+class Listing:
+    """One standing host as the desk knows it: the BIRTH FACTS placement
+    matches on (regimes, solo), the ADDRESS other hosts dial its pools at,
+    and the RemoteHost the desk itself adopts through. A listing is a
+    description, never the host — the metal lives in the host's own
+    container, which is the entire reason the desk can be a CPU process."""
+
+    name: str
+    regimes: tuple[Regime, ...]
+    address: str
+    solo: bool
+    host: "RemoteHost"
+
+    def occupied(self) -> bool:
+        """Asked over the wire, at placement time only: the roster is the
+        host's, and the desk holds no copy that could go stale."""
+        return any(t.get("status") == "running"
+                   for t in self.host.status().get("tenants", {}).values())
+
+
+class FleetService:
+    """The standing fleet: placement as a SERVICE, and the fleet journal's
+    ONE WRITER — the Trainer/ledger pattern applied to the fleet plane.
+
+    In-process, Fleet holds live Hosts and may carve because the factories
+    are beside the metal. Standing, none of that is true: hosts are GPU
+    containers elsewhere, so the desk holds LISTINGS (deploy-registered at
+    each host's boot), the join rung matches against them, and "carve" is a
+    venue action — boot a container wearing the regimes, list it — which is
+    why a placement nothing covers comes back as a BOOT instruction, the
+    standing world's acquire. Truth stays in the store: every listing and
+    every placement is journaled, `from_journal` rebuilds the desk after a
+    kill, and the desk's memory is only the single writer's cache. Multi-user
+    concurrency is exactly this single-writer property: two campaigns
+    submitting at once serialize through one desk instead of double-reading
+    one residual.
+
+    Serves over the same Transport contract as HostService: `submit` on the
+    async path (it ends in an adopt at the learner's host), `status` on the
+    sync one.
+    """
+
+    def __init__(self, store: Store,
+                 connect: Callable[[str], "RemoteHost"]) -> None:
+        self.store = store
+        self.connect = connect          # address -> RemoteHost: the desk's dialer
+        self.listings: dict[str, Listing] = {}
+
+    @classmethod
+    def from_journal(cls, store: Store,
+                     connect: Callable[[str], "RemoteHost"]) -> "FleetService":
+        """The desk, rebuilt from its own record: every `list` event redials.
+        Kill -9 the desk and nothing was lost but a process — the same
+        recovery shape as attach, on the fleet plane."""
+        desk = cls(store, connect)
+        for event in store.read_fleet_log():
+            if event.get("event") == "list":
+                desk.listings[event["host"]] = _listing_from(event, connect)
+        return desk
+
+    def list_host(self, name: str, regimes: Sequence[Regime], address: str,
+                  solo: bool = False) -> None:
+        """A host enters the standing fleet: the deploy that booted it lists
+        it here, once, and the desk journals the listing so a rebuilt desk
+        knows it too. Refuses a taken name for Fleet.register's reason."""
+        if name in self.listings:
+            raise FleetError(
+                f"host {name!r} is already listed with this desk; a listing "
+                f"is never replaced — delist first if the container is gone")
+        self.listings[name] = Listing(name=name, regimes=tuple(regimes),
+                                      address=address, solo=solo,
+                                      host=self.connect(address))
+        self.store.append_fleet_event({
+            "event": "list", "t": time.time(), "host": name,
+            "address": address, "solo": solo,
+            "regimes": [{"name": r.name, "capability": r.capability,
+                         "base": r.base, "shape": r.shape} for r in regimes]})
+
+    # ---- placement over listings (the join rung; carve is a venue action) ---
+
+    def find_listing(self, unit: tuple[Demand, ...]) -> Listing | None:
+        """Rung one over listings: sorted-name order, solo-and-occupied
+        skipped, coverage by capability equality — Fleet.find_join's rule,
+        matched against descriptions instead of objects."""
+        for name in sorted(self.listings):
+            listing = self.listings[name]
+            if listing.solo and listing.occupied():
+                continue
+            if all(_covers_regimes(listing.regimes, d) for d in unit):
+                return listing
+        return None
+
+    def place_listings(self, spec: ExperimentSpec
+                       ) -> tuple[dict[str | None, Listing], list[dict]]:
+        """Every placement unit onto a listing, or the boot list: what a
+        placement nothing serves needs BOOTED — regimes to wear, memory to
+        own — which the deploy executes and lists, the standing carve."""
+        placement: dict[str | None, Listing] = {}
+        boot: list[dict] = []
+        for unit in placement_units(demands_of(spec)):
+            listing = self.find_listing(unit)
+            if listing is None:
+                boot.append({
+                    "regimes": [regime_of(d).name for d in unit],
+                    "capabilities": sorted({d.capability for d in unit}),
+                    "base": unit[0].base,
+                    "memory": max(d.memory for d in unit)})
+                continue
+            for demand in unit:
+                placement[demand.pool] = listing
+        return placement, boot
+
+    # ---- submit: place, journal, adopt --------------------------------------
+
+    async def submit(self, spec_row: Mapping) -> dict:
+        """One frame in, one placement out: decode, place over the listings,
+        journal, and ADOPT at the learner's listing with every other pool's
+        address threaded as routes. The reply is the host's own adopt reply
+        plus where everything landed; the run itself is the adopted host's
+        business, and the ledger is the result channel there as everywhere."""
+        from rlstack.runner.remote import spec_from_json
+
+        spec = spec_from_json(spec_row)
+        if not isinstance(spec, ExperimentSpec):
+            return {"accepted": False,
+                    "error": f"submit expects an ExperimentSpec's canonical "
+                             f"form, decoded {type(spec).__name__}"}
+        placement, boot = self.place_listings(spec)
+        if boot:
+            return {"accepted": False, "boot": boot,
+                    "error": "no listed host serves these units — boot hosts "
+                             "wearing the named regimes and list them (the "
+                             "standing carve is a venue action)"}
+        learner_listing = placement.get(None)
+        if learner_listing is None:
+            return {"accepted": False,
+                    "error": "the spec declares no learner member — the desk "
+                             "places training specs"}
+        routes = {pool: listing.address
+                  for pool, listing in placement.items()
+                  if pool is not None and listing is not learner_listing}
+        reply = await learner_listing.host.adopt(spec_row, routes)
+        self.store.append_fleet_event({
+            "event": "place", "t": time.time(),
+            "run_id": reply.get("run_id"),
+            "host": learner_listing.name,
+            "pools": {pool or "learner": listing.name
+                      for pool, listing in placement.items()},
+            "accepted": bool(reply.get("accepted"))})
+        return {**reply, "host": learner_listing.name,
+                "pools": {pool or "learner": listing.name
+                          for pool, listing in placement.items()}}
+
+    def status(self) -> dict:
+        """The desk's inventory, no wire calls: what is listed and what it
+        wears. Occupancy is asked per placement, never cached here."""
+        return {"listings": {name: {
+            "address": listing.address, "solo": listing.solo,
+            "regimes": [r.name for r in listing.regimes]}
+            for name, listing in sorted(self.listings.items())}}
+
+    # ---- the Transport surface (HostService's contract, fleet-addressed) ----
+
+    async def serve(self, verb: str, payload: dict) -> dict:
+        if verb == "submit":
+            return await self.submit(payload["spec"])
+        raise ValueError(f"unknown fleet verb {verb!r}")
+
+    def answer(self, verb: str, payload: dict) -> dict:
+        if verb == "status":
+            return self.status()
+        raise ValueError(f"unknown admission-free fleet verb {verb!r}")
+
+
+def _covers_regimes(regimes: Sequence[Regime], demand: Demand) -> bool:
+    """Coverage is capability equality — Fleet._covers, over a description."""
+    return any(regime.capability == demand.capability
+               and regime.base == demand.base
+               and regime.shape == demand.shape
+               for regime in regimes)
+
+
+def _listing_from(event: Mapping,
+                  connect: Callable[[str], "RemoteHost"]) -> Listing:
+    """A journal `list` event back as a Listing — from_journal's one row."""
+    return Listing(
+        name=event["host"],
+        regimes=tuple(Regime(r["name"], r["capability"], r["base"], r["shape"])
+                      for r in event["regimes"]),
+        address=event["address"], solo=bool(event.get("solo", False)),
+        host=connect(event["address"]))
