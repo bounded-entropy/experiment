@@ -124,7 +124,7 @@ def spec_for(store, train_tasks, eval_tasks, updates, master):
 # ---------------------------------------------------------------------------
 
 @app.cls(image=image, gpu="L4:2", volumes={"/store": store_volume, "/hf": hf_cache},
-         timeout=14400, scaledown_window=300, max_containers=1)
+         timeout=86400, scaledown_window=1800, max_containers=1)
 @modal.concurrent(max_inputs=64)
 class PolicyHost:
     """The sampling partition in its own container: born with its Partition and
