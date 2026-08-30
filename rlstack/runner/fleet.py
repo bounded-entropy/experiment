@@ -486,9 +486,20 @@ class FleetService:
     """
 
     def __init__(self, store: Store,
-                 connect: Callable[[str], "RemoteHost"]) -> None:
+                 connect: Callable[[str], "RemoteHost"],
+                 provision: Callable[[dict], tuple] | None = None) -> None:
         self.store = store
         self.connect = connect          # address -> RemoteHost: the desk's dialer
+        # THE PROVISIONER: the venue's booter, venue-invisible to the desk. It
+        # receives a boot request (regimes as rows, the memory hint, the base)
+        # and returns the born host's listing facts (name, regimes, address,
+        # solo) — on a cloud venue it boots a container, on a local one it
+        # constructs a Host. With it, the standing carve stops being a human's
+        # errand: place -> PROVISION (journaled) -> adopt, the in-process
+        # ladder's shape, owned end to end by the desk. Without it, a
+        # placement nothing serves still returns boot instructions.
+        self.provision = provision
+        self.metal: dict[str, Metal] = {}
         self.listings: dict[str, Listing] = {}
 
     @classmethod
@@ -503,7 +514,26 @@ class FleetService:
                 desk.listings[event["host"]] = _listing_from(event, connect)
             elif event.get("event") == "delist":
                 desk.listings.pop(event["host"], None)
+            elif event.get("event") == "metal":
+                desk.metal[event["name"]] = Metal(
+                    name=event["name"], gpu=event.get("gpu", "L4"),
+                    devices=int(event.get("devices", 1)),
+                    vram_gb=float(event.get("vram_gb", 24.0)))
         return desk
+
+    def register_metal(self, metal: Metal) -> None:
+        """The acquire rung, recorded at the desk: what the fleet OWNS and may
+        provision against. Journaled like a listing, so a rebuilt desk knows
+        its inventory too; a provisioner without registered Metal still boots
+        (the venue may own capacity the desk merely uses), but sizing hints
+        and future residual accounting read from here."""
+        if metal.name in self.metal:
+            raise FleetError(f"metal {metal.name!r} is already registered")
+        self.metal[metal.name] = metal
+        self.store.append_fleet_event({
+            "event": "metal", "t": time.time(), "name": metal.name,
+            "gpu": metal.gpu, "devices": metal.devices,
+            "vram_gb": metal.vram_gb})
 
     def list_host(self, name: str, regimes: Sequence[Regime], address: str,
                   solo: bool = False) -> None:
@@ -562,7 +592,7 @@ class FleetService:
         placement: dict[str | None, Listing] = {}
         boot: list[dict] = []
         for unit in placement_units(demands_of(spec)):
-            listing = self.find_listing(unit)
+            listing = self.find_listing(unit) or self.provision_unit(unit)
             if listing is None:
                 boot.append({
                     "regimes": [regime_of(d).name for d in unit],
@@ -574,9 +604,37 @@ class FleetService:
                 placement[demand.pool] = listing
         return placement, boot
 
+    def provision_unit(self, unit: tuple[Demand, ...]) -> Listing | None:
+        """The standing CARVE, desk-owned: nothing listed serves this unit, so
+        the provisioner boots a host wearing its regimes, and the desk LISTS
+        and JOURNALS what was born — automatic because journaled, the same
+        legitimacy carve() has in-process. None without a provisioner (the
+        boot-instruction path answers instead), and a provisioner that fails
+        falls through the same way: a refusal that says what to boot beats a
+        half-born host."""
+        if self.provision is None:
+            return None
+        request = {
+            "regimes": [{"name": regime_of(d).name,
+                         "capability": d.capability,
+                         "base": d.base, "shape": d.shape} for d in unit],
+            "base": unit[0].base,
+            "memory": max(d.memory for d in unit),
+        }
+        try:
+            name, regimes, address, solo = self.provision(request)
+        except Exception:
+            return None
+        self.store.append_fleet_event({
+            "event": "provision", "t": time.time(), "host": name,
+            "request": request})
+        self.list_host(name, regimes, address, solo=solo)
+        return self.listings[name]
+
     # ---- submit: place, journal, adopt --------------------------------------
 
-    async def submit(self, spec_row: Mapping) -> dict:
+    async def submit(self, spec_row: Mapping,
+                     code: Mapping[str, str] | None = None) -> dict:
         """One frame in, one placement out: decode, place over the listings,
         journal, and ADOPT at the learner's listing with every other pool's
         address threaded as routes. The reply is the host's own adopt reply
@@ -604,7 +662,7 @@ class FleetService:
                   for pool, listing in placement.items()
                   if pool is not None and listing is not learner_listing}
         try:
-            reply = await learner_listing.host.adopt(spec_row, routes)
+            reply = await learner_listing.host.adopt(spec_row, routes, code)
         except Exception as down:
             # alive() passed and the container died between the probe and the
             # knock: the reply says so instead of the desk falling over, and
@@ -635,7 +693,7 @@ class FleetService:
 
     async def serve(self, verb: str, payload: dict) -> dict:
         if verb == "submit":
-            return await self.submit(payload["spec"])
+            return await self.submit(payload["spec"], payload.get("code"))
         raise ValueError(f"unknown fleet verb {verb!r}")
 
     def answer(self, verb: str, payload: dict) -> dict:

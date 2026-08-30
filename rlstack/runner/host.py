@@ -359,7 +359,8 @@ class Host:
     # ---- adopt: the submission door -----------------------------------------
 
     async def adopt(self, spec_row: Mapping,
-                    routes: Mapping[str, str] | None = None) -> dict:
+                    routes: Mapping[str, str] | None = None,
+                    code: Mapping[str, str] | None = None) -> dict:
         """Take an experiment IN OVER THE WIRE and run it as one more tenancy
         on this host's own loop — submit, without the submitter in-process.
 
@@ -381,6 +382,7 @@ class Host:
         """
         try:
             spec = self.decode_adoption(spec_row)
+            self.check_code_agreement(spec, code)
             schema = self.derive_schema(spec)
             remotes = self.dial_routes(spec, routes or {})
             binding = self.bind_pools(spec, remotes=frozenset(remotes))
@@ -409,6 +411,35 @@ class Host:
         task.add_done_callback(lambda done: done.exception())
         self._adoptions[rid] = task
         return {"accepted": True, "run_id": rid, "state": "adopted"}
+
+    def check_code_agreement(self, spec: ExperimentSpec,
+                             claimed: Mapping[str, str] | None) -> None:
+        """LOUD where version skew was silent: the client ships the source
+        hashes of every registered name its spec references, and this host
+        diffs them against its own registries — per name, so the refusal says
+        WHICH loss or processor the container's image predates.
+
+        The quiet failure this kills: edit a loss body locally, submit to a
+        standing host running the old image, and the host would happily run
+        ITS body under YOUR name — a different experiment than you meant,
+        detectable only by noticing an unexpected run_id. Code never crosses
+        the wire (identity is computed where the code runs, I3); agreement
+        about WHICH code does. A frame carrying no hashes skips the check —
+        the caller chose not to claim anything."""
+        if not claimed:
+            return
+        from rlstack.registry import code_hashes
+
+        mine = code_hashes(spec)
+        stale = sorted(name for name, theirs in claimed.items()
+                       if name in mine and mine[name] != theirs)
+        if stale:
+            raise HostError(
+                f"code skew: this host's image runs different source for "
+                f"{', '.join(stale)} than the submitting checkout — the "
+                f"container predates your edit (or you predate its). Redeploy "
+                f"the host image, then resubmit; running anyway would be a "
+                f"different experiment than you meant")
 
     def decode_adoption(self, spec_row: Mapping) -> ExperimentSpec:
         """The frame's spec, decoded and TYPED: an adopt frame carries exactly

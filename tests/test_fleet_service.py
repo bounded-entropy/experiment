@@ -204,6 +204,82 @@ if __name__ == "__main__":
     unittest.main()
 
 
+class CodeSkewTest(DeskFixture):
+    def test_a_stale_loss_is_refused_loudly_by_name(self) -> None:
+        """The quiet failure killed: a claimed hash differing from the host's
+        registry refuses the adoption and NAMES the stale entry."""
+        host = self.stand_up("h", "fleet://h", serves_pool=True, trains=True)
+        spec = arith_spec(self.train)
+
+        async def drive(code):
+            return await host.adopt(_row(spec), None, code)
+        refusal = go(drive({"loss:grpo": "0000000000000000"}))
+        self.assertFalse(refusal["accepted"])
+        self.assertIn("loss:grpo", refusal["error"])
+        self.assertIn("skew", refusal["error"])
+
+        from rlstack.registry import code_hashes
+        agreed = go(drive(code_hashes(spec)))
+        self.assertTrue(agreed["accepted"], agreed)
+        unclaimed = go(host.adopt(_row(arith_spec(self.train,
+                                                  seeds=Seeds(master=31)))))
+        self.assertTrue(unclaimed["accepted"])
+
+    def test_the_desk_relays_the_clients_claim(self) -> None:
+        host = self.stand_up("h", "fleet://h", serves_pool=True, trains=True)
+        desk = self.desk()
+        desk.list_host("h", host.regimes, "fleet://h")
+        reply = go(desk.submit(_row(arith_spec(self.train)),
+                               code={"loss:grpo": "not-the-real-hash"}))
+        self.assertFalse(reply["accepted"])
+        self.assertIn("loss:grpo", reply["error"])
+
+
+class ProvisionTest(DeskFixture):
+    def test_the_desk_provisions_what_nothing_serves(self) -> None:
+        """The standing carve, desk-owned: an empty desk with a provisioner
+        boots hosts for every unit, journals the births, and the run commits —
+        one frame in, metal out."""
+        booted: list[dict] = []
+
+        def provision(request):
+            index = len(booted)
+            booted.append(request)
+            name, address = f"boot-{index}", f"fleet://boot-{index}"
+            trains = any(r["capability"] == "training"
+                         for r in request["regimes"])
+            host = self.stand_up(name, address, serves_pool=not trains,
+                                 trains=trains)
+            return name, host.regimes, address, False
+
+        desk = FleetService(
+            self.store,
+            connect=lambda addr: RemoteHost(self.transports[addr]),
+            provision=provision)
+
+        reply = go(desk.submit(_row(self.split_spec())))
+        self.assertTrue(reply["accepted"], reply)
+        self.assertEqual(len(booted), 2)             # main unit + learner unit
+        self.assertEqual(sorted(desk.listings), ["boot-0", "boot-1"])
+        events = [e["event"] for e in self.store.read_fleet_log()]
+        self.assertEqual(events.count("provision"), 2)
+        self.assertEqual(events.count("list"), 2)
+
+    def test_without_a_provisioner_the_boot_instructions_stand(self) -> None:
+        desk = self.desk()
+        reply = go(desk.submit(_row(self.split_spec())))
+        self.assertFalse(reply["accepted"])
+        self.assertEqual(len(reply["boot"]), 2)
+
+    def test_metal_survives_the_journal(self) -> None:
+        from rlstack.runner.fleet import Metal
+        desk = self.desk()
+        desk.register_metal(Metal("node-a", "A100-80GB", 2, 80.0))
+        reborn = FleetService.from_journal(
+            self.store, connect=lambda addr: RemoteHost(self.transports[addr]))
+        self.assertEqual(reborn.metal["node-a"].vram_gb, 80.0)
+
+
 class LivenessVerbTest(DeskFixture):
     def test_the_desk_probes_its_listings(self) -> None:
         living = self.stand_up("alive-a", "fleet://a", serves_pool=True,
