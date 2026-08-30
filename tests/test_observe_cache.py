@@ -92,6 +92,28 @@ class CachedReadStoreTest(unittest.TestCase):
         cached.list_runs()
         self.assertEqual(len(store.lists), before)
 
+    def test_held_bytes_outrank_the_reload_blink(self) -> None:
+        """A mount reload makes files transiently absent; nothing deletes a
+        journal — so held bytes and the last real listing keep answering."""
+        tmp, store = seeded_store()
+        self.addCleanup(tmp.cleanup)
+        cached = CachedReadStore(store)
+        rows = cached.peek_ledger("r1")
+        listed = cached.list_runs()
+        self.assertEqual(listed, ["r1"])
+        ledger = store.path_of("runs/r1/ledger.jsonl")
+        manifest = store.path_of("runs/r1/manifest.json")
+        blink = ledger.read_bytes(), manifest.read_bytes()
+        ledger.unlink()                                # the blink
+        manifest.unlink()
+        self.assertEqual(cached.peek_ledger("r1"), rows)
+        cached._lists = {k: (0.0, keys)                # the TTL has passed...
+                         for k, (_, keys) in cached._lists.items()}
+        self.assertEqual(cached.list_runs(), ["r1"])   # ...held listing stands
+        ledger.write_bytes(blink[0])                   # the mount comes back
+        manifest.write_bytes(blink[1])
+        self.assertEqual(cached.peek_ledger("r1"), rows)
+
     def test_the_observers_store_never_writes(self) -> None:
         tmp, store = seeded_store()
         self.addCleanup(tmp.cleanup)

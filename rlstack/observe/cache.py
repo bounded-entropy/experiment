@@ -63,8 +63,11 @@ class CachedReadStore(Store):
                 if self.inner._size(key) == held[0]:
                     return held[1]
             except FileNotFoundError:
-                self._bytes.pop(key, None)
-                raise
+                # THE BLINK: a mount reload makes the whole tree transiently
+                # absent, and nothing in this store ever deletes a journal —
+                # so bytes we HELD outrank a momentary 404, and the next
+                # changed size re-reads honestly
+                return held[1]
         noticed = self._absent.get(key)
         if noticed is not None and time.time() - noticed < ABSENT_TTL:
             raise FileNotFoundError(key)
@@ -90,6 +93,12 @@ class CachedReadStore(Store):
         if held is not None and time.time() - held[0] < LIST_TTL:
             return held[1]
         keys = self.inner._list(prefix)
+        if not keys and held is not None and held[1]:
+            # a populated tree does not empty itself (runs and journals are
+            # never deleted): a blank listing right after a full one is the
+            # reload blink, so the last real listing stands one more tick
+            self._lists[prefix] = (time.time(), held[1])
+            return held[1]
         self._lists[prefix] = (time.time(), keys)
         return keys
 
