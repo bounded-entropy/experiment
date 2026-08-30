@@ -820,6 +820,19 @@ class FleetService:
             return await self.migrate(
                 payload["run_ids"], optim=payload.get("optim", "load"),
                 remaining_only=bool(payload.get("remaining_only", False)))
+        if verb == "list":
+            # the phone-home half of the deploy contract: when the desk is its
+            # own container, the deploy that booted a host reaches list_host
+            # over the wire — same rows the journal speaks
+            self.list_host(
+                payload["host"],
+                tuple(Regime(r["name"], r["capability"], r["base"], r["shape"])
+                      for r in payload["regimes"]),
+                payload["address"], solo=bool(payload.get("solo", False)))
+            return {"listed": payload["host"]}
+        if verb == "delist":
+            self.delist(payload["host"])
+            return {"delisted": payload["host"]}
         raise ValueError(f"unknown fleet verb {verb!r}")
 
     def answer(self, verb: str, payload: dict) -> dict:

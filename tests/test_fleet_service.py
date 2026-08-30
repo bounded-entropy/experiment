@@ -195,6 +195,26 @@ class FleetServiceTest(DeskFixture):
         with self.assertRaises(Exception):
             desk.list_host("serve-a", serving.regimes, "fleet://a2")
 
+    def test_a_host_phones_home_over_the_wire(self) -> None:
+        """A desk in its OWN container: the deploy that booted a host lists
+        and delists it through RemoteFleet, journal included — byte-for-byte
+        the in-process list_host."""
+        serving = self.stand_up("serve-a", "fleet://a", serves_pool=True,
+                                trains=False)
+        desk = self.desk()
+        remote = RemoteFleet(LocalTransport(desk))
+        go(remote.list_host("serve-a", serving.regimes, "fleet://a"))
+        self.assertEqual(sorted(desk.listings), ["serve-a"])
+        reborn = FleetService.from_journal(
+            self.store, connect=lambda addr: RemoteHost(self.transports[addr]))
+        self.assertEqual(sorted(reborn.listings), ["serve-a"])
+        self.assertEqual(reborn.listings["serve-a"].regimes,
+                         serving.regimes)
+        with self.assertRaises(Exception):        # never replaced, wire or not
+            go(remote.list_host("serve-a", serving.regimes, "fleet://a2"))
+        go(remote.delist("serve-a"))
+        self.assertEqual(desk.listings, {})
+
 
 def _row(spec) -> dict:
     return json.loads(canonical_json(spec))

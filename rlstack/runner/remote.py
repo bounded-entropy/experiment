@@ -463,6 +463,20 @@ class RemoteFleet:
         """{host: alive} for every listing, probed by the desk just now."""
         return self._transport.ask("liveness", {})
 
+    async def list_host(self, name: str, regimes: Sequence,
+                        address: str, solo: bool = False) -> dict:
+        """A booted host enters the standing fleet over the wire — the
+        phone-home half of the deploy contract: the container that stood the
+        host tells the desk what it wears and where it answers."""
+        return await self._transport.call("list", {
+            "host": name, "address": address, "solo": solo,
+            "regimes": [{"name": r.name, "capability": r.capability,
+                         "base": r.base, "shape": r.shape} for r in regimes]})
+
+    async def delist(self, name: str) -> dict:
+        """The listing's retirement, over the same wire it entered by."""
+        return await self._transport.call("delist", {"host": name})
+
     async def migrate(self, run_ids: Sequence[str], *, optim: str = "load",
                       remaining_only: bool = False) -> dict:
         """Warm-fork each run onto the current code from its ledger tail —
