@@ -681,6 +681,125 @@ class FleetService:
                 "pools": {pool or "learner": listing.name
                           for pool, listing in placement.items()}}
 
+    # ---- migrate: warm-fork running work onto the current code --------------
+
+    async def migrate(self, run_ids: Sequence[str], *,
+                      optim: str = "load",
+                      remaining_only: bool = False) -> dict:
+        """Warm-fork each named run into a NEW experiment continuing from its
+        ledger tail — the code-refresh move: containers were replaced, the
+        old runs' code hashes no longer exist anywhere, so each run's spec is
+        resubmitted with init=WarmStart(parent@tail) and becomes a new
+        run_id under the CURRENT code, moments included (optim="load" reads
+        the tail, the one version retention keeps).
+
+        `remaining_only` also slices the plans to the waves the parent never
+        committed, so the child runs exactly what was left. That is only
+        derivable for the standard on-policy pairing (train wave u = WaveRef
+        "self://rollouts/u", 1:1); a run whose plans say anything fancier is
+        REFUSED for slicing — migrate it full-plan instead, deliberately.
+
+        Every child is journaled as a `migrate` event (parent, child,
+        version) — lineage on the fleet plane, beside the manifest's own
+        parent record. Per-run failures land in the report; one bad run never
+        stops the pass.
+        """
+        import dataclasses
+
+        from rlstack.registry import code_hashes
+        from rlstack.runner.remote import spec_from_json
+        from rlstack.spec.canonical import canonical_json
+        from rlstack.spec.specs import WarmStart
+
+        report: dict[str, dict] = {}
+        for rid in run_ids:
+            try:
+                manifest = self.store.peek_manifest(rid)
+                if manifest is None:
+                    raise FleetError(f"no manifest for {rid!r} in this store")
+                spec = spec_from_json(manifest["spec"])
+                entries = self.store.peek_ledger(rid)
+                if not entries:
+                    raise FleetError(
+                        f"{rid!r} committed nothing — resubmit it plainly; "
+                        f"a warm start from nowhere is a fresh run wearing "
+                        f"a parent it never had")
+                tail = entries[-1]
+                committed = int(tail["update"])
+                version = max(int(v) for v in tail["versions"].values())
+                child = dataclasses.replace(
+                    spec, init=WarmStart(policy=f"store://{rid}@{version}",
+                                         optim=optim))
+                if remaining_only:
+                    plans, eval_done = self.sliced_plans(rid, spec, committed)
+                    child = dataclasses.replace(child, plans=plans)
+                    if eval_done:
+                        child = dataclasses.replace(child, eval=None)
+                import json as _json
+                reply = await self.submit(
+                    _json.loads(canonical_json(child)),
+                    code=code_hashes(child))
+                if reply.get("accepted"):
+                    self.store.append_fleet_event({
+                        "event": "migrate", "t": time.time(), "parent": rid,
+                        "child": reply.get("run_id"), "version": version,
+                        "remaining_only": remaining_only})
+                report[rid] = {**reply, "parent_version": version}
+            except Exception as refusal:
+                report[rid] = {"accepted": False, "error": str(refusal)}
+        return report
+
+    def sliced_plans(self, rid: str, spec: ExperimentSpec, committed: int):
+        """The parent's plans, minus everything its ledger already committed.
+
+        Rollout waves past `committed` re-index from 1; the train plan is
+        REBUILT as the standard pairing after PROVING the parent's was exactly
+        that (every entry WaveRef "self://rollouts/u", 1:1) — self:// refs are
+        index-coupled, so slicing anything fancier would silently retarget
+        them. Eval slices by fired points (committed // every). Refusals over
+        guesses, everywhere.
+        """
+        from rlstack.data.plan import RunPlan, WaveRef, decode, encode
+        from rlstack.spec.specs import Plans
+
+        def plan_of(kind: str) -> RunPlan | None:
+            data = self.store.peek_plan(rid, kind)
+            return None if data is None else decode(data)
+
+        train = plan_of("train")
+        rollout = plan_of("rollout")
+        if train is None or rollout is None:
+            raise FleetError(
+                f"{rid!r} carries no sliceable plans (pre-#59 run?) — "
+                f"migrate it full-plan")
+        expected = tuple(WaveRef(f"self://rollouts/{u}")
+                         for u in range(1, len(train) + 1))
+        if train.waves != expected or len(rollout) != len(train):
+            raise FleetError(
+                f"{rid!r}'s plans are not the standard on-policy pairing — "
+                f"self:// refs are index-coupled, so slicing would retarget "
+                f"them. Migrate it full-plan (remaining_only=False)")
+        remaining = len(train) - committed
+        if remaining <= 0:
+            raise FleetError(f"{rid!r} committed its whole plan — nothing "
+                             f"remaining to migrate")
+        rows = {"eval": spec.plans.eval}
+        eval_done = False
+        rows["rollout"] = self.store.cas_put(
+            encode(RunPlan(rollout.waves[committed:])))
+        rows["train"] = self.store.cas_put(encode(RunPlan(tuple(
+            WaveRef(f"self://rollouts/{u}") for u in range(1, remaining + 1)))))
+        if spec.plans.eval is not None and spec.eval is not None:
+            fired = committed // spec.eval.every
+            eval_plan = plan_of("eval")
+            if eval_plan is not None and fired < len(eval_plan):
+                rows["eval"] = self.store.cas_put(
+                    encode(RunPlan(eval_plan.waves[fired:])))
+            elif eval_plan is not None:
+                rows["eval"], eval_done = None, True   # every point fired
+        return (Plans(train=rows["train"], rollout=rows["rollout"],
+                      eval=rows["eval"]), eval_done)
+
     def status(self) -> dict:
         """The desk's inventory, no wire calls: what is listed and what it
         wears. Occupancy is asked per placement, never cached here."""
@@ -694,6 +813,10 @@ class FleetService:
     async def serve(self, verb: str, payload: dict) -> dict:
         if verb == "submit":
             return await self.submit(payload["spec"], payload.get("code"))
+        if verb == "migrate":
+            return await self.migrate(
+                payload["run_ids"], optim=payload.get("optim", "load"),
+                remaining_only=bool(payload.get("remaining_only", False)))
         raise ValueError(f"unknown fleet verb {verb!r}")
 
     def answer(self, verb: str, payload: dict) -> dict:

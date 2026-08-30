@@ -458,3 +458,12 @@ class RemoteFleet:
     def liveness(self) -> dict:
         """{host: alive} for every listing, probed by the desk just now."""
         return self._transport.ask("liveness", {})
+
+    async def migrate(self, run_ids: Sequence[str], *, optim: str = "load",
+                      remaining_only: bool = False) -> dict:
+        """Warm-fork each run onto the current code from its ledger tail —
+        the code-refresh pass, one frame. The desk does everything; the reply
+        maps parent run_id -> its child's acceptance (or refusal)."""
+        return await self._transport.call("migrate", {
+            "run_ids": list(run_ids), "optim": optim,
+            "remaining_only": remaining_only})

@@ -280,6 +280,106 @@ class ProvisionTest(DeskFixture):
         self.assertEqual(reborn.metal["node-a"].vram_gb, 80.0)
 
 
+class MigrateTest(DeskFixture):
+    def test_migrate_warm_forks_onto_the_current_code(self) -> None:
+        """The code-refresh pass: a finished run is warm-forked into a NEW
+        experiment whose manifest names its parent at the tail version, and
+        the child runs to its own commit — one RemoteFleet frame."""
+        host = self.stand_up("h", "fleet://h", serves_pool=True, trains=True)
+        desk = self.desk()
+        desk.list_host("h", host.regimes, "fleet://h")
+        remote = RemoteFleet(LocalTransport(desk))
+        spec = arith_spec(self.train)
+
+        async def drive():
+            first = await remote.submit(spec)
+            await host._adoptions[first["run_id"]]
+            forked = await remote.migrate([first["run_id"]])
+            child = forked[first["run_id"]]
+            if child.get("run_id") in host._adoptions:
+                await host._adoptions[child["run_id"]]
+            return first, child
+        first, child = go(drive())
+        self.assertTrue(child["accepted"], child)
+        self.assertNotEqual(child["run_id"], first["run_id"])
+        self.assertEqual(child["parent_version"], 4)
+        manifest = self.store.peek_manifest(child["run_id"])
+        self.assertEqual(manifest["parent"],
+                         f"store://{first['run_id']}@4")
+        self.assertEqual(len(self.store.peek_ledger(child["run_id"])), 4)
+        self.assertTrue(any(
+            e.get("event") == "migrate" and e.get("parent") == first["run_id"]
+            for e in self.store.read_fleet_log()))
+
+    def fabricate_parent(self, rid: str, spec, committed: int,
+                         train_blob: bytes | None = None) -> None:
+        """A half-done parent, by direct store writes: manifest, plans,
+        `committed` ledger lines, and the tail's blobs."""
+        import json as _json
+
+        from common import arith_plan_blobs
+        from rlstack.spec.canonical import canonical_json
+
+        run = self.store.open_run(rid, manifest={
+            "run_id": rid, "spec": canonical_json(spec)})
+        blobs = arith_plan_blobs(False)
+        run.write_plan("train", train_blob or blobs["train"])
+        run.write_plan("rollout", blobs["rollout"])
+        for update in range(1, committed + 1):
+            run.append_ledger({"update": update, "versions": {"pi": update},
+                               "bundle_id": f"b{update}"})
+        # the fake learner's own payload grammar (fakes.py emit/load)
+        run.write_blob("adapters", "pi", committed,
+                       b"fake-delta:pi:aaaa5ealed")
+        run.write_blob("optim", "pi", committed,
+                       f"fake-optim:pi:{committed}:aaaa5ealed".encode())
+
+    def test_remaining_only_slices_to_what_was_left(self) -> None:
+        host = self.stand_up("h", "fleet://h", serves_pool=True, trains=True)
+        desk = self.desk()
+        desk.list_host("h", host.regimes, "fleet://h")
+        spec = arith_spec(self.train)
+        self.fabricate_parent("aaaa11112222", spec, committed=2)
+
+        async def drive():
+            forked = await desk.migrate(["aaaa11112222"], remaining_only=True)
+            child = forked["aaaa11112222"]
+            if child.get("run_id") in host._adoptions:
+                await host._adoptions[child["run_id"]]
+            return child
+        child = go(drive())
+        self.assertTrue(child["accepted"], child)
+        self.assertEqual(child["parent_version"], 2)
+        # the child ran EXACTLY the two waves the parent never committed
+        self.assertEqual(len(self.store.peek_ledger(child["run_id"])), 2)
+
+    def test_fancy_plans_refuse_slicing_but_not_the_pass(self) -> None:
+        """One custom-plan run is refused for slicing WITH the reason; the
+        well-shaped run in the same pass still forks."""
+        from rlstack import RunPlan, WaveRef, encode
+
+        host = self.stand_up("h", "fleet://h", serves_pool=True, trains=True)
+        desk = self.desk()
+        desk.list_host("h", host.regimes, "fleet://h")
+        spec = arith_spec(self.train)
+        fancy = encode(RunPlan(tuple(
+            WaveRef("store://elsewhere/waves/1") for _ in range(4))))
+        self.fabricate_parent("fancy1111111", spec, 2, train_blob=fancy)
+        self.fabricate_parent("plain1111111", spec, 2)
+
+        async def drive():
+            forked = await desk.migrate(["fancy1111111", "plain1111111"],
+                                        remaining_only=True)
+            plain = forked["plain1111111"]
+            if plain.get("run_id") in host._adoptions:
+                await host._adoptions[plain["run_id"]]
+            return forked
+        forked = go(drive())
+        self.assertFalse(forked["fancy1111111"]["accepted"])
+        self.assertIn("standard on-policy", forked["fancy1111111"]["error"])
+        self.assertTrue(forked["plain1111111"]["accepted"])
+
+
 class LivenessVerbTest(DeskFixture):
     def test_the_desk_probes_its_listings(self) -> None:
         living = self.stand_up("alive-a", "fleet://a", serves_pool=True,
