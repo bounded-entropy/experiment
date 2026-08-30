@@ -3023,6 +3023,41 @@ lands 65 first.
     is never deleted at the merge: deletion has exactly two meanings in this
     store and neither is "a reader is done".
 
+66. **THE GATED LATENT KL: accuracy first, then the prior.** Ported from the
+    arc-agi-ttt harness, where the ordering is EMERGENT rather than written: a
+    group whose completions are all correct has an all-tie, z-scored-to-zero
+    advantage, so a constant KL term is simply the only gradient left once the
+    task is solved. rlstack's `grpo_latent_kl` already had that emergent half;
+    what the TTT campaign wants is the other half made explicit — NO prior
+    pull while the policy is still learning to be right. Two primitives, both
+    existing shapes:
+    - `training/post/group_accuracy.py`: consumes `reward`, produces
+      `accuracy` — the group's mean reward, one copy per row. The group is the
+      gate's scope on purpose: it is the advantage's baseline scope, so "this
+      group is solved" and "this group's advantage is identically zero" are
+      the same fact, and the gate hands exactly the dead rows to the prior.
+    - `training/losses/grpo_latent_kl_gated.py`: grpo's surrogate verbatim
+      (called, not restated) plus `gate * BETA * kl / microbatches_in_update`,
+      where the gate is the masked fraction of tokens whose `accuracy` reached
+      `FULL_ACCURACY` (1.0, a module constant like BETA and for the same
+      reason: the threshold IS the objective, so sweeping it must change
+      run_id). The gate is a COLUMN, not a branch in the trainer (I9/#38).
+    THE ENDPOINTS ARE EXACT regardless of packing — nothing solved pays no KL,
+    everything solved pays the whole BETA and coincides with `grpo_latent_kl`
+    to the float (pinned by test). Between them the effective beta is the
+    per-microbatch solved fractions averaged, a wave statistic that depends
+    mildly on how `pack` split the update — stated in the docstring rather
+    than hidden, and accepted: the alternative (a per-update gate) has no
+    scope to live in, because a postprocessor sees one group and a loss sees
+    one microbatch. deploy/plora_l4.py now runs
+    `grpo_latent_kl_gated` with `("final_answer", "group_accuracy",
+    "grpo_advantage")` — still ONE task (the screened 4/8 problem), where the
+    gate reads plainly: pure GRPO until a group goes 8/8, then that group's
+    share of the update becomes compression toward the prior. 740 tests green
+    on fakes (6 new); the three numeric assertions (gate closed = grpo
+    exactly, gate open = grpo_latent_kl exactly, half solved = BETA/2) are
+    torch-gated and run in the image. NOT run on metal yet.
+
 ---8<--- cut here ---8<---
 
 
