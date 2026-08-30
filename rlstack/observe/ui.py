@@ -70,8 +70,21 @@ def ui_app(roots: Sequence[Store | Root],
     edits appear live). `desk` is the OPTIONAL liveness probe — a plain
     callable returning {host: alive}, constructed by the venue around
     whatever fleet service it runs (the observer never learns which); None
-    means journal heartbeats are the only pulse."""
-    known = rooted(roots)
+    means journal heartbeats are the only pulse.
+
+    Two speed layers, both honesty-preserving: every root reads through a
+    CachedReadStore (immutable bytes cached forever, journals revalidated on
+    size — observe/cache.py), and one MEMO holds each API payload for a poll
+    tick, so N viewers polling every 3s cost one computation, not N."""
+    import threading
+
+    from rlstack.observe.cache import CachedReadStore
+
+    known = [Root(root.folder, CachedReadStore(root.store))
+             for root in rooted(roots)]
+    memo: dict[str, tuple[float, object, str]] = {}
+    hold = threading.Lock()
+    memo_ttl = 2.5
 
     def app(environ, start_response):
         path = environ.get("PATH_INFO", "/")
@@ -85,10 +98,15 @@ def ui_app(roots: Sequence[Store | Root],
                                       ("Cache-Control", "no-cache")])
             return [body]
         if path.startswith("/api/"):
+            query = environ.get("QUERY_STRING", "")
+            ticket = path + "?" + query
+            with hold:
+                held = memo.get(ticket)
+            if held is not None and time.time() - held[0] < memo_ttl:
+                return _json(start_response, held[1], held[2])
             try:
                 if refresh is not None:
                     refresh()
-                query = environ.get("QUERY_STRING", "")
                 hours = asked_hours(query)
                 now = time.time()
                 payload, status = api(
@@ -106,6 +124,11 @@ def ui_app(roots: Sequence[Store | Root],
                 payload, status = ({"error": "transient read failure",
                                     "detail": str(racing)},
                                    "503 Service Unavailable")
+            if status == "200 OK":     # a failure is retried, never served stale
+                with hold:
+                    memo[ticket] = (time.time(), payload, status)
+                    if len(memo) > 256:
+                        del memo[min(memo, key=lambda k: memo[k][0])]
             return _json(start_response, payload, status)
         # every page is the same document; the modules route on the pathname
         start_response("200 OK", [("Content-Type", "text/html; charset=utf-8")])
