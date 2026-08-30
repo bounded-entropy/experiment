@@ -314,7 +314,8 @@ class Host:
     async def submit(self, spec: ExperimentSpec, schema: SiteSchema,
                      store: Store | None = None,
                      max_inflight: int = 64,
-                     remotes: Mapping[str, Engine] | None = None) -> RunReport:
+                     remotes: Mapping[str, Engine] | None = None,
+                     subdir: str | None = None) -> RunReport:
         """Run one experiment on this host's metal: bind, fit, solo, attest, run.
         `remotes` maps pool names served by OTHER hosts to their RemotePools —
         the runner goes to the learner's host and reaches every other
@@ -338,7 +339,7 @@ class Host:
         try:
             report = await run_experiment_async(
                 spec, schema, run_store, binding, self.learner,
-                max_inflight, arbiter=self.arbiter,
+                max_inflight, arbiter=self.arbiter, subdir=subdir,
                 # the tenant knows its own phases but not its metal: this is
                 # the door through which its update timings reach THIS host's
                 # journal, and the only reason the runner learns a host name
@@ -360,7 +361,8 @@ class Host:
 
     async def adopt(self, spec_row: Mapping,
                     routes: Mapping[str, str] | None = None,
-                    code: Mapping[str, str] | None = None) -> dict:
+                    code: Mapping[str, str] | None = None,
+                    subdir: str | None = None) -> dict:
         """Take an experiment IN OVER THE WIRE and run it as one more tenancy
         on this host's own loop — submit, without the submitter in-process.
 
@@ -404,7 +406,8 @@ class Host:
             name: (engine.base or "*")
             for name, engine in sorted((binding | remotes).items())},
             store=self.store.describe())
-        task = asyncio.create_task(self.submit(spec, schema, remotes=remotes))
+        task = asyncio.create_task(
+            self.submit(spec, schema, remotes=remotes, subdir=subdir))
         # a failed run already journals and rosters its failure (submit's own
         # except path); retrieving the exception here only keeps asyncio from
         # shouting about a result nobody awaits

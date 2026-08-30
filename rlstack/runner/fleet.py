@@ -634,7 +634,8 @@ class FleetService:
     # ---- submit: place, journal, adopt --------------------------------------
 
     async def submit(self, spec_row: Mapping,
-                     code: Mapping[str, str] | None = None) -> dict:
+                     code: Mapping[str, str] | None = None,
+                     subdir: str | None = None) -> dict:
         """One frame in, one placement out: decode, place over the listings,
         journal, and ADOPT at the learner's listing with every other pool's
         address threaded as routes. The reply is the host's own adopt reply
@@ -662,7 +663,8 @@ class FleetService:
                   for pool, listing in placement.items()
                   if pool is not None and listing is not learner_listing}
         try:
-            reply = await learner_listing.host.adopt(spec_row, routes, code)
+            reply = await learner_listing.host.adopt(spec_row, routes, code,
+                                                     subdir)
         except Exception as down:
             # alive() passed and the container died between the probe and the
             # knock: the reply says so instead of the desk falling over, and
@@ -812,7 +814,8 @@ class FleetService:
 
     async def serve(self, verb: str, payload: dict) -> dict:
         if verb == "submit":
-            return await self.submit(payload["spec"], payload.get("code"))
+            return await self.submit(payload["spec"], payload.get("code"),
+                                     payload.get("subdir"))
         if verb == "migrate":
             return await self.migrate(
                 payload["run_ids"], optim=payload.get("optim", "load"),

@@ -54,7 +54,8 @@ class RunReport:
 def run_experiment(spec: ExperimentSpec, schema: SiteSchema, store: Store,
                    engines: Engine | Mapping[str, Engine], learner: Learner,
                    max_inflight: int = 64,
-                   arbiter: GpuArbiter | None = None) -> RunReport:
+                   arbiter: GpuArbiter | None = None,
+                   subdir: str | None = None) -> RunReport:
     """Submit and drive one experiment to completion. Safe to call again on the
     same spec: identical identity attaches and continues (or no-ops if done).
 
@@ -92,7 +93,8 @@ async def run_experiment_async(
         engines: Engine | Mapping[str, Engine], learner: Learner,
         max_inflight: int = 64,
         arbiter: GpuArbiter | None = None,
-        journal: HostJournal | None = None) -> RunReport:
+        journal: HostJournal | None = None,
+        subdir: str | None = None) -> RunReport:
     """The async form of run_experiment — the multi-tenant entry.
 
     The multi-tenancy invariant (I8) is only expressible when several
@@ -140,7 +142,9 @@ async def run_experiment_async(
     hashes = code_hashes(spec)
     fingerprint = data_fingerprint(spec)
     rid = run_id(spec, hashes, fingerprint)
-    run = store.open_run(rid, manifest={
+    # `subdir` is FILING, never identity: where a new run's directory spawns
+    # (open_run ignores it for a run that already lives — resume, not a move)
+    run = store.open_run(rid, subdir=subdir, manifest={
         "run_id": rid,
         "spec": canonical_json(spec),
         "code": hashes,

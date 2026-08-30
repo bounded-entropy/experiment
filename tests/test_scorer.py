@@ -248,10 +248,10 @@ class PostdataPartTest(unittest.TestCase):
 
     def test_a_part_lives_beside_the_merged_file(self) -> None:
         self.run.write_postdata_part(3, SCORER, {"x": [1.0]})
-        self.assertEqual(postdata_part_key("rid", 3, SCORER),
+        self.assertEqual(postdata_part_key("runs/rid", 3, SCORER),
                          "runs/rid/postdata/000003.scorer.json")
         self.assertTrue(self.store.path_of(
-            postdata_part_key("rid", 3, SCORER)).exists())
+            postdata_part_key("runs/rid", 3, SCORER)).exists())
 
     def test_the_merged_file_is_still_the_one_reader_sees(self) -> None:
         self.run.write_postdata_part(1, SCORER, {"teacher": [1.0]})

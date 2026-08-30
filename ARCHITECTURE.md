@@ -352,6 +352,13 @@ them. It reads capability **demands** off a spec's `gpu_config` (what, never
 where) and returns a `Plan` of `Join` / `Carve` / `Acquire` steps.
 `rlstack/runner/fleet.py`
 
+**Subdir / filing** — where a run's directory spawns
+(runs/<subdir>/<run_id>), indicated at submit and fixed for life. Filing,
+never identity: it does not hash, attach finds the run wherever it lives, and
+the observer renders the tree (a FOLDER is which store; a SUBDIR is filing
+inside one).
+`rlstack/data/stores/base.py` (`run_prefix`, `check_subdir`)
+
 **Desk / FleetService** — the STANDING fleet: placement as a service and the
 fleet journal's one writer (the Trainer/ledger pattern on the fleet plane).
 It holds **Listings** — descriptions of standing hosts (regimes, address,

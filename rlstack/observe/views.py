@@ -147,6 +147,7 @@ def runs_data(roots: Sequence[Store | Root]) -> list[dict]:
     read here, written by the CLI, and consulted by no experiment."""
     known = rooted(roots)
     annotations = [root.store.read_annotations() for root in known]
+    filings = [root.store.run_subdirs() for root in known]
     rows: dict[tuple[str, str], dict] = {}
     for root, host, events in _events_by_host(known):
         for event in events:
@@ -189,7 +190,13 @@ def runs_data(roots: Sequence[Store | Root]) -> list[dict]:
         for index, root in enumerate(known):
             if root.folder == folder:
                 row.update(annotated(annotations[index].get(run_id)))
+                # the SUBDIR the run's directory was filed under at birth
+                # ("" at the top): organization inside one store, where the
+                # #58 folder is which store — two axes, never one
+                row["subdir"] = filings[index].get(run_id, "")
                 break
+        else:
+            row["subdir"] = ""
     return sorted(rows.values(), key=lambda r: r["t"])
 
 
@@ -230,9 +237,14 @@ def render_runs(roots: Sequence[Store | Root], grep: str = "") -> str:
             lines.append(f"folder {folder}")
         lines.append(f"{'run':<14} {'name':<18} {'tags':<16} {'status':<8} "
                      f"{'committed':>9}  {'host(s)':<20} {'last event':<15} store")
-        for row in rows:
-            if row["folder"] != folder:
-                continue
+        mine = [row for row in rows if row["folder"] == folder]
+        seen_dir: str | None = None
+        for row in sorted(mine, key=lambda r: (r.get("subdir", ""), r["t"])):
+            subdir = row.get("subdir", "")
+            if subdir != seen_dir:
+                if subdir:
+                    lines.append(f"  dir {subdir}/")
+                seen_dir = subdir
             status = row["status"] + (" ⚠FORK" if row["forked"] else "")
             progress = f"{row['committed']}/{row['target']}"
             # the same id elsewhere: the other FOLDERS when they differ, and

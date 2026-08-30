@@ -63,7 +63,8 @@ class CrashingStore(LocalStore):
         super().__init__(root)
         self._crash = (method, after, post)
 
-    def open_run(self, run_id: str, manifest: dict | None = None) -> Any:
+    def open_run(self, run_id: str, manifest: dict | None = None,
+                 subdir: str | None = None) -> Any:
         return CrashingHandle(super().open_run(run_id, manifest), *self._crash)
 
 

@@ -102,9 +102,10 @@ function render() {
   for (const folder of folders) {
     const mine = rows.filter(r => r.folder === folder);
     if (!mine.length) continue;
-    tree.append(many ? folderBlock(folder, mine) : table(mine, false));
+    tree.append(many ? folderBlock(folder, mine) : dirBlocks(mine, false, ""));
   }
-  legend("a folder IS a store root, chosen at birth and never moved · name and"
+  legend("a folder IS a store root · <span class='key'>dir/</span> = the run's"
+    + " filing subdir, chosen at submit and never moved · name and"
     + " tags are annotations — flavortext, never hashed · "
     + "<span class='stall'>stalled</span> = the journal says running but a host"
     + " of the run has no pulse (debug those first) · ⚠FORK = one run_id in two"
@@ -120,8 +121,42 @@ function folderBlock(folder, rows) {
   block.addEventListener("toggle", () => {
     if (block.open) collapsed.delete(folder); else collapsed.add(folder);
   });
-  block.append(table(rows, true));
+  block.append(dirBlocks(rows, true, folder));
   return block;
+}
+
+// ---- the filing inside one store: runs/<subdir>/<run_id> ------------------
+// A SUBDIR is where the run's directory spawned at birth (submit's own
+// indication) — organization inside one store, where the folder above is
+// WHICH store. Top-level runs render bare; each subdir is its own block.
+
+function dirBlocks(rows, inFolder, folderKey) {
+  const bySub = new Map();
+  for (const r of rows) {
+    const sub = r.subdir || "";
+    if (!bySub.has(sub)) bySub.set(sub, []);
+    bySub.get(sub).push(r);
+  }
+  const frag = document.createDocumentFragment();
+  const subs = [...bySub.keys()].sort();
+  for (const sub of subs)
+    if (!sub) frag.append(table(bySub.get(sub), inFolder));
+  for (const sub of subs) {
+    if (!sub) continue;
+    const mine = bySub.get(sub);
+    const key = folderKey + "//" + sub;
+    const block = el("details", collapsed.has(key)
+        ? {class: "group"} : {class: "group", open: "open"});
+    block.append(el("summary", {},
+        `<span class="key">${esc(sub)}/</span>`
+      + `<span class="k">${mine.length} experiment${mine.length === 1 ? "" : "s"}</span>`));
+    block.addEventListener("toggle", () => {
+      if (block.open) collapsed.delete(key); else collapsed.add(key);
+    });
+    block.append(table(mine, inFolder));
+    frag.append(block);
+  }
+  return frag;
 }
 
 function table(rows, inFolder) {

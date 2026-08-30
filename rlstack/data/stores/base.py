@@ -43,6 +43,7 @@ import gzip
 import hashlib
 import io
 import json
+import re
 import time
 from abc import ABC, abstractmethod
 from collections.abc import Iterable, Mapping, Sequence
@@ -86,34 +87,52 @@ def _gzip_jsonl(rows: list[dict[str, Any]]) -> bytes:
     return buffer.getvalue()
 
 
-def wave_key(run_id: str, update: int) -> str:
-    """Where one update's sealed wave lives. One tree: the handle writes it
-    and the observer's peek reads it through the same name."""
-    return f"runs/{run_id}/waves/{update:06d}.jsonl.gz"
+def check_subdir(subdir: str) -> str:
+    """A run's filing path, validated: "/"-joined name segments, each of
+    [A-Za-z0-9._-]+ and never "." or "..". The subdir is WHERE a run's
+    directory spawns (runs/<subdir>/<run_id>) — organization, not identity:
+    it never hashes, and the same spec filed differently is the same run."""
+    segments = [seg for seg in str(subdir).strip("/").split("/") if seg]
+    if not segments:
+        raise StoreError(f"subdir {subdir!r} names no path segment")
+    for seg in segments:
+        if seg in (".", "..") or not re.fullmatch(r"[A-Za-z0-9._-]+", seg):
+            raise StoreError(
+                f"subdir segment {seg!r} is not a plain name segment "
+                f"([A-Za-z0-9._-]+, never '.' or '..')")
+    return "/".join(segments)
 
 
-def rollout_key(run_id: str, index: int) -> str:
+def wave_key(run_dir: str, update: int) -> str:
+    """Where one update's sealed wave lives, under the run's DIRECTORY key
+    (runs/<run_id>, or runs/<subdir>/<run_id> where the run was filed). One
+    tree: the handle writes it and the observer's peek reads it through the
+    same name."""
+    return f"{run_dir}/waves/{update:06d}.jsonl.gz"
+
+
+def rollout_key(run_dir: str, index: int) -> str:
     """Where one GENERATED wave lives, before any update consumes it.
 
     Separate from waves/ because the generator's output and the trainer's input
     stopped being the same thing (#59): a plan may train on rollout 7 at update
     9, on two rollouts at once, or on none at all."""
-    return f"runs/{run_id}/rollouts/{index:06d}.jsonl.gz"
+    return f"{run_dir}/rollouts/{index:06d}.jsonl.gz"
 
 
-def plan_key(run_id: str, kind: str) -> str:
+def plan_key(run_dir: str, kind: str) -> str:
     """Where a run's copy of one plan lives. The spec pins the plan by cas uri;
     this copy is what makes the run self-describing (I11) and what an observer
     reads without resolving anything."""
-    return f"runs/{run_id}/plans/{kind}.jsonl"
+    return f"{run_dir}/plans/{kind}.jsonl"
 
 
-def postdata_key(run_id: str, update: int) -> str:
+def postdata_key(run_dir: str, update: int) -> str:
     """Where one update's postprocessor columns live, beside its wave."""
-    return f"runs/{run_id}/postdata/{update:06d}.json"
+    return f"{run_dir}/postdata/{update:06d}.json"
 
 
-def postdata_part_key(run_id: str, update: int, producer: str) -> str:
+def postdata_part_key(run_dir: str, update: int, producer: str) -> str:
     """Where ONE producer's postdata columns live: beside the merged file,
     named by who wrote them.
 
@@ -124,7 +143,7 @@ def postdata_part_key(run_id: str, update: int, producer: str) -> str:
     """
     assert "/" not in producer and "." not in producer, (
         f"postdata producer {producer!r} must be one dot-free name segment")
-    return f"runs/{run_id}/postdata/{update:06d}.{producer}.json"
+    return f"{run_dir}/postdata/{update:06d}.{producer}.json"
 
 
 class Store(ABC):
@@ -175,33 +194,74 @@ class Store(ABC):
 
     # ---- runs ---------------------------------------------------------------
 
-    def open_run(self, run_id: str, manifest: dict[str, Any] | None = None) -> "RunHandle":
-        """Attach-or-create: create runs/<run_id>/ (manifest required) or attach
-        to it (the manifest must match — identity is computed, I3).
+    def run_prefix(self, run_id: str) -> str:
+        """The key of this run's DIRECTORY: runs/<run_id> at the top, or
+        runs/<subdir>/<run_id> wherever open_run filed it at birth. One run,
+        one home, found by its manifest and cached; a run that exists nowhere
+        resolves to the top spelling, so absence still reads as absence. The
+        cache never goes stale because a run NEVER MOVES — its home is fixed
+        the moment the manifest is written."""
+        homes = self.__dict__.setdefault("_run_homes", {})
+        cached = homes.get(run_id)
+        if cached is not None:
+            return cached
+        suffix = f"/{run_id}/manifest.json"
+        for key in self._list("runs/"):
+            if key.endswith(suffix):
+                homes[run_id] = key[: -len("/manifest.json")]
+                return homes[run_id]
+        return f"runs/{run_id}"
+
+    def run_subdirs(self) -> dict[str, str]:
+        """{run_id: subdir} for every run in the store ("" at the top) — the
+        observer's one question about filing."""
+        out: dict[str, str] = {}
+        for key in self._list("runs/"):
+            if not key.endswith("/manifest.json"):
+                continue
+            parts = key.split("/")
+            out[parts[-2]] = "/".join(parts[1:-2])
+        return out
+
+    def open_run(self, run_id: str, manifest: dict[str, Any] | None = None,
+                 subdir: str | None = None) -> "RunHandle":
+        """Attach-or-create: create the run's directory (manifest required) or
+        attach to it (the manifest must match — identity is computed, I3).
+
+        `subdir` says WHERE a NEW run's directory spawns
+        (runs/<subdir>/<run_id>); it is filing, never identity. A run's home
+        is fixed at birth: attaching finds the run wherever it lives, and a
+        different subdir asked later is ignored — resubmission is resume, not
+        a move (I10's "for life" includes the address).
 
         Attaching discards unsealed work: per-update artifacts and blob versions
         no ledger line committed. Observers must peek instead (I10).
         """
-        manifest_key = f"runs/{run_id}/manifest.json"
+        home = self.run_prefix(run_id)
+        manifest_key = f"{home}/manifest.json"
         if not self._exists(manifest_key):
             if manifest is None:
                 raise StoreError(
                     f"run {run_id!r} does not exist; a manifest is required to create it")
+            if subdir is not None:
+                home = f"runs/{check_subdir(subdir)}/{run_id}"
+                manifest_key = f"{home}/manifest.json"
             self._write(manifest_key, _canonical(manifest).encode("utf-8"))
-            self._append_line(f"runs/{run_id}/ledger.jsonl", "")
-            return RunHandle(self, run_id, _canonical(manifest))
+            self._append_line(f"{home}/ledger.jsonl", "")
+            self.__dict__.setdefault("_run_homes", {})[run_id] = home
+            return RunHandle(self, run_id, _canonical(manifest), home)
 
         stored = self._read(manifest_key).decode("utf-8")
         if manifest is not None and _canonical(manifest) != _canonical(json.loads(stored)):
             raise ManifestMismatch(
                 f"run {run_id!r} exists with a different manifest (identity is computed, I3)")
-        handle = RunHandle(self, run_id, stored)
+        handle = RunHandle(self, run_id, stored, home)
         handle._discard_unsealed()
         return handle
 
     def list_runs(self) -> list[str]:
-        """Run ids present in the store."""
-        return sorted({key.split("/")[1] for key in self._list("runs/")
+        """Run ids present in the store, wherever they are filed."""
+        return sorted({key.split("/")[-2] for key in self._list("runs/")
                        if key.endswith("/manifest.json")})
 
     # ---- content-addressed storage ------------------------------------------
@@ -240,7 +300,8 @@ class Store(ABC):
         what its store contains and why — a UI renders from this."""
         try:
             return json.loads(
-                self._read(f"runs/{run_id}/dictionary.json").decode("utf-8"))
+                self._read(f"{self.run_prefix(run_id)}/dictionary.json")
+                .decode("utf-8"))
         except FileNotFoundError:
             return None
 
@@ -249,7 +310,8 @@ class Store(ABC):
         work — an observer must never do that to a live run)."""
         try:
             return json.loads(
-                self._read(f"runs/{run_id}/manifest.json").decode("utf-8"))
+                self._read(f"{self.run_prefix(run_id)}/manifest.json")
+                .decode("utf-8"))
         except FileNotFoundError:
             return None
 
@@ -257,7 +319,8 @@ class Store(ABC):
         """A run's committed entries WITHOUT attaching; torn or corrupt
         lines are skipped, not repaired — peeking never writes."""
         try:
-            text = self._read(f"runs/{run_id}/ledger.jsonl").decode("utf-8")
+            text = self._read(
+                f"{self.run_prefix(run_id)}/ledger.jsonl").decode("utf-8")
         except FileNotFoundError:
             return []
         out = []
@@ -275,7 +338,8 @@ class Store(ABC):
         update the ledger committed can never be rewritten, so reading it is
         as safe as reading the ledger. None when that update has no wave."""
         try:
-            raw = gzip.decompress(self._read(wave_key(run_id, update)))
+            raw = gzip.decompress(
+                self._read(wave_key(self.run_prefix(run_id), update)))
         except FileNotFoundError:
             return None
         return [json.loads(line) for line in raw.decode("utf-8").split("\n") if line]
@@ -285,7 +349,8 @@ class Store(ABC):
         attaching. None when that update has no postdata."""
         try:
             payload = json.loads(
-                self._read(postdata_key(run_id, update)).decode("utf-8"))
+                self._read(postdata_key(self.run_prefix(run_id),
+                                        update)).decode("utf-8"))
         except FileNotFoundError:
             return None
         return payload["columns"]
@@ -298,7 +363,7 @@ class Store(ABC):
         committed updates are counting up to. None when the run declared no
         plan of that kind."""
         try:
-            return self._read(plan_key(run_id, kind))
+            return self._read(plan_key(self.run_prefix(run_id), kind))
         except FileNotFoundError:
             return None
 
@@ -306,7 +371,7 @@ class Store(ABC):
         """Every completed eval summary for a run, WITHOUT attaching —
         the observer's held-out series. Unparseable files are skipped."""
         out = []
-        for key in self._list(f"runs/{run_id}/eval"):
+        for key in self._list(f"{self.run_prefix(run_id)}/eval"):
             if not key.endswith("/summary.json"):
                 continue
             try:
@@ -434,14 +499,16 @@ class Store(ABC):
 
 @dataclass
 class RunHandle:
-    """Handle on runs/<run_id>/ — backend-agnostic; all IO via the store's verbs."""
+    """Handle on the run's directory (runs/<run_id>, or runs/<subdir>/<run_id>
+    where it was filed) — backend-agnostic; all IO via the store's verbs."""
 
     store: Store
     run_id: str
     _manifest_json: str
+    run_dir: str = ""
 
     def _key(self, *parts: str) -> str:
-        return "/".join(("runs", self.run_id, *parts))
+        return "/".join((self.run_dir or f"runs/{self.run_id}", *parts))
 
     @property
     def manifest(self) -> dict[str, Any]:
@@ -522,7 +589,7 @@ class RunHandle:
     # ---- per-update artifacts: waves + postdata --------------------------
 
     def _wave_key(self, update: int) -> str:
-        return wave_key(self.run_id, update)
+        return wave_key(self._key(), update)
 
     def write_wave(self, update: int, rows: list[dict[str, Any]]) -> None:
         """Write one sealed wave's rows atomically (gzip of canonical jsonl)."""
@@ -537,7 +604,7 @@ class RunHandle:
         return [json.loads(line) for line in raw.split("\n") if line]
 
     def _rollout_key(self, index: int) -> str:
-        return rollout_key(self.run_id, index)
+        return rollout_key(self._key(), index)
 
     def write_rollout(self, index: int, rows: list[dict[str, Any]]) -> None:
         """Seal one generated wave. Never refused against the ledger: a rollout
@@ -555,16 +622,16 @@ class RunHandle:
     def write_plan(self, kind: str, data: bytes) -> None:
         """Copy one plan into the run, verbatim: the bytes the spec's cas uri
         addresses, so the run holds the shape it actually ran."""
-        self.store._write(plan_key(self.run_id, kind), data)
+        self.store._write(plan_key(self._key(), kind), data)
 
     def read_plan(self, kind: str) -> bytes:
-        key = plan_key(self.run_id, kind)
+        key = plan_key(self._key(), kind)
         if not self.store._exists(key):
             raise FileNotFoundError(f"no {kind} plan: {key}")
         return self.store._read(key)
 
     def _postdata_key(self, update: int) -> str:
-        return postdata_key(self.run_id, update)
+        return postdata_key(self._key(), update)
 
     def write_postdata(self, update: int, columns: Mapping[str, list[float]]) -> None:
         """The postprocessor pipeline's columns for one wave, in wave order —
@@ -591,7 +658,7 @@ class RunHandle:
         keep reading exactly one file per update.
         """
         self._refuse_committed_overwrite(update, "postdata")
-        self.store._write(postdata_part_key(self.run_id, update, producer),
+        self.store._write(postdata_part_key(self._key(), update, producer),
                           _canonical({"columns": dict(columns)}).encode("utf-8"))
 
     def read_postdata_part(self, update: int,
@@ -603,7 +670,7 @@ class RunHandle:
         waiting on a store predicate should be reading a value, not catching an
         exception.
         """
-        key = postdata_part_key(self.run_id, update, producer)
+        key = postdata_part_key(self._key(), update, producer)
         if not self.store._exists(key):
             return None
         return json.loads(self.store._read(key).decode("utf-8"))["columns"]

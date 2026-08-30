@@ -3094,6 +3094,31 @@ specs; backends (local/modal/skypilot) and GPU topology are semantics-neutral.
       40-tenant width) — a stated cost; the store-side read is the observer's
       answer, as everywhere.
 
+67. **FILING: runs spawn into subdirs, and the tree reaches the UI.** The
+    store's runs/ was flat and organization leaned entirely on tags; now a
+    submission may INDICATE a subdir and the run's directory spawns at
+    runs/<subdir>/<run_id>. Three rulings hold it together:
+    - **Filing is never identity.** The subdir rides submit/adopt/desk frames
+      as a parameter beside the spec — it does not hash, so the same spec
+      filed differently is the SAME run (pinned: identical run_id and
+      byte-identical ledger at runs/sweeps/arith/<id> and runs/<id>). It
+      could not live in the spec without violating I3's "identity is
+      content".
+    - **One home, for life.** open_run resolves a run by its manifest
+      wherever it lives (`run_prefix`, the one seam every peek and every
+      handle key routes through, cached because runs never move); a
+      different subdir asked at attach is ignored — resubmission is resume,
+      not a move. I10's "for life" now includes the address.
+    - **Segments are attested** (check_subdir: [A-Za-z0-9._-]+ per segment,
+      never "." or ".."), for the host-name reason: a stray separator would
+      file a run where no reader looks.
+    The observer says where each run lives (runs_data rows carry `subdir`;
+    the web index nests a collapsible block per subdir INSIDE each #58
+    folder block; the CLI prints `dir <subdir>/` headers). The two axes are
+    deliberately distinct and both rendered: a FOLDER is which store (#58, a
+    root chosen at birth), a SUBDIR is filing inside one store. Key helpers
+    (wave_key and kin) now take the run DIRECTORY, not the id — the one
+    signature change, caught by one test.
 
 ## Open threads (do NOT treat as settled; flag when your answer touches them)
 

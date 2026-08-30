@@ -265,7 +265,8 @@ class HostService:
         if verb == "adopt":
             return await self.host.adopt(payload["spec"],
                                          payload.get("routes", {}),
-                                         payload.get("code"))
+                                         payload.get("code"),
+                                         payload.get("subdir"))
         engine = self._engine(payload["base"], payload["tp"])
         if not self.host.arbiter.is_attached(engine):
             self.host.arbiter.attach(
@@ -413,7 +414,8 @@ class RemoteHost:
 
     async def adopt(self, spec: object,
                     routes: Mapping[str, str] | None = None,
-                    code: Mapping[str, str] | None = None) -> dict:
+                    code: Mapping[str, str] | None = None,
+                    subdir: str | None = None) -> dict:
         """`spec` may be a live ExperimentSpec (encoded here, hashes computed
         here) or an already-canonical row (forwarded as-is — the DESK's case,
         relaying a client's frame with the CLIENT's claimed hashes)."""
@@ -427,7 +429,8 @@ class RemoteHost:
                 from rlstack.registry import code_hashes
                 code = code_hashes(spec)
         return await self._transport.call("adopt", {
-            "spec": row, "routes": dict(routes or {}), "code": dict(code or {})})
+            "spec": row, "routes": dict(routes or {}),
+            "code": dict(code or {}), "subdir": subdir})
 
     def status(self) -> dict:
         return self._transport.ask("status", {})
@@ -444,13 +447,14 @@ class RemoteFleet:
     def __init__(self, transport: Transport) -> None:
         self._transport = transport
 
-    async def submit(self, spec: object) -> dict:
+    async def submit(self, spec: object,
+                     subdir: str | None = None) -> dict:
         from rlstack.registry import code_hashes
         from rlstack.spec.canonical import canonical_json
 
         return await self._transport.call("submit", {
             "spec": json.loads(canonical_json(spec)),
-            "code": code_hashes(spec)})
+            "code": code_hashes(spec), "subdir": subdir})
 
     def status(self) -> dict:
         return self._transport.ask("status", {})
