@@ -203,6 +203,15 @@ payload-less address a request carries. The bundle is the ONLY data channel
 from the training world back to the inference world (I2).
 `rlstack/policy/compile.py`
 
+**SiteWrapper / the chain** — the shared half of every module-replacing
+replay site: one wrapper per (family, path), and NESTING when different
+adapter families claim one path on a shared learner — each family's forward
+applies only rows whose routed state is its own and passes the rest through
+to `inner` (`join_site` / `leave_site` find and splice a family's wrapper
+anywhere in the chain). A tenant beside a foreign family is bit-identical to
+the same tenant alone.
+`rlstack/policy/adapters/replay.py`
+
 **Slot / row plan** — the trainer's routing unit. A **slot** is one tenant's
 installed deltas at a set of sites; a **RowPlan** says which slot each row of
 one padded microbatch carries, and raises if a lowering runs unrouted. The
@@ -342,6 +351,17 @@ host.
 them. It reads capability **demands** off a spec's `gpu_config` (what, never
 where) and returns a `Plan` of `Join` / `Carve` / `Acquire` steps.
 `rlstack/runner/fleet.py`
+
+**Desk / FleetService** — the STANDING fleet: placement as a service and the
+fleet journal's one writer (the Trainer/ledger pattern on the fleet plane).
+It holds **Listings** — descriptions of standing hosts (regimes, address,
+solo), journaled and rebuilt by `from_journal` — matches the join rung over
+them, and `submit(spec)` ends in an **adopt** at the learner's listing with
+every other pool's address threaded as routes. A placement nothing serves
+returns boot instructions: the standing carve is a venue action. A campaign's
+whole surface is `RemoteFleet(transport).submit(spec)`; no venue word appears
+in any of it.
+`rlstack/runner/fleet.py` (`FleetService`, `Listing`), `rlstack/runner/remote.py` (`RemoteFleet`)
 
 **Pool** — a NAME traffic routes to, with two lives: declared capacity
 (`PoolMember` in a `GpuConfig`) and a runtime routing entry (`Routes`: pool name
@@ -581,6 +601,13 @@ One currency and one decider per rung (I12):
 - **sleep / wake** — a build fact of `VllmEngine` (and the learner's offload),
   deliberately NOT on the Engine protocol: the seam an alternating host's
   arbiter hooks call to make a partition really hand the device back.
+- **adopt** — submit, without the submitter in-process: decode the frame's
+  canonical spec, derive the schema HERE (`schema_for`), dial the routes into
+  RemotePools (`dial` resolves an address to a transport; the pool's declared
+  base/tp wrap it), run the custody checks fail-fast, roster the tenancy
+  EAGERLY, and run it as a background task on this host's own loop. The reply
+  is acceptance, never completion — the ledger is the result channel.
+  Re-adoption is resume.
 
 ### Pool traffic (`rlstack/runner/traffic.py`, `rlstack/runner/remote.py`)
 

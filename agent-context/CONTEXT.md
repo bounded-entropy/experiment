@@ -2910,13 +2910,6 @@ specs; backends (local/modal/skypilot) and GPU topology are semantics-neutral.
     locally, having no HF checkout to read; and nothing in `observe/` learned
     the word plora, because the dictionary is what the UI reads.
 
-APPEND VERBATIM to agent-context/CONTEXT.md, immediately after entry 64's last
-line ("...the word plora, because the dictionary is what the UI reads.") and
-before the "## Open threads" heading. Renumber to 66 if the adopt workstream
-lands 65 first.
-
----8<--- cut here ---8<---
-
 65. **THE SCORER: the fourth daemon, and post traffic leaves the gradient's
     critical path.** #47 measured the problem and named it: a teacher column
     computed inside the Trainer's post phase makes every gradient wait on a fan
@@ -3024,6 +3017,82 @@ lands 65 first.
     store and neither is "a reader is done".
 
 ---8<--- cut here ---8<---
+
+66. **THE SUBMISSION DOOR AND THE STANDING FLEET: adopt, the desk, and the
+    mixed-family chain — three rulings, one arc, each proven by the failure
+    that demanded it.** The deployment model was always "experiments request
+    resources and join matching hosts", and the fleet could PLACE (#43) but
+    nothing could DELIVER: `submit` was an in-process method, so a campaign
+    could only run where its script already stood. This entry is the missing
+    delivery, built outward from one verb.
+    - **`Host.adopt(spec_row, routes)` — submit, without the submitter
+      in-process.** The frame is the spec's canonical JSON plus placement's
+      routes (pool name -> ADDRESS, for pools this host does not serve). The
+      schema is derived HOST-SIDE (`schema_for`, a birth fact): an adopted
+      spec never ships a schema, so identity is computed where the code that
+      will run lives (I3) and a client cannot ship one the metal disagrees
+      with. The reply is ACCEPTANCE — {run_id, state} — never completion: the
+      ledger is the result channel and peeks are the door, as for any run.
+      Custody checks (bind, fit, solo) run fail-fast in the reply; the submit
+      gate still runs at Phase 0 inside the tenancy task. RE-ADOPTION IS
+      RESUME, the same way resubmission always was. Two fixes the desk's own
+      tests forced, both now rules: `dial` resolves an address to a
+      TRANSPORT and the HOST wraps it with the pool's declared (base, tp) —
+      the venue knows where, the spec knows what — and acceptance rosters the
+      tenancy EAGERLY, because a roster written when the background task
+      first ticks lets two adopts in one breath both pass check_solo.
+      `spec_from_json` (canonical_json's typed inverse, dispatch over the
+      closed class table) lives with the WIRE CODECS in runner/remote.py, not
+      in canonical.py — the architecture test refused the first placement,
+      correctly: spec modules are pure values, and only the wire decodes.
+    - **`FleetService` — placement as a service, and the fleet journal's ONE
+      WRITER.** The Trainer/ledger pattern applied to the fleet plane: the
+      desk holds LISTINGS (descriptions of standing hosts — regimes, address,
+      solo — deploy-registered at boot, journaled, rebuilt by `from_journal`
+      after any kill), matches the join rung over them, and `submit` ends in
+      an adopt at the learner's listing with every other pool's address
+      threaded as routes. A placement nothing serves returns BOOT
+      INSTRUCTIONS: the standing carve is a venue action (boot a container
+      wearing the regimes, list it), because the desk is a CPU process and
+      the factories live beside metal it does not have. `delist` and a
+      placement-time liveness probe complete it: a dead container is skipped,
+      never offered. Single-writer is also the multi-user answer: concurrent
+      campaigns serialize through one desk instead of double-reading one
+      residual. NOTHING IN rlstack/ SAYS THE VENUE'S NAME — the desk knows
+      `connect: address -> RemoteHost`, a campaign is
+      `RemoteFleet(transport).submit(spec)`, and the Modal cls transport is
+      ~10 lines in the deploy file.
+    - **`SiteWrapper` — mixed adapter FAMILIES at one site path nest, not
+      collide.** Found by the sweep, not by review: 40 tenants (28 plora, 12
+      lora) on ONE shared learner all died in minutes — plora rows routed
+      through a lora tenant's wrapper met lora math (`state.b` on a
+      PloraState, 20 arms), lora rows through a plora wrapper were asked for
+      recorded latents they never drew (12 arms). The hole is as old as #44:
+      every site wrapper assumed all state at its path was its own family,
+      and no prior tenancy ever mixed families at a path (the stress matrix
+      is single-family per site). The fix is a shared chain in replay.py:
+      SiteWrapper owns the roster and the nesting — `join_site` finds a
+      family's wrapper anywhere in the chain or wraps the head; `leave_site`
+      splices it out wherever it sits — and each family's forward applies
+      ONLY rows whose routed state is its own, passing the rest through to
+      `inner` (the other family's wrapper, or the bare Linear). Pinned by
+      tests/test_mixed_families.py: a tenant beside a foreign family is
+      BIT-IDENTICAL to the same tenant alone, in both install orders.
+    - **The venue lesson, paid for once:** `modal run`'s ephemeral app dies
+      with its entrypoint and takes spawned work with it — 32 seeded arms,
+      killed at seed time. The standing container is DEPLOYED and every door
+      looks it up by name, which is not a workaround but the model itself:
+      sweep, via_desk and progress are three processes knocking on one
+      standing host.
+    - **Proven on metal (deploy/sweep_a100.py):** 40 experiments — plora
+      k x prior_std x latent against lora r x lr, two seeds — as tenants of
+      ONE shared engine and ONE shared learner on two fractional partitions
+      of a single A100, 32 arms through the in-process door and 8 arriving
+      from a SEPARATE process as one RemoteFleet frame each, all forty on one
+      roster, all forty committing. The observation door queues behind
+      training forwards on a saturated loop (progress took minutes at
+      40-tenant width) — a stated cost; the store-side read is the observer's
+      answer, as everywhere.
 
 
 ## Open threads (do NOT treat as settled; flag when your answer touches them)
