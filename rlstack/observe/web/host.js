@@ -5,8 +5,8 @@
 // memory curve that falls off a cliff is only explained by the moment next to it.
 "use strict";
 
-import {C, WHEEL, brief, clock, el, esc, getJSON, gib, note, section, when}
-  from "./dom.js";
+import {C, WHEEL, ago, brief, clock, el, esc, getJSON, gib, note, pulseDot,
+        section, when} from "./dom.js";
 import {card, plot, residencyTip, timeline} from "./charts.js";
 import {ctx, legend, query, route, runPath, withHours} from "./nav.js";
 
@@ -23,7 +23,9 @@ export async function drawHost() {
   if (!host) { holder.textContent = "unknown host"; return; }
   holder.innerHTML = "";
   const resident = host.tenancy.filter(t => t.detached === null).length;
-  ctx(`<span>${esc(host.host)}</span>`
+  ctx(pulseDot(host.pulse, host.now) + `<span>${esc(host.host)}</span>`
+    + (host.pulse && host.pulse.last
+        ? `<span class="k">last event ${esc(ago(host.pulse.last, host.now))}</span>` : "")
     + (host.folders.some(f => f)
         ? `<span class="k">${esc(host.folders.filter(f => f).join(" "))}</span>` : "")
     + `<span class="meta">engines ${esc(host.engines.join(", ") || "?")}`

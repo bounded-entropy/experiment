@@ -278,6 +278,8 @@ class AddressingTest(unittest.TestCase):
 
     def test_the_index_carries_the_folder_and_the_annotation(self) -> None:
         _, _, body = call(self.app, "/api/runs")
+        body = __import__("json").dumps(
+            __import__("json").loads(body)["runs"]).encode()
         rows = json.loads(body)
         self.assertEqual(sorted(r["folder"] for r in rows),
                          ["opd/math", "sft", "sft"])
@@ -319,7 +321,7 @@ class PageAddressingTest(unittest.TestCase):
     def test_the_modules_carry_the_addressing_machinery(self) -> None:
         for module, machinery in (
                 ("nav.js", ("?root=", "drawAmbiguity", "apiRun", "optgroup")),
-                ("runs.js", ("folderBlock", "matches", "tag", "collapsed")),
+                ("runs.js", ("folderBlock", "matchExpr", "tag", "collapsed")),
                 ("run.js", ("drawAmbiguity", "route.folder")),
                 ("wave.js", ("drawAmbiguity", "route.folder")),
                 ("host.js", ("query(route.folder)",)),

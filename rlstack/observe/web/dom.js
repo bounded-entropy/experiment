@@ -9,7 +9,8 @@ export const C = {feed: "#5fb2ff", eval: "#ffb86b", rail: "#9de08f",
                   derived: "#c792ea", dim: "#8494a4", warn: "#e07a7a",
                   teal: "#6fd6c4", line: "#2a323c"};
 export const WHEEL = [C.feed, C.rail, C.eval, C.derived, C.warn, C.teal];
-export const STATUS_COLOR = {running: C.rail, done: C.feed, failed: C.warn};
+export const STATUS_COLOR = {running: C.rail, done: C.feed,
+                             failed: C.warn, stalled: C.eval};
 export const poll = {hovering: false};
 
 export function el(tag, attrs, html) {
@@ -50,6 +51,29 @@ export function clock(t) {
   if (!t) return "—";
   return new Date(t * 1000).toLocaleTimeString([], {hour: "2-digit",
       minute: "2-digit", second: "2-digit", hour12: false});
+}
+
+export function ago(t, now) {
+  // relative age against the SERVER's clock when given (a page must not call
+  // a host dead because the laptop's clock drifts)
+  if (!t) return "never";
+  const s = Math.max(0, (now || Date.now() / 1000) - t);
+  if (s < 90) return s.toFixed(0) + "s ago";
+  if (s < 5400) return (s / 60).toFixed(0) + "m ago";
+  if (s < 129600) return (s / 3600).toFixed(1) + "h ago";
+  return (s / 86400).toFixed(1) + "d ago";
+}
+
+export function pulseDot(pulse, now) {
+  // the one liveness glyph, everywhere: probe or presumption, said as which
+  if (!pulse || pulse.live === null || pulse.live === undefined)
+    return `<span class="dot unknown" title="liveness unknown — journal too thin">○</span>`;
+  const seen = ago(pulse.last, now);
+  const how = pulse.source === "desk" ? "probed by the fleet service"
+                                      : "presumed from the journal heartbeat";
+  return pulse.live
+    ? `<span class="dot live" title="alive (${how}) · last event ${seen}">●</span>`
+    : `<span class="dot down" title="down (${how}) · last event ${seen}">●</span>`;
 }
 
 export function dur(seconds) {

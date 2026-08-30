@@ -20,7 +20,7 @@ export async function drawRun() {
   const runId = route.runId, folder = route.folder;
   const [data, runs, timing, waves] = await Promise.all([
     getJSON(apiRun(runId, "", folder)),
-    getJSON("/api/runs"),
+    getJSON("/api/runs").then(d => (d && d.runs) || []),
     getJSON(apiRun(runId, "/timing", folder)),
     getJSON(apiRun(runId, "/waves", folder)),
   ]);

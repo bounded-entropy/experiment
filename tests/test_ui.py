@@ -88,6 +88,7 @@ class UiTest(unittest.TestCase):
         self.assertEqual(status, "200 OK")          # same document, JS routes
 
         status, headers, body = call(app, "/api/runs")
+        body = json.dumps(json.loads(body)["runs"]).encode()
         self.assertEqual(status, "200 OK")
         runs = json.loads(body)
         self.assertEqual(runs, [])                  # no host journal: raw run
@@ -121,7 +122,7 @@ class UiTest(unittest.TestCase):
             "pools": ["policy"], "n_updates": 4, "store": self.store.describe()})
         app = ui_app([self.store])
         _, _, body = call(app, "/api/runs")
-        row = json.loads(body)[0]
+        row = json.loads(body)["runs"][0]
         for field in ("run_id", "status", "committed", "target", "hosts"):
             self.assertIn(field, row)
         self.assertEqual(row["run_id"], self.report.run_id)

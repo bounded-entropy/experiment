@@ -46,7 +46,11 @@ from rlstack.observe.aggregate import (
 from rlstack.observe.host_series import (
     fleet_data, host_series, journals_for, windowed,
 )
+from rlstack.observe.liveness import (
+    DeskLiveness, liveness_by_host, stall_runs,
+)
 from rlstack.observe.locate import Root, rooted
+from rlstack.observe.select import metric_names, overlay
 from rlstack.observe.page import WEB_PREFIX, asset, document
 from rlstack.observe.series import run_series
 from rlstack.observe.views import runs_data
@@ -57,12 +61,16 @@ NOT_FOUND = "404 Not Found"
 
 def ui_app(roots: Sequence[Store | Root],
            refresh: Callable[[], None] | None = None,
-           panels: Callable[[], list[dict]] | None = None):
+           panels: Callable[[], list[dict]] | None = None,
+           desk: DeskLiveness | None = None):
     """The WSGI app over one top directory's roots (or one bare store, the
-    degenerate case). `refresh` runs before each API read (a Modal volume
-    needs .reload() to see commits from other containers; None for local).
-    `panels` supplies derived-graph declarations (None → each store's own
-    panels.json, re-read per request so edits appear live)."""
+    degenerate case). `refresh` runs before each API read (a volume-backed
+    store may need it; None for local). `panels` supplies derived-graph
+    declarations (None → each store's own panels.json, re-read per request so
+    edits appear live). `desk` is the OPTIONAL liveness probe — a plain
+    callable returning {host: alive}, constructed by the venue around
+    whatever fleet service it runs (the observer never learns which); None
+    means journal heartbeats are the only pulse."""
     known = rooted(roots)
 
     def app(environ, start_response):
@@ -81,11 +89,14 @@ def ui_app(roots: Sequence[Store | Root],
                 refresh()
             query = environ.get("QUERY_STRING", "")
             hours = asked_hours(query)
+            now = time.time()
             payload, status = api(
                 known, [unquote(part) for part in path.split("/") if part],
                 asked_folder(query),
                 panels() if panels is not None else None,
-                since=None if hours is None else time.time() - hours * 3600.0)
+                since=None if hours is None else now - hours * 3600.0,
+                now=now, desk=desk,
+                params=parse_qs(query, keep_blank_values=True))
             return _json(start_response, payload, status)
         # every page is the same document; the modules route on the pathname
         start_response("200 OK", [("Content-Type", "text/html; charset=utf-8")])
@@ -116,23 +127,59 @@ def asked_folder(query: str) -> str | None:
     return params["root"][0] if "root" in params else None
 
 
+def pulses_for(roots: Sequence[Root], now: float,
+               desk: DeskLiveness | None) -> dict[str, dict]:
+    """Every journaled host's pulse (heartbeat, desk-corrected), keyed by
+    bare host name — the join runs_data and fleet_data rows use."""
+    pairs = []
+    for root in rooted(roots):
+        for host in root.store.list_hosts():
+            pairs.append((host, root.store.read_host_log(host)))
+    return liveness_by_host(pairs, now, desk)
+
+
 def api(roots: Sequence[Root], route: list[str], folder: str | None,
         panels: list[dict] | None,
-        since: float | None = None) -> tuple[object, str]:
+        since: float | None = None, now: float | None = None,
+        desk: DeskLiveness | None = None,
+        params: dict | None = None) -> tuple[object, str]:
     """One route → (payload, status). Route is the path already split and
     unquoted: ["api", "run", <id>, "wave", <n>] and its shorter kin; `folder`
     is the ?root= the link carried."""
+    now = time.time() if now is None else now
     match route:
         case ["api", "runs"]:
-            return runs_data(roots), "200 OK"
+            rows = runs_data(roots)
+            stall_runs(rows, pulses_for(roots, now, desk))
+            return {"now": now, "runs": rows}, "200 OK"
         case ["api", "hosts"]:
-            return fleet_data(roots, since=since), "200 OK"
+            data = fleet_data(roots, since=since, now=now)
+            pulses = pulses_for(roots, now, desk)
+            for host in data["hosts"]:
+                host["pulse"] = pulses.get(host["host"])
+            stall_runs(data["runs"], pulses)
+            for host in data["hosts"]:
+                stall_runs(host["tenancy"], pulses_of_lanes(host, pulses))
+            data["now"] = now
+            return data, "200 OK"
+        case ["api", "metrics"]:
+            return {"metrics": metric_names(roots)}, "200 OK"
+        case ["api", "series"]:
+            asked = params or {}
+            metric = (asked.get("metric") or ["reward"])[0]
+            expr = (asked.get("q") or [""])[0]
+            payload = overlay(roots, metric, expr)
+            payload["now"] = now
+            return payload, "200 OK"
         case ["api", "fleet"]:
             return fleet_throughput([root.store for root in roots],
                                     since=since), "200 OK"
         case ["api", "host", host]:
-            return _found(host_page(in_folder(roots, folder), host, since),
-                          "unknown host")
+            page = host_page(in_folder(roots, folder), host, since)
+            if page is not None:
+                page["pulse"] = pulses_for(roots, now, desk).get(host)
+                page["now"] = now
+            return _found(page, "unknown host")
         case ["api", "run", run_id]:
             return run_route(roots, run_id, folder, "unknown run",
                              lambda root: run_series(root.store, run_id,
@@ -151,6 +198,15 @@ def api(roots: Sequence[Root], route: list[str], folder: str | None,
                              lambda root: wave_detail(root.store, run_id,
                                                       int(update)))
     return {"error": "unknown route"}, NOT_FOUND
+
+
+def pulses_of_lanes(host: dict, pulses: dict[str, dict]) -> dict[str, dict]:
+    """A tenancy lane's only host is the row it sits on: stalling a lane
+    consults exactly this host's pulse (the lane rows carry no hosts list,
+    so one is synthesized for the join)."""
+    for lane in host["tenancy"]:
+        lane.setdefault("hosts", [host["host"]])
+    return pulses
 
 
 def holders(roots: Sequence[Root], run_id: str) -> list[Root]:

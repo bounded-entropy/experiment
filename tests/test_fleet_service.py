@@ -204,6 +204,27 @@ if __name__ == "__main__":
     unittest.main()
 
 
+class LivenessVerbTest(DeskFixture):
+    def test_the_desk_probes_its_listings(self) -> None:
+        living = self.stand_up("alive-a", "fleet://a", serves_pool=True,
+                               trains=True)
+
+        class Dead:
+            async def call(self, verb, payload):
+                raise ConnectionError("gone")
+
+            def ask(self, verb, payload):
+                raise ConnectionError("gone")
+
+        self.transports["fleet://dead"] = Dead()
+        desk = self.desk()
+        desk.list_host("alive-a", living.regimes, "fleet://a")
+        desk.list_host("dead-z", living.regimes, "fleet://dead")
+        remote = RemoteFleet(LocalTransport(desk))
+        self.assertEqual(remote.liveness(),
+                         {"alive-a": True, "dead-z": False})
+
+
 class LivenessTest(DeskFixture):
     def test_a_dead_listing_is_skipped_and_a_delist_survives_rebuild(self) -> None:
         """A listing whose container stopped answering is invisible to

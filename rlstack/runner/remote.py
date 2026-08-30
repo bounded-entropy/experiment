@@ -441,3 +441,7 @@ class RemoteFleet:
 
     def status(self) -> dict:
         return self._transport.ask("status", {})
+
+    def liveness(self) -> dict:
+        """{host: alive} for every listing, probed by the desk just now."""
+        return self._transport.ask("liveness", {})

@@ -641,7 +641,16 @@ class FleetService:
     def answer(self, verb: str, payload: dict) -> dict:
         if verb == "status":
             return self.status()
+        if verb == "liveness":
+            return self.liveness()
         raise ValueError(f"unknown admission-free fleet verb {verb!r}")
+
+    def liveness(self) -> dict:
+        """Every listing PROBED, now: {host: answered}. The desk is the one
+        place that can ask a container instead of presuming from a journal,
+        and an observer given a desk shows probes where it has them."""
+        return {name: listing.alive()
+                for name, listing in sorted(self.listings.items())}
 
 
 def _covers_regimes(regimes: Sequence[Regime], demand: Demand) -> bool:

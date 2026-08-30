@@ -313,7 +313,8 @@ def numbers_under(prefix: str, value) -> list[tuple[str, float]]:
 # ---------------------------------------------------------------------------
 
 def fleet_data(roots: Sequence[Store | Root],
-               since: float | None = None) -> dict:
+               since: float | None = None,
+               now: float | None = None) -> dict:
     """What is true of the FLEET rather than of one experiment: every host as
     the hosts view renders it, joined with its residencies and its utilization
     shape, plus the runs view's placement. One window spans every timeline, so
@@ -338,9 +339,12 @@ def fleet_data(roots: Sequence[Store | Root],
             host["regimes"] = latest.get("regimes", [])
             host["partition"] = latest.get("partition")
             hosts.append(host)
+    # the axis is ANCHORED TO THE CLOCK when the reader asked for a window:
+    # "past hour" ends now, not at the last event — a chart that stops hours
+    # ago must show the emptiness, because the emptiness is the reading
     win = fleet_window(hosts)
     if win is not None and since is not None:
-        win = [max(win[0], since), win[1]]
+        win = [since, now if now is not None else win[1]]
     return {
         "hosts": hosts,
         "runs": runs_data(known),

@@ -18,7 +18,7 @@ const FINISH_COLOR = {stop: C.rail, eos: C.feed, length: C.warn};
 export async function drawWave() {
   const [wave, runs] = await Promise.all([
     getJSON(apiRun(route.runId, "/wave/" + route.update, route.folder)),
-    getJSON("/api/runs")]);
+    getJSON("/api/runs").then(d => (d && d.runs) || [])]);
   const holder = document.getElementById("page");
   holder.innerHTML = "";
   if (wave && wave.ambiguous) { drawAmbiguity(route.runId, wave.ambiguous); return; }
