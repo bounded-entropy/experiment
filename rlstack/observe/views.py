@@ -84,9 +84,23 @@ def hosts_data(roots: Sequence[Store | Root]) -> list[dict]:
     out = []
     for root, host, events in _events_by_host(roots):
         ups = [e for e in events if e.get("event") == "host-up"]
-        attached = {e["run_id"] for e in events if e.get("event") == "attach"}
-        detach = {e["run_id"]: e.get("status", "?") for e in events
-                  if e.get("event") == "detach"}
+        # per-run last word, then the ledger's: an attach after a detach is a
+        # resume (running again), and commits reaching the plan mean done even
+        # when the final detach died with its container
+        status_by_run: dict[str, str] = {}
+        for e in events:
+            rid = e.get("run_id")
+            if not rid:
+                continue
+            if e.get("event") == "attach":
+                status_by_run[rid] = "running"
+            elif e.get("event") == "detach":
+                status_by_run[rid] = e.get("status", "?")
+        for rid, status in list(status_by_run.items()):
+            if status != "done":
+                committed, target = _progress(root.store, rid)
+                if isinstance(target, int) and target > 0 and committed >= target:
+                    status_by_run[rid] = "done"
         out.append({
             "host": host,
             "folder": root.folder,
@@ -96,9 +110,10 @@ def hosts_data(roots: Sequence[Store | Root]) -> list[dict]:
             "boots": len(ups),
             "first_seen": events[0].get("t") if events else None,
             "last_seen": events[-1].get("t") if events else None,
-            "running": sorted(attached - detach.keys()),
-            "done": sum(1 for s in detach.values() if s == "done"),
-            "failed": sum(1 for s in detach.values() if s == "failed"),
+            "running": sorted(r for r, s in status_by_run.items()
+                              if s == "running"),
+            "done": sum(1 for s in status_by_run.values() if s == "done"),
+            "failed": sum(1 for s in status_by_run.values() if s == "failed"),
         })
     return out
 
@@ -146,6 +161,11 @@ def runs_data(roots: Sequence[Store | Root]) -> list[dict]:
                 row["hosts"].append(host)
             if event.get("event") == "detach":
                 row["status"] = event.get("status", "?")
+            else:
+                # a RE-attach reopens the story: resubmission is resume, and
+                # a status frozen at an old detach would call a healthy
+                # second attempt by its first attempt's death
+                row["status"] = "running"
             row["t"] = max(row["t"], event.get("t", 0.0))
 
     for (folder, run_id), row in rows.items():
@@ -161,6 +181,11 @@ def runs_data(roots: Sequence[Store | Root]) -> list[dict]:
                    holding[0] if holding else None)
         committed, target = (_progress(own.store, run_id) if own else (0, "?"))
         row["committed"], row["target"] = committed, target
+        # THE LEDGER IS TRUTH: a run whose commits reached its plan is done,
+        # whatever the journal's tail says — a crashed container loses its
+        # detach events, and observability must not let that read as failure
+        if isinstance(target, int) and target > 0 and committed >= target:
+            row["status"] = "done"
         for index, root in enumerate(known):
             if root.folder == folder:
                 row.update(annotated(annotations[index].get(run_id)))

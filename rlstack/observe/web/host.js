@@ -8,7 +8,7 @@
 import {C, WHEEL, brief, clock, el, esc, getJSON, gib, note, section, when}
   from "./dom.js";
 import {card, plot, residencyTip, timeline} from "./charts.js";
-import {ctx, legend, query, route, runPath} from "./nav.js";
+import {ctx, legend, query, route, runPath, withHours} from "./nav.js";
 
 const MOMENT_COLOR = {"host-up": C.teal, attach: C.rail, detach: C.feed,
                       sleep: C.derived, wake: C.eval};
@@ -17,8 +17,8 @@ const MOMENT_COLOR = {"host-up": C.teal, attach: C.rail, detach: C.feed,
 const CLAIMED_EVENTS = ["traffic.", "update."];
 
 export async function drawHost() {
-  const host = await getJSON("/api/host/" + encodeURIComponent(route.host)
-                             + query(route.folder));
+  const host = await getJSON(withHours("/api/host/" + encodeURIComponent(route.host)
+                             + query(route.folder)));
   const holder = document.getElementById("page");
   if (!host) { holder.textContent = "unknown host"; return; }
   holder.innerHTML = "";

@@ -32,6 +32,28 @@ function parse(pathname, search) {
   return {page: "runs", folder: folder};
 }
 
+// The fleet pages read a TIME WINDOW (?hours=N; absent means one day, 0
+// means everything). The picker writes it into the address, withHours carries
+// it onto the API calls, and run pages never window — a curve is its whole
+// story.
+export function withHours(url) {
+  const h = new URLSearchParams(location.search).get("hours") ?? "24";
+  if (h === "0") return url;
+  return url + (url.includes("?") ? "&" : "?") + "hours=" + encodeURIComponent(h);
+}
+
+function rangeLinks() {
+  const current = new URLSearchParams(location.search).get("hours") ?? "24";
+  const mk = (hours, label) => {
+    const params = new URLSearchParams(location.search);
+    params.set("hours", hours);
+    return `<a class="nav${current === hours ? " on" : ""}"` +
+           ` href="${location.pathname}?${params.toString()}">${label}</a>`;
+  };
+  return `<span class="win">` + mk("1", "hour") + mk("24", "day")
+       + mk("0", "all") + `</span>`;
+}
+
 export function query(folder) {
   return (folder === null || folder === undefined) ? ""
        : "?root=" + encodeURIComponent(folder);
@@ -53,9 +75,11 @@ export function apiRun(runId, tail, folder) {
 export function nav() {
   const runs = route.page === "runs" || route.page === "run" || route.page === "wave";
   const hdr = document.getElementById("hdr");
+  const fleetish = route.page === "fleet" || route.page === "host";
   hdr.innerHTML = `<a href="/">rlstack</a>`
     + `<a class="nav${runs ? " on" : ""}" href="/">runs</a>`
     + `<a class="nav${runs ? "" : " on"}" href="/hosts">hosts</a>`
+    + (fleetish ? rangeLinks() : "")
     + `<span id="ctx"></span>`;
   if (route.runId) {
     const sel = el("select", {id: "switch", title: "switch experiment"});

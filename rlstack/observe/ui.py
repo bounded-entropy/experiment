@@ -33,6 +33,8 @@ writes one, and there is no POST route to write one with.
 
 from __future__ import annotations
 
+import time
+
 import json
 from collections.abc import Callable, Sequence
 from urllib.parse import parse_qs, unquote
@@ -41,7 +43,9 @@ from rlstack.data.stores.base import Store
 from rlstack.observe.aggregate import (
     fleet_throughput, moments, run_timing, traffic_channels,
 )
-from rlstack.observe.host_series import fleet_data, host_series, journals_for
+from rlstack.observe.host_series import (
+    fleet_data, host_series, journals_for, windowed,
+)
 from rlstack.observe.locate import Root, rooted
 from rlstack.observe.page import WEB_PREFIX, asset, document
 from rlstack.observe.series import run_series
@@ -75,16 +79,34 @@ def ui_app(roots: Sequence[Store | Root],
         if path.startswith("/api/"):
             if refresh is not None:
                 refresh()
+            query = environ.get("QUERY_STRING", "")
+            hours = asked_hours(query)
             payload, status = api(
                 known, [unquote(part) for part in path.split("/") if part],
-                asked_folder(environ.get("QUERY_STRING", "")),
-                panels() if panels is not None else None)
+                asked_folder(query),
+                panels() if panels is not None else None,
+                since=None if hours is None else time.time() - hours * 3600.0)
             return _json(start_response, payload, status)
         # every page is the same document; the modules route on the pathname
         start_response("200 OK", [("Content-Type", "text/html; charset=utf-8")])
         return [document()]
 
     return app
+
+
+def asked_hours(query: str) -> float | None:
+    """?hours=N — how far back the fleet pages read. Absent or 0 means
+    everything (the server stays timeless; the WEB CLIENT asks for one day by
+    default, because a fleet chart spanning its whole journal is a smear, not
+    a reading). Run pages never window: an experiment's curve is its whole
+    story by definition."""
+    params = parse_qs(query, keep_blank_values=True)
+    raw = params.get("hours", ["0"])[0]
+    try:
+        hours = float(raw)
+    except ValueError:
+        hours = 24.0
+    return None if hours <= 0 else hours
 
 
 def asked_folder(query: str) -> str | None:
@@ -95,7 +117,8 @@ def asked_folder(query: str) -> str | None:
 
 
 def api(roots: Sequence[Root], route: list[str], folder: str | None,
-        panels: list[dict] | None) -> tuple[object, str]:
+        panels: list[dict] | None,
+        since: float | None = None) -> tuple[object, str]:
     """One route → (payload, status). Route is the path already split and
     unquoted: ["api", "run", <id>, "wave", <n>] and its shorter kin; `folder`
     is the ?root= the link carried."""
@@ -103,11 +126,12 @@ def api(roots: Sequence[Root], route: list[str], folder: str | None,
         case ["api", "runs"]:
             return runs_data(roots), "200 OK"
         case ["api", "hosts"]:
-            return fleet_data(roots), "200 OK"
+            return fleet_data(roots, since=since), "200 OK"
         case ["api", "fleet"]:
-            return fleet_throughput([root.store for root in roots]), "200 OK"
+            return fleet_throughput([root.store for root in roots],
+                                    since=since), "200 OK"
         case ["api", "host", host]:
-            return _found(host_page(in_folder(roots, folder), host),
+            return _found(host_page(in_folder(roots, folder), host, since),
                           "unknown host")
         case ["api", "run", run_id]:
             return run_route(roots, run_id, folder, "unknown run",
@@ -161,14 +185,17 @@ def in_folder(roots: Sequence[Root], folder: str | None) -> list[Root]:
             else [root for root in roots if root.folder == folder])
 
 
-def host_page(roots: Sequence[Root], host: str) -> dict | None:
+def host_page(roots: Sequence[Root], host: str,
+              since: float | None = None) -> dict | None:
     """One host's journal as its page reads it: the four named readings, plus
-    the traffic rails and the moments a timeline marks."""
-    series = host_series(roots, host)
+    the traffic rails and the moments a timeline marks. `since` windows every
+    series, never the identity facts."""
+    series = host_series(roots, host, since=since)
     if series is None:
         return None
     events = sorted((event for _, evs in journals_for(roots, host)
                      for event in evs), key=lambda e: e.get("t") or 0.0)
+    events = windowed(events, since)
     series["channels"] = traffic_channels(events)
     series["moments"] = moments(events)
     return series

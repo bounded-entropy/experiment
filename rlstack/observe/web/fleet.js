@@ -5,11 +5,11 @@
 
 import {C, WHEEL, brief, clock, el, esc, getJSON, raw, section, when} from "./dom.js";
 import {card, emptyCard, residencyTip, timeline} from "./charts.js";
-import {ctx, hostPath, legend} from "./nav.js";
+import {ctx, hostPath, legend, withHours} from "./nav.js";
 
 export async function drawFleet() {
   const [fleet, flow] = await Promise.all([
-    getJSON("/api/hosts"), getJSON("/api/fleet")]);
+    getJSON(withHours("/api/hosts")), getJSON(withHours("/api/fleet"))]);
   const holder = document.getElementById("page");
   holder.innerHTML = "";
   if (!fleet) { holder.textContent = "no stores"; return; }

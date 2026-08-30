@@ -71,15 +71,39 @@ def journals_for(roots: Sequence[Store | Root], host: str) -> list[tuple[Root, l
     return out
 
 
-def host_series(roots: Sequence[Store | Root], host: str) -> dict | None:
+def windowed(events: Sequence[dict], since: float | None) -> list[dict]:
+    """Events at or after `since`; the whole history when since is None. The
+    window bounds SERIES — identity facts (boots, first/last seen) always
+    read the full journal, because a host does not stop being what it is
+    when its birth scrolls out of the last 24 hours."""
+    if since is None:
+        return list(events)
+    return [e for e in events if (e.get("t") or 0.0) >= since]
+
+
+def lanes_overlapping(lanes: list[dict], since: float | None) -> list[dict]:
+    """The residencies a window shows: still open, or closed inside it. A
+    lane that both began and ended before the window is history the ALL
+    range still tells whole."""
+    if since is None:
+        return lanes
+    return [lane for lane in lanes
+            if lane.get("detached") is None
+            or (lane.get("detached") or 0.0) >= since]
+
+
+def host_series(roots: Sequence[Store | Root], host: str,
+                since: float | None = None) -> dict | None:
     """One host's page, from its journal alone. None when no root in this
     set has ever journaled that host; when several do, their events are read
-    as one history and the page names every folder it drew from."""
+    as one history and the page names every folder it drew from. `since`
+    windows the series (lanes, gpu, metrics), never the identity facts."""
     journals = journals_for(roots, host)
     if not journals:
         return None
     events = sorted((event for _, evs in journals for event in evs),
                     key=lambda e: e.get("t") or 0.0)
+    recent = windowed(events, since)
     boots = boot_facts(events)
     latest = boots[-1] if boots else {}
     return {
@@ -93,9 +117,9 @@ def host_series(roots: Sequence[Store | Root], host: str) -> dict | None:
         "regimes": latest.get("regimes", []),
         "first_seen": events[0].get("t"),
         "last_seen": events[-1].get("t"),
-        "tenancy": tenancy_lanes(events),
-        "gpus": gpu_channels(events),
-        "metrics": metric_series(events),
+        "tenancy": lanes_overlapping(tenancy_lanes(events), since),
+        "gpus": gpu_channels(recent),
+        "metrics": metric_series(recent),
     }
 
 
@@ -288,7 +312,8 @@ def numbers_under(prefix: str, value) -> list[tuple[str, float]]:
 # the global reading
 # ---------------------------------------------------------------------------
 
-def fleet_data(roots: Sequence[Store | Root]) -> dict:
+def fleet_data(roots: Sequence[Store | Root],
+               since: float | None = None) -> dict:
     """What is true of the FLEET rather than of one experiment: every host as
     the hosts view renders it, joined with its residencies and its utilization
     shape, plus the runs view's placement. One window spans every timeline, so
@@ -307,17 +332,21 @@ def fleet_data(roots: Sequence[Store | Root]) -> dict:
             boots = boot_facts(events)
             latest = boots[-1] if boots else {}
             host = dict(row)                  # whatever the hosts view names
-            host["tenancy"] = tenancy_lanes(events)
-            host["util"] = thin(busiest_device(events), FLEET_POINTS)
+            host["tenancy"] = lanes_overlapping(tenancy_lanes(events), since)
+            host["util"] = thin(busiest_device(windowed(events, since)),
+                                FLEET_POINTS)
             host["regimes"] = latest.get("regimes", [])
             host["partition"] = latest.get("partition")
             hosts.append(host)
+    win = fleet_window(hosts)
+    if win is not None and since is not None:
+        win = [max(win[0], since), win[1]]
     return {
         "hosts": hosts,
         "runs": runs_data(known),
         "stores": [root.store.describe() for root in known],
         "folders": [root.folder for root in known],
-        "window": fleet_window(hosts),
+        "window": win,
     }
 
 
