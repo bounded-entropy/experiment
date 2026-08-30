@@ -56,6 +56,7 @@ if torch is not None:
     from rlstack.policy.adapters import plora_factors, plora_torch
     from rlstack.policy.adapters.replay import ReplayRows, row_plan
     from rlstack.training.losses.grpo_latent_kl import BETA, grpo_latent_kl
+    from rlstack.training.losses.grpo_latent_kl_gated import grpo_latent_kl_gated
     from rlstack.training.losses import PolicyOutputs
 
 needs_torch = unittest.skipUnless(
@@ -77,6 +78,19 @@ def plora_spec(train_uri: str, heldout_uri: str | None = None, **init):
         policy=PolicySpec(base="Qwen/Qwen3-0.6B", bank={"pi": entry}),
         algo=AlgoSpec(loss="grpo_latent_kl",
                       post=("verifier", "grpo_advantage"),
+                      optim=OptimSpec("adamw", lr=1e-5),
+                      schedule=Schedule(microbatch_tokens=64)))
+
+
+def gated_plora_spec(train_uri: str,
+                     post=("verifier", "group_accuracy", "grpo_advantage")):
+    """plora_spec with the gate: the loss that earns the prior's pull, and the
+    pipeline that writes the column it reads."""
+    entry = plora(SITE, k=4, latent=8, members=2, factors=FACTORS)
+    return arith_spec(
+        train_uri,
+        policy=PolicySpec(base="Qwen/Qwen3-0.6B", bank={"pi": entry}),
+        algo=AlgoSpec(loss="grpo_latent_kl_gated", post=post,
                       optim=OptimSpec("adamw", lr=1e-5),
                       schedule=Schedule(microbatch_tokens=64)))
 
@@ -224,6 +238,19 @@ class ValidateTest(unittest.TestCase):
 
     def test_the_prior_must_have_a_scale(self) -> None:
         self.assertIn("plora-bad-shape", self.codes(prior_std=0.0))
+
+    def test_the_gated_loss_validates_with_its_column(self) -> None:
+        issues = validate(gated_plora_spec("cas://x/t.jsonl"), SCHEMA)
+        self.assertEqual(issues, [])
+
+    def test_the_gate_without_its_producer_is_refused(self) -> None:
+        """"accuracy" is a data column like any other (I9): drop
+        group_accuracy from the pipeline and Phase 0 refuses the plan,
+        never a KeyError mid-update."""
+        spec = gated_plora_spec("cas://x/t.jsonl",
+                                post=("verifier", "grpo_advantage"))
+        codes = {issue.code for issue in validate(spec, SCHEMA)}
+        self.assertIn("unsatisfied-requires", codes)
 
 
 # ---------------------------------------------------------------------------
@@ -841,6 +868,68 @@ class LatentKlLossTest(unittest.TestCase):
             with self.subTest(parameter=name):
                 self.assertIsNotNone(parameter.grad)
                 self.assertGreater(float(parameter.grad.abs().sum()), 0.0)
+
+
+@needs_torch
+class GatedLatentKlLossTest(unittest.TestCase):
+    """accuracy first, then the KL: the gate is the solved share of the batch."""
+
+    def a_batch(self, accuracy, microbatches: int = 1):
+        from rlstack import TokenBatch
+        return TokenBatch(
+            token_ids=(1, 2, 3, 4), loss_mask=(1, 1, 1, 1),
+            behavior_logprobs=(-0.5,) * 4, segment_ids=(0, 0, 0, 0),
+            doc_starts=(0,),
+            postdata={"advantage": (1.0, 1.0, -1.0, -1.0),
+                      "accuracy": tuple(accuracy)},
+            microbatches_in_update=microbatches)
+
+    def outputs(self, state, logprobs):
+        return PolicyOutputs(
+            logprobs=logprobs,
+            provided=ADAPTER_TYPES.get("plora").instance.provide(state))
+
+    def kl(self, state) -> float:
+        return float(plora_torch.analytic_kl(state.mu, state.log_std,
+                                             state.prior_std))
+
+    def test_an_unsolved_batch_pays_no_kl(self) -> None:
+        """The whole point: while nothing is solved the prior is SILENT, even
+        against a live posterior whose KL is far from zero."""
+        from rlstack.training.losses.grpo import grpo
+
+        state = a_live_state()
+        logprobs = torch.full((4,), -0.5)
+        batch = self.a_batch((0.5,) * 4)
+        plain = grpo(PolicyOutputs(logprobs=logprobs), batch)
+        gated = grpo_latent_kl_gated(self.outputs(state, logprobs), batch)
+        self.assertGreater(self.kl(state), 0.0)
+        self.assertAlmostEqual(float(plain.loss), float(gated.loss), places=7)
+
+    def test_a_solved_batch_pays_the_whole_beta(self) -> None:
+        """Fully solved coincides with grpo_latent_kl: the gate is 1, so the
+        two objectives share one KL price and can never drift apart."""
+        state = a_live_state()
+        logprobs = torch.full((4,), -0.5)
+        gated = grpo_latent_kl_gated(self.outputs(state, logprobs),
+                                     self.a_batch((1.0,) * 4))
+        ungated = grpo_latent_kl(self.outputs(state, logprobs),
+                                 self.a_batch((1.0,) * 4))
+        self.assertAlmostEqual(float(gated.loss), float(ungated.loss),
+                               places=7)
+
+    def test_a_half_solved_batch_pays_half(self) -> None:
+        """Two of four masked tokens sit in a solved group, so the effective
+        beta is BETA / 2 — the KL enters in proportion to the solved share."""
+        from rlstack.training.losses.grpo import grpo
+
+        state = a_live_state()
+        logprobs = torch.full((4,), -0.5)
+        batch = self.a_batch((1.0, 1.0, 0.0, 0.0))
+        plain = grpo(PolicyOutputs(logprobs=logprobs), batch)
+        gated = grpo_latent_kl_gated(self.outputs(state, logprobs), batch)
+        self.assertAlmostEqual(float(gated.loss) - float(plain.loss),
+                               0.5 * BETA * self.kl(state), places=6)
 
 
 @needs_torch

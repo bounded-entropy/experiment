@@ -95,6 +95,13 @@ class PipelineTest(unittest.TestCase):
         self.assertEqual(columns["reward"], [1.0, 0.0, 0.0, 0.0])
         self.assertEqual(columns["advantage"], [1.0, -1.0, 0.0, 0.0])
 
+    def test_group_accuracy_is_the_groups_mean_broadcast(self) -> None:
+        """Each row carries ITS group's accuracy: the column is the gate
+        grpo_latent_kl_gated reads, so a half-right group must not look
+        solved from any of its rows."""
+        columns = self.run_pipe(("verifier", "group_accuracy"))
+        self.assertEqual(columns["accuracy"], [0.5, 0.5, 0.0, 0.0])
+
     def test_columns_align_to_wave_order(self) -> None:
         columns = self.run_pipe(("verifier",))
         self.assertEqual(len(columns["reward"]), 4)
@@ -127,6 +134,9 @@ class RegistrationTest(unittest.TestCase):
         grpo = POST.get("grpo_advantage")
         self.assertEqual(grpo.consumes, ("reward",))
         self.assertEqual(grpo.produces, ("advantage",))
+        accuracy = POST.get("group_accuracy")
+        self.assertEqual(accuracy.consumes, ("reward",))
+        self.assertEqual(accuracy.produces, ("accuracy",))
 
 
 if __name__ == "__main__":
