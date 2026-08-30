@@ -127,6 +127,47 @@ export function note(text) {
 }
 
 export async function getJSON(path) {
-  const res = await fetch(path);
-  return res.ok ? await res.json() : null;
+  try {
+    const res = await fetch(path);
+    return res.ok ? await res.json() : null;
+  } catch (_) { return null; }         // a dead wire is null, never a throw
+}
+
+export async function getAnswer(path) {
+  // the three-way truth a CLAIM needs: an answer, a POSITIVE miss (the server
+  // looked and said no), or the wire being down. A page must never read
+  // "down" as "no such run" — that is the wipe-on-hiccup bug.
+  try {
+    const res = await fetch(path);
+    if (res.ok) return {data: await res.json()};
+    return res.status === 404 ? {missing: true} : {down: true};
+  } catch (_) { return {down: true}; }
+}
+
+// ---- the freshness contract -----------------------------------------------
+// A page that has drawn once NEVER wipes itself because one poll failed: it
+// keeps the last good render, says how old it is, and repairs silently on the
+// next good answer. Pages call okTick() after a full render and lostTick()
+// instead of touching the DOM when a poll comes back empty.
+
+let lastGood = 0;
+
+export function drawnOnce() { return lastGood > 0; }
+
+export function okTick() {
+  lastGood = Date.now();
+  const pip = document.getElementById("stale");
+  if (pip) pip.style.display = "none";
+}
+
+export function lostTick() {
+  if (!lastGood) return;               // nothing to keep: the page says its own words
+  let pip = document.getElementById("stale");
+  if (!pip) {
+    pip = el("div", {id: "stale"});
+    document.body.append(pip);
+  }
+  pip.textContent = "connection lost — showing data from "
+                  + ago(lastGood / 1000) + " · retrying";
+  pip.style.display = "block";
 }

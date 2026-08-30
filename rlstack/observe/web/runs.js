@@ -11,7 +11,7 @@
 // the cursor.
 "use strict";
 
-import {ago, el, esc} from "./dom.js";
+import {ago, drawnOnce, el, esc, lostTick, okTick} from "./dom.js";
 import {ctx, hostPath, legend, runPath, runsIndex} from "./nav.js";
 
 let needle = "";
@@ -21,10 +21,17 @@ const collapsed = new Set();
 
 export async function drawIndex() {
   const data = await runsIndex();
+  if (!data) {                         // the freshness contract (dom.js)
+    if (drawnOnce()) { lostTick(); return; }
+    document.getElementById("page").textContent =
+        "observer unreachable — retrying";
+    return;
+  }
   latest = data.runs;
   serverNow = data.now;
   frame();
   render();
+  okTick();
 }
 
 // ---- the frame: built ONCE, so a poll never rebuilds the search box -------

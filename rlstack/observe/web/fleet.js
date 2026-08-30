@@ -3,17 +3,22 @@
 // (#50's rule); the two aggregates here belong to no single host or run.
 "use strict";
 
-import {C, WHEEL, ago, brief, clock, el, esc, getJSON, pulseDot, raw, section,
-        when} from "./dom.js";
+import {C, WHEEL, ago, brief, clock, drawnOnce, el, esc, getJSON, lostTick,
+        okTick, pulseDot, raw, section, when} from "./dom.js";
 import {card, emptyCard, residencyTip, timeline} from "./charts.js";
 import {ctx, hostPath, legend, withHours} from "./nav.js";
 
 export async function drawFleet() {
   const [fleet, flow] = await Promise.all([
     getJSON(withHours("/api/hosts")), getJSON(withHours("/api/fleet"))]);
+  if (!fleet) {                        // the freshness contract (dom.js)
+    if (drawnOnce()) { lostTick(); return; }
+    document.getElementById("page").textContent =
+        "observer unreachable — retrying";
+    return;
+  }
   const holder = document.getElementById("page");
   holder.innerHTML = "";
-  if (!fleet) { holder.textContent = "no stores"; return; }
   // a host name is unique per store, not per fleet: when two roots journal
   // the same name, the folder is what tells them apart
   const shared = new Set();
@@ -84,6 +89,7 @@ export async function drawFleet() {
     + " <span style='color:#ffb86b'>orange = stalled (running, host has no pulse)</span>,"
     + " <span style='color:#e07a7a'>red = failed</span> · aggregates sum per"
     + " bucket · hover anything for raw values");
+  okTick();
 }
 
 // ---- the two aggregates: one per kind of partition ------------------------

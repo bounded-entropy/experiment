@@ -103,6 +103,21 @@ class UiTest(unittest.TestCase):
         self.assertEqual(status, "404 Not Found")
         self.assertEqual(len(refreshes), 3)         # every API read refreshed
 
+    def test_a_racing_read_is_a_503_never_a_lying_404(self) -> None:
+        """An exception inside an API read (a reload swapping files under a
+        scan) answers 503 "try again" — the page must be able to tell a
+        transient from the server's own positive "no such run", and the
+        worker must survive it."""
+        def racing():
+            raise FileNotFoundError("swapped mid-scan")
+        app = ui_app([self.store], refresh=racing)
+        status, _, body = call(app, f"/api/run/{self.report.run_id}")
+        self.assertEqual(status, "503 Service Unavailable")
+        self.assertIn("transient", json.loads(body)["error"])
+        status, _, _ = call(ui_app([self.store]),
+                            f"/api/run/{self.report.run_id}")
+        self.assertEqual(status, "200 OK")          # the worker lived
+
     def test_api_reads_never_mutate_a_live_run(self) -> None:
         staged = self.store.path_of(
             f"runs/{self.report.run_id}/waves/000099.jsonl.gz")

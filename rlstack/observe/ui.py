@@ -85,18 +85,27 @@ def ui_app(roots: Sequence[Store | Root],
                                       ("Cache-Control", "no-cache")])
             return [body]
         if path.startswith("/api/"):
-            if refresh is not None:
-                refresh()
-            query = environ.get("QUERY_STRING", "")
-            hours = asked_hours(query)
-            now = time.time()
-            payload, status = api(
-                known, [unquote(part) for part in path.split("/") if part],
-                asked_folder(query),
-                panels() if panels is not None else None,
-                since=None if hours is None else now - hours * 3600.0,
-                now=now, desk=desk,
-                params=parse_qs(query, keep_blank_values=True))
+            try:
+                if refresh is not None:
+                    refresh()
+                query = environ.get("QUERY_STRING", "")
+                hours = asked_hours(query)
+                now = time.time()
+                payload, status = api(
+                    known, [unquote(part) for part in path.split("/") if part],
+                    asked_folder(query),
+                    panels() if panels is not None else None,
+                    since=None if hours is None else now - hours * 3600.0,
+                    now=now, desk=desk,
+                    params=parse_qs(query, keep_blank_values=True))
+            except Exception as racing:
+                # an observer read can RACE the store it reads (a volume
+                # reload swapping files mid-scan): that is a 503 saying try
+                # again — never a dead worker, and never a lying 404 the page
+                # would mistake for "no such run"
+                payload, status = ({"error": "transient read failure",
+                                    "detail": str(racing)},
+                                   "503 Service Unavailable")
             return _json(start_response, payload, status)
         # every page is the same document; the modules route on the pathname
         start_response("200 OK", [("Content-Type", "text/html; charset=utf-8")])

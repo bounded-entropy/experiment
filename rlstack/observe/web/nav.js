@@ -109,10 +109,12 @@ export function ctx(html) {
 let switcherSignature = null;
 
 export async function runsIndex() {
-  // /api/runs answers {now, runs}; every consumer reads it through here
+  // /api/runs answers {now, runs}; every consumer reads it through here.
+  // null means the POLL failed — a page keeps its last render and says so,
+  // instead of mistaking a dead wire for an empty index
   const {getJSON} = await import("./dom.js");
   const data = await getJSON("/api/runs");
-  return data ? {now: data.now, runs: data.runs || []} : {now: null, runs: []};
+  return data ? {now: data.now, runs: data.runs || []} : null;
 }
 
 export function syncSwitcher(runs) {

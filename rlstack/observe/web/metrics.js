@@ -8,7 +8,8 @@
 // overlay finds the interesting run, the run page explains it.
 "use strict";
 
-import {WHEEL, brief, el, esc, getJSON, hideTip, poll, showTip} from "./dom.js";
+import {WHEEL, brief, drawnOnce, el, esc, getJSON, hideTip, lostTick, okTick,
+        poll, showTip} from "./dom.js";
 import {plot} from "./charts.js";
 import {ctx, legend, runPath} from "./nav.js";
 
@@ -26,7 +27,12 @@ export async function drawCharts() {
   }
   const data = await getJSON("/api/series?metric=" + encodeURIComponent(metric)
                              + "&q=" + encodeURIComponent(expr));
+  if (!data) {                         // the freshness contract (dom.js)
+    if (drawnOnce()) lostTick();
+    return;
+  }
   render(data);
+  okTick();
 }
 
 // ---- the frame: built once, so the poll never yanks the controls ----------

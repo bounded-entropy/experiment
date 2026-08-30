@@ -8,7 +8,7 @@
 // poll for.
 "use strict";
 
-import {C, brief, el, esc, getJSON, note, raw, section} from "./dom.js";
+import {C, brief, el, esc, getAnswer, getJSON, note, raw, section} from "./dom.js";
 import {histogramCard} from "./charts.js";
 import {apiRun, ctx, drawAmbiguity, legend, route, runPath, syncSwitcher}
   from "./nav.js";
@@ -16,9 +16,10 @@ import {apiRun, ctx, drawAmbiguity, legend, route, runPath, syncSwitcher}
 const FINISH_COLOR = {stop: C.rail, eos: C.feed, length: C.warn};
 
 export async function drawWave() {
-  const [wave, runs] = await Promise.all([
-    getJSON(apiRun(route.runId, "/wave/" + route.update, route.folder)),
+  const [answer, runs] = await Promise.all([
+    getAnswer(apiRun(route.runId, "/wave/" + route.update, route.folder)),
     getJSON("/api/runs").then(d => (d && d.runs) || [])]);
+  const wave = answer.data;
   const holder = document.getElementById("page");
   holder.innerHTML = "";
   if (wave && wave.ambiguous) { drawAmbiguity(route.runId, wave.ambiguous); return; }
@@ -26,7 +27,11 @@ export async function drawWave() {
   if (!wave) {
     ctx(`<a href="${runPath(route.runId, route.folder)}" class="nav">`
       + `${esc(route.runId)}</a>`);
-    holder.textContent = "no such sealed wave";
+    // a sealed wave never polls — so a DOWN wire retries itself; only the
+    // server's own "no" (a positive 404) stands as the answer
+    holder.textContent = answer.missing ? "no such sealed wave"
+                                        : "observer unreachable — retrying";
+    if (!answer.missing) setTimeout(drawWave, 3000);
     return;
   }
   const s = wave.summary;
