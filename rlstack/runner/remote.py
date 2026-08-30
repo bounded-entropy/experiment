@@ -436,6 +436,32 @@ class RemoteHost:
         return self._transport.ask("status", {})
 
 
+class RemoteMetal:
+    """The desk's end of the METAL PLANE: deduce, then command.
+
+    `residual` is the deduction feed — per-device free fractions from the
+    container that owns the device, counting built partitions AND in-flight
+    bookings. `carve` is the command: the metal books synchronously at its
+    own door, so a deduction gone stale between the ask and the command
+    costs a refusal, never a double-book. `decarve` frees a host's fraction
+    on a still-living container — the reaper's second half."""
+
+    def __init__(self, transport: Transport) -> None:
+        self._transport = transport
+
+    def residual(self) -> list[float]:
+        return list(self._transport.ask("residual", {})["residual"])
+
+    def describe(self) -> dict:
+        return self._transport.ask("describe", {})
+
+    async def carve(self, request: Mapping) -> dict:
+        return await self._transport.call("carve", dict(request))
+
+    async def decarve(self, name: str) -> dict:
+        return await self._transport.call("decarve", {"host": name})
+
+
 class RemoteFleet:
     """The client end of the STANDING fleet: a campaign's whole surface.
 
@@ -464,18 +490,42 @@ class RemoteFleet:
         return self._transport.ask("liveness", {})
 
     async def list_host(self, name: str, regimes: Sequence,
-                        address: str, solo: bool = False) -> dict:
+                        address: str, solo: bool = False,
+                        partition: Mapping | None = None,
+                        metal: str = "") -> dict:
         """A booted host enters the standing fleet over the wire — the
         phone-home half of the deploy contract: the container that stood the
-        host tells the desk what it wears and where it answers."""
+        host tells the desk what it wears, where it answers, and (the
+        capacity view) the partition row it was born onto and the metal it
+        lives on."""
         return await self._transport.call("list", {
             "host": name, "address": address, "solo": solo,
+            "partition": dict(partition) if partition else None,
+            "metal": metal,
             "regimes": [{"name": r.name, "capability": r.capability,
                          "base": r.base, "shape": r.shape} for r in regimes]})
 
-    async def delist(self, name: str) -> dict:
+    async def delist(self, name: str, reason: str = "") -> dict:
         """The listing's retirement, over the same wire it entered by."""
-        return await self._transport.call("delist", {"host": name})
+        return await self._transport.call("delist", {"host": name,
+                                                     "reason": reason})
+
+    async def register_metal(self, name: str, gpu: str, devices: int,
+                             vram_gb: float, address: str) -> dict:
+        """A metal container phones home its OWN existence — the other half
+        of the deploy contract: after this the desk can deduce (residual)
+        and command (carve/decarve) against it at `address`."""
+        return await self._transport.call("metal", {
+            "name": name, "gpu": gpu, "devices": devices,
+            "vram_gb": vram_gb, "address": address})
+
+    async def reap(self, probes: int = 3, wait: float = 0.0) -> dict:
+        """The janitor's sweep, run by the desk now: probe every listing,
+        retry the silent (on a lazy venue the knock is the restart), reap
+        what stays silent — decarve at its metal, delist with the reason
+        journaled. Returns {host: alive | recovered | reaped}."""
+        return await self._transport.call("reap", {"probes": probes,
+                                                   "wait": wait})
 
     async def migrate(self, run_ids: Sequence[str], *, optim: str = "load",
                       remaining_only: bool = False) -> dict:

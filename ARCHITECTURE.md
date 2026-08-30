@@ -362,13 +362,28 @@ inside one).
 **Desk / FleetService** — the STANDING fleet: placement as a service and the
 fleet journal's one writer (the Trainer/ledger pattern on the fleet plane).
 It holds **Listings** — descriptions of standing hosts (regimes, address,
-solo), journaled and rebuilt by `from_journal` — matches the join rung over
-them, and `submit(spec)` ends in an **adopt** at the learner's listing with
-every other pool's address threaded as routes. A placement nothing serves
-returns boot instructions: the standing carve is a venue action. A campaign's
-whole surface is `RemoteFleet(transport).submit(spec)`; no venue word appears
-in any of it.
+solo, and the capacity VIEW: partition row + metal name), journaled and
+rebuilt by `from_journal` — matches the join rung over them, and
+`submit(spec)` ends in an **adopt** at the learner's listing with every other
+pool's address threaded as routes. A placement no listing serves becomes a
+desk-issued CARVE on a registered metal (deduce by residual, command by
+RemoteMetal.carve); only what no metal holds returns boot instructions — the
+standing acquire, a human's. `reap` is the janitor: probe, retry (the knock
+is the restart on a lazy venue), decarve + delist(reason) what stays silent.
+A campaign's whole surface is `RemoteFleet(transport).submit(spec)`; no venue
+word appears in any of it.
 `rlstack/runner/fleet.py` (`FleetService`, `Listing`), `rlstack/runner/remote.py` (`RemoteFleet`)
+
+**MetalService / the metal plane** — the metal-side end of the standing
+carve: the container that owns a device wears it by default. One registered
+Metal's BOOKS (built partitions — hand-built hosts enter via `adopt_born` —
+plus pending bookings), and the verbs that create and free hosts: `carve`
+(BOOKS its fraction synchronously before the build's first await, so carves
+never double-promise; a failed build releases), `decarve` (the venue's
+`release` unmakes the metal, the fraction returns to residual), `residual` /
+`describe` (the desk's deduction feed). The desk DEDUCES, the metal
+ENFORCES; the metal writes nothing to the fleet journal.
+`rlstack/runner/fleet.py` (`MetalService`), `rlstack/runner/remote.py` (`RemoteMetal`)
 
 **Pool** — a NAME traffic routes to, with two lives: declared capacity
 (`PoolMember` in a `GpuConfig`) and a runtime routing entry (`Routes`: pool name

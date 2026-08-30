@@ -3,7 +3,8 @@
     MODAL_PROFILE=yu-masala-workspace modal deploy deploy/fleet_a100.py
     ... run deploy/fleet_a100.py::up           # A100 serves, phones home
     ... run deploy/fleet_a100.py::submit       # the sweep's best lora arm, long
-    ... run deploy/fleet_a100.py::status       # listings, probes, committed
+    ... run deploy/fleet_a100.py::status       # listings, residual, probes
+    ... run deploy/fleet_a100.py::reap         # the janitor's sweep, by hand
 
 then edit code and watch what a refresh really does:
 
@@ -17,8 +18,17 @@ knows it re-reads from the fleet journal, so a redeploy reboots it into the
 same fleet. The A100 stands the sweep's two fractional hosts and LISTS THEM
 OVER THE WIRE (RemoteFleet.list_host) when `up` starts it serving; `submit`
 goes client -> desk -> adopt, three processes, with the client's code claim
-checked at the host. The two transports below are this venue's whole
+checked at the host. The three transports below are this venue's whole
 contribution.
+
+THE METAL PLANE stands by default: the container wears a MetalService (its
+books hold the two standing hosts, so residual is honest: 1 - .42 - .50),
+`up` phones home the metal's own registration beside the host listings, and
+a placement no listing serves becomes a desk-issued CARVE on the ~8%% that
+is free — booked at this container's door before the build, so carves never
+double-promise. The `reaper` function sweeps on a schedule: probe, retry
+(on Modal the knock itself boots a stopped-but-deployed container), and
+only what stays silent is decarved + delisted with the reason journaled.
 """
 
 import json
@@ -62,6 +72,8 @@ LEARN_FRACTION = 0.50
 
 SERVE_ADDRESS = "a100://serve"
 LEARN_ADDRESS = "a100://train"
+METAL_NAME = "modal-a100"
+METAL_ADDRESS = "a100://metal"       # the metal PLANE: carve/decarve/residual
 
 
 # ---------------------------------------------------------------------------
@@ -117,6 +129,28 @@ class MetalTransport:
         return self.handle().host_ask.remote(self.address, verb, payload)
 
 
+class MetalPlaneTransport:
+    """The Transport contract to the metal PLANE of the same container —
+    carve/decarve/residual, the verbs that create and free hosts rather than
+    talk to one. One metal today; the address rides anyway so a second metal
+    is a second cls, not a new desk."""
+
+    def __init__(self, address: str) -> None:
+        self.address = address
+        self._handle = None
+
+    def handle(self):
+        if self._handle is None:
+            self._handle = metal_handle()
+        return self._handle
+
+    async def call(self, verb: str, payload: dict) -> dict:
+        return await self.handle().metal.remote.aio(verb, payload)
+
+    def ask(self, verb: str, payload: dict) -> dict:
+        return self.handle().metal_ask.remote(verb, payload)
+
+
 # ---------------------------------------------------------------------------
 # the desk: a warm CPU container whose whole memory is the fleet journal
 # ---------------------------------------------------------------------------
@@ -130,7 +164,7 @@ class Desk:
     def bring_up(self) -> None:
         from rlstack import ModalVolumeStore
         from rlstack.runner.fleet import FleetService
-        from rlstack.runner.remote import RemoteHost
+        from rlstack.runner.remote import RemoteHost, RemoteMetal
 
         class DeskStore(ModalVolumeStore):
             """The desk's one extra durable point: cas blobs it writes
@@ -144,8 +178,11 @@ class Desk:
 
         self.desk = FleetService.from_journal(
             DeskStore("/store", volume=store_volume, locator=STORE),
-            connect=lambda address: RemoteHost(MetalTransport(address)))
-        print(f"[desk] rebuilt from journal: {sorted(self.desk.listings)}")
+            connect=lambda address: RemoteHost(MetalTransport(address)),
+            connect_metal=lambda address: RemoteMetal(
+                MetalPlaneTransport(address)))
+        print(f"[desk] rebuilt from journal: {sorted(self.desk.listings)} "
+              f"/ metal plane: {sorted(self.desk.metal_remotes)}")
 
     @modal.method()
     async def fleet(self, verb: str, payload: dict) -> dict:
@@ -171,43 +208,75 @@ class Metal:
         from rlstack import ModalVolumeStore
         from rlstack.policy.siteschema import hf_schema
         from rlstack.runner.engines.vllm_engine import VllmEngine
+        from rlstack.runner.fleet import Metal as OwnedMetal, MetalService
         from rlstack.runner.host import Host, Partition, Regime
         from rlstack.runner.learners.torch_learner import TorchLearner
-        from rlstack.runner.remote import HostService, LocalTransport
+        from rlstack.runner.remote import LocalTransport
 
         self.store = ModalVolumeStore("/store", volume=store_volume,
                                       locator=STORE)
         ensure_tasks(self.store)
+
+        # THE METAL PLANE, by default: the container's books, the factories
+        # a desk-issued carve builds with, and the address mint. dial routes
+        # through the same table the venue's host verbs use, so a carved
+        # host reaches its neighbors exactly like a standing one.
+        self.metal_service = MetalService(
+            OwnedMetal(METAL_NAME, "A100-40GB", 1, 40.0), store=self.store,
+            engine_factory=lambda regime, partition: VllmEngine(
+                regime.base, tp=regime.shape,
+                gpu_memory_utilization=partition.memory,
+                max_model_len=1536, max_bundles=8, max_rank=16,
+                cas_get=self.store.cas_get, serves=("lora",)),
+            learner_factory=lambda regime, partition: TorchLearner(),
+            address_of=lambda name: f"a100://{name}",
+            schema_for=hf_schema,
+            dial=lambda address: LocalTransport(
+                self.metal_service.service_for(address)),
+            release=lambda host: [engine.shutdown()
+                                  for engine in host.engines])
 
         engine = VllmEngine(BASE, tp=1, gpu_memory_utilization=SERVE_FRACTION,
                             max_model_len=1536, max_bundles=8, max_rank=16,
                             cas_get=self.store.cas_get, serves=("lora",))
         self.serve_host = Host(
             "a100-serve", engines=(engine,), learner=None, store=self.store,
-            partition=Partition("modal-a100", (0,), SERVE_FRACTION,
+            partition=Partition(METAL_NAME, (0,), SERVE_FRACTION,
                                 "A100-40GB"),
             regimes=(Regime("serve-tp1", "inference", BASE, 1),))
-        local = {SERVE_ADDRESS: HostService(self.serve_host)}
+        self.metal_service.adopt_born(self.serve_host, SERVE_ADDRESS)
         self.learn_host = Host(
             "a100-train", engines=(), learner=TorchLearner(), store=self.store,
-            partition=Partition("modal-a100", (0,), LEARN_FRACTION,
+            partition=Partition(METAL_NAME, (0,), LEARN_FRACTION,
                                 "A100-40GB"),
             regimes=(Regime("train-fsdp1", "training", BASE, 1),),
             schema_for=hf_schema,
-            dial=lambda address: LocalTransport(local[address]))
-        local[LEARN_ADDRESS] = HostService(self.learn_host)
-        self.services = local
-        print(f"[metal] up: {BASE} on one A100-40GB, two hosts")
+            dial=lambda address: LocalTransport(
+                self.metal_service.service_for(address)))
+        self.metal_service.adopt_born(self.learn_host, LEARN_ADDRESS)
+        print(f"[metal] up: {BASE} on one A100-40GB, two hosts; "
+              f"residual {self.metal_service.residual()}")
 
     @modal.method()
     async def host(self, address: str, verb: str, payload: dict) -> dict:
         if verb == "adopt":
             store_volume.reload()  # a migrated child's plans are desk-written
-        return await self.services[address].serve(verb, payload)
+        return await self.metal_service.service_for(address).serve(verb,
+                                                                   payload)
 
     @modal.method()
     def host_ask(self, address: str, verb: str, payload: dict) -> dict:
-        return self.services[address].answer(verb, payload)
+        return self.metal_service.service_for(address).answer(verb, payload)
+
+    @modal.method()
+    async def metal(self, verb: str, payload: dict) -> dict:
+        if verb == "carve":
+            store_volume.reload()  # a carve may read desk-written cas blobs
+        return await self.metal_service.serve(verb, payload)
+
+    @modal.method()
+    def metal_ask(self, verb: str, payload: dict) -> dict:
+        return self.metal_service.answer(verb, payload)
 
     @modal.method()
     def build_row_here(self, updates: int) -> dict:
@@ -239,11 +308,19 @@ class Metal:
         from rlstack.runner.remote import RemoteFleet
 
         fleet = RemoteFleet(DeskTransport())
+        try:
+            await fleet.register_metal(METAL_NAME, "A100-40GB", 1, 40.0,
+                                       METAL_ADDRESS)
+            print(f"[metal] registered {METAL_NAME} on the metal plane")
+        except Exception as taken:
+            print(f"[metal] {METAL_NAME} not re-registered: {taken}")
         for name, host, address in (
                 ("a100-serve", self.serve_host, SERVE_ADDRESS),
                 ("a100-train", self.learn_host, LEARN_ADDRESS)):
             try:
-                await fleet.list_host(name, host.regimes, address)
+                await fleet.list_host(name, host.regimes, address,
+                                      partition=host.partition.row(),
+                                      metal=METAL_NAME)
                 print(f"[metal] listed {name} at {address}")
             except Exception as taken:
                 print(f"[metal] {name} not re-listed: {taken}")
@@ -311,6 +388,24 @@ def ensure_tasks(store) -> None:
 
 
 # ---------------------------------------------------------------------------
+# the reaper: liveness delisting on a cadence
+# ---------------------------------------------------------------------------
+
+@app.function(image=cpu_image, schedule=modal.Period(minutes=15),
+              timeout=1200)
+async def reaper() -> None:
+    """The janitor's sweep, on the clock: every listing probed by the desk,
+    the silent retried (on Modal the knock itself boots a stopped-but-
+    deployed container — a call queues until bring_up answers, so a mere
+    reboot reads as alive/recovered, never reaped), and only a torn-down
+    deployment stays silent long enough to be decarved and delisted."""
+    from rlstack.runner.remote import RemoteFleet
+
+    print(json.dumps(await RemoteFleet(DeskTransport()).reap(probes=3,
+                                                             wait=30.0)))
+
+
+# ---------------------------------------------------------------------------
 # the doors
 # ---------------------------------------------------------------------------
 
@@ -346,12 +441,25 @@ async def submit(updates: int = 400) -> None:
 
 @app.local_entrypoint()
 def status() -> None:
-    from rlstack.runner.remote import RemoteFleet
+    from rlstack.runner.remote import RemoteFleet, RemoteMetal
 
     fleet = RemoteFleet(DeskTransport())
-    print(json.dumps({"listings": fleet.status()["listings"],
-                      "liveness": fleet.liveness(),
-                      "roster": metal_handle().roster.remote()}, indent=2))
+    told = fleet.status()
+    print(json.dumps({
+        "listings": told["listings"], "metal": told["metal"],
+        "residual": RemoteMetal(
+            MetalPlaneTransport(METAL_ADDRESS)).residual(),
+        "liveness": fleet.liveness(),
+        "roster": metal_handle().roster.remote()}, indent=2))
+
+
+@app.local_entrypoint()
+async def reap(probes: int = 3, wait: float = 30.0) -> None:
+    """The janitor's sweep, by hand — same verb the scheduled reaper runs."""
+    from rlstack.runner.remote import RemoteFleet
+
+    print(json.dumps(await RemoteFleet(DeskTransport()).reap(probes, wait),
+                     indent=2))
 
 
 @app.local_entrypoint()

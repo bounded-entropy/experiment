@@ -3120,6 +3120,56 @@ specs; backends (local/modal/skypilot) and GPU topology are semantics-neutral.
     (wave_key and kin) now take the run DIRECTORY, not the id — the one
     signature change, caught by one test.
 
+68. **THE METAL PLANE AND THE REAPER: the desk deduces, the metal enforces,
+    and silence gets a janitor.** Until now the standing carve was a human's
+    errand (boot instructions in the submit refusal) and a host that died
+    without saying delist left a stale listing forever. Samarth's ruling
+    closed both, with one invariant named first: **a carve accepted is a
+    fraction promised** — space must be booked from the ack, not from the
+    build's completion, or two carves in the build window double-book.
+    - **MetalService** (runner/fleet.py) is the metal-side end: the
+      container that owns a device wears it BY DEFAULT beside its
+      HostService routing. It holds ONE registered Metal's books — built
+      partitions (hand-built standing hosts enter via `adopt_born`, refused
+      without a partition) plus PENDING bookings — and serves `carve`
+      (books synchronously before the build's first await; factories run in
+      a worker thread because an engine boot is minutes; a failed build
+      releases its booking), `decarve` (the venue's `release` unmakes what
+      the factories made, the fraction returns to residual), and
+      `residual`/`describe` on the ask path. It writes NOTHING to the fleet
+      journal: the desk stays that journal's one writer.
+    - **The desk commands carves** (the bare provision CALLABLE is
+      superseded): metal registration now carries an ADDRESS (`metal` verb —
+      the container phones home its own existence beside its host listings;
+      journaled; from_journal redials via `connect_metal`), and
+      provision_unit asks each registered metal's residual (the DEDUCTION)
+      then commands the first that fits (RemoteMetal.carve). A stale
+      deduction costs a refusal at the metal's door, never a double-book;
+      what no metal holds is still a boot instruction — the standing
+      acquire stays a human's. A unit carved for a placement whose later
+      unit missed STAYS listed (metal born is metal listed).
+    - **Listings carry the capacity VIEW** (partition row + metal name,
+      journaled, rebuilt): the desk can deduce, plan, and render — and the
+      row is exactly what enforcement must not rely on, because a view
+      cannot see in-flight bookings or unilateral deaths. Both of Samarth's
+      options landed, with the authority split stated.
+    - **reap(probes, wait)**: every listing probed; the silent RETRIED
+      (Samarth's "somehow restart" — on Modal the knock itself boots a
+      stopped-but-deployed container, so a probe that queues until bring_up
+      answers reads recovered, and only a torn-down deployment stays
+      silent); the still-silent DECARVED at their metal (a living container
+      frees the fraction; a dead one already did, physically) and DELISTED
+      with reason="reaped" journaled, so the rebuilt desk agrees.
+      fleet_a100 runs it on a modal.Period(15m) schedule and as a manual
+      door. Verdicts: alive | recovered | reaped.
+    Wire growth: fleet verbs `metal`/`reap`, metal verbs
+    `carve`/`decarve`/`residual`/`describe`, RemoteMetal beside RemoteHost/
+    RemoteFleet, list frames carry partition/metal, delist carries reason.
+    fleet_a100's Metal container books its two standing hosts (residual
+    honestly ~0.08) and mints carve addresses; the booking race, the failed
+    build, the reaped-carve-frees-metal circle, and the recover-vs-reap
+    verdicts are all pinned on fakes (test_fleet_service, 26 tests).
+
 ## Open threads (do NOT treat as settled; flag when your answer touches them)
 
 - TODO (Samarth, settled intent — future, nothing now): BUNDLE LRU EVICTION

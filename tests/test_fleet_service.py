@@ -19,13 +19,14 @@ import json
 
 from common import arith_spec, arith_store
 from rlstack import (
-    FakeEngine, FakeLearner, GpuConfig, GpuGroup, Host, Regime, Seeds,
+    FakeEngine, FakeLearner, GpuConfig, GpuGroup, Host, Metal, Regime, Seeds,
     fake_qwen_schema, gpus, learner, pool,
 )
+from rlstack.runner.host import Partition
 from rlstack.spec.canonical import canonical_json
-from rlstack.runner.fleet import FleetService, Listing
+from rlstack.runner.fleet import FleetService, Listing, MetalService
 from rlstack.runner.remote import (
-    HostService, LocalTransport, RemoteFleet, RemoteHost,
+    HostService, LocalTransport, RemoteFleet, RemoteHost, RemoteMetal,
 )
 
 BASE = "Qwen/Qwen3-0.6B"
@@ -44,6 +45,56 @@ class DeskFixture(unittest.TestCase):
         self.addCleanup(tmp.cleanup)
         self.store, self.train, self.heldout = arith_store(tmp.name)
         self.transports: dict[str, LocalTransport] = {}
+        self.metal_services: dict[str, MetalService] = {}
+        self.metal_transports: dict[str, LocalTransport] = {}
+
+    def _transport(self, address: str):
+        """Every address in this test's little world — hand-listed hosts
+        first (so a test may shadow a carved address with a Dead transport),
+        then hosts carved on any metal service."""
+        if address in self.transports:
+            return self.transports[address]
+        for service in self.metal_services.values():
+            if address in service.services:
+                return LocalTransport(service.services[address])
+        raise KeyError(address)
+
+    class LazyTransport:
+        """Resolves the address on EVERY frame — the venue truth
+        (MetalTransport looks its handle up lazily), and what lets a test
+        kill a container by shadowing its address after it was listed."""
+
+        def __init__(self, fixture: "DeskFixture", address: str) -> None:
+            self.fixture, self.address = fixture, address
+
+        async def call(self, verb: str, payload: dict) -> dict:
+            return await self.fixture._transport(self.address).call(
+                verb, payload)
+
+        def ask(self, verb: str, payload: dict) -> dict:
+            return self.fixture._transport(self.address).ask(verb, payload)
+
+    def metal_service(self, name: str = "fake-metal", devices: int = 2,
+                      build_gate=None, broken: bool = False) -> MetalService:
+        """One metal container's books on fakes: factories that can be held
+        open (build_gate) or broken, for the booking claims."""
+        def engine_factory(regime, partition):
+            if build_gate is not None:
+                build_gate.wait()
+            if broken:
+                raise RuntimeError("the factory is broken")
+            return FakeEngine(base=regime.base)
+
+        service = MetalService(
+            Metal(name, "L4", devices, 24.0), store=self.store,
+            engine_factory=engine_factory,
+            learner_factory=lambda regime, partition: FakeLearner(),
+            address_of=lambda host_name: f"fleet://carved/{host_name}",
+            schema_for=lambda base: fake_qwen_schema(4, base=base),
+            dial=lambda address: self._transport(address))
+        self.metal_services[name] = service
+        self.metal_transports[f"metal://{name}"] = LocalTransport(service)
+        return service
 
     def stand_up(self, name: str, address: str, *, serves_pool: bool,
                  trains: bool, solo: bool = False) -> Host:
@@ -69,7 +120,17 @@ class DeskFixture(unittest.TestCase):
     def desk(self) -> FleetService:
         return FleetService(
             self.store,
-            connect=lambda addr: RemoteHost(self.transports[addr]))
+            connect=lambda addr: RemoteHost(self.LazyTransport(self, addr)),
+            connect_metal=lambda addr: RemoteMetal(
+                self.metal_transports[addr]))
+
+    def desk_with_metal(self, *names) -> FleetService:
+        """A desk with the named metal services registered, plane and all."""
+        desk = self.desk()
+        for name in names:
+            desk.register_metal(self.metal_services[name].metal,
+                                address=f"metal://{name}")
+        return desk
 
     def split_spec(self):
         """main on one partition, the learner on another — the two-listing
@@ -182,7 +243,7 @@ class FleetServiceTest(DeskFixture):
         reborn = FleetService.from_journal(
             self.store, connect=lambda addr: RemoteHost(self.transports[addr]))
         self.assertEqual(sorted(reborn.listings), ["serve-a", "train-b"])
-        placement, boot = reborn.place_listings(self.split_spec())
+        placement, boot = go(reborn.place_listings(self.split_spec()))
         self.assertEqual(boot, [])
         self.assertEqual(placement[None].name, "train-b")
         self.assertEqual(placement["main"].name, "serve-a")
@@ -203,13 +264,20 @@ class FleetServiceTest(DeskFixture):
                                 trains=False)
         desk = self.desk()
         remote = RemoteFleet(LocalTransport(desk))
-        go(remote.list_host("serve-a", serving.regimes, "fleet://a"))
+        row = {"metal": "node-a", "gpu": "L4", "devices": [0], "memory": 0.4}
+        go(remote.list_host("serve-a", serving.regimes, "fleet://a",
+                            partition=row, metal="node-a"))
         self.assertEqual(sorted(desk.listings), ["serve-a"])
         reborn = FleetService.from_journal(
             self.store, connect=lambda addr: RemoteHost(self.transports[addr]))
         self.assertEqual(sorted(reborn.listings), ["serve-a"])
         self.assertEqual(reborn.listings["serve-a"].regimes,
                          serving.regimes)
+        # the capacity VIEW rides the frame, the journal, and the rebuild
+        self.assertEqual(reborn.listings["serve-a"].partition, row)
+        self.assertEqual(reborn.listings["serve-a"].metal, "node-a")
+        self.assertEqual(reborn.status()["listings"]["serve-a"]["partition"],
+                         row)
         with self.assertRaises(Exception):        # never replaced, wire or not
             go(remote.list_host("serve-a", serving.regimes, "fleet://a2"))
         go(remote.delist("serve-a"))
@@ -256,48 +324,74 @@ class CodeSkewTest(DeskFixture):
 
 
 class ProvisionTest(DeskFixture):
-    def test_the_desk_provisions_what_nothing_serves(self) -> None:
-        """The standing carve, desk-owned: an empty desk with a provisioner
-        boots hosts for every unit, journals the births, and the run commits —
-        one frame in, metal out."""
-        booted: list[dict] = []
+    def test_the_desk_deduces_then_commands_the_carve(self) -> None:
+        """The standing carve, desk-issued: an empty desk with one registered
+        metal asks its residual, COMMANDS one carve per unit, lists the born
+        hosts with their partition rows, and the run commits — one frame in,
+        metal out, the desk still the fleet journal's one writer."""
+        service = self.metal_service(devices=2)
+        desk = self.desk_with_metal("fake-metal")
 
-        def provision(request):
-            index = len(booted)
-            booted.append(request)
-            name, address = f"boot-{index}", f"fleet://boot-{index}"
-            trains = any(r["capability"] == "training"
-                         for r in request["regimes"])
-            host = self.stand_up(name, address, serves_pool=not trains,
-                                 trains=trains)
-            return name, host.regimes, address, False
-
-        desk = FleetService(
-            self.store,
-            connect=lambda addr: RemoteHost(self.transports[addr]),
-            provision=provision)
-
-        reply = go(desk.submit(_row(self.split_spec())))
+        async def drive():
+            reply = await desk.submit(_row(self.split_spec()))
+            trainer = service.hosts[reply["host"]]
+            await trainer._adoptions[reply["run_id"]]
+            return reply
+        reply = go(drive())
         self.assertTrue(reply["accepted"], reply)
-        self.assertEqual(len(booted), 2)             # main unit + learner unit
-        self.assertEqual(sorted(desk.listings), ["boot-0", "boot-1"])
+        self.assertEqual(sorted(desk.listings), sorted(service.hosts))
+        self.assertEqual(len(service.hosts), 2)      # main unit + learner unit
+        listing = desk.listings[reply["host"]]
+        self.assertEqual(listing.metal, "fake-metal")
+        self.assertEqual(listing.partition["memory"], 1.0)
+        self.assertEqual(service.residual(), [0.0, 0.0])
         events = [e["event"] for e in self.store.read_fleet_log()]
         self.assertEqual(events.count("provision"), 2)
         self.assertEqual(events.count("list"), 2)
 
-    def test_without_a_provisioner_the_boot_instructions_stand(self) -> None:
+    def test_what_no_metal_holds_stays_a_boot_instruction(self) -> None:
+        """One device, two whole-device units: the first carves, the second
+        misses everywhere and lands in `boot` — and the unit that DID carve
+        stays listed for the next submit's join rung."""
+        self.metal_service(devices=1)
+        desk = self.desk_with_metal("fake-metal")
+        reply = go(desk.submit(_row(self.split_spec())))
+        self.assertFalse(reply["accepted"])
+        self.assertEqual(len(reply["boot"]), 1)
+        self.assertEqual(len(desk.listings), 1)
+
+    def test_without_metal_the_boot_instructions_stand(self) -> None:
         desk = self.desk()
         reply = go(desk.submit(_row(self.split_spec())))
         self.assertFalse(reply["accepted"])
         self.assertEqual(len(reply["boot"]), 2)
 
     def test_metal_survives_the_journal(self) -> None:
-        from rlstack.runner.fleet import Metal
         desk = self.desk()
         desk.register_metal(Metal("node-a", "A100-80GB", 2, 80.0))
         reborn = FleetService.from_journal(
             self.store, connect=lambda addr: RemoteHost(self.transports[addr]))
         self.assertEqual(reborn.metal["node-a"].vram_gb, 80.0)
+        self.assertEqual(reborn.metal_remotes, {})   # no address, no plane
+
+    def test_metal_phones_home_and_the_rebuilt_desk_redials_it(self) -> None:
+        """The metal container registers its OWN existence over the wire,
+        address included — and a desk rebuilt from the journal can deduce
+        (residual) against it again."""
+        self.metal_service(devices=2)
+        desk = self.desk()
+        remote = RemoteFleet(LocalTransport(desk))
+        go(remote.register_metal("fake-metal", "L4", 2, 24.0,
+                                 "metal://fake-metal"))
+        self.assertIn("fake-metal", desk.metal_remotes)
+        reborn = FleetService.from_journal(
+            self.store,
+            connect=lambda addr: RemoteHost(self._transport(addr)),
+            connect_metal=lambda addr: RemoteMetal(
+                self.metal_transports[addr]))
+        self.assertEqual(reborn.metal["fake-metal"].devices, 2)
+        self.assertEqual(reborn.metal_remotes["fake-metal"].residual(),
+                         [1.0, 1.0])
 
 
 class MigrateTest(DeskFixture):
@@ -439,7 +533,7 @@ class LivenessTest(DeskFixture):
         desk.list_host("dead-z", living.regimes, "fleet://dead")
         desk.list_host("alive-a", living.regimes, "fleet://a")
 
-        placement, boot = desk.place_listings(arith_spec(self.train))
+        placement, boot = go(desk.place_listings(arith_spec(self.train)))
         self.assertEqual(boot, [])
         self.assertEqual(placement[None].name, "alive-a")
 
@@ -447,3 +541,171 @@ class LivenessTest(DeskFixture):
         reborn = FleetService.from_journal(
             self.store, connect=lambda addr: RemoteHost(self.transports[addr]))
         self.assertEqual(sorted(reborn.listings), ["alive-a"])
+
+
+def _inference_request(memory: float) -> dict:
+    return {"regimes": [{"name": "main-tp1", "capability": "inference",
+                         "base": BASE, "shape": 1}],
+            "base": BASE, "memory": memory}
+
+
+class MetalServiceTest(DeskFixture):
+    """The metal's books: booked before built, released on failure, honest
+    about hand-built neighbors, freed by decarve."""
+
+    def test_a_carve_books_before_it_builds(self) -> None:
+        """The invariant the metal plane exists for: while one carve's build
+        is still open, a second that would share its metal REFUSES — the
+        fraction is promised the moment the command is accepted, not when
+        the engine finally stands."""
+        import threading
+        gate = threading.Event()
+        service = self.metal_service(devices=1, build_gate=gate)
+
+        async def drive():
+            first = asyncio.create_task(service.carve(_inference_request(0.6)))
+            await asyncio.sleep(0.05)     # first books, enters its build
+            second = await service.carve(_inference_request(0.6))
+            gate.set()
+            return await first, second
+        first, second = go(drive())
+        self.assertTrue(first["carved"], first)
+        self.assertFalse(second["carved"])
+        self.assertIn("residual", second)
+        self.assertAlmostEqual(service.residual()[0], 0.4)
+        self.assertEqual(service.pending, [])
+        self.assertIn(first["address"], service.services)
+
+    def test_a_failed_build_releases_its_booking(self) -> None:
+        service = self.metal_service(devices=1, broken=True)
+        refusal = go(service.carve(_inference_request(0.6)))
+        self.assertFalse(refusal["carved"])
+        self.assertIn("released", refusal["error"])
+        self.assertEqual(service.residual(), [1.0])
+        self.assertEqual(service.pending, [])
+        self.assertEqual(service.hosts, {})
+
+    def test_hand_built_hosts_share_the_books(self) -> None:
+        """adopt_born: a bring_up's own standing host counts into residual
+        exactly like a carve's child — and a partitionless host is refused,
+        because unaccounted metal is the double-book this class kills."""
+        service = self.metal_service(devices=1)
+        standing = Host(
+            "standing", engines=(FakeEngine(base=BASE),), learner=None,
+            store=self.store,
+            partition=Partition("fake-metal", (0,), 0.5, "L4"),
+            regimes=(Regime("standing-serve", "inference", BASE, 1),))
+        service.adopt_born(standing, "fleet://standing")
+        self.assertEqual(service.residual(), [0.5])
+        self.assertIsNone(service.choose_devices(1, 0.6))
+        bare = Host("bare", engines=(), learner=FakeLearner(),
+                    store=self.store)
+        with self.assertRaises(Exception):
+            service.adopt_born(bare, "fleet://bare")
+
+    def test_decarve_frees_and_the_address_stops_answering(self) -> None:
+        service = self.metal_service(devices=1)
+        born = go(service.carve(_inference_request(0.6)))
+        self.assertAlmostEqual(service.residual()[0], 0.4)
+        released: list[Host] = []
+        service.release = released.append
+        reply = go(service.serve("decarve", {"host": born["host"]}))
+        self.assertTrue(reply["decarved"], reply)
+        self.assertEqual(service.residual(), [1.0])
+        self.assertEqual(len(released), 1)        # the venue unmade the metal
+        with self.assertRaises(Exception):
+            service.service_for(born["address"])
+
+
+class ReapTest(DeskFixture):
+    class Dead:
+        def __init__(self) -> None:
+            self.attempts = 0
+
+        async def call(self, verb, payload):
+            raise ConnectionError("gone")
+
+        def ask(self, verb, payload):
+            self.attempts += 1
+            raise ConnectionError("gone")
+
+    class Rebooting:
+        """Answers after `fail` failures — the container a lazy venue boots
+        BECAUSE of the knock."""
+
+        def __init__(self, inner, fail: int) -> None:
+            self.inner, self.fail, self.attempts = inner, fail, 0
+
+        async def call(self, verb, payload):
+            return await self.inner.call(verb, payload)
+
+        def ask(self, verb, payload):
+            self.attempts += 1
+            if self.attempts <= self.fail:
+                raise ConnectionError("booting")
+            return self.inner.ask(verb, payload)
+
+    def test_retries_then_recovers_or_reaps(self) -> None:
+        """The three verdicts: a listing that answers is alive; one that
+        answers on a retry RECOVERED (the knock was the restart); one silent
+        through every retry is reaped — delisted with the reason journaled,
+        so the rebuilt desk agrees."""
+        living = self.stand_up("well", "fleet://well", serves_pool=True,
+                               trains=True)
+        self.transports["fleet://reboot"] = self.Rebooting(
+            self.transports["fleet://well"], fail=2)
+        dead = self.Dead()
+        self.transports["fleet://gone"] = dead
+        desk = self.desk()
+        desk.list_host("well", living.regimes, "fleet://well")
+        desk.list_host("reboots", living.regimes, "fleet://reboot")
+        desk.list_host("gone", living.regimes, "fleet://gone")
+
+        verdicts = go(desk.reap(probes=3))
+        self.assertEqual(verdicts, {"well": "alive", "reboots": "recovered",
+                                    "gone": "reaped"})
+        self.assertEqual(sorted(desk.listings), ["reboots", "well"])
+        self.assertEqual(dead.attempts, 4)           # the probe + 3 retries
+        last_delist = [e for e in self.store.read_fleet_log()
+                       if e["event"] == "delist"][-1]
+        self.assertEqual((last_delist["host"], last_delist["reason"]),
+                         ("gone", "reaped"))
+        reborn = FleetService.from_journal(
+            self.store, connect=lambda addr: RemoteHost(self._transport(addr)))
+        self.assertEqual(sorted(reborn.listings), ["reboots", "well"])
+
+    def test_a_reaped_carve_frees_its_metal(self) -> None:
+        """The whole circle: the desk carved these hosts, their container
+        went silent, and the reap DECARVES them at the metal before
+        delisting — the fractions are residual again, carvable by the next
+        submit."""
+        service = self.metal_service(devices=2)
+        desk = self.desk_with_metal("fake-metal")
+
+        async def drive():
+            reply = await desk.submit(_row(self.split_spec()))
+            await service.hosts[reply["host"]]._adoptions[reply["run_id"]]
+            return reply
+        reply = go(drive())
+        self.assertTrue(reply["accepted"], reply)
+        self.assertEqual(service.residual(), [0.0, 0.0])
+
+        for listing in desk.listings.values():        # both containers die
+            self.transports[listing.address] = self.Dead()
+        verdicts = go(desk.reap(probes=1))
+        self.assertEqual(set(verdicts.values()), {"reaped"})
+        self.assertEqual(desk.listings, {})
+        self.assertEqual(service.hosts, {})
+        self.assertEqual(service.residual(), [1.0, 1.0])
+
+    def test_reap_rides_the_wire(self) -> None:
+        dead = self.Dead()
+        self.transports["fleet://gone"] = dead
+        living = self.stand_up("well", "fleet://well", serves_pool=True,
+                               trains=False)
+        desk = self.desk()
+        desk.list_host("well", living.regimes, "fleet://well")
+        desk.list_host("gone", living.regimes, "fleet://gone")
+        remote = RemoteFleet(LocalTransport(desk))
+        verdicts = go(remote.reap(probes=1))
+        self.assertEqual(verdicts, {"well": "alive", "gone": "reaped"})
