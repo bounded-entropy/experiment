@@ -289,7 +289,7 @@ class ExperimentSpec:
 class BackendProfile:
     """Where a run executes. The manifest records which profile ran it."""
 
-    kind: str                     # "local" | "modal" | "skypilot"
+    kind: str                     # a venue name, e.g. "local", "modal", "aws"
     gpu: str = ""
     nodes: int = 1
     idle: str = "keep"

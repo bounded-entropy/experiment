@@ -423,4 +423,4 @@ class StoreForTest(unittest.TestCase):
             store_for("s3://bucket/prefix")
         with self.assertRaises(NotImplementedError) as caught:
             store_for("modal://rlstack-store")
-        self.assertIn("beside the volume", str(caught.exception))
+        self.assertIn("lives with its venue", str(caught.exception))
