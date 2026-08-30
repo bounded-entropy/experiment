@@ -35,7 +35,7 @@ function frame() {
   holder.innerHTML = "";
   const find = el("div", {class: "find"});
   const box = el("input", {id: "q", type: "search", autocomplete: "off",
-      placeholder: "filter: regex terms AND \u00b7 | for OR (e.g. plora k=4 | latent=64)"});
+      placeholder: "regex terms AND \u00b7 \u201c | \u201d for OR \u00b7 tag:lora exact \u00b7 name:/id:/note: scoped"});
   box.value = needle;
   box.addEventListener("input", () => { needle = box.value; render(); });
   find.append(box);
@@ -50,16 +50,32 @@ function frame() {
 export function matchExpr(run, q) {
   q = (q || "").trim();
   if (!q) return true;
-  const hay = [run.run_id, run.name || "", run.note || ""]
-      .concat(run.tags || []).join(" ");
+  // unscoped terms NEVER search the note (prose poisons family filters);
+  // tag: matches a whole tag exactly, name:/id:/note: search their field;
   // a pipe WITH SPACES is OR; an unspaced | stays inside its regex term
+  const hay = [run.run_id, run.name || ""].concat(run.tags || []).join(" ");
+  const search = (term, text) => {
+    try { return new RegExp(term, "i").test(text); }
+    catch (_) { return text.toLowerCase().includes(term.toLowerCase()); }
+  };
+  const whole = (term, tag) => {
+    try { return new RegExp("^(?:" + term + ")$", "i").test(tag); }
+    catch (_) { return tag.toLowerCase() === term.toLowerCase(); }
+  };
+  const one = term => {
+    const at = term.indexOf(":");
+    const scope = at > 0 ? term.slice(0, at) : "";
+    const rest = at > 0 ? term.slice(at + 1) : "";
+    if (rest && scope === "tag")
+      return (run.tags || []).some(tag => whole(rest, tag));
+    if (rest && scope === "name") return search(rest, run.name || "");
+    if (rest && scope === "id") return search(rest, run.run_id || "");
+    if (rest && scope === "note") return search(rest, run.note || "");
+    return search(term, hay);
+  };
   return q.split(/\s+\|\s+/).some(clause => {
     const terms = clause.trim().split(/\s+/).filter(Boolean);
-    if (!terms.length) return false;
-    return terms.every(term => {
-      try { return new RegExp(term, "i").test(hay); }
-      catch (_) { return hay.toLowerCase().includes(term.toLowerCase()); }
-    });
+    return terms.length > 0 && terms.every(one);
   });
 }
 

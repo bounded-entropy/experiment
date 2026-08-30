@@ -2,11 +2,14 @@
 
 The QUERY GRAMMAR, spoken identically by this file and the web client: a
 pipe WITH SPACES (" | ") separates OR clauses — an unspaced | stays inside
-its term, so regex alternation like `k(4|8)` survives — whitespace inside a
-clause is AND, and each term is tried as a case-insensitive REGEX over
-run_id, name, note and every tag (joined), falling back to plain substring
-when it does not compile. `prior=0.3 k=4 | latent=64` reads exactly as it
-looks. Empty selects everything.
+its term, so regex alternation like `k(4|8)` survives — and whitespace
+inside a clause is AND. An UNSCOPED term is a case-insensitive regex (plain
+substring when it does not compile) over run_id + name + tags — NEVER the
+note: notes are prose, and prose mentioning "plora-vs-lora" must not make
+"plora" select lora runs. Scoped terms reach one field: `tag:X` matches a
+WHOLE tag (fullmatch, so tag:lora is not tag:plora), `name:X`, `id:X` and
+`note:X` search within that field. `prior=0.3 k=4 | latent=64` reads
+exactly as it looks. Empty selects everything.
 
 The overlay reads LEDGERS ONLY: a metric is any numeric the train block or
 the post means carry, per update — which is every rail, every declared
@@ -31,24 +34,42 @@ def match_expr(row: dict, expr: str) -> bool:
     expr = (expr or "").strip()
     if not expr:
         return True
-    hay = " ".join([row.get("run_id", ""), row.get("name", ""),
-                    row.get("note", ""), *(row.get("tags") or [])])
-    return any(_clause(hay, clause)
+    return any(_clause(row, clause)
                for clause in re.split(r"\s+\|\s+", expr))
 
 
-def _clause(hay: str, clause: str) -> bool:
+def _clause(row: dict, clause: str) -> bool:
     terms = clause.split()
     if not terms:
         return False
-    return all(_term(hay, term) for term in terms)
+    return all(_term(row, term) for term in terms)
 
 
-def _term(hay: str, term: str) -> bool:
+def _term(row: dict, term: str) -> bool:
+    scope, _, rest = term.partition(":")
+    if rest and scope in ("tag", "name", "id", "note"):
+        if scope == "tag":
+            return any(_whole(rest, tag) for tag in row.get("tags") or [])
+        field = {"name": "name", "id": "run_id", "note": "note"}[scope]
+        return _search(rest, str(row.get(field) or ""))
+    hay = " ".join([row.get("run_id", ""), row.get("name", ""),
+                    *(row.get("tags") or [])])
+    return _search(term, hay)
+
+
+def _search(term: str, text: str) -> bool:
     try:
-        return re.search(term, hay, re.IGNORECASE) is not None
+        return re.search(term, text, re.IGNORECASE) is not None
     except re.error:
-        return term.lower() in hay.lower()
+        return term.lower() in text.lower()
+
+
+def _whole(term: str, tag: str) -> bool:
+    """tag: terms match the WHOLE tag — the scope that exists to be exact."""
+    try:
+        return re.fullmatch(term, tag, re.IGNORECASE) is not None
+    except re.error:
+        return term.lower() == tag.lower()
 
 
 def _entry_value(entry: dict, metric: str) -> float | None:

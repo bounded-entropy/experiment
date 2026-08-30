@@ -86,6 +86,25 @@ class GrammarTest(unittest.TestCase):
         # an uncompilable term falls back to substring, not to an error
         self.assertFalse(match_expr(self.ROW, "((("))
 
+    def test_the_note_is_not_in_the_default_scope(self) -> None:
+        """Prose must not poison family filters: a lora run whose NOTE says
+        "plora-vs-lora sweep" does not match "plora"; note: reaches it."""
+        lora = {"run_id": "def456", "name": "lora-r4-lr0.0003-s11",
+                "note": "40-arm plora-vs-lora sweep",
+                "tags": ["lora", "r=4"]}
+        self.assertFalse(match_expr(lora, "plora"))
+        self.assertTrue(match_expr(lora, "note:plora"))
+
+    def test_tag_scope_is_exact(self) -> None:
+        """tag: matches a WHOLE tag — tag:lora selects the lora family and
+        never plora; regex still works when asked for."""
+        self.assertFalse(match_expr(self.ROW, "tag:lora"))
+        self.assertTrue(match_expr(self.ROW, "tag:plora"))
+        self.assertTrue(match_expr(self.ROW, "tag:k=4"))
+        self.assertTrue(match_expr(self.ROW, r"tag:prior=0\.[13]"))
+        self.assertTrue(match_expr(self.ROW, "name:k4 id:abc"))
+        self.assertFalse(match_expr(self.ROW, "id:zzz"))
+
 
 class OverlayTest(unittest.TestCase):
     def test_one_series_per_matching_run_off_the_ledgers(self) -> None:
