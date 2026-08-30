@@ -84,8 +84,9 @@ from rlstack.runner.host import (
 from rlstack.runner.remote import (
     HostService, LocalTransport, RemotePool, Transport,
 )
-from rlstack.runner.fleet import (
-    Acquire, Carve, Demand, Fleet, FleetError, Join, Metal, Plan, demands_of,
+from rlstack.runner.campaign import Campaigns, demands_of
+from rlstack.runner.desk import (
+    Demand, Desk, FleetError, Metal, demand_rows, demands_from,
     fraction_for_gb,
 )
 from rlstack.runner.loop import (

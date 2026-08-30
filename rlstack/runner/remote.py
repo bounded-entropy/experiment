@@ -462,25 +462,36 @@ class RemoteMetal:
         return await self._transport.call("decarve", {"host": name})
 
 
-class RemoteFleet:
-    """The client end of the STANDING fleet: a campaign's whole surface.
+class RemoteDesk:
+    """The client end of the standing fleet: a campaign's whole surface.
 
-    One frame carries the spec to the desk; the desk places it over the
-    listings, adopts it at the learner's host, and the reply says where
-    everything landed (or what to boot). After that the campaign watches the
-    run's own store — the desk holds no results, exactly as no host does."""
+    The desk is workload-blind, so the SHAPING happens here, client-side:
+    `submit` turns a spec into demand rows (anchor on the learner) plus an
+    opaque frame via the campaign layer, and one frame carries both to the
+    desk — which places, delivers to the anchor, and answers with where
+    everything landed (or what to boot). `resolve` is the pure client's
+    verb: demands in, addresses out, no delivery. After either, a client
+    watches the store — the desk holds no results, exactly as no host does."""
 
     def __init__(self, transport: Transport) -> None:
         self._transport = transport
 
     async def submit(self, spec: object,
                      subdir: str | None = None) -> dict:
-        from rlstack.registry import code_hashes
-        from rlstack.spec.canonical import canonical_json
+        from rlstack.runner.campaign import demands_of, frame_for
+        from rlstack.runner.desk import demand_rows
 
         return await self._transport.call("submit", {
-            "spec": json.loads(canonical_json(spec)),
-            "code": code_hashes(spec), "subdir": subdir})
+            "demands": demand_rows(demands_of(spec)),
+            "frame": frame_for(spec, subdir)})
+
+    async def resolve(self, demands: Sequence) -> dict:
+        """Demands in, addresses out — placement without a workload: the
+        door for an evaluator, a scorer, any client that wants a pool."""
+        from rlstack.runner.desk import demand_rows
+
+        return await self._transport.call("place",
+                                          {"demands": demand_rows(demands)})
 
     def status(self) -> dict:
         return self._transport.ask("status", {})

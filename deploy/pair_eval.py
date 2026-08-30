@@ -63,10 +63,10 @@ class DeskTransport:
         return self._handle
 
     async def call(self, verb: str, payload: dict) -> dict:
-        return await self.handle().fleet.remote.aio(verb, payload)
+        return await self.handle().desk.remote.aio(verb, payload)
 
     def ask(self, verb: str, payload: dict) -> dict:
-        return self.handle().fleet_ask.remote(verb, payload)
+        return self.handle().desk_ask.remote(verb, payload)
 
 
 class MetalTransport:
@@ -89,9 +89,9 @@ class MetalTransport:
 def serving_pool():
     """Ask the desk, join the pool: the live listing wearing an inference
     regime is where this client's traffic goes — placement without a carve."""
-    from rlstack.runner.remote import RemoteFleet, RemotePool
+    from rlstack.runner.remote import RemoteDesk, RemotePool
 
-    fleet = RemoteFleet(DeskTransport())
+    fleet = RemoteDesk(DeskTransport())
     told = fleet.status()["listings"]
     alive = fleet.liveness()
     for name, row in sorted(told.items()):
@@ -112,8 +112,10 @@ def opened(store):
 
     def bank_of(rid: str) -> dict[str, str]:
         manifest = store.peek_manifest(rid)
-        bank = manifest["spec"]["policy"]["bank"]
-        return {name: row["adapter_type"] for name, row in bank.items()}
+        row = manifest["spec"]        # the canonical form is stored as a string
+        spec = json.loads(row) if isinstance(row, str) else row
+        return {name: entry["adapter_type"]
+                for name, entry in spec["policy"]["bank"].items()}
 
     return reader_for, bank_of
 

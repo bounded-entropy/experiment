@@ -1,19 +1,26 @@
-"""The Fleet: the inventory of Metal and hosts, and the placement ladder over them.
+"""The Desk: a demand allocator, and the metal plane it commands.
 
-An experiment declares capability DEMANDS — what, never where: capability, base
-and shard shape read straight off its gpu_config, with the declared fraction as a
-carve hint. Placement climbs three rungs, one currency and one decider each
-(I12): JOIN a host that already serves the capability (automatic; the target
-host's own arbiter decides, and fractions are ignored because the weights
-already live there), CARVE a new host out of RESIDUAL metal (automatic BECAUSE
-journaled, residual-only so a living host is never shrunk or reshaped), or
-ACQUIRE — new metal costs money, so place() names what to buy and submit()
-refuses to run it.
+The desk is WORKLOAD-BLIND. Its whole vocabulary is Demands (what capability,
+what base, what shard shape — never where, never why), listings, metal, and
+addresses; a workload reaches it as demand rows plus an OPAQUE FRAME the desk
+relays to the anchor demand's host without decoding. What an experiment is —
+specs, identity, plans, code claims — lives with the host that adopts it and
+in the campaign layer (runner/campaign.py), where specs are turned INTO
+demands. The acid test of the boundary: this module imports no spec class.
 
-A sleep group places as ONE unit onto one multi-regime host; concurrent members
-place per member, because colocation is only a hint and is semantics-neutral
-(I5). submit() then runs the experiment where the learner landed — the learner
-is never remote — and reaches every other partition through RemotePools.
+Placement climbs the same rungs it always has (I12): JOIN a listing that
+already serves the capability (coverage is capability equality; solo-and-
+occupied skipped, dead listings skipped), CARVE a new host out of a
+registered metal's residual (the desk deduces, the metal's own books
+enforce), or answer with BOOT instructions — new metal costs money, so
+acquiring stays a human's. A sleep group places as ONE unit onto one
+multi-regime host; concurrent members place per member (I5: colocation is a
+hint, never semantics).
+
+Truth stays in the store: every listing, metal registration, placement and
+delisting is journaled, `from_journal` rebuilds the desk after a kill, and
+the desk's memory is only the single writer's cache — "the fleet" names the
+aggregate this journal records, and the desk is that journal's one writer.
 """
 
 from __future__ import annotations
@@ -27,11 +34,9 @@ from rlstack.data.stores.base import Store
 from rlstack.policy.siteschema import SiteSchema
 from rlstack.runner.host import Host, Partition, Regime
 from rlstack.runner.interfaces import Engine, Learner
-from rlstack.runner.loop import RunReport, experiment_identity
 from rlstack.runner.remote import (
     HostService, LocalTransport, RemoteHost, RemotePool, Transport,
 )
-from rlstack.spec.specs import ExperimentSpec, PoolMember
 
 
 class FleetError(RuntimeError):
@@ -84,73 +89,27 @@ class Demand:
     memory: float
     group: int
     sharing: str
+    # the ANCHOR is where a delivered frame lands — the one demand whose host
+    # receives the workload. The desk never knows WHY (for an experiment it is
+    # the learner, because the learner is never remote — but that rule lives
+    # with whoever built the demands, not here).
+    anchor: bool = False
 
 
-@dataclass(frozen=True)
-class Join:
-    """Rung one: the capability already exists — attach to its host."""
-
-    host: str
-    demand: Demand
-
-
-@dataclass(frozen=True)
-class Carve:
-    """Rung two: partition a new host out of residual metal. One regime per
-    demand in the unit; several regimes mean the carved host alternates."""
-
-    metal: str
-    devices: tuple[int, ...]
-    memory: float
-    regimes: tuple[Regime, ...]
-    demands: tuple[Demand, ...]
+def demand_rows(demands: Sequence[Demand]) -> list[dict]:
+    """Demands as wire rows — the desk's whole input vocabulary."""
+    return [{"pool": d.pool, "capability": d.capability, "base": d.base,
+             "shape": d.shape, "memory": d.memory, "group": d.group,
+             "sharing": d.sharing, "anchor": d.anchor} for d in demands]
 
 
-@dataclass(frozen=True)
-class Acquire:
-    """Rung three: nothing fits — new metal, a human's call."""
-
-    gpu: str
-    devices: int
-    demands: tuple[Demand, ...]
-
-
-@dataclass(frozen=True)
-class Plan:
-    """A placement, as data: joins and carves execute automatically;
-    one acquire step makes the whole plan a human's."""
-
-    steps: tuple[Join | Carve | Acquire, ...]
-
-    @property
-    def acquires(self) -> tuple[Acquire, ...]:
-        return tuple(s for s in self.steps if isinstance(s, Acquire))
-
-    @property
-    def needs_human(self) -> bool:
-        return bool(self.acquires)
-
-
-def demands_of(spec: ExperimentSpec) -> tuple[Demand, ...]:
-    """The spec's gpu_config as capability demands. A member with no
-    declared fraction demands a WHOLE device per shard when carved — the
-    safe default; sub-device partitions are opt-in via fractions."""
-    out: list[Demand] = []
-    for gi, group in enumerate(spec.gpu_config.groups):
-        for member in group.members:
-            if isinstance(member, PoolMember):
-                out.append(Demand(
-                    pool=member.name, capability="inference",
-                    base=member.base or spec.policy.base, shape=member.tp,
-                    memory=member.fraction if member.fraction is not None else 1.0,
-                    group=gi, sharing=group.sharing))
-            else:
-                out.append(Demand(
-                    pool=None, capability="training", base=spec.policy.base,
-                    shape=member.fsdp,
-                    memory=member.fraction if member.fraction is not None else 1.0,
-                    group=gi, sharing=group.sharing))
-    return tuple(out)
+def demands_from(rows: Sequence[Mapping]) -> tuple[Demand, ...]:
+    """Wire rows back as Demands — demand_rows' typed inverse."""
+    return tuple(Demand(
+        pool=row["pool"], capability=row["capability"], base=row["base"],
+        shape=int(row["shape"]), memory=float(row["memory"]),
+        group=int(row["group"]), sharing=row["sharing"],
+        anchor=bool(row.get("anchor", False))) for row in rows)
 
 
 def placement_units(demands: Sequence[Demand]) -> tuple[tuple[Demand, ...], ...]:
@@ -179,253 +138,6 @@ def regime_of(demand: Demand) -> Regime:
                       base=demand.base, shape=demand.shape)
     return Regime(name=f"learner-fsdp{demand.shape}", capability="training",
                   base=demand.base, shape=demand.shape)
-
-
-class Fleet:
-    """The inventory and the ladder. Factories make a carve's metal (an
-    engine per inference regime, a learner per training regime) — fakes in
-    tests, vLLM/torch builders on real metal; the Host constructor attests
-    the result against the regimes either way.
-
-    A factory is handed BOTH birth facts of the host it is building: the
-    Regime (what capability) and the Partition (how much of what metal). The
-    fraction is the whole point of a sub-GPU host and only the carve knows it,
-    so the contract that realizes a partition is paid it rather than left to
-    re-derive it off the plan."""
-
-    def __init__(self, metal: Sequence[Metal], *, store: Store,
-                 engine_factory: Callable[[Regime, Partition], Engine],
-                 learner_factory: Callable[[Regime, Partition], Learner],
-                 hosts: Sequence[Host] = ()) -> None:
-        self.metal = {m.name: m for m in metal}
-        self.store = store
-        self.engine_factory = engine_factory
-        self.learner_factory = learner_factory
-        self.hosts: dict[str, Host] = {}
-        self.carves = 0                 # carve ordinal, for unique host names
-        for host in hosts:
-            self.register(host)
-
-    def register(self, host: Host) -> None:
-        """A host's name is its identity in the fleet: registration REFUSES a
-        name already taken instead of replacing the host that holds it.
-
-        Replacing is never right, even when names are unique by construction
-        (carve_name). The replaced host keeps its metal — engines resident,
-        tenants bound, arbiter admitting — while dropping out of the dict
-        residual() sums over, so its fraction silently returns to the residual
-        and the next carve is sized against memory that is already gone."""
-        if host.name in self.hosts:
-            raise FleetError(
-                f"host {host.name!r} is already registered with this fleet; "
-                f"a host is never replaced — its metal outlives the dict "
-                f"entry, and the residual would count its partition free")
-        self.hosts[host.name] = host
-
-    # ---- the inventory ------------------------------------------------------
-
-    def residual(self, metal_name: str) -> list[float]:
-        """Free memory per device — capacity no partition owns. The residual
-        is NOBODY'S, which is exactly why carving from it needs no
-        approval."""
-        free = [1.0] * self.metal[metal_name].devices
-        for host in self.hosts.values():
-            part = host.partition
-            if part is None or part.metal != metal_name:
-                continue
-            for device in part.devices:
-                free[device] -= part.memory
-        return free
-
-    # ---- the ladder, one named method per rung ------------------------------
-
-    def find_join(self, unit: tuple[Demand, ...]) -> Host | None:
-        """Rung one: ONE host whose regimes cover every demand in the unit.
-        Coverage is capability equality — same capability, base, and shape; a
-        fraction never enters (the weights already live there).
-
-        A SOLO host that is already running an experiment is skipped rather
-        than offered and then refused: soloness is a birth fact, so it belongs
-        to placement, and the ladder falls through to carve exactly as it does
-        for a host that lacks the capability at all.
-        """
-        for name in sorted(self.hosts):
-            host = self.hosts[name]
-            if host.solo and host.occupied():
-                continue
-            if all(self._covers(host, demand) for demand in unit):
-                return host
-        return None
-
-    @staticmethod
-    def _covers(host: Host, demand: Demand) -> bool:
-        return any(regime.capability == demand.capability
-                   and regime.base == demand.base
-                   and regime.shape == demand.shape
-                   for regime in host.regimes)
-
-    def plan_carve(self, unit: tuple[Demand, ...],
-                   booked: dict[str, dict[int, float]]) -> Carve | None:
-        """Rung two: first-fit over residual, in registered-metal order —
-        `shape` devices each with the unit's memory free. `booked` carries
-        this plan's earlier carves so one plan never double-books a device.
-        A sleep unit's members alternate, so it needs max(shape) devices at
-        max(memory) — one partition, worn in turns."""
-        need_devices = max(demand.shape for demand in unit)
-        need_memory = max(demand.memory for demand in unit)
-        for metal_name in sorted(self.metal):
-            free = self.residual(metal_name)
-            for device, used in booked.get(metal_name, {}).items():
-                free[device] -= used
-            chosen = [i for i, f in enumerate(free)
-                      if f >= need_memory - 1e-9][:need_devices]
-            if len(chosen) == need_devices:
-                return Carve(metal=metal_name, devices=tuple(chosen),
-                             memory=need_memory,
-                             regimes=tuple(regime_of(d) for d in unit),
-                             demands=unit)
-        return None
-
-    def place(self, spec: ExperimentSpec) -> Plan:
-        """The ladder, per placement unit: JOIN if some host already serves
-        the whole unit; else CARVE from residual; else ACQUIRE (a human).
-        Pure planning — nothing is built or journaled until apply()."""
-        steps: list[Join | Carve | Acquire] = []
-        booked: dict[str, dict[int, float]] = {}
-        for unit in placement_units(demands_of(spec)):
-            host = self.find_join(unit)
-            if host is not None:
-                steps.extend(Join(host.name, demand) for demand in unit)
-                continue
-            carve = self.plan_carve(unit, booked)
-            if carve is not None:
-                slate = booked.setdefault(carve.metal, {})
-                for device in carve.devices:
-                    slate[device] = slate.get(device, 0.0) + carve.memory
-                steps.append(carve)
-                continue
-            gpu = (next(iter(self.metal.values())).gpu if self.metal
-                   else "GPU")
-            steps.append(Acquire(gpu=gpu,
-                                 devices=max(d.shape for d in unit),
-                                 demands=unit))
-        return Plan(tuple(steps))
-
-    def apply(self, plan: Plan) -> dict[str | None, Host]:
-        """Execute the automatic rungs: joins resolve to their hosts, carves
-        BUILD hosts (the factories make the metal, the Host constructor
-        attests it and journals host-up, the fleet journals the carve).
-        Refuses a plan with acquire steps — that rung is a human's.
-        Returns demand.pool -> serving host (None key: the learner's)."""
-        if plan.needs_human:
-            raise FleetError(
-                "the plan needs new metal — a human's call: "
-                + "; ".join(f"{a.devices}x {a.gpu} for "
-                            f"{sorted(d.pool or 'learner' for d in a.demands)}"
-                            for a in plan.acquires)
-                + ". Register Metal(...) with the fleet and resubmit.")
-        placement: dict[str | None, Host] = {}
-        for step in plan.steps:
-            if isinstance(step, Join):
-                placement[step.demand.pool] = self.hosts[step.host]
-            else:
-                host = self.carve(step)
-                for demand in step.demands:
-                    placement[demand.pool] = host
-        return placement
-
-    def carve_name(self, step: Carve) -> str:
-        """The name a carved host is born with: the metal it came from, the
-        devices it owns, the regimes it wears, and a per-fleet CARVE ORDINAL.
-
-        The ordinal is not decoration. A regime's name carries capability and
-        shape but not base, so two carves that differ only by base would otherwise
-        produce one name — and the base cannot go in the name either, because
-        a base is "Qwen/Qwen3-0.6B" and a host name is a journal path segment
-        that may hold no "/" (Host attests it). No separator here is "/" for
-        that same reason."""
-        self.carves += 1
-        devices = "-".join(str(d) for d in step.devices)
-        regimes = "+".join(regime.name for regime in step.regimes)
-        return f"{step.metal}:{devices}.{regimes}.c{self.carves}"
-
-    def carve(self, step: Carve) -> Host:
-        """Rung two executed, under the three conditions that make it
-        automatic: residual-only by construction (plan_carve drew from
-        residual), never mutating an existing host (a NEW Host is born with
-        its capability), journaled — legibility by record, not by approval.
-        The born partition is STAMPED with the metal's GPU kind: the fraction
-        says how much, the kind says of what."""
-        metal = self.metal[step.metal]
-        partition = Partition(step.metal, step.devices, step.memory, metal.gpu)
-        engines: list[Engine] = []
-        carved_learner: Learner | None = None
-        for regime in step.regimes:
-            if regime.capability == "inference":
-                engines.append(self.engine_factory(regime, partition))
-            else:
-                carved_learner = self.learner_factory(regime, partition)
-        name = self.carve_name(step)
-        host = Host(name, engines=tuple(engines), learner=carved_learner,
-                    store=self.store, partition=partition,
-                    regimes=step.regimes)
-        self.register(host)
-        self.store.append_fleet_event({
-            "event": "carve", "t": time.time(), "host": name,
-            "metal": step.metal, "gpu": metal.gpu,
-            "devices": list(step.devices), "memory": step.memory,
-            "regimes": [{"name": r.name, "capability": r.capability,
-                         "base": r.base, "shape": r.shape}
-                        for r in step.regimes]})
-        return host
-
-    # ---- submit -------------------------------------------------------------
-
-    async def submit(self, spec: ExperimentSpec, schema: SiteSchema,
-                     store: Store | None = None,
-                     max_inflight: int = 64) -> RunReport:
-        """place → apply → run. The runner goes to the learner's host; every
-        pool that landed elsewhere is reached through a RemotePool over a
-        LocalTransport — every host in this process, which the Modal-cls
-        transport replaces behind the same two verbs. The placement is
-        journaled under the run's identity before the run opens."""
-        plan = self.place(spec)
-        placement = self.apply(plan)          # raises FleetError on acquire
-        rid = experiment_identity(spec, schema)
-        self.store.append_fleet_event({
-            "event": "place", "t": time.time(), "run_id": rid,
-            "steps": [_step_row(step) for step in plan.steps]})
-        learner_host = placement.get(None)
-        if learner_host is None:
-            raise FleetError(
-                "the spec declares no learner member — the fleet runs "
-                "training specs (generation-only runs are an open thread)")
-        remotes: dict[str, Engine] = {}
-        for demand in demands_of(spec):
-            if demand.pool is None:
-                continue
-            serving = placement[demand.pool]
-            if serving is learner_host:
-                continue
-            remotes[demand.pool] = RemotePool(
-                LocalTransport(HostService(serving)),
-                base=demand.base, tp=demand.shape)
-        return await learner_host.submit(spec, schema, store=store,
-                                         max_inflight=max_inflight,
-                                         remotes=remotes)
-
-
-def _step_row(step: Join | Carve | Acquire) -> dict:
-    """One plan step as a journal row."""
-    if isinstance(step, Join):
-        return {"rung": "join", "host": step.host,
-                "pool": step.demand.pool or "learner"}
-    if isinstance(step, Carve):
-        return {"rung": "carve", "metal": step.metal,
-                "devices": list(step.devices), "memory": step.memory,
-                "regimes": [r.name for r in step.regimes]}
-    return {"rung": "acquire", "gpu": step.gpu, "devices": step.devices,
-            "pools": sorted(d.pool or "learner" for d in step.demands)}
 
 
 # ---------------------------------------------------------------------------
@@ -472,15 +184,16 @@ class Listing:
             return False
 
 
-class FleetService:
-    """The standing fleet: placement as a SERVICE, and the fleet journal's
-    ONE WRITER — the Trainer/ledger pattern applied to the fleet plane.
+class Desk:
+    """Placement as a SERVICE, and the fleet journal's ONE WRITER — the
+    Trainer/ledger pattern applied to the fleet plane. Workload-blind: its
+    input is Demands, its output is addresses, and a delivered frame passes
+    through it unread (the module docstring's boundary).
 
-    In-process, Fleet holds live Hosts and may carve because the factories
-    are beside the metal. Standing, none of that is true: hosts are GPU
-    containers elsewhere, so the desk holds LISTINGS (deploy-registered at
-    each host's boot), the join rung matches against them, and the standing
-    CARVE is a command sent to a registered metal's own container: the desk
+    Hosts are containers elsewhere, so the desk holds LISTINGS (phone-home
+    registered at each host's boot), the join rung matches against them, and
+    the standing CARVE is a command sent to a registered metal's own
+    container: the desk
     DEDUCES from the metal's residual and the metal ENFORCES with a booking
     (MetalService), so a placement nothing covers comes back as a BOOT
     instruction only when no registered metal can hold it — the standing
@@ -516,7 +229,7 @@ class FleetService:
     def from_journal(cls, store: Store,
                      connect: Callable[[str], "RemoteHost"],
                      connect_metal: Callable[[str], "RemoteMetal"] | None = None,
-                     ) -> "FleetService":
+                     ) -> "Desk":
         """The desk, rebuilt from its own record: every `list` event redials,
         every addressed `metal` event redials the metal plane. Kill -9 the
         desk and nothing was lost but a process — the same recovery shape as
@@ -562,8 +275,8 @@ class FleetService:
         knows it too. `partition` and `metal` are the capacity VIEW — the row
         the host was born onto and the registered Metal it lives on — carried
         so the desk can deduce and the reaper can free; enforcement stays at
-        the metal's own books. Refuses a taken name for Fleet.register's
-        reason."""
+        the metal's own books. Refuses a taken name — a listing
+        is never replaced."""
         if name in self.listings:
             raise FleetError(
                 f"host {name!r} is already listed with this desk; a listing "
@@ -598,14 +311,14 @@ class FleetService:
 
     def find_listing(self, unit: tuple[Demand, ...]) -> Listing | None:
         """Rung one over listings: sorted-name order, coverage by capability
-        equality (Fleet.find_join's rule, matched against descriptions),
+        equality (covers(), the one join rule, matched against descriptions),
         solo-and-occupied skipped — and so is a listing whose container no
         longer ANSWERS: placement must never offer a host it cannot reach,
         and a dead listing is a fact discovered here, reported by the boot
         refusal, and cured by a delist or a reboot."""
         for name in sorted(self.listings):
             listing = self.listings[name]
-            if not all(_covers_regimes(listing.regimes, d) for d in unit):
+            if not all(covers(listing.regimes, d) for d in unit):
                 continue
             if not listing.alive():
                 continue
@@ -614,7 +327,7 @@ class FleetService:
             return listing
         return None
 
-    async def place_listings(self, spec: ExperimentSpec
+    async def place_listings(self, demands: Sequence[Demand]
                              ) -> tuple[dict[str | None, Listing], list[dict]]:
         """Every placement unit onto a listing, a fresh carve, or the boot
         list: what no listed host serves is CARVED on a registered metal that
@@ -624,7 +337,7 @@ class FleetService:
         the next submit's join rung finds it."""
         placement: dict[str | None, Listing] = {}
         boot: list[dict] = []
-        for unit in placement_units(demands_of(spec)):
+        for unit in placement_units(demands):
             listing = self.find_listing(unit) or await self.provision_unit(unit)
             if listing is None:
                 boot.append({
@@ -685,179 +398,71 @@ class FleetService:
             return self.listings[born["host"]]
         return None
 
-    # ---- submit: place, journal, adopt --------------------------------------
+    # ---- place and submit: demands in, addresses (and one delivery) out -----
 
-    async def submit(self, spec_row: Mapping,
-                     code: Mapping[str, str] | None = None,
-                     subdir: str | None = None) -> dict:
-        """One frame in, one placement out: decode, place over the listings,
-        journal, and ADOPT at the learner's listing with every other pool's
-        address threaded as routes. The reply is the host's own adopt reply
-        plus where everything landed; the run itself is the adopted host's
-        business, and the ledger is the result channel there as everywhere."""
-        from rlstack.runner.remote import spec_from_json
+    async def place(self, demands: Sequence[Demand]) -> dict:
+        """Demands in, addresses out — the PURE CLIENT's door: an evaluator,
+        a scorer, anything that wants a pool without being a workload the
+        fleet tracks. Same ladder as a delivery (join, carve, boot), same
+        journal row; the client wraps the addresses itself and is thereafter
+        just admitted traffic at each host."""
+        placement, boot = await self.place_listings(demands)
+        if boot:
+            return {"placed": False, "boot": boot}
+        pools = {demand.pool or "learner": placement[demand.pool].address
+                 for demand in demands}
+        self.store.append_fleet_event({
+            "event": "place", "t": time.time(), "delivered": False,
+            "pools": {pool or "learner": listing.name
+                      for pool, listing in placement.items()}})
+        return {"placed": True, "pools": pools}
 
-        spec = spec_from_json(spec_row)
-        if not isinstance(spec, ExperimentSpec):
+    async def submit(self, rows: Sequence[Mapping], frame: Mapping) -> dict:
+        """Demand rows plus one OPAQUE FRAME: place, then DELIVER the frame to
+        the anchor demand's host with every other pool's address threaded as
+        routes. The desk reads the frame's envelope (spec/code/subdir are the
+        adopt wire's argument names) and never its contents — what the spec
+        means is the anchor host's business, and the ledger is the result
+        channel there as everywhere. Routes come off the DEMAND rows, which
+        is what makes the blind relay possible at all."""
+        demands = demands_from(rows)
+        anchored = [d for d in demands if d.anchor]
+        if len(anchored) != 1:
             return {"accepted": False,
-                    "error": f"submit expects an ExperimentSpec's canonical "
-                             f"form, decoded {type(spec).__name__}"}
-        placement, boot = await self.place_listings(spec)
+                    "error": f"a delivery needs exactly one anchor demand "
+                             f"(where the frame lands); got {len(anchored)}"}
+        placement, boot = await self.place_listings(demands)
         if boot:
             return {"accepted": False, "boot": boot,
                     "error": "no listed host serves these units and no "
                              "registered metal can hold them — boot or "
                              "register metal wearing the named regimes (the "
                              "standing acquire is a human's)"}
-        learner_listing = placement.get(None)
-        if learner_listing is None:
-            return {"accepted": False,
-                    "error": "the spec declares no learner member — the desk "
-                             "places training specs"}
-        routes = {pool: listing.address
-                  for pool, listing in placement.items()
-                  if pool is not None and listing is not learner_listing}
+        anchor_listing = placement[anchored[0].pool]
+        routes = {d.pool: placement[d.pool].address for d in demands
+                  if not d.anchor and d.pool is not None
+                  and placement[d.pool] is not anchor_listing}
         try:
-            reply = await learner_listing.host.adopt(spec_row, routes, code,
-                                                     subdir)
+            reply = await anchor_listing.host.adopt(
+                frame.get("spec"), routes, frame.get("code"),
+                frame.get("subdir"))
         except Exception as down:
             # alive() passed and the container died between the probe and the
             # knock: the reply says so instead of the desk falling over, and
             # the cure is a delist or a reboot, both venue actions
-            return {"accepted": False, "host": learner_listing.name,
-                    "error": f"host {learner_listing.name!r} did not answer "
-                             f"the adopt: {down}"}
+            return {"accepted": False, "host": anchor_listing.name,
+                    "error": f"host {anchor_listing.name!r} did not answer "
+                             f"the delivery: {down}"}
         self.store.append_fleet_event({
-            "event": "place", "t": time.time(),
+            "event": "place", "t": time.time(), "delivered": True,
             "run_id": reply.get("run_id"),
-            "host": learner_listing.name,
+            "host": anchor_listing.name,
             "pools": {pool or "learner": listing.name
                       for pool, listing in placement.items()},
             "accepted": bool(reply.get("accepted"))})
-        return {**reply, "host": learner_listing.name,
+        return {**reply, "host": anchor_listing.name,
                 "pools": {pool or "learner": listing.name
                           for pool, listing in placement.items()}}
-
-    # ---- migrate: warm-fork running work onto the current code --------------
-
-    async def migrate(self, run_ids: Sequence[str], *,
-                      optim: str = "load",
-                      remaining_only: bool = False) -> dict:
-        """Warm-fork each named run into a NEW experiment continuing from its
-        ledger tail — the code-refresh move: containers were replaced, the
-        old runs' code hashes no longer exist anywhere, so each run's spec is
-        resubmitted with init=WarmStart(parent@tail) and becomes a new
-        run_id under the CURRENT code, moments included (optim="load" reads
-        the tail, the one version retention keeps).
-
-        `remaining_only` also slices the plans to the waves the parent never
-        committed, so the child runs exactly what was left. That is only
-        derivable for the standard on-policy pairing (train wave u = WaveRef
-        "self://rollouts/u", 1:1); a run whose plans say anything fancier is
-        REFUSED for slicing — migrate it full-plan instead, deliberately.
-
-        Every child is journaled as a `migrate` event (parent, child,
-        version) — lineage on the fleet plane, beside the manifest's own
-        parent record. Per-run failures land in the report; one bad run never
-        stops the pass.
-        """
-        import dataclasses
-
-        from rlstack.registry import code_hashes
-        from rlstack.runner.remote import spec_from_json
-        from rlstack.spec.canonical import canonical_json
-        from rlstack.spec.specs import WarmStart
-
-        report: dict[str, dict] = {}
-        for rid in run_ids:
-            try:
-                manifest = self.store.peek_manifest(rid)
-                if manifest is None:
-                    raise FleetError(f"no manifest for {rid!r} in this store")
-                spec = spec_from_json(manifest["spec"])
-                entries = self.store.peek_ledger(rid)
-                if not entries:
-                    raise FleetError(
-                        f"{rid!r} committed nothing — resubmit it plainly; "
-                        f"a warm start from nowhere is a fresh run wearing "
-                        f"a parent it never had")
-                tail = entries[-1]
-                committed = int(tail["update"])
-                version = max(int(v) for v in tail["versions"].values())
-                child = dataclasses.replace(
-                    spec, init=WarmStart(policy=f"store://{rid}@{version}",
-                                         optim=optim))
-                if remaining_only:
-                    plans, eval_done = self.sliced_plans(rid, spec, committed)
-                    child = dataclasses.replace(child, plans=plans)
-                    if eval_done:
-                        child = dataclasses.replace(child, eval=None)
-                import json as _json
-                reply = await self.submit(
-                    _json.loads(canonical_json(child)),
-                    code=code_hashes(child))
-                if reply.get("accepted"):
-                    self.store.append_fleet_event({
-                        "event": "migrate", "t": time.time(), "parent": rid,
-                        "child": reply.get("run_id"), "version": version,
-                        "remaining_only": remaining_only})
-                report[rid] = {**reply, "parent_version": version}
-            except Exception as refusal:
-                report[rid] = {"accepted": False, "error": str(refusal)}
-        return report
-
-    def sliced_plans(self, rid: str, spec: ExperimentSpec, committed: int):
-        """The parent's plans, minus everything its ledger already committed.
-
-        Rollout waves past `committed` re-index from 1; the train plan is
-        REBUILT as the standard pairing after PROVING the parent's was exactly
-        that (every entry WaveRef "self://rollouts/u", 1:1) — self:// refs are
-        index-coupled, so slicing anything fancier would silently retarget
-        them. Eval slices by fired points (committed // every). Refusals over
-        guesses, everywhere.
-        """
-        from rlstack.data.plan import RunPlan, WaveRef, decode, encode
-        from rlstack.spec.specs import Plans
-
-        def plan_of(kind: str) -> RunPlan | None:
-            data = self.store.peek_plan(rid, kind)
-            return None if data is None else decode(data)
-
-        train = plan_of("train")
-        rollout = plan_of("rollout")
-        if train is None or rollout is None:
-            raise FleetError(
-                f"{rid!r} carries no sliceable plans (pre-#59 run?) — "
-                f"migrate it full-plan")
-        expected = tuple(WaveRef(f"self://rollouts/{u}")
-                         for u in range(1, len(train) + 1))
-        if train.waves != expected or len(rollout) != len(train):
-            raise FleetError(
-                f"{rid!r}'s plans are not the standard on-policy pairing — "
-                f"self:// refs are index-coupled, so slicing would retarget "
-                f"them. Migrate it full-plan (remaining_only=False)")
-        remaining = len(train) - committed
-        if remaining <= 0:
-            raise FleetError(f"{rid!r} committed its whole plan — nothing "
-                             f"remaining to migrate")
-        rows = {"eval": spec.plans.eval}
-        eval_done = False
-        rows["rollout"] = self.store.cas_put(
-            encode(RunPlan(rollout.waves[committed:])))
-        rows["train"] = self.store.cas_put(encode(RunPlan(tuple(
-            WaveRef(f"self://rollouts/{u}") for u in range(1, remaining + 1)))))
-        if spec.plans.eval is not None and spec.eval is not None:
-            fired = committed // spec.eval.every
-            eval_plan = plan_of("eval")
-            if eval_plan is not None and fired < len(eval_plan):
-                rows["eval"] = self.store.cas_put(
-                    encode(RunPlan(eval_plan.waves[fired:])))
-            elif eval_plan is not None:
-                rows["eval"], eval_done = None, True   # every point fired
-        return (Plans(train=rows["train"], rollout=rows["rollout"],
-                      eval=rows["eval"]), eval_done)
-
-    # ---- reap: the janitor's sweep ------------------------------------------
 
     async def reap(self, probes: int = 3, wait: float = 0.0) -> dict:
         """Every listing probed, the silent ones retried, the still-silent
@@ -918,12 +523,9 @@ class FleetService:
 
     async def serve(self, verb: str, payload: dict) -> dict:
         if verb == "submit":
-            return await self.submit(payload["spec"], payload.get("code"),
-                                     payload.get("subdir"))
-        if verb == "migrate":
-            return await self.migrate(
-                payload["run_ids"], optim=payload.get("optim", "load"),
-                remaining_only=bool(payload.get("remaining_only", False)))
+            return await self.submit(payload["demands"], payload["frame"])
+        if verb == "place":
+            return await self.place(demands_from(payload["demands"]))
         if verb == "list":
             # the phone-home half of the deploy contract: when the desk is its
             # own container, the deploy that booted a host reaches list_host
@@ -968,8 +570,8 @@ class FleetService:
                 for name, listing in sorted(self.listings.items())}
 
 
-def _covers_regimes(regimes: Sequence[Regime], demand: Demand) -> bool:
-    """Coverage is capability equality — Fleet._covers, over a description."""
+def covers(regimes: Sequence[Regime], demand: Demand) -> bool:
+    """THE join rule, the only copy: coverage is capability equality."""
     return any(regime.capability == demand.capability
                and regime.base == demand.base
                and regime.shape == demand.shape
@@ -1082,7 +684,7 @@ class MetalService:
 
     def carve_name(self, devices: tuple[int, ...],
                    regimes: tuple[Regime, ...]) -> str:
-        """Fleet.carve_name's rule, on this metal's own ordinal — minted on
+        """Carve names, on this metal's own ordinal — minted on
         the loop, BEFORE any build thread runs, so concurrent carves never
         race the counter."""
         self.carves += 1
@@ -1141,7 +743,7 @@ class MetalService:
     def build(self, name: str, regimes: tuple[Regime, ...],
               devices: tuple[int, ...], memory: float) -> Host:
         """(worker thread) The factories realize the partition and the Host
-        constructor attests the result — Fleet.carve's construction, against
+        constructor attests the result against
         books this container owns."""
         partition = Partition(self.metal.name, devices, memory, self.metal.gpu)
         engines: list[Engine] = []

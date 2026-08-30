@@ -20,10 +20,10 @@ loss-file constant and identical for every plora arm, deliberately.
 WHAT THE VENUE PROVES (the plumbing): multi-tenancy at width — every arm is
 a tenant of ONE shared engine and ONE shared learner on two fractional
 partitions of one device — and the STANDING FLEET end to end: the container
-stands a serving host, a learner host, and a FleetService listing both;
+stands a serving host, a learner host, and a Desk listing both;
 `sweep` seeds most arms through the classic in-process submit, and
 `via_desk` sends the rest from a DIFFERENT PROCESS as one frame each
-(RemoteFleet -> desk -> place -> adopt), landing on the SAME roster. The
+(RemoteDesk -> desk -> place -> adopt), landing on the SAME roster. The
 desk and the hosts know no venue word; ClsTransport below is this venue's
 whole contribution (I5).
 """
@@ -161,7 +161,7 @@ class SweepMetal:
         from rlstack import ModalVolumeStore
         from rlstack.policy.siteschema import hf_schema
         from rlstack.runner.engines.vllm_engine import VllmEngine
-        from rlstack.runner.fleet import FleetService
+        from rlstack.runner.desk import Desk
         from rlstack.runner.host import Host, Partition, Regime
         from rlstack.runner.learners.torch_learner import TorchLearner
         from rlstack.runner.remote import HostService, LocalTransport, RemoteHost
@@ -191,7 +191,7 @@ class SweepMetal:
             dial=lambda address: transports[address])
         transports[LEARN_ADDRESS] = LocalTransport(HostService(self.learn_host))
 
-        self.desk = FleetService(
+        self.desk = Desk(
             self.store,
             connect=lambda address: RemoteHost(transports[address]))
         self.desk.list_host("sweep-serve", self.serve_host.regimes,
@@ -341,11 +341,11 @@ async def via_desk(desk_arms: int = 8) -> None:
     """THE PROOF: a different process, one frame per experiment, through the
     desk — placed over the listings, adopted at the learner host, landing on
     the same roster as the in-process arms."""
-    from rlstack.runner.remote import RemoteFleet
+    from rlstack.runner.remote import RemoteDesk
 
     handle = deployed_metal()
     rows = handle.build_rows_here.remote(grid()[-desk_arms:])
-    fleet = RemoteFleet(ClsTransport(handle))
+    fleet = RemoteDesk(ClsTransport(handle))
     print(f"[via_desk] status before: "
           f"{sorted(fleet.status()['listings'])}")
     for row in rows:

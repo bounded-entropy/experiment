@@ -3053,9 +3053,10 @@ specs; backends (local/modal/skypilot) and GPU topology are semantics-neutral.
 
 ---8<--- cut here ---8<---
 
-66. **THE SUBMISSION DOOR AND THE STANDING FLEET: adopt, the desk, and the
+68. **THE SUBMISSION DOOR AND THE STANDING FLEET: adopt, the desk, and the
     mixed-family chain — three rulings, one arc, each proven by the failure
-    that demanded it.** The deployment model was always "experiments request
+    that demanded it.** (Renumbered from a colliding #66 at the
+    worktree merge; chronologically it sits between #65 and #67.) The deployment model was always "experiments request
     resources and join matching hosts", and the fleet could PLACE (#43) but
     nothing could DELIVER: `submit` was an in-process method, so a campaign
     could only run where its script already stood. This entry is the missing
@@ -3204,6 +3205,54 @@ specs; backends (local/modal/skypilot) and GPU topology are semantics-neutral.
     honestly ~0.08) and mints carve addresses; the booking race, the failed
     build, the reaped-carve-frees-metal circle, and the recover-vs-reap
     verdicts are all pinned on fakes (test_fleet_service, 26 tests).
+
+69. **THE BLIND DESK: the desk allocates Demands; specs meet the fleet in
+    the campaign layer; Fleet-the-class is gone.** Samarth's ruling, arrived
+    at from the side evaluator (pair_eval.py hand-rolled find_listing and a
+    third copy of the venue transports because the desk's only door demanded
+    an ExperimentSpec with a learner): the desk should not know what an
+    experiment IS — its fundamental job is to accept any Demand and try
+    allocating it; the host owns what a workload means.
+    THE BOUNDARY: rlstack/runner/desk.py imports no spec class (the acid
+    test, pinned: a gibberish frame is placed and relayed untouched, the
+    HOST refuses it, the desk's reply carries the host's error). The desk's
+    vocabulary is Demand rows (demand_rows/demands_from, the wire codec;
+    Demand grows `anchor` — where a delivered frame lands), listings, metal,
+    addresses. Two doors: `place(demands)` answers addresses (the PURE
+    CLIENT's door — an evaluator joins a pool and is thereafter just
+    admitted traffic; journaled delivered=False), and `submit(demands,
+    frame)` places then DELIVERS the opaque frame to the anchor demand's
+    host with routes threaded — routes are derivable from the demand rows
+    alone, which is what makes the blind relay possible. One frame keeps
+    placement+delivery atomic (no leases, the #43 ruling stands).
+    THE CAMPAIGN LAYER (runner/campaign.py) is the only place specs become
+    demands: demands_of marks the learner demand anchor (the learner is
+    never remote lives HERE now, client-side, where the spec is), frame_for
+    carries the canonical row + code claim, and Campaigns is the desk's
+    spec-aware sidecar — it owns migrate/sliced_plans (they read stores AND
+    specs, so they ride beside the desk in its container, one Transport
+    door: Campaigns.serve handles migrate, delegates the rest). RemoteDesk
+    .submit(spec) keeps its signature — shaping moved client-side —
+    and .resolve(demands) is the pure client's verb (pair_eval's
+    serving_pool, deleted).
+    THE RENAME (a #55-style vocabulary arc, identity-free — machinery names
+    are not hashed): FleetService → Desk, RemoteFleet → RemoteDesk, fleet.py
+    → desk.py, the deploy verbs fleet/fleet_ask → desk/desk_ask.
+    Fleet-the-class (the in-process ladder) is DELETED, and with it
+    Join/Carve/Acquire/Plan-as-data: its unique value was the ladder over
+    live hosts, which Desk + MetalService with local factories already are —
+    the duplicated join rule (Fleet._covers vs _covers_regimes, a listed
+    finding) collapses to ONE `covers()`. "The fleet" survives as the
+    collective noun for the plane (the journal key fleet/log.jsonl and
+    read_fleet_log/append_fleet_event keep it; renaming bytes on disk
+    orphans history). Host/Partition stay two words for two planes (1:1
+    stated in ARCHITECTURE.md). Tests: test_fleet_service → test_desk (+
+    place/blindness/anchor claims), test_fleet → test_placement (the pure
+    vocabulary: demands_of + anchor, placement_units, fraction_for_gb,
+    covers). NOT REDEPLOYED with the pair mid-flight: the wire verbs rename,
+    and a redeploy would strand the running metal generation and let the
+    reaper decarve the live pair's listings — the deploy waits for the
+    natural break (the migrate move is the natural break).
 
 ## Open threads (do NOT treat as settled; flag when your answer touches them)
 

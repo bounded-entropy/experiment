@@ -1,4 +1,4 @@
-"""The standing fleet: FleetService (the desk), Listing, RemoteFleet.
+"""The standing fleet: Desk (the desk), Listing, RemoteDesk.
 
 The claims under test: a campaign's whole surface is one frame (submit at the
 desk → placed over listings → adopted at the learner's host, routes threaded);
@@ -12,6 +12,7 @@ produces is byte-identical to an in-process submit of the same spec.
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import tempfile
 import unittest
 
@@ -24,9 +25,12 @@ from rlstack import (
 )
 from rlstack.runner.host import Partition
 from rlstack.spec.canonical import canonical_json
-from rlstack.runner.fleet import FleetService, Listing, MetalService
+from rlstack.runner.campaign import Campaigns, demands_of
+from rlstack.runner.desk import (
+    Demand, Desk, Listing, MetalService, demand_rows,
+)
 from rlstack.runner.remote import (
-    HostService, LocalTransport, RemoteFleet, RemoteHost, RemoteMetal,
+    HostService, LocalTransport, RemoteDesk, RemoteHost, RemoteMetal,
 )
 
 BASE = "Qwen/Qwen3-0.6B"
@@ -117,14 +121,14 @@ class DeskFixture(unittest.TestCase):
         self.transports[address] = LocalTransport(HostService(host))
         return host
 
-    def desk(self) -> FleetService:
-        return FleetService(
+    def desk(self) -> Desk:
+        return Desk(
             self.store,
             connect=lambda addr: RemoteHost(self.LazyTransport(self, addr)),
             connect_metal=lambda addr: RemoteMetal(
                 self.metal_transports[addr]))
 
-    def desk_with_metal(self, *names) -> FleetService:
+    def desk_with_metal(self, *names) -> Desk:
         """A desk with the named metal services registered, plane and all."""
         desk = self.desk()
         for name in names:
@@ -140,7 +144,7 @@ class DeskFixture(unittest.TestCase):
             GpuGroup(gpus(n=1), (learner(),)))))
 
 
-class FleetServiceTest(DeskFixture):
+class DeskTest(DeskFixture):
     def test_one_frame_places_adopts_and_threads_routes(self) -> None:
         """The whole standing path: desk places main onto the serving
         listing, adopts at the training listing with main's address as a
@@ -154,7 +158,7 @@ class FleetServiceTest(DeskFixture):
         desk.list_host("train-b", trainer.regimes, "fleet://b")
 
         async def drive():
-            reply = await desk.submit(_row(self.split_spec()))
+            reply = await Campaigns(desk).submit(self.split_spec())
             await trainer._adoptions[reply["run_id"]]
             return reply
         reply = go(drive())
@@ -178,7 +182,7 @@ class FleetServiceTest(DeskFixture):
         desk = self.desk()
         desk.list_host("serve-a", serving.regimes, "fleet://a")
         desk.list_host("train-b", trainer.regimes, "fleet://b")
-        remote = RemoteFleet(LocalTransport(desk))
+        remote = RemoteDesk(LocalTransport(Campaigns(desk)))
 
         async def drive():
             reply = await remote.submit(self.split_spec())
@@ -204,7 +208,7 @@ class FleetServiceTest(DeskFixture):
         """The standing carve is a venue action: the refusal SAYS what to
         boot instead of placing wrong."""
         desk = self.desk()
-        reply = go(desk.submit(_row(self.split_spec())))
+        reply = go(Campaigns(desk).submit(self.split_spec()))
         self.assertFalse(reply["accepted"])
         self.assertEqual(len(reply["boot"]), 2)
         self.assertEqual(reply["boot"][0]["base"], BASE)
@@ -218,10 +222,10 @@ class FleetServiceTest(DeskFixture):
         desk.list_host("busy", busy.regimes, "fleet://busy", solo=True)
 
         async def drive():
-            first = await desk.submit(_row(arith_spec(self.train)))
+            first = await Campaigns(desk).submit(arith_spec(self.train))
             # while the first is still running, the desk must not offer busy
-            second = await desk.submit(_row(arith_spec(
-                self.train, seeds=Seeds(master=99))))
+            second = await Campaigns(desk).submit(
+                arith_spec(self.train, seeds=Seeds(master=99)))
             await busy._adoptions[first["run_id"]]
             return first, second
         first, second = go(drive())
@@ -240,10 +244,10 @@ class FleetServiceTest(DeskFixture):
         first.list_host("serve-a", serving.regimes, "fleet://a")
         first.list_host("train-b", trainer.regimes, "fleet://b")
 
-        reborn = FleetService.from_journal(
+        reborn = Desk.from_journal(
             self.store, connect=lambda addr: RemoteHost(self.transports[addr]))
         self.assertEqual(sorted(reborn.listings), ["serve-a", "train-b"])
-        placement, boot = go(reborn.place_listings(self.split_spec()))
+        placement, boot = go(reborn.place_listings(demands_of(self.split_spec())))
         self.assertEqual(boot, [])
         self.assertEqual(placement[None].name, "train-b")
         self.assertEqual(placement["main"].name, "serve-a")
@@ -258,17 +262,17 @@ class FleetServiceTest(DeskFixture):
 
     def test_a_host_phones_home_over_the_wire(self) -> None:
         """A desk in its OWN container: the deploy that booted a host lists
-        and delists it through RemoteFleet, journal included — byte-for-byte
+        and delists it through RemoteDesk, journal included — byte-for-byte
         the in-process list_host."""
         serving = self.stand_up("serve-a", "fleet://a", serves_pool=True,
                                 trains=False)
         desk = self.desk()
-        remote = RemoteFleet(LocalTransport(desk))
+        remote = RemoteDesk(LocalTransport(Campaigns(desk)))
         row = {"metal": "node-a", "gpu": "L4", "devices": [0], "memory": 0.4}
         go(remote.list_host("serve-a", serving.regimes, "fleet://a",
                             partition=row, metal="node-a"))
         self.assertEqual(sorted(desk.listings), ["serve-a"])
-        reborn = FleetService.from_journal(
+        reborn = Desk.from_journal(
             self.store, connect=lambda addr: RemoteHost(self.transports[addr]))
         self.assertEqual(sorted(reborn.listings), ["serve-a"])
         self.assertEqual(reborn.listings["serve-a"].regimes,
@@ -317,8 +321,11 @@ class CodeSkewTest(DeskFixture):
         host = self.stand_up("h", "fleet://h", serves_pool=True, trains=True)
         desk = self.desk()
         desk.list_host("h", host.regimes, "fleet://h")
-        reply = go(desk.submit(_row(arith_spec(self.train)),
-                               code={"loss:grpo": "not-the-real-hash"}))
+        spec = arith_spec(self.train)
+        reply = go(desk.submit(          # a TAMPERED frame, relayed unread
+            demand_rows(demands_of(spec)),
+            {"spec": _row(spec), "code": {"loss:grpo": "not-the-real-hash"},
+             "subdir": None}))
         self.assertFalse(reply["accepted"])
         self.assertIn("loss:grpo", reply["error"])
 
@@ -333,7 +340,7 @@ class ProvisionTest(DeskFixture):
         desk = self.desk_with_metal("fake-metal")
 
         async def drive():
-            reply = await desk.submit(_row(self.split_spec()))
+            reply = await Campaigns(desk).submit(self.split_spec())
             trainer = service.hosts[reply["host"]]
             await trainer._adoptions[reply["run_id"]]
             return reply
@@ -355,21 +362,21 @@ class ProvisionTest(DeskFixture):
         stays listed for the next submit's join rung."""
         self.metal_service(devices=1)
         desk = self.desk_with_metal("fake-metal")
-        reply = go(desk.submit(_row(self.split_spec())))
+        reply = go(Campaigns(desk).submit(self.split_spec()))
         self.assertFalse(reply["accepted"])
         self.assertEqual(len(reply["boot"]), 1)
         self.assertEqual(len(desk.listings), 1)
 
     def test_without_metal_the_boot_instructions_stand(self) -> None:
         desk = self.desk()
-        reply = go(desk.submit(_row(self.split_spec())))
+        reply = go(Campaigns(desk).submit(self.split_spec()))
         self.assertFalse(reply["accepted"])
         self.assertEqual(len(reply["boot"]), 2)
 
     def test_metal_survives_the_journal(self) -> None:
         desk = self.desk()
         desk.register_metal(Metal("node-a", "A100-80GB", 2, 80.0))
-        reborn = FleetService.from_journal(
+        reborn = Desk.from_journal(
             self.store, connect=lambda addr: RemoteHost(self.transports[addr]))
         self.assertEqual(reborn.metal["node-a"].vram_gb, 80.0)
         self.assertEqual(reborn.metal_remotes, {})   # no address, no plane
@@ -380,11 +387,11 @@ class ProvisionTest(DeskFixture):
         (residual) against it again."""
         self.metal_service(devices=2)
         desk = self.desk()
-        remote = RemoteFleet(LocalTransport(desk))
+        remote = RemoteDesk(LocalTransport(Campaigns(desk)))
         go(remote.register_metal("fake-metal", "L4", 2, 24.0,
                                  "metal://fake-metal"))
         self.assertIn("fake-metal", desk.metal_remotes)
-        reborn = FleetService.from_journal(
+        reborn = Desk.from_journal(
             self.store,
             connect=lambda addr: RemoteHost(self._transport(addr)),
             connect_metal=lambda addr: RemoteMetal(
@@ -398,11 +405,11 @@ class MigrateTest(DeskFixture):
     def test_migrate_warm_forks_onto_the_current_code(self) -> None:
         """The code-refresh pass: a finished run is warm-forked into a NEW
         experiment whose manifest names its parent at the tail version, and
-        the child runs to its own commit — one RemoteFleet frame."""
+        the child runs to its own commit — one RemoteDesk frame."""
         host = self.stand_up("h", "fleet://h", serves_pool=True, trains=True)
         desk = self.desk()
         desk.list_host("h", host.regimes, "fleet://h")
-        remote = RemoteFleet(LocalTransport(desk))
+        remote = RemoteDesk(LocalTransport(Campaigns(desk)))
         spec = arith_spec(self.train)
 
         async def drive():
@@ -456,7 +463,7 @@ class MigrateTest(DeskFixture):
         self.fabricate_parent("aaaa11112222", spec, committed=2)
 
         async def drive():
-            forked = await desk.migrate(["aaaa11112222"], remaining_only=True)
+            forked = await Campaigns(desk).migrate(["aaaa11112222"], remaining_only=True)
             child = forked["aaaa11112222"]
             if child.get("run_id") in host._adoptions:
                 await host._adoptions[child["run_id"]]
@@ -482,7 +489,7 @@ class MigrateTest(DeskFixture):
         self.fabricate_parent("plain1111111", spec, 2)
 
         async def drive():
-            forked = await desk.migrate(["fancy1111111", "plain1111111"],
+            forked = await Campaigns(desk).migrate(["fancy1111111", "plain1111111"],
                                         remaining_only=True)
             plain = forked["plain1111111"]
             if plain.get("run_id") in host._adoptions:
@@ -510,7 +517,7 @@ class LivenessVerbTest(DeskFixture):
         desk = self.desk()
         desk.list_host("alive-a", living.regimes, "fleet://a")
         desk.list_host("dead-z", living.regimes, "fleet://dead")
-        remote = RemoteFleet(LocalTransport(desk))
+        remote = RemoteDesk(LocalTransport(Campaigns(desk)))
         self.assertEqual(remote.liveness(),
                          {"alive-a": True, "dead-z": False})
 
@@ -533,12 +540,12 @@ class LivenessTest(DeskFixture):
         desk.list_host("dead-z", living.regimes, "fleet://dead")
         desk.list_host("alive-a", living.regimes, "fleet://a")
 
-        placement, boot = go(desk.place_listings(arith_spec(self.train)))
+        placement, boot = go(desk.place_listings(demands_of(arith_spec(self.train))))
         self.assertEqual(boot, [])
         self.assertEqual(placement[None].name, "alive-a")
 
         desk.delist("dead-z")
-        reborn = FleetService.from_journal(
+        reborn = Desk.from_journal(
             self.store, connect=lambda addr: RemoteHost(self.transports[addr]))
         self.assertEqual(sorted(reborn.listings), ["alive-a"])
 
@@ -670,7 +677,7 @@ class ReapTest(DeskFixture):
                        if e["event"] == "delist"][-1]
         self.assertEqual((last_delist["host"], last_delist["reason"]),
                          ("gone", "reaped"))
-        reborn = FleetService.from_journal(
+        reborn = Desk.from_journal(
             self.store, connect=lambda addr: RemoteHost(self._transport(addr)))
         self.assertEqual(sorted(reborn.listings), ["reboots", "well"])
 
@@ -683,7 +690,7 @@ class ReapTest(DeskFixture):
         desk = self.desk_with_metal("fake-metal")
 
         async def drive():
-            reply = await desk.submit(_row(self.split_spec()))
+            reply = await Campaigns(desk).submit(self.split_spec())
             await service.hosts[reply["host"]]._adoptions[reply["run_id"]]
             return reply
         reply = go(drive())
@@ -706,6 +713,52 @@ class ReapTest(DeskFixture):
         desk = self.desk()
         desk.list_host("well", living.regimes, "fleet://well")
         desk.list_host("gone", living.regimes, "fleet://gone")
-        remote = RemoteFleet(LocalTransport(desk))
+        remote = RemoteDesk(LocalTransport(Campaigns(desk)))
         verdicts = go(remote.reap(probes=1))
         self.assertEqual(verdicts, {"well": "alive", "gone": "reaped"})
+
+
+class BlindDeskTest(DeskFixture):
+    def test_place_serves_a_pure_client(self) -> None:
+        """Demands in, addresses out, nothing adopted: the evaluator's door.
+        The reply names the pool's address and the journal records the
+        placement, but no roster anywhere gains a tenancy."""
+        serving = self.stand_up("serve-a", "fleet://a", serves_pool=True,
+                                trains=False)
+        desk = self.desk()
+        desk.list_host("serve-a", serving.regimes, "fleet://a")
+        reply = go(desk.place((Demand(
+            pool="main", capability="inference", base=BASE, shape=1,
+            memory=0.2, group=0, sharing="concurrent"),)))
+        self.assertTrue(reply["placed"])
+        self.assertEqual(reply["pools"], {"main": "fleet://a"})
+        self.assertEqual(serving.roster, {})
+        self.assertTrue(any(
+            e.get("event") == "place" and e.get("delivered") is False
+            for e in self.store.read_fleet_log()))
+
+    def test_the_desk_never_reads_the_frame(self) -> None:
+        """GIBBERISH in the frame's spec: the desk places and relays it
+        untouched, the HOST refuses it, and the desk's reply carries the
+        host's own error — proof the desk decoded nothing."""
+        host = self.stand_up("h", "fleet://h", serves_pool=True, trains=True)
+        desk = self.desk()
+        desk.list_host("h", host.regimes, "fleet://h")
+        demands = demands_of(arith_spec(self.train))
+        reply = go(desk.submit(
+            demand_rows(demands),
+            {"spec": {"utter": "gibberish"}, "code": None, "subdir": None}))
+        self.assertFalse(reply["accepted"])
+        self.assertEqual(reply["host"], "h")     # it REACHED the host
+
+    def test_a_delivery_needs_exactly_one_anchor(self) -> None:
+        serving = self.stand_up("serve-a", "fleet://a", serves_pool=True,
+                                trains=False)
+        desk = self.desk()
+        desk.list_host("serve-a", serving.regimes, "fleet://a")
+        unanchored = tuple(dataclasses.replace(d, anchor=False)
+                           for d in demands_of(arith_spec(self.train)))
+        reply = go(desk.submit(demand_rows(unanchored),
+                               {"spec": {}, "code": None, "subdir": None}))
+        self.assertFalse(reply["accepted"])
+        self.assertIn("anchor", reply["error"])

@@ -314,7 +314,7 @@ the bf16 kernel difference, and GROWTH above that floor is the signal.
 **Metal** — registered owned hardware the fleet may carve: a name, a GPU kind, a
 device count, and one device's VRAM. Registering Metal *is* the acquire rung
 executed.
-`rlstack/runner/fleet.py`
+`rlstack/runner/desk.py`
 
 **GpuSet** — pure device demand inside a spec (`n`, `nodes`, optional literal
 ids). Demand, never a provider name — the spec says what, placement says where
@@ -334,7 +334,11 @@ matches joins against regimes; the host attests its metal against them at birth.
 `rlstack/runner/host.py`
 
 **Host** — an ATOMIC PURPOSED PARTITION: a Partition plus its Regimes, attested
-at construction and never grown or reshaped (I12). It owns its engines, at most
+at construction and never grown or reshaped (I12). Host and Partition are 1:1
+and deliberately two words: the Partition is the RESOURCE fact (what share of
+what metal), the Host is the SERVICE wearing it (arbiter, engines/learner,
+roster) — the fleet plane speaks partitions, the workload plane speaks hosts.
+It owns its engines, at most
 ONE multi-tenant learner, its arbiter, and its journal store. One regime =
 dedicated; several = it ALTERNATES them on its own arbiter group, one host
 wearing masks rather than two hosts coordinating. `solo` is one more birth
@@ -345,12 +349,14 @@ cannot disturb each other's RESULTS, never their THROUGHPUT.
 **Residual** — capacity no partition owns. A carve draws from residual only,
 which is what makes carving automatic: it can never shrink or reshape a living
 host.
-`rlstack/runner/fleet.py`
+`rlstack/runner/desk.py`
 
-**Fleet** — the inventory of Metal and hosts, and the placement ladder over
-them. It reads capability **demands** off a spec's `gpu_config` (what, never
-where) and returns a `Plan` of `Join` / `Carve` / `Acquire` steps.
-`rlstack/runner/fleet.py`
+**Demand** — one member's capability need as a value: capability, base, shard
+shape, the fraction as a carve hint, and the **anchor** flag (where a delivered
+frame lands). The desk's whole input vocabulary; `demand_rows`/`demands_from`
+are its wire codec. A spec becomes demands in the CAMPAIGN layer, never at the
+desk.
+`rlstack/runner/desk.py` (`Demand`), `rlstack/runner/campaign.py` (`demands_of`)
 
 **Subdir / filing** — where a run's directory spawns
 (runs/<subdir>/<run_id>), indicated at submit and fixed for life. Filing,
@@ -359,20 +365,32 @@ the observer renders the tree (a FOLDER is which store; a SUBDIR is filing
 inside one).
 `rlstack/data/stores/base.py` (`run_prefix`, `check_subdir`)
 
-**Desk / FleetService** — the STANDING fleet: placement as a service and the
-fleet journal's one writer (the Trainer/ledger pattern on the fleet plane).
-It holds **Listings** — descriptions of standing hosts (regimes, address,
-solo, and the capacity VIEW: partition row + metal name), journaled and
-rebuilt by `from_journal` — matches the join rung over them, and
-`submit(spec)` ends in an **adopt** at the learner's listing with every other
-pool's address threaded as routes. A placement no listing serves becomes a
-desk-issued CARVE on a registered metal (deduce by residual, command by
-RemoteMetal.carve); only what no metal holds returns boot instructions — the
-standing acquire, a human's. `reap` is the janitor: probe, retry (the knock
-is the restart on a lazy venue), decarve + delist(reason) what stays silent.
-A campaign's whole surface is `RemoteFleet(transport).submit(spec)`; no venue
-word appears in any of it.
-`rlstack/runner/fleet.py` (`FleetService`, `Listing`), `rlstack/runner/remote.py` (`RemoteFleet`)
+**Desk** — placement as a service and the fleet journal's one writer (the
+Trainer/ledger pattern on the fleet plane). WORKLOAD-BLIND: its vocabulary is
+Demands, listings, metal and addresses; it imports no spec class. It holds
+**Listings** — descriptions of standing hosts (regimes, address, solo, and
+the capacity VIEW: partition row + metal name), journaled and rebuilt by
+`from_journal`. Two doors: `place(demands)` answers addresses (the PURE
+CLIENT's door — an evaluator joins a pool and is thereafter just admitted
+traffic), and `submit(demands, frame)` additionally DELIVERS the opaque frame
+to the anchor demand's host with every other pool's address threaded as
+routes — routes come off the demand rows, which is what makes the blind relay
+possible. A placement no listing serves becomes a desk-issued CARVE on a
+registered metal (deduce by residual, command by RemoteMetal.carve); only
+what no metal holds returns boot instructions — the standing acquire, a
+human's. `reap` is the janitor: probe, retry (the knock is the restart on a
+lazy venue), decarve + delist(reason) what stays silent.
+`rlstack/runner/desk.py` (`Desk`, `Listing`), `rlstack/runner/remote.py` (`RemoteDesk`)
+
+**Campaign layer** — where SPECS meet the fleet, the only such place:
+`demands_of(spec)` (anchor on the learner — the learner is never remote, said
+once, here), `frame_for(spec)` (canonical row + the client's code claim), and
+`Campaigns` — the desk's spec-aware sidecar serving the passes that need both
+a store and spec knowledge (today `migrate`, the code-refresh warm-fork) over
+the desk's own Transport contract. A campaign's whole surface is
+`RemoteDesk(transport).submit(spec)` (shaping happens client-side) or
+`.resolve(demands)` for a pure client; no venue word appears in any of it.
+`rlstack/runner/campaign.py`
 
 **MetalService / the metal plane** — the metal-side end of the standing
 carve: the container that owns a device wears it by default. One registered
@@ -383,7 +401,7 @@ never double-promise; a failed build releases), `decarve` (the venue's
 `release` unmakes the metal, the fraction returns to residual), `residual` /
 `describe` (the desk's deduction feed). The desk DEDUCES, the metal
 ENFORCES; the metal writes nothing to the fleet journal.
-`rlstack/runner/fleet.py` (`MetalService`), `rlstack/runner/remote.py` (`RemoteMetal`)
+`rlstack/runner/desk.py` (`MetalService`), `rlstack/runner/remote.py` (`RemoteMetal`)
 
 **Pool** — a NAME traffic routes to, with two lives: declared capacity
 (`PoolMember` in a `GpuConfig`) and a runtime routing entry (`Routes`: pool name
@@ -476,7 +494,7 @@ observability. Placement, boots, tenancies, gpu samples, traffic windows,
 update timings and carves land here, deliberately outside run manifests so
 placement stays out of identity. Correctness never reads a journal; torn tails
 are tolerated.
-`rlstack/data/stores/base.py`, `rlstack/runner/host.py`, `rlstack/runner/fleet.py`
+`rlstack/data/stores/base.py`, `rlstack/runner/host.py`, `rlstack/runner/desk.py`
 
 **Emission plane** — the measurement side of observability: a `TrafficMeter`
 the host's engines and arbiter count into (prefill and decode tokens, time to
@@ -595,20 +613,20 @@ The declaration half is class attributes (`serving`, `engine_plugin`,
 - **rollout_lowering** — build this adapter type's serving half for one engine
   build; `install_replay`'s twin.
 
-### The fleet ladder (`rlstack/runner/fleet.py`)
+### The fleet ladder (`rlstack/runner/desk.py`)
 
 One currency and one decider per rung (I12):
 
-- **join** — a host already serves the demanded capability; automatic, and the
-  target host's own arbiter is the decider. Declared fractions are ignored: the
-  weights already live there.
-- **carve** — nothing serves it but residual metal fits, so partition a new
-  host into existence. Automatic *because* journaled; residual-only, never
-  reshaping an existing host; the declared fraction sizes the new partition.
-- **acquire** — nothing fits. New metal costs money, so a human registers
-  Metal; `place()` names what to buy and `submit()` refuses to run it.
-- **place** — read demands off the spec and return the `Plan`.
-- **apply** — execute the automatic rungs of a plan, journaling every carve.
+- **join** — a listing already serves the demanded capability (`covers`: the
+  ONE coverage rule — capability, base, shape equality); automatic, and the
+  target host's own arbiter is the decider. Declared fractions are ignored:
+  the weights already live there.
+- **carve** — nothing serves it but a registered metal's residual fits, so
+  the desk commands the metal to partition a new host into existence. The
+  metal BOOKS before it builds (MetalService), so carves never double-promise;
+  journaled and listed at the desk, the single writer.
+- **acquire / boot** — nothing fits. New metal costs money, so the desk
+  answers with boot instructions and a human executes them.
 
 ### The host (`rlstack/runner/host.py`)
 
@@ -708,7 +726,7 @@ referenced by number throughout the code. In short, by subject:
 | I9 | the loss is pure math | loss, postprocessor, token_level |
 | I10 | one experiment, one store | run store, peek, observer |
 | I11 | runs self-describe | dictionary.json, flow graph |
-| I12 | a host is an atomic purposed partition | host, partition, regime, fleet ladder |
+| I12 | a host is an atomic purposed partition | host, partition, regime, desk ladder |
 
 Deltas agreed after the last spec fold-in live in `agent-context/CONTEXT.md`;
 later entries supersede earlier ones, and the code plus the latest entry win.

@@ -106,10 +106,10 @@ class DeskTransport:
         return self._handle
 
     async def call(self, verb: str, payload: dict) -> dict:
-        return await self.handle().fleet.remote.aio(verb, payload)
+        return await self.handle().desk.remote.aio(verb, payload)
 
     def ask(self, verb: str, payload: dict) -> dict:
-        return self.handle().fleet_ask.remote(verb, payload)
+        return self.handle().desk_ask.remote(verb, payload)
 
 
 class MetalTransport:
@@ -168,7 +168,7 @@ class Desk:
     @modal.enter()
     def bring_up(self) -> None:
         from rlstack import ModalVolumeStore
-        from rlstack.runner.fleet import FleetService
+        from rlstack.runner.desk import Desk
         from rlstack.runner.remote import RemoteHost, RemoteMetal
 
         class DeskStore(ModalVolumeStore):
@@ -181,22 +181,26 @@ class Desk:
                 if key.startswith("cas/"):
                     self._persist()
 
-        self.desk = FleetService.from_journal(
+        self.desk = Desk.from_journal(
             DeskStore("/store", volume=store_volume, locator=STORE),
             connect=lambda address: RemoteHost(MetalTransport(address)),
             connect_metal=lambda address: RemoteMetal(
                 MetalPlaneTransport(address)))
+        # the composed door: the blind desk plus its spec-aware sidecar
+        # (campaign.py) — one Transport surface, migrate included
+        from rlstack.runner.campaign import Campaigns
+        self.door = Campaigns(self.desk)
         print(f"[desk] rebuilt from journal: {sorted(self.desk.listings)} "
               f"/ metal plane: {sorted(self.desk.metal_remotes)}")
 
     @modal.method()
-    async def fleet(self, verb: str, payload: dict) -> dict:
+    async def desk(self, verb: str, payload: dict) -> dict:
         store_volume.reload()      # other containers' ledgers, seen fresh
-        return await self.desk.serve(verb, payload)
+        return await self.door.serve(verb, payload)
 
     @modal.method()
-    def fleet_ask(self, verb: str, payload: dict) -> dict:
-        return self.desk.answer(verb, payload)
+    def desk_ask(self, verb: str, payload: dict) -> dict:
+        return self.door.answer(verb, payload)
 
 
 # ---------------------------------------------------------------------------
@@ -213,7 +217,7 @@ class Metal:
         from rlstack import ModalVolumeStore
         from rlstack.policy.siteschema import hf_schema
         from rlstack.runner.engines.vllm_engine import VllmEngine
-        from rlstack.runner.fleet import Metal as OwnedMetal, MetalService
+        from rlstack.runner.desk import Metal as OwnedMetal, MetalService
         from rlstack.runner.learners.torch_learner import TorchLearner
         from rlstack.runner.remote import LocalTransport
 
@@ -298,9 +302,9 @@ class Metal:
         every host the books grow. Stopping THIS call kills the metal."""
         import asyncio
 
-        from rlstack.runner.remote import RemoteFleet
+        from rlstack.runner.remote import RemoteDesk
 
-        fleet = RemoteFleet(DeskTransport())
+        fleet = RemoteDesk(DeskTransport())
         try:
             await fleet.register_metal(METAL_NAME, "A100-40GB", 1, 40.0,
                                        METAL_ADDRESS)
@@ -441,9 +445,9 @@ async def reaper() -> None:
     deployed container — a call queues until bring_up answers, so a mere
     reboot reads as alive/recovered, never reaped), and only a torn-down
     deployment stays silent long enough to be decarved and delisted."""
-    from rlstack.runner.remote import RemoteFleet
+    from rlstack.runner.remote import RemoteDesk
 
-    print(json.dumps(await RemoteFleet(DeskTransport()).reap(probes=3,
+    print(json.dumps(await RemoteDesk(DeskTransport()).reap(probes=3,
                                                              wait=30.0)))
 
 
@@ -455,13 +459,13 @@ async def reaper() -> None:
 def up() -> None:
     """Start the metal's shift and wait until the desk holds the metal —
     nothing stands: listings appear only when placements carve them."""
-    from rlstack.runner.remote import RemoteFleet
+    from rlstack.runner.remote import RemoteDesk
 
     call = metal_handle().serve.spawn()
     print(f"[up] metal serving: call {call.object_id}")
     print(f"[up] kill it later with: modal run deploy/fleet_a100.py::stop "
           f"--call-id {call.object_id}")
-    fleet = RemoteFleet(DeskTransport())
+    fleet = RemoteDesk(DeskTransport())
     for _ in range(90):
         if METAL_NAME in fleet.status().get("metal", {}):
             break
@@ -475,10 +479,10 @@ async def pair(updates: int = 400) -> None:
     submit CARVES the serve and learner hosts out of the bare metal (the
     engine builds inside that frame — minutes); the second JOINS the same
     hosts, so both arms share one engine and one learner."""
-    from rlstack.runner.remote import RemoteFleet, spec_from_json
+    from rlstack.runner.remote import RemoteDesk, spec_from_json
 
     rows = metal_handle().build_pair_here.remote(updates)
-    fleet = RemoteFleet(DeskTransport())
+    fleet = RemoteDesk(DeskTransport())
     for name in ("lora", "gated"):
         reply = await fleet.submit(spec_from_json(rows[name]))
         print(f"[{name}]", json.dumps(reply, indent=2))
@@ -486,9 +490,9 @@ async def pair(updates: int = 400) -> None:
 
 @app.local_entrypoint()
 def status() -> None:
-    from rlstack.runner.remote import RemoteFleet, RemoteMetal
+    from rlstack.runner.remote import RemoteDesk, RemoteMetal
 
-    fleet = RemoteFleet(DeskTransport())
+    fleet = RemoteDesk(DeskTransport())
     told = fleet.status()
     print(json.dumps({
         "listings": told["listings"], "metal": told["metal"],
@@ -501,9 +505,9 @@ def status() -> None:
 @app.local_entrypoint()
 async def reap(probes: int = 3, wait: float = 30.0) -> None:
     """The janitor's sweep, by hand — same verb the scheduled reaper runs."""
-    from rlstack.runner.remote import RemoteFleet
+    from rlstack.runner.remote import RemoteDesk
 
-    print(json.dumps(await RemoteFleet(DeskTransport()).reap(probes, wait),
+    print(json.dumps(await RemoteDesk(DeskTransport()).reap(probes, wait),
                      indent=2))
 
 
@@ -512,9 +516,9 @@ async def migrate(run_ids: str, optim: str = "load",
                   full_plan: bool = False) -> None:
     """The refresh's second half: warm-fork the named runs onto whatever
     code is deployed NOW."""
-    from rlstack.runner.remote import RemoteFleet
+    from rlstack.runner.remote import RemoteDesk
 
-    report = await RemoteFleet(DeskTransport()).migrate(
+    report = await RemoteDesk(DeskTransport()).migrate(
         run_ids.split(","), optim=optim, remaining_only=not full_plan)
     print(json.dumps(report, indent=2))
 
