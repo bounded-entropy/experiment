@@ -93,18 +93,6 @@ class LoopTest(unittest.TestCase):
         self.assertEqual(len(column), flat.doc_len)
         self.assertIn(None, column)               # injected prompt positions
 
-    def test_eval_fires_on_schedule(self) -> None:
-        spec = arith_spec(self.train, self.heldout)
-        report, _ = self.run_spec(spec)
-        run = self.store.open_run(report.run_id)
-        for update in (2, 4):
-            summary = json.loads(run.read_eval(update, "summary.json"))
-            self.assertEqual(summary["update"], update)
-            self.assertEqual(summary["episodes"], 8 * 2)  # tasks × n_samples
-            self.assertIn("reward", summary["means"])
-        eval_1 = self.store.path_of(f"runs/{report.run_id}/eval/1")
-        self.assertFalse(eval_1.exists())
-
     def test_resubmit_attaches_and_no_ops(self) -> None:
         spec = arith_spec(self.train)
         report, _ = self.run_spec(spec)

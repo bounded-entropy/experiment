@@ -17,7 +17,6 @@ from rlstack import (
     ADAPTER_TYPES,
     AdapterSpec,
     AlgoSpec,
-    EvalSpec,
     ExperimentSpec,
     GenSpec,
     GpuConfig,
@@ -132,20 +131,11 @@ def train_plan() -> RunPlan:
                          for u in range(1, UPDATES + 1)))
 
 
-def eval_plan(env: str) -> RunPlan:
-    """What the Evaluator MEASURES: one wave per eval point, two samples of
-    each held-out task. Held-out-ness is a property of the PLANS now — no id
-    an eval wave names is one a rollout wave sampled."""
-    return RunPlan(tuple(
-        WavePlan(tuple(GroupPlan(task, (Sample(task, env), Sample(task, env)))
-                       for task in HELD_OUT_IDS))
-        for _ in range(UPDATES // 10)))
-
-
 def plans_for(env: str) -> Plans:
-    """The three plans of a run that makes, takes, and measures."""
-    return Plans(train=cas(train_plan()), rollout=cas(rollout_plan(env)),
-                 eval=cas(eval_plan(env)))
+    """The two plans of a run that makes and takes. Measurement has no plan
+    here (#70): observing held-out tasks is a Measurement's own manifest,
+    outside the run."""
+    return Plans(train=cas(train_plan()), rollout=cas(rollout_plan(env)))
 
 
 def example_1() -> ExperimentSpec:
@@ -169,7 +159,6 @@ def example_1() -> ExperimentSpec:
                             overrides={"head": {"lr": 3e-6}}),
             schedule=Schedule(),
         ),
-        eval=EvalSpec(every=10, pool="eval", post=("verifier",)),
         gpu_config=GpuConfig(groups=(
             GpuGroup(gpus(n=6), (pool("main", tp=2, n=3), learner(fsdp=2))),
             GpuGroup(gpus(n=1), (pool("eval"),)),
@@ -360,9 +349,7 @@ class TestExample6Replicates(unittest.TestCase):
             example_1(),
             policy=PolicySpec(base="Qwen/Qwen3-1.7B",
                               bank={"pi": lora("layers.0-31.mlp.*", r=16)}),
-            # no eval, and so no eval plan: measurement is a plan, not a flag
-            eval=None,
-            plans=replace(example_1().plans, eval=None),
+            plans=example_1().plans,
             gpu_config=GpuConfig(groups=(
                 GpuGroup(gpus(ids=("0",)),
                       (pool("main", n=2, fraction=0.30), learner(fraction=0.25))),

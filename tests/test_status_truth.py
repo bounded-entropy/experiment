@@ -27,7 +27,7 @@ def store_with(journal: list[dict], committed: int = 0) -> LocalStore:
         store.append_host_event("h", event)
     if committed:
         run = store.open_run("r1", manifest={"run_id": "r1"})
-        run.write_plan("train", arith_plan_blobs(False)["train"])
+        run.write_plan("train", arith_plan_blobs()["train"])
         for update in range(1, committed + 1):
             run.append_ledger({"update": update})
     return store

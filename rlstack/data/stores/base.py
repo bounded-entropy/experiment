@@ -16,7 +16,11 @@ the reference):
                                                file above at the commit
                   adapters/<name>@<v>.bin      delta payloads
                   optim/<name>@<v>.bin         optimizer moments (lockstep)
-                  eval/<update>/...            firewalled measurement output
+                  eval/<update>/...            PRE-#70 in-run eval (legacy read)
+    measurements/<run_id>/<name>/manifest.json observation OUTSIDE the run
+                                 points.jsonl  (#70): not identity, not
+                                               resume-equivalence, deletable —
+                                               supersede by NAME
     cas/<sha256>/blob                          content-addressed objects
     hosts/<name>/log.jsonl                     the host and fleet journals:
     fleet/log.jsonl                            observability only (correctness
@@ -368,8 +372,9 @@ class Store(ABC):
             return None
 
     def peek_eval_summaries(self, run_id: str) -> list[dict[str, Any]]:
-        """Every completed eval summary for a run, WITHOUT attaching —
-        the observer's held-out series. Unparseable files are skipped."""
+        """Every completed eval summary for a PRE-#70 run, WITHOUT attaching —
+        the legacy in-run eval's held-out series. New runs measure OUTSIDE the
+        run dir (measurements/); this stays so history renders."""
         out = []
         for key in self._list(f"{self.run_prefix(run_id)}/eval"):
             if not key.endswith("/summary.json"):
@@ -379,6 +384,62 @@ class Store(ABC):
             except (FileNotFoundError, json.JSONDecodeError):
                 pass
         return sorted(out, key=lambda s: s.get("update", 0))
+
+    # ---- measurements: observation OUTSIDE the run (#70) ---------------------
+    #
+    # measurements/<run_id>/<name>/manifest.json + points.jsonl. Not identity,
+    # not the run dir, not resume-equivalence: a Measurement is an observation
+    # OF a run, configured by its own manifest, appended point by point, and
+    # deletable — supersede by NAME rather than rewriting one. One writer per
+    # (run_id, name); the observer reads them beside the legacy eval/.
+
+    def open_measurement(self, run_id: str, name: str,
+                         manifest: Mapping[str, Any]) -> None:
+        """Write-once config: a second open with the SAME manifest is a no-op
+        (the measurer's restart), a different one is refused — a changed
+        observation is a NEW name, so no points file ever mixes configs."""
+        key = f"measurements/{run_id}/{name}/manifest.json"
+        stated = _canonical(dict(manifest))
+        if self._exists(key):
+            if self._read(key).decode("utf-8") != stated:
+                raise StoreError(
+                    f"measurement {name!r} of {run_id!r} exists with a "
+                    f"different manifest — a changed observation is a new "
+                    f"name, never a rewrite")
+            return
+        self._write(key, stated.encode("utf-8"))
+
+    def append_measurement_point(self, run_id: str, name: str,
+                                 row: Mapping[str, Any]) -> None:
+        self._append_line(
+            f"measurements/{run_id}/{name}/points.jsonl",
+            json.dumps(dict(row), sort_keys=True, separators=(",", ":")))
+
+    def measured_updates(self, run_id: str, name: str) -> set[int]:
+        """The updates this measurement already holds — the idempotence key
+        a measuring pass skips by."""
+        return {int(row["update"])
+                for row in self._read_log(
+                    f"measurements/{run_id}/{name}/points.jsonl")
+                if "update" in row}
+
+    def read_measurements(self, run_id: str) -> dict[str, dict[str, Any]]:
+        """{name: {"manifest": ..., "points": [...]}} for one run — the
+        observer's read, beside the legacy eval summaries."""
+        out: dict[str, dict[str, Any]] = {}
+        for key in self._list(f"measurements/{run_id}/"):
+            if not key.endswith("/manifest.json"):
+                continue
+            name = key.split("/")[-2]
+            try:
+                manifest = json.loads(self._read(key).decode("utf-8"))
+            except (FileNotFoundError, json.JSONDecodeError):
+                continue
+            points = sorted(
+                self._read_log(f"measurements/{run_id}/{name}/points.jsonl"),
+                key=lambda r: r.get("update", 0))
+            out[name] = {"manifest": manifest, "points": points}
+        return out
 
     def read_panels(self) -> list[dict[str, Any]]:
         """User-defined derived-graph declarations (panels.json at the store
@@ -769,16 +830,8 @@ class RunHandle:
 
     # ---- eval ---------------------------------------------------------------
 
-    def write_eval(self, update: int, filename: str, text: str) -> None:
-        """Firewalled measurement output; never consulted by crash recovery."""
-        self.store._write(self._key("eval", str(update), filename),
-                          text.encode("utf-8"))
-
-    def has_eval(self, update: int, filename: str = "summary.json") -> bool:
-        """Whether `update`'s eval completed (the summary is written last)."""
-        return self.store._exists(self._key("eval", str(update), filename))
-
     def read_eval(self, update: int, filename: str) -> str:
+        """A PRE-#70 run's in-run eval output — legacy read, nothing writes."""
         return self.store._read(self._key("eval", str(update), filename)).decode("utf-8")
 
     # ---- crash recovery (runs on every attach) ------------------------------

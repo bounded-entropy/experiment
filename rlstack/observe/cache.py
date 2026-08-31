@@ -36,8 +36,16 @@ def immutable(key: str) -> bool:
     rest by the store's write-once rule — a committed artifact is never
     rewritten, so its first bytes are its only bytes."""
     return (key.startswith("cas/")
-            or key.endswith(("manifest.json", "dictionary.json"))
+            or (key.endswith(("manifest.json", "dictionary.json"))
+                and not deletable(key))
             or "/waves/" in key or "/postdata/" in key)
+
+
+def deletable(key: str) -> bool:
+    """The ONE deletable tree: measurements are observations, superseded or
+    removed at will (#70) — so for them, and only them, absence is believed
+    (after ABSENT_TTL) instead of outranked by held bytes."""
+    return key.startswith("measurements/")
 
 
 class CachedReadStore(Store):
@@ -63,9 +71,13 @@ class CachedReadStore(Store):
                 if self.inner._size(key) == held[0]:
                     return held[1]
             except FileNotFoundError:
+                if deletable(key):
+                    self._bytes.pop(key, None)
+                    self._absent[key] = time.time()
+                    raise
                 # THE BLINK: a mount reload makes the whole tree transiently
-                # absent, and nothing in this store ever deletes a journal —
-                # so bytes we HELD outrank a momentary 404, and the next
+                # absent, and nothing else in this store ever deletes — so
+                # bytes we HELD outrank a momentary 404, and the next
                 # changed size re-reads honestly
                 return held[1]
         noticed = self._absent.get(key)
@@ -93,10 +105,12 @@ class CachedReadStore(Store):
         if held is not None and time.time() - held[0] < LIST_TTL:
             return held[1]
         keys = self.inner._list(prefix)
-        if not keys and held is not None and held[1]:
+        if (not keys and held is not None and held[1]
+                and not deletable(prefix)):
             # a populated tree does not empty itself (runs and journals are
-            # never deleted): a blank listing right after a full one is the
-            # reload blink, so the last real listing stands one more tick
+            # never deleted; measurements/ is the exception and skips this):
+            # a blank listing right after a full one is the reload blink, so
+            # the last real listing stands one more tick
             self._lists[prefix] = (time.time(), held[1])
             return held[1]
         self._lists[prefix] = (time.time(), keys)

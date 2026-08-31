@@ -133,10 +133,8 @@ class Campaigns:
                     spec, init=WarmStart(policy=f"store://{rid}@{version}",
                                          optim=optim))
                 if remaining_only:
-                    plans, eval_done = self.sliced_plans(rid, spec, committed)
-                    child = dataclasses.replace(child, plans=plans)
-                    if eval_done:
-                        child = dataclasses.replace(child, eval=None)
+                    child = dataclasses.replace(
+                        child, plans=self.sliced_plans(rid, spec, committed))
                 reply = await self.submit(child)
                 if reply.get("accepted"):
                     self.store.append_fleet_event({
@@ -155,8 +153,8 @@ class Campaigns:
         REBUILT as the standard pairing after PROVING the parent's was exactly
         that (every entry WaveRef "self://rollouts/u", 1:1) — self:// refs are
         index-coupled, so slicing anything fancier would silently retarget
-        them. Eval slices by fired points (committed // every). Refusals over
-        guesses, everywhere.
+        them. Refusals over guesses, everywhere. (Measurement has no plan to
+        slice: it is not part of the run.)
         """
         from rlstack.data.plan import RunPlan, WaveRef, decode, encode
         from rlstack.spec.specs import Plans
@@ -182,19 +180,9 @@ class Campaigns:
         if remaining <= 0:
             raise FleetError(f"{rid!r} committed its whole plan — nothing "
                              f"remaining to migrate")
-        rows = {"eval": spec.plans.eval}
-        eval_done = False
-        rows["rollout"] = self.store.cas_put(
-            encode(RunPlan(rollout.waves[committed:])))
-        rows["train"] = self.store.cas_put(encode(RunPlan(tuple(
-            WaveRef(f"self://rollouts/{u}") for u in range(1, remaining + 1)))))
-        if spec.plans.eval is not None and spec.eval is not None:
-            fired = committed // spec.eval.every
-            eval_plan = plan_of("eval")
-            if eval_plan is not None and fired < len(eval_plan):
-                rows["eval"] = self.store.cas_put(
-                    encode(RunPlan(eval_plan.waves[fired:])))
-            elif eval_plan is not None:
-                rows["eval"], eval_done = None, True   # every point fired
-        return (Plans(train=rows["train"], rollout=rows["rollout"],
-                      eval=rows["eval"]), eval_done)
+        return Plans(
+            train=self.store.cas_put(encode(RunPlan(tuple(
+                WaveRef(f"self://rollouts/{u}")
+                for u in range(1, remaining + 1))))),
+            rollout=self.store.cas_put(
+                encode(RunPlan(rollout.waves[committed:]))))

@@ -46,20 +46,6 @@ class GenSpec:
     sampling: SamplingSpec = SamplingSpec()
 
 
-@dataclass(frozen=True)
-class EvalSpec:
-    """Firewalled measurement: immutable bundle versions + held-out tasks only.
-
-    WHAT eval samples is Plans.eval — one wave per eval point, held-out tasks
-    named leaf by leaf — so `tasks`, `env` and `n_samples` are not knobs here
-    any more than they are in a rollout. What remains is when it runs, what
-    scores it, and where the traffic goes."""
-
-    every: int = 10               # run after every N optim updates
-    post: tuple[str, ...] = ()    # scoring pipeline over eval trajectories
-    pool: str = "main"            # which engine pool carries eval traffic
-
-
 # ---------------------------------------------------------------------------
 # the bridge (I2: the policy is the only two-world primitive)
 # ---------------------------------------------------------------------------
@@ -95,7 +81,8 @@ class Plans:
     `train` is what the Trainer consumes, one wave per update, and its LENGTH
     is the run's length. `rollout` is what the Generator makes, one wave per
     rollout index; None means the run samples nothing (every train leaf is
-    already sealed elsewhere). `eval` is one wave per eval point.
+    already sealed elsewhere). Measurement has no plan here: it is not part
+    of the run (a Measurement follows the ledger from outside, observe-side).
 
     Each uri's sha IS the plan's content hash, so a plan hashes into run_id
     exactly as if it were written inline, while the spec stays readable.
@@ -103,7 +90,6 @@ class Plans:
 
     train: str                    # "cas://<sha>"
     rollout: str | None = None
-    eval: str | None = None
 
 
 @dataclass(frozen=True)
@@ -271,7 +257,6 @@ class ExperimentSpec:
     gpu_config: GpuConfig         # semantics-neutral (I5)
     seeds: Seeds
     init: WarmStart | None = None
-    eval: EvalSpec | None = None
     tier: str = "lab"             # "lab" | "release"
 
     def __post_init__(self) -> None:

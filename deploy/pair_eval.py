@@ -186,12 +186,11 @@ async def screen() -> dict:
 @app.function(image=image, volumes={"/store": store_volume},
               schedule=modal.Period(minutes=10), timeout=3600)
 async def tick() -> dict:
-    """Backfill and follow: every EVERY-th committed version of each arm not
-    yet measured, restored from blobs and measured on the picked problems.
-    The first tick reaches back to update EVERY; later ticks keep pace."""
-    from rlstack import ModalVolumeStore
-    from rlstack.data.tasks import load_tasks
-    from rlstack.policy.compile import restore_bundle
+    """Backfill and follow, through the CORE measurer (#70): one idempotent
+    `measure_run` pass per arm writes measurements/<run_id>/heldout/ — the
+    same area the run pages render — on the picked problems. The first tick
+    reaches back to the earliest sealed version; later ticks keep pace."""
+    from rlstack import Measurement, ModalVolumeStore, load_tasks, measure_run
 
     store_volume.reload()
     store = ModalVolumeStore("/store", volume=store_volume, locator=STORE)
@@ -199,35 +198,25 @@ async def tick() -> dict:
         chosen = json.loads(store._read(f"{AREA}/tasks.json"))
     except FileNotFoundError:
         return {"waiting": "no tasks.json — run screen first"}
-    task_ids = chosen["picked"]
+    task_ids = tuple(sorted(chosen["picked"]))
     tasks = {t.id: t for t in load_tasks(store, EVAL_TASKS)
              if t.id in set(task_ids)}
-    reader_for, bank_of = opened(store)
+    measurement = Measurement(
+        name="heldout", env="dapo_math", task_ids=task_ids,
+        samples=EVAL_SAMPLES, every=EVERY, post=("final_answer",),
+        seed=MASTER, temperature=1.0, max_tokens=MAX_TOKENS)
     pool = serving_pool()
-
     report = {}
     for arm, rid in RUNS.items():
         try:
-            done = json.loads(store._read(f"{AREA}/{arm}.json"))
-        except FileNotFoundError:
-            done = {}
-        for entry in store.peek_ledger(rid):
-            update = int(entry["update"])
-            if update % EVERY or str(update) in done:
-                continue
-            bundle = restore_bundle(
-                {n: int(v) for n, v in entry["versions"].items()},
-                entry["bundle_id"], reader_for(rid),
-                list(bank_of(rid)), bank_of(rid))
-            if not pool.knows_bundle(bundle.bundle_id):
-                pool.add_bundle(bundle)
-            mean, per_task = await measure(pool, bundle, tasks, task_ids,
-                                           EVAL_SAMPLES, update)
-            done[str(update)] = {"mean": mean, "per_task": per_task}
-            print(f"[{arm}] u{update}: {mean:.3f}")
-        store._write(f"{AREA}/{arm}.json", json.dumps(done).encode())
-        report[arm] = {str(u): round(done[u]["mean"], 3)
-                       for u in sorted(done, key=int)}
+            fresh = await measure_run(store, rid, measurement, pool, tasks)
+            told = store.read_measurements(rid)["heldout"]["points"]
+            report[arm] = {"new": fresh,
+                           "curve": {p["update"]: round(p["means"]
+                                     .get("reward", float("nan")), 3)
+                                     for p in told}}
+        except Exception as refusal:
+            report[arm] = {"error": str(refusal)}
     store_volume.commit()
     return report
 
@@ -238,12 +227,16 @@ def read_out() -> dict:
     from rlstack import ModalVolumeStore
 
     store = ModalVolumeStore("/store", volume=store_volume, locator=STORE)
-    out = {}
-    for name in ("tasks", *RUNS):
-        try:
-            out[name] = json.loads(store._read(f"{AREA}/{name}.json"))
-        except FileNotFoundError:
-            out[name] = None
+    out: dict = {}
+    try:
+        out["tasks"] = json.loads(store._read(f"{AREA}/tasks.json"))
+    except FileNotFoundError:
+        out["tasks"] = None
+    for arm, rid in RUNS.items():
+        told = store.read_measurements(rid).get("heldout")
+        out[arm] = None if told is None else {
+            str(p["update"]): p["means"].get("reward")
+            for p in told["points"]}
     return out
 
 
@@ -263,7 +256,7 @@ def show() -> None:
     tasks = told.pop("tasks") or {}
     print(f"picked {len(tasks.get('picked', []))} problems, screening "
           f"aggregate {tasks.get('aggregate')}")
-    rows = {arm: {int(u): v["mean"] for u, v in (told[arm] or {}).items()}
+    rows = {arm: {int(u): v for u, v in (told[arm] or {}).items()}
             for arm in RUNS}
     updates = sorted(set().union(*[set(r) for r in rows.values()]))
     print("update  " + "  ".join(f"{arm:>8}" for arm in RUNS))

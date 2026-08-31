@@ -74,36 +74,19 @@ def train_plan(updates):
                          for u in range(1, updates + 1)))
 
 
-def eval_plan(task_ids, updates, every):
-    """ONE WAVE PER EVAL POINT — not one per update.
-
-    The evaluator reads its k-th wave for its k-th measurement
-    (`plan.wave(update // every)`), and the plan's LENGTH is how many
-    measurements the run takes. Padding it out to one entry per update, with
-    empties in between, makes every point read an empty wave and measure
-    nothing — which is exactly what run 803578405216 did (#61).
-    """
-    from rlstack import GroupPlan, RunPlan, Sample, WavePlan
-    measured = WavePlan(tuple(GroupPlan(task, (Sample(task, "dapo_math"),))
-                              for task in task_ids))
-    return RunPlan((measured,) * (updates // every))
-
-
 def spec_for(store, train_tasks, eval_tasks, updates, master, init=None):
     """The experiment as one value. `init` starts it from another run's
     sealed policy — a birth fact, consumed once at Phase 1 and never again."""
-    from rlstack import (AlgoSpec, EvalSpec, ExperimentSpec, GenSpec, GpuConfig,
+    from rlstack import (AlgoSpec, ExperimentSpec, GenSpec, GpuConfig,
                          GpuGroup, GpuSet, LearnerMember, OptimSpec, Plans,
                          PolicySpec, PoolMember, SamplingSpec, Schedule, Seeds,
                          encode, lora)
     from rlstack.data.tasks import load_tasks
 
     train_ids = [t.id for t in load_tasks(store, train_tasks)]
-    eval_ids = [t.id for t in load_tasks(store, eval_tasks)][:32]
     plans = Plans(
         train=store.cas_put(encode(train_plan(updates))),
-        rollout=store.cas_put(encode(rollout_plan(train_ids, updates, master))),
-        eval=store.cas_put(encode(eval_plan(eval_ids, updates, every=10))))
+        rollout=store.cas_put(encode(rollout_plan(train_ids, updates, master))))
     return ExperimentSpec(
         policy=PolicySpec(base=BASE,
                           bank={"pi": lora("layers.*.self_attn.*", r=16)}),
@@ -118,7 +101,6 @@ def spec_for(store, train_tasks, eval_tasks, updates, master, init=None):
                       # makes the knob bite again (#58 measured it stuck when a
                       # single document was longer than the budget).
                       schedule=Schedule(microbatch_tokens=512, max_policy_lag=1)),
-        eval=EvalSpec(every=10, post=("final_answer",)),
         init=init,
         gpu_config=GpuConfig(groups=(
             GpuGroup(gpus=GpuSet(n=2), members=(PoolMember("main", tp=2),)),

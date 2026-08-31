@@ -342,35 +342,26 @@ class Metal:
 def pair_plans(store, updates: int):
     """The shared plans: every update rolls the ONE screened problem
     (GROUPS_PER_WAVE groups of GROUP_SIZE — the overfitting pressure is the
-    point), and every EVAL_EVERY updates one eval wave measures the SAME
-    EVAL_HELD_OUT problems, EVAL_SAMPLES deep. One wave per eval POINT, the
-    #61 lesson."""
+    point). Measurement has no plan here (#70): the held-out reading is
+    pair_eval.py's Measurement, outside the runs."""
     from rlstack import GroupPlan, Plans, RunPlan, Sample, WavePlan, WaveRef, encode
-    from rlstack.data.tasks import load_tasks
 
     wave = WavePlan(tuple(
         GroupPlan(f"{TRAIN_TASK_ID}#{g}",
                   tuple(Sample(TRAIN_TASK_ID, "dapo_math")
                         for _ in range(GROUP_SIZE)))
         for g in range(GROUPS_PER_WAVE)))
-    held_out = [t.id for t in load_tasks(store, EVAL_TASKS)][:EVAL_HELD_OUT]
-    measured = WavePlan(tuple(
-        GroupPlan(task, tuple(Sample(task, "dapo_math")
-                              for _ in range(EVAL_SAMPLES)))
-        for task in held_out))
     return Plans(
         train=store.cas_put(encode(RunPlan(tuple(
             WaveRef(f"self://rollouts/{u}") for u in range(1, updates + 1))))),
-        rollout=store.cas_put(encode(RunPlan((wave,) * updates))),
-        eval=store.cas_put(encode(RunPlan(
-            (measured,) * (updates // EVAL_EVERY)))))
+        rollout=store.cas_put(encode(RunPlan((wave,) * updates))))
 
 
 def pair_specs(store, updates: int):
     """The two arms as values: identical everywhere but the bank and the
     loss. Returns {"lora": spec, "gated": spec}."""
     from rlstack import (
-        AlgoSpec, EvalSpec, ExperimentSpec, GenSpec, GpuConfig, GpuGroup,
+        AlgoSpec, ExperimentSpec, GenSpec, GpuConfig, GpuGroup,
         GpuSet, LearnerMember, OptimSpec, PolicySpec, PoolMember,
         SamplingSpec, Schedule, Seeds, lora, plora,
     )
@@ -390,7 +381,6 @@ def pair_specs(store, updates: int):
                                           overrides=overrides),
                           schedule=Schedule(microbatch_tokens=512,
                                             max_policy_lag=1)),
-            eval=EvalSpec(every=EVAL_EVERY, post=("final_answer",)),
             gpu_config=GpuConfig(groups=(
                 GpuGroup(gpus=GpuSet(n=1), members=(
                     PoolMember("main", tp=1, fraction=SERVE_FRACTION),)),

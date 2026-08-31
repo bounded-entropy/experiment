@@ -52,8 +52,8 @@ class FlowGraphTest(unittest.TestCase):
         graph = self.graph()
         self.assertTrue(node(graph, "advantage", "post").feeds_loss)
         self.assertTrue(node(graph, "reward", "post").feeds_loss)
-        # eval's reward is measurement, not gradient
-        self.assertFalse(node(graph, "reward", "eval").feeds_loss)
+        # no eval-phase nodes exist any more: measurement left the spec (#70)
+        self.assertEqual([n for n in graph.nodes if n.phase == "eval"], [])
 
     def test_direct_requires_and_measurement_only(self) -> None:
         direct = self.graph(loss="sdft", post=("verifier",))

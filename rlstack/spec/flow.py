@@ -187,7 +187,9 @@ def flow_graph(spec: ExperimentSpec) -> FlowGraph:
     """The one canonical walk. Everything else is a query on its result."""
     loss = spec.algo.loss if spec.algo is not None else None
     post_pipeline = tuple(spec.algo.post) if spec.algo is not None else ()
-    eval_pipeline = tuple(spec.eval.post) if spec.eval is not None else ()
+    # measurement left the spec (#70): the eval phase survives as a
+    # dictionary dimension for PRE-#70 runs, and is empty ever after
+    eval_pipeline: tuple[str, ...] = ()
 
     requires = frozenset(
         LOSSES.get(loss).requires

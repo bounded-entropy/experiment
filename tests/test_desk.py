@@ -443,7 +443,7 @@ class MigrateTest(DeskFixture):
 
         run = self.store.open_run(rid, manifest={
             "run_id": rid, "spec": canonical_json(spec)})
-        blobs = arith_plan_blobs(False)
+        blobs = arith_plan_blobs()
         run.write_plan("train", train_blob or blobs["train"])
         run.write_plan("rollout", blobs["rollout"])
         for update in range(1, committed + 1):

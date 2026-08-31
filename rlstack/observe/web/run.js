@@ -66,9 +66,17 @@ export async function drawRun() {
       .map(u => [u.update, u[sec][name]]);
   const evalOf = name => data.eval.filter(e => e.means[name] !== undefined)
       .map(e => [e.update, e.means[name]]);
+  // held-out overlays, both eras: the legacy in-run eval plus every NAMED
+  // measurement (#70) carrying this metric — one dashed series each
+  const measured = name => (data.measurements || []).map(m => ({
+      label: m.name, color: C.eval, dash: true,
+      points: m.points.filter(p => p.means[name] !== undefined)
+                      .map(p => [p.update, p.means[name]])}))
+      .filter(s => s.points.length);
   const pair = (name, color) => [
     {label: name, color: color, points: trainOf("post", name)},
-    {label: "eval", color: C.eval, dash: true, points: evalOf(name)}];
+    {label: "eval", color: C.eval, dash: true, points: evalOf(name)},
+    ...measured(name)];
 
   if (feeding.length) {
     const grid = section("feeds the loss", "walkback from " + (dict.loss ?? "?"));

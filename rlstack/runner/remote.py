@@ -125,7 +125,7 @@ def _spec_classes() -> dict[str, type]:
     from rlstack.spec import specs
 
     classes = (
-        specs.SamplingSpec, specs.GenSpec, specs.EvalSpec, specs.AdapterSpec,
+        specs.SamplingSpec, specs.GenSpec, specs.AdapterSpec,
         specs.PolicySpec, specs.Plans, specs.OptimSpec, specs.Schedule,
         specs.AlgoSpec, specs.GpuSet, specs.PoolMember, specs.LearnerMember,
         specs.GpuGroup, specs.GpuConfig, specs.Seeds, specs.WarmStart,

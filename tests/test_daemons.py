@@ -287,7 +287,6 @@ class BlackboardRunTest(unittest.TestCase):
             GpuGroup(gpus(n=1), (pool("main"), learner()), sharing="sleep"),)))
         report, run = self.run_spec(spec)
         self.assertEqual(len(run.read_ledger()), 4)
-        self.assertTrue(run.has_eval(2) and run.has_eval(4))
 
 
 if __name__ == "__main__":

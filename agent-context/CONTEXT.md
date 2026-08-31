@@ -3254,6 +3254,43 @@ specs; backends (local/modal/skypilot) and GPU topology are semantics-neutral.
     reaper decarve the live pair's listings — the deploy waits for the
     natural break (the migrate move is the natural break).
 
+70. **MEASUREMENT LEAVES THE RUN: EvalSpec retired, the Evaluator daemon
+    dissolved, observation is its own thing.** Samarth's ruling, forced by a
+    live incident: the pair's in-run eval was pinned by identity to a
+    floor-scoring task set for all 400 updates, and the sanctioned fix (the
+    side evaluator) worked precisely BECAUSE eval was firewalled and every
+    adapter version restorable — at which point the in-run Evaluator was
+    revealed as an identity liability with no compensating power.
+    THE CUT: EvalSpec is deleted, ExperimentSpec.eval and Plans.eval are
+    gone, the Evaluator daemon and its wiring are gone, validate's eval
+    rules are gone, code_hashes no longer reaches eval.post, and migrate's
+    eval-slicing deletes itself. A run's identity is its TRAINING loop.
+    Old stores are readable history: a pre-#70 canonical row's eval keys
+    are extra fields the decoder never touches (pinned by test), and the
+    observer still renders legacy eval/ summaries beside the new shape.
+    THE REPLACEMENT (runner/measure.py): a Measurement is an observation OF
+    a run — name, env, held-out task ids, samples, cadence, post pipeline,
+    its own seed — written to measurements/<run_id>/<name>/ (write-once
+    manifest + append-only points; ModalVolumeStore persists each point).
+    `measure_run` is one idempotent pass any process can run against a
+    pool: backfills every missing EVERY-th version from restored bundles
+    (KeepRestorable is what licenses reaching into the past), reduces in
+    WAVE order (#53's rule carried over, scrambler-pinned), and follows
+    the ledger on any cadence. It peeks, never attaches; the run dir gains
+    not one byte (pinned). Swapping what a run is measured on mid-run is
+    a NON-EVENT: stop one measurer, start another under a NEW name —
+    supersede, never rewrite (open_measurement refuses a changed manifest).
+    THE EDGES: measurements/ is the store's ONE deletable tree, so the
+    observer cache believes its absences instead of blink-guarding them
+    (the deliberate carve-out); the UI renders every named measurement as
+    its own dashed series beside legacy eval; pair_eval.py's tick is now a
+    thin venue wrapper over measure_run writing measurements/<rid>/heldout
+    (UI-visible). Vocabulary: RESIDENT vs DAEMON named in ARCHITECTURE.md
+    (an Engine/Learner lives on a partition; a Generator/Trainer/Scorer
+    watches the store and pokes one) — colocation is transport choice, and
+    only the Trainer's is forced (the autograd arc and the seal cannot
+    cross a wire).
+
 ## Open threads (do NOT treat as settled; flag when your answer touches them)
 
 - TODO (Samarth, settled intent — future, nothing now): BUNDLE LRU EVICTION

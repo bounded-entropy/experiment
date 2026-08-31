@@ -12,7 +12,7 @@ from rlstack.registry import loss
 from rlstack.runner.fakes import FakeEngine
 from rlstack.training.post.base import PostProcessor, postprocessor
 from rlstack.spec.specs import (
-    AdapterSpec, AlgoSpec, EvalSpec, ExperimentSpec, GenSpec, GpuConfig, GpuGroup,
+    AdapterSpec, AlgoSpec, ExperimentSpec, GenSpec, GpuConfig, GpuGroup,
     OptimSpec, PolicySpec, Plans, Schedule, Seeds, WarmStart,
     gpus, learner, lora, pool,
 )
@@ -145,16 +145,6 @@ class TestUnknownNames(unittest.TestCase):
         spec = clean_spec(gen=replace(clean_spec().gen, envs=("nope",)))
         self.assertIn("unknown-env", codes(spec))
 
-    def test_eval_without_a_plan(self) -> None:
-        # eval's SHAPE is its plan (#59): declaring eval without one measures
-        # nothing, and silence would read as a passing run
-        spec = clean_spec(eval=EvalSpec(), plans=Plans(train="cas://p/t"))
-        self.assertIn("eval-without-plan", codes(spec))
-
-    def test_unknown_eval_post(self) -> None:
-        spec = clean_spec(eval=EvalSpec(post=("nope",)))
-        self.assertIn("unknown-post", codes(spec))
-
     def test_unknown_adapter_type(self) -> None:
         spec = clean_spec(policy=PolicySpec(
             base="Qwen/Qwen3-1.7B", bank={"x": AdapterSpec(adapter_type="nope", site="final_hidden")}))
@@ -211,16 +201,6 @@ class TestDeclarationWiring(unittest.TestCase):
             clean_spec().algo,
             post=("verifier", "val_also_reward", "grpo_advantage")))
         self.assertEqual(codes(spec), {"post-collision"})
-
-    def test_eval_pipeline_is_checked_independently(self) -> None:
-        # the same processors reused in eval are fine; a broken EVAL pipeline
-        # is flagged even when algo.post is clean
-        clean = clean_spec(eval=EvalSpec(post=("verifier",)),
-                           plans=Plans(train="cas://p/t", eval="cas://p/e"))
-        self.assertEqual(validate(clean, SCHEMA), [])
-        broken = clean_spec(eval=EvalSpec(post=("grpo_advantage",)),
-                            plans=Plans(train="cas://p/t", eval="cas://p/e"))
-        self.assertEqual(codes(broken), {"post-unwired"})
 
 
 class TestSites(unittest.TestCase):
@@ -374,11 +354,6 @@ class TestTopology(unittest.TestCase):
             GpuGroup(gpus(n=1), (pool("rollout"), learner())),)))
         self.assertEqual(codes(spec), {"main-pool-missing"})
 
-    def test_eval_pool_missing(self) -> None:
-        spec = clean_spec(eval=EvalSpec(pool="evalpool"),
-                          plans=Plans(train="cas://p/t", eval="cas://p/e"))
-        self.assertEqual(codes(spec), {"eval-pool-missing"})
-
 
 class TestCoherence(unittest.TestCase):
     def test_rollout_plan_without_gen(self) -> None:
@@ -461,15 +436,9 @@ class TestPostPools(unittest.TestCase):
                                      learner())),)))
         self.assertEqual(validate(spec, SCHEMA), [])
 
-    def test_eval_pipeline_pools_are_checked_too(self) -> None:
-        spec = clean_spec(eval=EvalSpec(post=("llm_judge",)))
-        self.assertIn("post-pool-missing", codes(spec))
-
     def test_traffic_pools_collects_every_route(self) -> None:
-        spec = clean_spec(
-            algo=self.judge_algo(),
-            eval=EvalSpec(pool="scorer"))
-        self.assertEqual(traffic_pools(spec), {"main", "judge", "scorer"})
+        spec = clean_spec(algo=self.judge_algo())
+        self.assertEqual(traffic_pools(spec), {"main", "judge"})
 
 
 class TestPostPoolCoresidency(unittest.TestCase):
@@ -483,15 +452,6 @@ class TestPostPoolCoresidency(unittest.TestCase):
         return GpuConfig(groups=(
             GpuGroup(gpus(n=1), (pool("main"), pool("judge"), learner()),
                      sharing="sleep"),))
-
-    def test_eval_pipeline_conflicts_with_its_serving_pool(self) -> None:
-        """The evaluator holds eval.pool AND its pipeline's pools under one
-        admission — main+judge alternating in one sleep group cannot serve it."""
-        spec = clean_spec(
-            gpu_config=self.sleep_both(),
-            eval=EvalSpec(pool="main",
-                          post=("llm_judge",)))
-        self.assertIn("post-pools-conflict", codes(spec))
 
     def test_algo_judge_alone_coexists_with_sleeping_main(self) -> None:
         """The trainer admits only the pipeline's declared pools around post,
@@ -507,7 +467,5 @@ class TestPostPoolCoresidency(unittest.TestCase):
             gpu_config=GpuConfig(groups=(
                 GpuGroup(gpus(n=1), (pool("main"), learner()),
                          sharing="sleep"),
-                GpuGroup(gpus(n=1), (pool("judge"),)),)),
-            eval=EvalSpec(pool="main",
-                          post=("verifier",)))
+                GpuGroup(gpus(n=1), (pool("judge"),)),)))
         self.assertNotIn("post-pools-conflict", codes(spec))

@@ -73,7 +73,6 @@ def judged_spec(train_uri: str, heldout_uri: str | None = None):
     return replace(
         base,
         algo=replace(base.algo, post=("llm_judge", "grpo_advantage")),
-        eval=None,
         gpu_config=GpuConfig(groups=(
             GpuGroup(gpus(n=1), (pool("main"), pool("judge"), learner())),)))
 
@@ -192,7 +191,6 @@ class SplitOrderGateTest(unittest.TestCase):
         base = arith_spec(self.train)
         spec = replace(
             base, algo=replace(base.algo, post=pipeline),
-            eval=None,
             gpu_config=GpuConfig(groups=(GpuGroup(
                 gpus(n=1), (pool("main"), pool("judge"), learner())),)))
         return [issue.code for issue in validate(spec, SCHEMA)]
@@ -215,7 +213,6 @@ class SplitOrderGateTest(unittest.TestCase):
         spec = replace(
             base, algo=replace(base.algo, post=(
                 "verifier", "scorer_test_pooled_consumer", "grpo_advantage")),
-            eval=None,
             gpu_config=GpuConfig(groups=(GpuGroup(
                 gpus(n=1), (pool("main"), pool("judge"), learner())),)))
         issue = next(i for i in validate(spec, SCHEMA)

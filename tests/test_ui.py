@@ -49,6 +49,25 @@ def call(app, path: str):
     return captured["status"], captured["headers"], body
 
 
+def fabricate_heldout(store, run_id) -> None:
+    """Both eras of held-out data, hand-written: LEGACY in-run summaries (a
+    pre-#70 run's eval/ — nothing writes these any more, but old runs must
+    render) and a MEASUREMENT (the #70 shape)."""
+    import json as _json
+    for update in (2, 4):
+        store._write(
+            f"{store.run_prefix(run_id)}/eval/{update}/summary.json",
+            _json.dumps({"update": update, "episodes": 16,
+                         "means": {"reward": 0.25 * update}}).encode())
+    store.open_measurement(run_id, "heldout",
+                           {"every": 2, "post": ["verifier"]})
+    for update in (2, 4):
+        store.append_measurement_point(
+            run_id, "heldout",
+            {"update": update, "episodes": 16,
+             "means": {"reward": 0.1 * update}})
+
+
 class UiTest(unittest.TestCase):
     def setUp(self) -> None:
         tmp = tempfile.TemporaryDirectory()
@@ -56,6 +75,7 @@ class UiTest(unittest.TestCase):
         self.store, train, heldout = arith_store(tmp.name)
         self.report = run_experiment(arith_spec(train, heldout), SCHEMA,
                                      self.store, FakeEngine(), FakeLearner())
+        fabricate_heldout(self.store, self.report.run_id)
 
     def test_series_joins_ledger_dictionary_and_eval(self) -> None:
         series = run_series(self.store, self.report.run_id)
@@ -67,6 +87,11 @@ class UiTest(unittest.TestCase):
             self.assertIn("logprob_gap", update["train"])
         self.assertEqual([e["update"] for e in series["eval"]], [2, 4])
         self.assertIn("reward", series["eval"][0]["means"])
+        # ...and the #70 shape beside it: named measurements, points intact
+        told = {m["name"]: m for m in series["measurements"]}
+        self.assertEqual([pt["update"] for pt in told["heldout"]["points"]],
+                         [2, 4])
+        self.assertEqual(told["heldout"]["manifest"]["every"], 2)
         # the walkback priority rides in, ready for the page
         feeding = [c["name"] for c in series["dictionary"]["columns"]
                    if c["feeds_loss"]]
@@ -218,6 +243,7 @@ class DerivedSeriesTest(unittest.TestCase):
         self.store, train, heldout = arith_store(tmp.name)
         self.report = run_experiment(arith_spec(train, heldout), SCHEMA,
                                      self.store, FakeEngine(), FakeLearner())
+        fabricate_heldout(self.store, self.report.run_id)
 
     def test_derived_panels_compute_with_eval_overlay(self) -> None:
         panels = [{"name": "excess", "expr": "reward - 0.5"},

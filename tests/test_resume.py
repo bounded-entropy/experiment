@@ -183,20 +183,18 @@ class CompletionOrderTest(unittest.TestCase):
                                 engine, FakeLearner(), max_inflight)
         return snapshot(store, report.run_id)
 
-    def test_eval_bytes_do_not_depend_on_the_completion_order(self) -> None:
+    def test_run_bytes_do_not_depend_on_the_completion_order(self) -> None:
+        """Completion order must not reach the bytes (#53) — the whole run
+        dir, under a scrambling engine. (The measurement half of this claim
+        lives in test_measure.py now: measurement left the run dir, #70.)"""
         reference = self.go(FakeEngine(), 64)
-        evals = sorted(p for p in reference if p.startswith("eval/"))
-        self.assertTrue(evals, "the spec under test must actually run evals")
-
         scrambler = InterleavingEngine()
         narrow = InterleavingEngine()
         for label, run in (("serial", self.go(FakeEngine(), 1)),
                            ("scrambled", self.go(scrambler, 64)),
                            ("scrambled, narrow", self.go(narrow, 3))):
             with self.subTest(schedule=label):
-                self.assertEqual({p: run[p] for p in evals},
-                                 {p: reference[p] for p in evals})
-                self.assertEqual(run, reference)   # ...and the rest of it
+                self.assertEqual(run, reference)
 
         # the pin is only worth something if the scrambling really scrambled
         self.assertNotEqual(scrambler.finished, scrambler.launched)

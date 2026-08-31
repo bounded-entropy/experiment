@@ -149,10 +149,6 @@ def code_hashes(spec: ExperimentSpec) -> dict[str, str]:
         for name in spec.gen.envs:
             add(ENVS, name)
 
-    if spec.eval is not None:
-        for name in spec.eval.post:
-            add(POST, name)
-
     for adapter in spec.policy.bank.values():
         add(ADAPTER_TYPES, adapter.adapter_type)
 

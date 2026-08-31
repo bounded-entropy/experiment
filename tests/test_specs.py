@@ -18,7 +18,6 @@ from rlstack.spec.specs import (
     AlgoSpec,
     BackendProfile,
     PoolMember,
-    EvalSpec,
     ExperimentSpec,
     GenSpec,
     GpuConfig,
@@ -56,8 +55,7 @@ def example_1(bank: dict[str, AdapterSpec] | None = None) -> ExperimentSpec:
         ),
         gen=GenSpec(envs=("math_single_turn",),
                     tasks=("cas://3fa9c2.../math_train.jsonl",)),
-        plans=Plans(train="cas://plan/train", rollout="cas://plan/roll",
-                    eval="cas://plan/eval"),
+        plans=Plans(train="cas://plan/train", rollout="cas://plan/roll"),
         algo=AlgoSpec(
             loss="grpo",
             post=("verifier", "grpo_advantage"),
@@ -66,7 +64,6 @@ def example_1(bank: dict[str, AdapterSpec] | None = None) -> ExperimentSpec:
             schedule=Schedule(microbatch_tokens=16384,
                               max_policy_lag=0),
         ),
-        eval=EvalSpec(every=10),
         gpu_config=GpuConfig(groups=(
             GpuGroup(gpus(n=6), (pool("main", tp=2, n=3), learner(fsdp=2)),
                   sharing="concurrent"),
@@ -102,7 +99,7 @@ class TestConstruction(unittest.TestCase):
         self.assertNotEqual(self.exp, other)
 
     def test_optional_halves(self) -> None:
-        offline = replace(self.exp, gen=None, eval=None,
+        offline = replace(self.exp, gen=None,
                           plans=Plans(train="cas://plan/train"))
         self.assertIsNone(offline.gen)
         generation_only = replace(self.exp, algo=None)
@@ -223,16 +220,16 @@ class TestDefaults(unittest.TestCase):
         are absent when a run makes nothing (every train leaf is sealed
         elsewhere) or measures nothing."""
         p = Plans(train="cas://plan/train")
-        self.assertEqual((p.rollout, p.eval), (None, None))
+        self.assertEqual(p.rollout, None)
 
-    def test_eval_spec(self) -> None:
-        """Eval keeps only when it runs, what scores it, and where the traffic
-        goes: `tasks`, `env` and `n_samples` left with the SHAPE (#59), which
-        is plans.eval — one wave per eval point, held out leaf by leaf."""
-        e = EvalSpec()
-        self.assertEqual((e.every, e.post, e.pool), (10, (), "main"))
-        self.assertEqual([f.name for f in fields(EvalSpec)],
-                         ["every", "post", "pool"])
+    def test_measurement_left_the_spec(self) -> None:
+        """#70: a run's identity is its training loop. Plans carries no eval
+        and the spec no EvalSpec — measurement is an observation OUTSIDE the
+        run (runner/measure.py), configured by its own manifest."""
+        self.assertEqual([f.name for f in fields(Plans)],
+                         ["train", "rollout"])
+        self.assertNotIn("eval",
+                         [f.name for f in fields(ExperimentSpec)])
 
     def test_schedule(self) -> None:
         """Schedule has exactly TWO fields, because the plan states the rest:

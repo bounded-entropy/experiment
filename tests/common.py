@@ -9,7 +9,7 @@ from typing import Any
 
 
 from rlstack import (
-    AlgoSpec, EvalSpec, ExperimentSpec, GenSpec, GpuConfig, GpuGroup, GroupPlan,
+    AlgoSpec, ExperimentSpec, GenSpec, GpuConfig, GpuGroup, GroupPlan,
     LocalStore, Message, OptimSpec, Plans, PolicySpec, Role, Rollout, RunPlan,
     Sample, Schedule, Seeds, Task, Trajectory, Turn, WavePlan, WaveRef, encode,
     gpus, learner, lora, pool,
@@ -65,25 +65,20 @@ def trains_on_rollouts(updates: int) -> RunPlan:
                          for u in range(1, updates + 1)))
 
 
-def arith_plan_blobs(with_eval: bool, updates: int = 4,
-                     every: int = 2) -> dict[str, bytes]:
+def arith_plan_blobs(updates: int = 4) -> dict[str, bytes]:
     """The plan bytes an arith run needs, keyed by kind. Pure: the same bytes
-    every time, so `cas_uri` names them and `arith_store` writes them."""
-    blobs = {
+    every time, so `cas_uri` names them and `arith_store` writes them.
+    Measurement has no plan here: a Measurement names its tasks itself."""
+    return {
         "train": encode(trains_on_rollouts(updates)),
         "rollout": encode(grpo_plan(task_ids(TRAIN), groups=2, size=2,
                                     updates=updates)),
     }
-    if with_eval:
-        held = task_ids(HELDOUT)
-        blobs["eval"] = encode(grpo_plan(held, groups=len(held), size=2,
-                                         updates=updates // every))
-    return blobs
 
 
-def arith_plans(with_eval: bool, updates: int = 4, every: int = 2) -> Plans:
-    """Those blobs' uris — the spec's view of the same three artifacts."""
-    blobs = arith_plan_blobs(with_eval, updates, every)
+def arith_plans(updates: int = 4) -> Plans:
+    """Those blobs' uris — the spec's view of the same artifacts."""
+    blobs = arith_plan_blobs(updates)
     return Plans(**{kind: cas_uri(data) for kind, data in blobs.items()})
 
 
@@ -96,12 +91,10 @@ def arith_spec(train_uri: str, heldout_uri: str | None = None,
                           bank={"pi": lora("layers.0-3.self_attn.*", r=16)}),
         gen=GenSpec(envs=("math_single_turn",),
                     tasks=(train_uri,) + ((heldout_uri,) if heldout_uri else ())),
-        plans=plans or arith_plans(heldout_uri is not None),
+        plans=plans or arith_plans(),
         algo=AlgoSpec(loss="grpo", post=("verifier", "grpo_advantage"),
                       optim=OptimSpec("adamw", lr=1e-5),
                       schedule=Schedule(microbatch_tokens=64)),
-        eval=(EvalSpec(every=2, post=("verifier",))
-              if heldout_uri else None),
         gpu_config=GpuConfig(groups=(
             GpuGroup(gpus(n=1), (pool("main"), learner())),)),
         seeds=Seeds(master=17),
@@ -113,7 +106,7 @@ def arith_spec(train_uri: str, heldout_uri: str | None = None,
 def arith_store(root: str | Any) -> tuple[LocalStore, str, str]:
     """A store seeded with train + held-out tasks AND the standard plans."""
     store = LocalStore(root)
-    for blobs in (arith_plan_blobs(True), arith_plan_blobs(False)):
+    for blobs in (arith_plan_blobs(),):
         for data in blobs.values():
             store.cas_put(data)
     return (store,

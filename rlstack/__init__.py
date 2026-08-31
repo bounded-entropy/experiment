@@ -27,7 +27,7 @@ from rlstack.data.plan import (
     GroupPlan, Replay, RunPlan, Sample, WavePlan, WaveRef, decode, encode,
 )
 from rlstack.spec.specs import (
-    AdapterSpec, AlgoSpec, BackendProfile, PoolMember, EvalSpec, ExperimentSpec,
+    AdapterSpec, AlgoSpec, BackendProfile, PoolMember, ExperimentSpec,
     GenSpec, GpuConfig, GpuSet, GpuGroup, LearnerMember, OptimSpec, PolicySpec,
     Plans, SamplingSpec, Schedule, Seeds, WarmStart,
     attn_bias, gpus, learner, lora, plora, pool, soft_prompt,
@@ -77,7 +77,7 @@ from rlstack.runner.refs import RefReader
 from rlstack.runner.post import run_pipeline
 from rlstack.runner.signals import RunSignals
 from rlstack.runner.arbiter import GpuArbiter
-from rlstack.runner.daemons import Daemon, Evaluator, Generator, Scorer, Trainer
+from rlstack.runner.daemons import Daemon, Generator, Scorer, Trainer
 from rlstack.runner.host import (
     Host, HostError, Partition, Regime, Tenancy,
 )
@@ -89,6 +89,7 @@ from rlstack.runner.desk import (
     Demand, Desk, FleetError, Metal, demand_rows, demands_from,
     fraction_for_gb,
 )
+from rlstack.runner.measure import Measurement, measure_run
 from rlstack.runner.loop import (
     RunReport, experiment_identity, plan_daemons, run_experiment,
 )

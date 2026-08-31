@@ -135,30 +135,16 @@ def train_plan(updates):
                          for u in range(1, updates + 1)))
 
 
-def eval_plan(task_id, held_out, updates):
-    """ONE WAVE PER EVAL POINT (#61): the trained problem, plus a handful of
-    held-out ones. The trained task is in here on purpose — this is test-time
-    training, so "did it learn THIS problem" is the measurement, and the
-    held-out ids are the control that says whether it also broke everything
-    else."""
-    from rlstack import GroupPlan, RunPlan, Sample, WavePlan
-    measured = WavePlan(tuple(
-        GroupPlan(task, (Sample(task, "dapo_math"),))
-        for task in (task_id, *held_out)))
-    return RunPlan((measured,) * (updates // EVAL_EVERY))
-
-
 def spec_for(store, task_id, held_out, updates, master):
     """The experiment as one value."""
-    from rlstack import (AlgoSpec, EvalSpec, ExperimentSpec, GenSpec, GpuConfig,
+    from rlstack import (AlgoSpec, ExperimentSpec, GenSpec, GpuConfig,
                          GpuGroup, GpuSet, LearnerMember, OptimSpec, Plans,
                          PolicySpec, PoolMember, SamplingSpec, Schedule, Seeds,
                          encode, plora)
 
     plans = Plans(
         train=store.cas_put(encode(train_plan(updates))),
-        rollout=store.cas_put(encode(rollout_plan(task_id, updates))),
-        eval=store.cas_put(encode(eval_plan(task_id, held_out, updates))))
+        rollout=store.cas_put(encode(rollout_plan(task_id, updates))))
     return ExperimentSpec(
         policy=PolicySpec(base=BASE, bank={"pi": plora(
             SITE, k=K, latent=LATENT, members=MEMBERS, prior_std=PRIOR_STD,
@@ -186,7 +172,6 @@ def spec_for(store, task_id, held_out, updates, master):
             # rule that the knob must bite still holds — completions here are
             # up to ~1300 tokens.
             schedule=Schedule(microbatch_tokens=512, max_policy_lag=1)),
-        eval=EvalSpec(every=EVAL_EVERY, post=("final_answer",), pool="eval"),
         gpu_config=GpuConfig(groups=(
             GpuGroup(gpus=GpuSet(n=1), members=(
                 PoolMember("main", tp=1, fraction=MAIN_FRACTION),)),

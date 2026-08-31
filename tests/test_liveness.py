@@ -111,7 +111,7 @@ class OverlayTest(unittest.TestCase):
         store = LocalStore(tempfile.mkdtemp())
         for rid, rewards in (("r1", [0.1, 0.5]), ("r2", [0.9])):
             run = store.open_run(rid, manifest={"run_id": rid})
-            run.write_plan("train", arith_plan_blobs(False)["train"])
+            run.write_plan("train", arith_plan_blobs()["train"])
             for update, reward in enumerate(rewards, start=1):
                 run.append_ledger({"update": update,
                                    "train": {"loss": 0.0},

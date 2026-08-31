@@ -114,6 +114,22 @@ class CachedReadStoreTest(unittest.TestCase):
         manifest.write_bytes(blink[1])
         self.assertEqual(cached.peek_ledger("r1"), rows)
 
+    def test_measurements_absence_is_believed(self) -> None:
+        """The ONE deletable tree (#70): measurements are observations,
+        superseded or removed at will — so their 404s are honored instead of
+        outranked by held bytes, and a blank listing is accepted."""
+        tmp, store = seeded_store()
+        self.addCleanup(tmp.cleanup)
+        store.open_measurement("r1", "held", {"every": 5})
+        store.append_measurement_point("r1", "held",
+                                       {"update": 5, "means": {}})
+        cached = CachedReadStore(store)
+        self.assertEqual(list(cached.read_measurements("r1")), ["held"])
+        for key in store._list("measurements/"):
+            store.path_of(key).unlink()
+        cached._lists.clear()
+        self.assertEqual(cached.read_measurements("r1"), {})
+
     def test_the_observers_store_never_writes(self) -> None:
         tmp, store = seeded_store()
         self.addCleanup(tmp.cleanup)

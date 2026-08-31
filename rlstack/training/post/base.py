@@ -2,7 +2,7 @@
 
 The sealed record holds what the policy did; a postprocessor computes what to
 make of it — rewards, judge scores, advantages, teacher logprobs — as one
-ORDERED pipeline (AlgoSpec.post / EvalSpec.post) running after the seal and
+ORDERED pipeline (AlgoSpec.post, or a Measurement's post) running after the seal and
 before the loss, one class per file under this folder. `process` sees ONE group
 (the scope of a partial loss contribution), the columns earlier processors
 produced for it, and a PoolClient; anything that needs a GPU is a

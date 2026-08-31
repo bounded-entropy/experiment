@@ -43,7 +43,8 @@ class ModalVolumeStoreTest(unittest.TestCase):
         run.append_ledger({"update": 1, "versions": {"pi": 1}})
         self.assertEqual(self.volume.commits, created + 1)   # THE commit point
 
-        run.write_eval(1, "summary.json", "{}")              # firewalled output
+        self.store.append_measurement_point(                 # observation
+            "r1", "heldout", {"update": 1, "means": {}})     # outside the run
         self.assertEqual(self.volume.commits, created + 2)
 
     def test_without_a_volume_it_is_just_a_local_store(self) -> None:

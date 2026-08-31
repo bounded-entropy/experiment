@@ -232,12 +232,24 @@ class BlobTest(StoreTestCase):
             self.open().read_blob("adapters", "attn", 7)
 
 
-class EvalTest(StoreTestCase):
+class MeasurementTest(StoreTestCase):
     def test_write_and_read_back(self) -> None:
+        """#70: observation lives OUTSIDE the run dir, write-once manifest,
+        append-only points, idempotence by measured_updates."""
         run = self.open()
-        run.write_eval(12, "summary.json", '{"means": {}}')
-        self.assertEqual(run.read_eval(12, "summary.json"), '{"means": {}}')
-        self.assertTrue(rpath(run, "eval", "12", "summary.json").exists())
+        self.store.open_measurement(run.run_id, "heldout", {"every": 5})
+        self.store.open_measurement(run.run_id, "heldout", {"every": 5})
+        with self.assertRaises(StoreError):     # a changed observation is a
+            self.store.open_measurement(         # NEW name, never a rewrite
+                run.run_id, "heldout", {"every": 10})
+        self.store.append_measurement_point(
+            run.run_id, "heldout", {"update": 5, "means": {"reward": 0.5}})
+        told = self.store.read_measurements(run.run_id)
+        self.assertEqual(told["heldout"]["manifest"], {"every": 5})
+        self.assertEqual(told["heldout"]["points"][0]["means"],
+                         {"reward": 0.5})
+        self.assertEqual(self.store.measured_updates(run.run_id, "heldout"),
+                         {5})
 
 
 class CasTest(StoreTestCase):

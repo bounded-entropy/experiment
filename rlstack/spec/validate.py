@@ -98,9 +98,6 @@ def check_names_are_registered(spec: ExperimentSpec, schema: SiteSchema) -> list
     if spec.gen is not None:
         for index, name in enumerate(spec.gen.envs):
             look(ENVS, name, "unknown-env", f"gen.envs[{index}]")
-    if spec.eval is not None:
-        for i, name in enumerate(spec.eval.post):
-            look(POST, name, "unknown-post", f"eval.post[{i}]")
     for entry_name, adapter in spec.policy.bank.items():
         look(ADAPTER_TYPES, adapter.adapter_type, "unknown-adapter",
              f"policy.bank.{entry_name}.adapter_type")
@@ -133,8 +130,6 @@ def check_post_pipelines_are_wired(spec: ExperimentSpec, schema: SiteSchema) -> 
     phases = []
     if spec.algo is not None:
         phases.append(("algo.post", "post"))
-    if spec.eval is not None:
-        phases.append(("eval.post", "eval"))
     for path, phase in phases:
         for i, name, want, produced in graph.missing_consumes(phase):
             issues.append(_issue(
@@ -422,11 +417,6 @@ def check_traffic_routes_to_declared_pools(spec: ExperimentSpec, schema: SiteSch
             "main-pool-missing", "gpu_config",
             f"gen traffic routes to the pool named 'main', which no group declares; "
             f"pools: {', '.join(sorted(pools)) or '(none)'}"))
-    if spec.eval is not None and spec.eval.pool not in pools:
-        issues.append(_issue(
-            "eval-pool-missing", "eval.pool",
-            f"eval traffic routes to pool {spec.eval.pool!r}, which no group "
-            f"declares; pools: {', '.join(sorted(pools)) or '(none)'}"))
     return issues
 
 
@@ -493,8 +483,6 @@ def check_post_pools_are_declared(spec: ExperimentSpec, schema: SiteSchema) -> l
     pipelines = []
     if spec.algo is not None:
         pipelines.append(("algo.post", spec.algo.post))
-    if spec.eval is not None:
-        pipelines.append(("eval.post", spec.eval.post))
     issues = []
     for field, pipeline in pipelines:
         for i, name in enumerate(pipeline):
@@ -512,14 +500,10 @@ def check_post_pools_are_declared(spec: ExperimentSpec, schema: SiteSchema) -> l
 
 def traffic_pools(spec: ExperimentSpec) -> set[str]:
     """Every pool this spec's traffic can address at run time: "main" (gen and
-    the pipelines' default client), eval.pool, and each pipeline processor's
-    declared pools. The loop holds the engine map it was handed against this
-    set before any daemon starts."""
+    the pipelines' default client) and each pipeline processor's declared
+    pools. The loop holds the engine map it was handed against this set
+    before any daemon starts."""
     pools = {"main"}
-    if spec.eval is not None:
-        pools.add(spec.eval.pool)
-        pools.update(p for name in spec.eval.post if name in POST
-                     for p in POST.get(name).pools)
     if spec.algo is not None:
         pools.update(p for name in spec.algo.post if name in POST
                      for p in POST.get(name).pools)
@@ -548,8 +532,6 @@ def check_post_pools_can_coreside(spec: ExperimentSpec, schema: SiteSchema) -> l
     pipelines = []
     if spec.algo is not None:
         pipelines.append(("algo.post", spec.algo.post, ()))
-    if spec.eval is not None:
-        pipelines.append(("eval.post", spec.eval.post, (spec.eval.pool,)))
     issues = []
     for field, pipeline, held in pipelines:
         sampled = set(held) | {pool for name in pipeline if name in POST
@@ -577,30 +559,6 @@ def check_a_rollout_plan_has_gen(spec: ExperimentSpec, schema: SiteSchema) -> li
             "a rollout plan samples, but gen is None: nothing declares which "
             "environments may run or which task sets they may draw from")]
     return []
-
-
-def check_eval_has_a_plan(spec: ExperimentSpec, schema: SiteSchema) -> list[ValidationIssue]:
-    """Eval's SHAPE is its plan (#59): declaring eval without one measures
-    nothing, and the silence would look like a passing run."""
-    if spec.eval is not None and spec.plans.eval is None:
-        return [_issue(
-            "eval-without-plan", "plans.eval",
-            "eval is declared but plans.eval is None: what eval samples is a "
-            "plan, one wave per eval point")]
-    return []
-
-
-def check_eval_tasks_are_held_out(spec: ExperimentSpec, schema: SiteSchema) -> list[ValidationIssue]:
-    """Eval is firewalled measurement; measuring on trained-on tasks is not.
-
-    Held-out is now a property of the PLANS rather than of two task files: the
-    same set may hold both, so what matters is that no task an eval wave
-    samples is one a rollout wave sampled. The gate resolves both plans to
-    answer it — the one check that reads a plan's contents rather than its
-    shape.""" 
-    if spec.eval is None or spec.plans.eval is None or spec.plans.rollout is None:
-        return []
-    return []          # resolved by check_plans_are_realizable, which has the bytes
 
 
 def check_schedule_is_sane(spec: ExperimentSpec, schema: SiteSchema) -> list[ValidationIssue]:
@@ -655,8 +613,6 @@ CHECKS = (
     check_post_pools_are_declared,
     check_post_pools_can_coreside,
     check_a_rollout_plan_has_gen,
-    check_eval_has_a_plan,
-    check_eval_tasks_are_held_out,
     check_schedule_is_sane,
     check_warm_start_map_targets_this_bank,
 )

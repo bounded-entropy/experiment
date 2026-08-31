@@ -42,8 +42,8 @@ the commit bit, and daemons synchronize through it and nothing else.
 **Spec** — a frozen dataclass of declarative values. A spec never does setup
 and never touches a GPU; it *is* identity (I3). `ExperimentSpec` is the whole
 experiment as one value, composed of `PolicySpec` / `GenSpec` /
-`TrajectorySource` / `AlgoSpec` / `GpuConfig` / `Seeds` / `EvalSpec` /
-`WarmStart`.
+`TrajectorySource` / `AlgoSpec` / `GpuConfig` / `Seeds` / `WarmStart`.
+A run's identity is its TRAINING loop: measurement is not in the spec (#70).
 `rlstack/spec/specs.py`
 
 **Experiment** — one spec, resolved and run. Also the unit of identity, of
@@ -529,10 +529,29 @@ residents its work occupies, do the work, write the store and notify. The
 **Generator** samples waves at the newest committed bundle within the lag
 buffer; the **Scorer** runs the pooled half of the post pipeline beside the
 pools it addresses and writes it as a postdata part; the **Trainer** runs the
-inline half + gradient + commit and is the ledger's only writer; the
-**Evaluator** does firewalled measurement on the eval modulus. Each condition
-method is a named, overridable seam.
+inline half + gradient + commit and is the ledger's only writer. Each
+condition method is a named, overridable seam. (The Evaluator retired in #70:
+measurement left the run.)
 `rlstack/runner/daemons/`
+
+**Resident / daemon** — the two kinds of runtime thing, named: a RESIDENT is
+the heavy object living on a partition (an Engine, a Learner — nouns of
+capability), a DAEMON is the thin loop that watches the store and pokes a
+resident (Generator, Trainer, Scorer — agent nouns). Daemons synchronize
+through the store ONLY, so colocation with their resident is a transport
+choice, not architecture; the Trainer sits beside its Learner because the
+autograd arc and the seal cannot cross a wire, and everything else could in
+principle live anywhere.
+
+**Measurement** — observation OUTSIDE the run (#70): a value naming held-out
+task ids, samples, a cadence, a scoring pipeline and its own seed, written as
+measurements/<run_id>/<name>/ (write-once manifest + append-only points) by
+`measure_run` — one idempotent pass any process can run against a pool, backfilling
+every missing point (retention keeps every adapter version restorable) and
+following the ledger's future. Never the run dir, never identity, never
+resume-equivalence; deletable, though a changed observation is a NEW name.
+Swapping what a run is measured on, mid-run, is a non-event.
+`rlstack/runner/measure.py`, `rlstack/data/stores/base.py` (measurements)
 
 **The split rule** — a postprocessor declaring `pools` is SCORER-RUN, a
 pool-less one is TRAINER-INLINE: sending traffic is what makes a processor

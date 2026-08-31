@@ -2,8 +2,8 @@
 
 Phase 2 is a blackboard, not a choreography: plan_daemons derives one daemon
 per GPU responsibility from the spec — a Generator iff trajectories are live, a
-Scorer iff the post pipeline addresses a pool, the Trainer always, an Evaluator
-iff eval is declared — and they run concurrently, synchronized ONLY through the
+Scorer iff the post pipeline addresses a pool, the Trainer always
+— and they run concurrently, synchronized ONLY through the
 store (signals.py) and admitted onto shared metal by the arbiter. Nobody calls
 anybody: the ledger is the commit bus, waves/ the data bus, and postdata parts
 the scoring bus.
@@ -22,7 +22,7 @@ from rlstack.data.stores.base import RunHandle, Store
 from rlstack.policy.compile import Bundle, compile_bundle
 from rlstack.policy.siteschema import SiteSchema, resolve
 from rlstack.registry import ADAPTER_TYPES, POST, code_hashes
-from rlstack.runner.daemons import Daemon, Evaluator, Generator, Scorer, Trainer
+from rlstack.runner.daemons import Daemon, Generator, Scorer, Trainer
 from rlstack.runner.interfaces import Engine, Learner
 from rlstack.runner.arbiter import GpuArbiter
 from rlstack.runner.meters import HostJournal
@@ -73,7 +73,7 @@ def data_fingerprint(spec: ExperimentSpec) -> str:
     their contents: a plan that draws different tasks, or a task file whose
     rows changed, is a different experiment without anyone saying so (I3).
     """
-    parts = [spec.plans.train, spec.plans.rollout or "-", spec.plans.eval or "-"]
+    parts = [spec.plans.train, spec.plans.rollout or "-"]
     if spec.gen is not None:
         parts.extend(spec.gen.tasks)
     return "|".join(parts)
@@ -123,7 +123,7 @@ async def run_experiment_async(
     # ---- Phase 0: identity — computed, never typed (I3) ----------------------
     validate_or_raise(spec, schema)
     # the engine map must cover every pool the spec's traffic can route to
-    # (gen, eval, and each pipeline processor's declared judge/teacher pools)
+    # (gen, and each pipeline processor's declared judge/teacher pools)
     unmapped = sorted(traffic_pools(spec) - set(engine_map))
     if unmapped:
         raise ValueError(
@@ -231,7 +231,7 @@ def load_plans(declared: Plans, store: Store) -> dict[str, RunPlan]:
     """Resolve the declared plan uris. `train` is mandatory — it is the run's
     length; the other two are absent when the run makes or measures nothing."""
     out = {"train": decode(store.cas_get(declared.train))}
-    for kind in ("rollout", "eval"):
+    for kind in ("rollout",):
         uri = getattr(declared, kind)
         if uri is not None:
             out[kind] = decode(store.cas_get(uri))
@@ -263,18 +263,17 @@ def plan_daemons(spec: ExperimentSpec, *, run, store, engine_map, learner,
     """The spec already declares the daemons; this reads them off.
 
     a rollout plan → a Generator makes its waves; a post pipeline with a POOLED
-    half → a Scorer runs it; an eval plan → an Evaluator watches the commit
-    bus; the Trainer always. Each daemon admits the RESIDENTS its work
-    occupies: the scorer the engines of its processors' declared pools, the
-    trainer's train phase the learner, the generator and evaluator their
-    serving pool's engine (plus the eval pipeline's).
+    half → a Scorer runs it; the Trainer always. Each daemon admits the
+    RESIDENTS its work occupies: the scorer the engines of its processors'
+    declared pools, the trainer's train phase the learner, the generator its
+    serving pool's engine. Measurement is NOT a daemon here: it is not part
+    of the run (a Measurement follows the ledger from outside — runner/
+    measure.py — and writes its own area, never the run dir).
 
     ONE Scorer owns the WHOLE pooled half of the TRAIN pipeline, in this
-    process, beside whatever engines the routes map holds. Two v1 limits stated
-    rather than hidden: the eval pipeline keeps its single inline path (the
-    Evaluator is firewalled measurement, and its cadence is a modulus, not a
-    critical path), and a scorer standing on its own host is placement work
-    that belongs with host adoption, not here.
+    process, beside whatever engines the routes map holds. One v1 limit
+    stated rather than hidden: a scorer standing on its own host is placement
+    work that belongs with host adoption, not here.
 
     Only the Trainer takes the host journal: an update is the unit of progress
     the other daemons orbit, so its phase timings are the run's own clock.
@@ -306,13 +305,6 @@ def plan_daemons(spec: ExperimentSpec, *, run, store, engine_map, learner,
             due_at=rollouts_needed(plans["train"].waves), tasks=tasks,
             engine=engine_map["main"], routes_at=routes_at,
             initial_bundle=initial_bundle, max_inflight=max_inflight))
-    if spec.eval is not None:
-        daemons.append(Evaluator(
-            signals, arbiter, run,
-            spec=spec, plan=plans["eval"], tasks=tasks,
-            engine=engine_map[spec.eval.pool],
-            post_residents=pipeline_residents(spec.eval.post, engine_map),
-            routes_at=routes_at, max_inflight=max_inflight))
     return daemons
 
 
