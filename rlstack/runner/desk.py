@@ -309,14 +309,18 @@ class Desk:
 
     # ---- placement over listings (the join rung; carve is a venue action) ---
 
-    def find_listing(self, unit: tuple[Demand, ...]) -> Listing | None:
+    def find_listing(self, unit: tuple[Demand, ...],
+                     avoid: frozenset[str] = frozenset()) -> Listing | None:
         """Rung one over listings: sorted-name order, coverage by capability
         equality (covers(), the one join rule, matched against descriptions),
         solo-and-occupied skipped — and so is a listing whose container no
         longer ANSWERS: placement must never offer a host it cannot reach,
         and a dead listing is a fact discovered here, reported by the boot
-        refusal, and cured by a delist or a reboot."""
+        refusal, and cured by a delist or a reboot. Names in `avoid` are off
+        the table — a reroute excluding the listing being torn down."""
         for name in sorted(self.listings):
+            if name in avoid:
+                continue
             listing = self.listings[name]
             if not all(covers(listing.regimes, d) for d in unit):
                 continue
@@ -327,18 +331,22 @@ class Desk:
             return listing
         return None
 
-    async def place_listings(self, demands: Sequence[Demand]
+    async def place_listings(self, demands: Sequence[Demand],
+                             avoid: frozenset[str] = frozenset(),
                              ) -> tuple[dict[str | None, Listing], list[dict]]:
         """Every placement unit onto a listing, a fresh carve, or the boot
         list: what no listed host serves is CARVED on a registered metal that
         can hold it, and only what no metal can hold lands in `boot` — the
         standing acquire, a human's. A unit carved for a placement whose
         LATER unit then missed stays listed: metal born is metal listed, and
-        the next submit's join rung finds it."""
+        the next submit's join rung finds it. `avoid` passes to the join rung
+        — a carve can never land on an avoided listing, because a carve is
+        always a NEW name."""
         placement: dict[str | None, Listing] = {}
         boot: list[dict] = []
         for unit in placement_units(demands):
-            listing = self.find_listing(unit) or await self.provision_unit(unit)
+            listing = (self.find_listing(unit, avoid)
+                       or await self.provision_unit(unit))
             if listing is None:
                 boot.append({
                     "regimes": [regime_of(d).name for d in unit],
@@ -424,7 +432,9 @@ class Desk:
         adopt wire's argument names) and never its contents — what the spec
         means is the anchor host's business, and the ledger is the result
         channel there as everywhere. Routes come off the DEMAND rows, which
-        is what makes the blind relay possible at all."""
+        is what makes the blind relay possible at all — and the delivery is
+        ARCHIVED (rows and frame ride the journaled placement, still unread),
+        which is what makes a later reroute a replay."""
         demands = demands_from(rows)
         anchored = [d for d in demands if d.anchor]
         if len(anchored) != 1:
@@ -438,7 +448,19 @@ class Desk:
                              "registered metal can hold them — boot or "
                              "register metal wearing the named regimes (the "
                              "standing acquire is a human's)"}
-        anchor_listing = placement[anchored[0].pool]
+        return await self.deliver(demands, placement, rows, frame)
+
+    async def deliver(self, demands: Sequence[Demand],
+                      placement: Mapping[str | None, Listing],
+                      rows: Sequence[Mapping], frame: Mapping) -> dict:
+        """The delivery half of a submission — submit's and reroute's ONE
+        copy: the frame lands at the anchor demand's host with every other
+        pool's address threaded as routes (read off the demand rows alone,
+        the blind relay), and the placement is journaled WITH the rows and
+        the frame — the archive a reroute replays without the desk ever
+        having decoded it."""
+        anchor = next(d for d in demands if d.anchor)
+        anchor_listing = placement[anchor.pool]
         routes = {d.pool: placement[d.pool].address for d in demands
                   if not d.anchor and d.pool is not None
                   and placement[d.pool] is not anchor_listing}
@@ -453,16 +475,34 @@ class Desk:
             return {"accepted": False, "host": anchor_listing.name,
                     "error": f"host {anchor_listing.name!r} did not answer "
                              f"the delivery: {down}"}
+        pools = {pool or "learner": listing.name
+                 for pool, listing in placement.items()}
         self.store.append_fleet_event({
             "event": "place", "t": time.time(), "delivered": True,
             "run_id": reply.get("run_id"),
-            "host": anchor_listing.name,
-            "pools": {pool or "learner": listing.name
-                      for pool, listing in placement.items()},
-            "accepted": bool(reply.get("accepted"))})
-        return {**reply, "host": anchor_listing.name,
-                "pools": {pool or "learner": listing.name
-                          for pool, listing in placement.items()}}
+            "host": anchor_listing.name, "pools": pools,
+            "accepted": bool(reply.get("accepted")),
+            "demands": [dict(row) for row in rows], "frame": dict(frame)})
+        return {**reply, "host": anchor_listing.name, "pools": pools}
+
+    def placements(self) -> dict[str, dict]:
+        """The desk's CURRENT-BINDING table, derived on demand: the latest
+        delivered placement per run_id — which listing each pool landed on,
+        and (for deliveries since the archive existed) the demand rows and
+        opaque frame that made it. Journal archaeology promoted to a read:
+        dependents joins against it, reroute replays from it, an observer
+        may render it. The frame stays as unread here as it was in flight."""
+        table: dict[str, dict] = {}
+        for event in self.store.read_fleet_log():
+            if event.get("event") == "place" and event.get("run_id"):
+                row = {"pools": event.get("pools", {}),
+                       "host": event.get("host")}
+                if event.get("demands") is not None:
+                    row["demands"] = event["demands"]
+                if event.get("frame") is not None:
+                    row["frame"] = event["frame"]
+                table[event["run_id"]] = row
+        return table
 
     def dependents(self, name: str) -> list[str]:
         """Running runs whose LATEST journaled placement routes through
@@ -470,10 +510,8 @@ class Desk:
         alone would miss half of them: a serve host's roster is empty (a
         tenancy lives at its anchor), but every placement journaled the
         pools it landed on, and the rosters say which runs still run."""
-        placed: dict[str, dict] = {}
-        for event in self.store.read_fleet_log():
-            if event.get("event") == "place" and event.get("run_id"):
-                placed[event["run_id"]] = event.get("pools", {})
+        placed = {rid: row["pools"]
+                  for rid, row in self.placements().items()}
         running: set[str] = set()
         for listing in self.listings.values():
             try:
@@ -485,24 +523,109 @@ class Desk:
         return sorted(rid for rid, pools in placed.items()
                       if rid in running and name in pools.values())
 
-    async def decommission(self, name: str, force: bool = False) -> dict:
+    async def stop_anchored(self, run_id: str) -> dict:
+        """Stop a tenancy WHEREVER it runs: probe the listings' rosters for
+        the one carrying `run_id` running — tenancies live only at their
+        anchor, so at most one listing answers — and tell that host to stop
+        it (cancellation awaited host-side). A run nobody carries answers
+        stopped: False; already dead is the goal state, not an error."""
+        for name in sorted(self.listings):
+            listing = self.listings[name]
+            try:
+                tenants = listing.host.status().get("tenants", {})
+            except Exception:
+                continue
+            if tenants.get(run_id, {}).get("status") == "running":
+                return await listing.host.stop(run_id)
+        return {"stopped": False, "run_id": run_id, "state": "unlisted"}
+
+    async def reroute(self, run_id: str, avoiding: str = "",
+                      park: bool = False) -> dict:
+        """RESTART-IS-REDIAL: move a delivered workload by replaying the
+        desk's own archived delivery — place the archived demand rows again
+        with `avoiding` off the table, stop the old tenancy at whichever
+        listing's roster carries it, and deliver the archived frame to the
+        new placement. Priced by resume-equivalence: the store is the run,
+        so the move costs at most one uncommitted update, and nothing is
+        copied because there is nothing to copy.
+
+        PLACE-FIRST: a healthy run is refused a move rather than stopped
+        with nowhere to go. `park` — decommission's mode, when the host is
+        dying regardless — inverts that: the tenancy is stopped anyway and
+        journaled PARKED with the boot instructions, the run waiting whole
+        in the store for metal a human must add; resubmitting it through
+        its campaign revives it. A delivery from before the archive carried
+        rows and frame cannot be replayed — refused (or parked) with the
+        same cure named."""
+        archived = self.placements().get(run_id, {})
+        rows, frame = archived.get("demands"), archived.get("frame")
+        if rows is None or frame is None:
+            if not park:
+                return {"rerouted": False, "run_id": run_id,
+                        "error": f"run {run_id} has no archived delivery at "
+                                 f"this desk (placed before the archive, or "
+                                 f"a pure client) — resubmit it through its "
+                                 f"campaign instead"}
+            stopped = await self.stop_anchored(run_id)
+            self.store.append_fleet_event({
+                "event": "parked", "t": time.time(), "run_id": run_id,
+                "reason": "no archived delivery to replay — resubmit "
+                          "through its campaign"})
+            return {"rerouted": False, "parked": True, "run_id": run_id,
+                    "stopped": stopped}
+        demands = demands_from(rows)
+        avoid = frozenset({avoiding}) if avoiding else frozenset()
+        placement, boot = await self.place_listings(demands, avoid)
+        if boot and not park:
+            return {"rerouted": False, "run_id": run_id, "boot": boot,
+                    "error": "nowhere to go: nothing else serves these "
+                             "units and no registered metal can hold them "
+                             "— the run keeps running where it is"}
+        stopped = await self.stop_anchored(run_id)
+        if boot:
+            self.store.append_fleet_event({
+                "event": "parked", "t": time.time(), "run_id": run_id,
+                "boot": boot, "avoiding": avoiding})
+            return {"rerouted": False, "parked": True, "run_id": run_id,
+                    "boot": boot, "stopped": stopped}
+        reply = await self.deliver(demands, placement, rows, frame)
+        if not reply.get("accepted"):
+            self.store.append_fleet_event({
+                "event": "parked", "t": time.time(), "run_id": run_id,
+                "reason": f"redelivery refused: {reply.get('error')}"})
+            return {"rerouted": False, "parked": True, "run_id": run_id,
+                    **reply}
+        return {"rerouted": True, **reply}
+
+    async def decommission(self, name: str, force: bool = False,
+                           reroute: bool = False) -> dict:
         """CARVE'S INVERSE, client-asked: tear the host down at its metal
         (decarve — the engine shut down, the fraction back to residual) and
         delist it, one verb. The refusal is the point: a host that running
         work lives on OR routes through is NAMED rather than yanked, and
-        `force` says you mean it. A hand-listed host (no metal on its
-        listing) only delists — its metal was never the desk's to touch;
-        a silent metal delists too, reap's reasoning on demand: the
-        fraction freed itself when the container died. The freed metal is
-        reallocated by nothing more than existing rules — residual grew,
-        so the next placement's carve may land there."""
+        `force` says you mean it. With `reroute` the running work is MOVED
+        first: each dependent replayed onto a fresh placement with this
+        listing off the table (restart-is-redial), and one nothing else
+        covers is stopped and journaled PARKED — the host is coming down
+        either way, and a parked run waits whole in the store for metal a
+        human adds. A hand-listed host (no metal on its listing) only
+        delists — its metal was never the desk's to touch; a silent metal
+        delists too, reap's reasoning on demand: the fraction freed itself
+        when the container died. The freed metal is reallocated by nothing
+        more than existing rules — residual grew, so the next placement's
+        carve may land there."""
         listing = self.listings.get(name)
         if listing is None:
             raise FleetError(f"host {name!r} is not listed with this desk")
         holding = self.dependents(name)
+        moved: dict[str, dict] = {}
+        if holding and reroute:
+            for rid in holding:
+                moved[rid] = await self.reroute(rid, avoiding=name, park=True)
+            holding = self.dependents(name)   # what a replay could not clear
         if holding and not force:
             return {"decommissioned": False, "host": name,
-                    "running": holding,
+                    "running": holding, "rerouted": moved,
                     "error": f"host {name!r} carries or serves running work "
                              f"({', '.join(holding)}) — decommission with "
                              f"force to tear it down anyway"}
@@ -515,7 +638,7 @@ class Desk:
                 pass
         self.delist(name, reason="decommissioned")
         return {"decommissioned": True, "host": name, "decarved": decarved,
-                "running": holding}
+                "running": holding, "rerouted": moved}
 
     async def reap(self, probes: int = 3, wait: float = 0.0) -> dict:
         """Every listing probed, the silent ones retried, the still-silent
@@ -596,7 +719,12 @@ class Desk:
             return {"delisted": payload["host"]}
         if verb == "decommission":
             return await self.decommission(
-                payload["host"], force=bool(payload.get("force", False)))
+                payload["host"], force=bool(payload.get("force", False)),
+                reroute=bool(payload.get("reroute", False)))
+        if verb == "reroute":
+            return await self.reroute(
+                payload["run_id"], avoiding=payload.get("avoiding", ""),
+                park=bool(payload.get("park", False)))
         if verb == "metal":
             # the metal container phones home its OWN existence, address
             # included — after this the desk can deduce and command against it
@@ -616,6 +744,8 @@ class Desk:
             return self.status()
         if verb == "liveness":
             return self.liveness()
+        if verb == "placements":
+            return {"placements": self.placements()}
         raise ValueError(f"unknown admission-free fleet verb {verb!r}")
 
     def liveness(self) -> dict:

@@ -258,15 +258,17 @@ class HostService:
         bare host's attach here on first remote use, at zero footprint — a
         joiner never re-counts a fraction the partition already owns.
 
-        `adopt` rides this async path but is NOT admitted: it registers a
-        tenancy whose daemons admit their own work, so the door itself
-        occupies nothing — and it is host-addressed, so it resolves no
-        engine."""
+        `adopt` and `stop` ride this async path but are NOT admitted: adopt
+        registers a tenancy whose daemons admit their own work, stop cancels
+        one, so neither door occupies anything — and both are host-addressed,
+        so they resolve no engine."""
         if verb == "adopt":
             return await self.host.adopt(payload["spec"],
                                          payload.get("routes", {}),
                                          payload.get("code"),
                                          payload.get("subdir"))
+        if verb == "stop":
+            return await self.host.stop(payload["run_id"])
         engine = self._engine(payload["base"], payload["tp"])
         if not self.host.arbiter.is_attached(engine):
             self.host.arbiter.attach(
@@ -432,6 +434,12 @@ class RemoteHost:
             "spec": row, "routes": dict(routes or {}),
             "code": dict(code or {}), "subdir": subdir})
 
+    async def stop(self, run_id: str) -> dict:
+        """Tell the host to stop a tenancy — cancellation awaited host-side,
+        so the reply means the death is complete and the run_id is free to
+        adopt again, here or elsewhere (a reroute's first half)."""
+        return await self._transport.call("stop", {"run_id": run_id})
+
     def status(self) -> dict:
         return self._transport.ask("status", {})
 
@@ -522,13 +530,34 @@ class RemoteDesk:
         return await self._transport.call("delist", {"host": name,
                                                      "reason": reason})
 
-    async def decommission(self, name: str, force: bool = False) -> dict:
+    async def decommission(self, name: str, force: bool = False,
+                           reroute: bool = False) -> dict:
         """Carve's inverse at the desk, one frame: decarve at the host's
         metal (engine down, fraction back to residual) plus delist. Refused
         with the running work NAMED when anything lives on or routes through
-        the host; `force` tears it down anyway."""
+        the host; `force` tears it down anyway. `reroute` MOVES the running
+        work first — each dependent replayed onto a fresh placement with
+        this host off the table, or parked (stopped, journaled, waiting in
+        the store) when nothing else covers it."""
         return await self._transport.call("decommission",
-                                          {"host": name, "force": force})
+                                          {"host": name, "force": force,
+                                           "reroute": reroute})
+
+    async def reroute(self, run_id: str, avoiding: str = "",
+                      park: bool = False) -> dict:
+        """Move a delivered workload: the desk replays its archived delivery
+        onto a fresh placement (skipping `avoiding`), stopping the old
+        tenancy only once there is somewhere to go. `park` stops it
+        regardless and journals the run parked — decommission's mode, when
+        the host is dying either way."""
+        return await self._transport.call("reroute", {
+            "run_id": run_id, "avoiding": avoiding, "park": park})
+
+    def placements(self) -> dict:
+        """The desk's current-binding table: the latest delivered placement
+        per run_id — pools to listings, plus the archived demand rows and
+        frame where the delivery carried them."""
+        return self._transport.ask("placements", {})["placements"]
 
     async def register_metal(self, name: str, gpu: str, devices: int,
                              vram_gb: float, address: str) -> dict:

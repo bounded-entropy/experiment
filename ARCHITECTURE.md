@@ -651,8 +651,20 @@ One currency and one decider per rung (I12):
   Refused with the running work NAMED when anything lives on or routes
   through the host (the guard is DEPENDENTS off the journaled placements —
   a serve host's roster is empty, so occupancy alone would lie); `force`
-  tears down anyway. Delist alone stays bookkeeping-only; `reap` is the same
-  composition applied to hosts that stopped answering.
+  tears down anyway, and `reroute` MOVES the dependents first. Delist alone
+  stays bookkeeping-only; `reap` is the same composition applied to hosts
+  that stopped answering.
+- **reroute** — restart-is-redial: every delivery is ARCHIVED (demand rows +
+  opaque frame ride the journaled placement, still unread), so moving a
+  workload is replaying the desk's own delivery onto a fresh placement with
+  one listing off the table — stop the old tenancy at its anchor, deliver
+  the archived frame to the new one; the store is the run, so nothing is
+  copied and the move costs at most one uncommitted update. PLACE-FIRST: a
+  run with nowhere to go is refused a move, not stopped — unless `park`
+  (decommission's mode: the host dies regardless), which stops it and
+  journals it PARKED with the boot instructions; the ordinary campaign
+  resubmit revives it, same run_id. `placements()` is the archive as a
+  read: the latest binding per run_id.
 
 ### The host (`rlstack/runner/host.py`)
 
@@ -662,6 +674,10 @@ One currency and one decider per rung (I12):
   **run** under the host's shared arbiter against the experiment's own store.
 - **attach / detach** — a resident's registration with the arbiter, and a
   tenancy's entry in the roster and the journal.
+- **stop** — adopt's per-run inverse: the adoption task cancelled and
+  AWAITED (the daemons run under one TaskGroup, so cancellation is
+  structural), the detach journaled, the run_id free to adopt again — here
+  or elsewhere. Safe mid-update by resume-equivalence.
 - **admit** — the one verb work wraps itself in; entering it guarantees the
   resident is resident.
 - **sleep / wake** — a build fact of `VllmEngine` (and the learner's offload),

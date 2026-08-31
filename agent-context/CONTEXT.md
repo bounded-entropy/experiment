@@ -3312,6 +3312,41 @@ specs; backends (local/modal/skypilot) and GPU topology are semantics-neutral.
     call id), and desk-side probes of dead listings each knock-boot the
     metal by name, so delist/decommission BEFORE the container kill.
 
+72. **REROUTE: restart-is-redial.** Taking a host down must not take its
+    tenants with it, and no state needs to move to guarantee that — the
+    store is the run (resume-equivalence) and adoption is resume, so a
+    "reroute" is stop + place + redeliver, nothing copied. Three pieces.
+    (1) `Host.stop(run_id)`: the per-tenancy kill, adopt's inverse —
+    cancel the adoption task and AWAIT it (daemons unwind structurally
+    under the TaskGroup; submit's except path rosters failed + journals
+    detach; a pre-try cancellation is normalized by stop itself), so the
+    reply means the death is complete and the run_id is free to adopt
+    again anywhere. HostService verb + RemoteHost method; stopping
+    mid-update costs one redone update, nothing else. (2) THE ARCHIVE:
+    `Desk.deliver` (submit's delivery half, now one copy) journals the
+    demand ROWS and the opaque FRAME inside the delivered place event —
+    still unread, so the desk stays blind — and `Desk.placements()`
+    promotes the journal archaeology to a read: latest binding per
+    run_id, rows and frame included, `dependents` joins against it.
+    (3) `Desk.reroute(run_id, avoiding, park)`: replay the archived
+    delivery — place the rows again with `avoiding` off the table
+    (find_listing/place_listings grew an `avoid` set; a carve never
+    lands there because a carve is a new name), stop the old tenancy at
+    whichever listing's roster carries it (`stop_anchored` probes — at
+    most one answers), deliver the archived frame to the new placement.
+    PLACE-FIRST: a healthy run is never stopped with nowhere to go;
+    `park` (decommission's mode — the host dies regardless) stops it
+    anyway and journals `parked` with the boot instructions, the run
+    waiting whole in the store until a human adds metal and RESUBMITS —
+    the revival is the ordinary campaign submit, same run_id.
+    `decommission(host, reroute=True)` moves every dependent first and
+    tears down after. Pre-archive deliveries refuse the replay with the
+    cure named (campaign resubmit). Solo self-rejoin is a known
+    non-feature: place-first sees the still-running tenancy occupying
+    its own solo host. Pinned by StopTest + RerouteTest (moved run
+    finishes on the fresh carve under the same run_id; refused move
+    leaves the run running to done; park + revive; unarchived refusal).
+
 ## Open threads (do NOT treat as settled; flag when your answer touches them)
 
 - TODO (Samarth, settled intent — future, nothing now): BUNDLE LRU EVICTION

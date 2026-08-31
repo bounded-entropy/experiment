@@ -41,6 +41,22 @@ def go(coro):
     return asyncio.run(coro)
 
 
+class GatedEngine(FakeEngine):
+    """A FakeEngine whose sampling waits at a gate: holds a run in its
+    RUNNING state deterministically, so a test can stop or reroute it
+    mid-flight and then open the gate to let the survivor finish."""
+
+    def __init__(self, gate: asyncio.Event, **kwargs) -> None:
+        super().__init__(**kwargs)
+        self.gate = gate
+
+    async def sample_tokens(self, messages, sampling, stop, bundle_id, seed):
+        await self.gate.wait()
+        async for event in FakeEngine.sample_tokens(
+                self, messages, sampling, stop, bundle_id, seed):
+            yield event
+
+
 class DeskFixture(unittest.TestCase):
     """Two standing hosts behind transports, one desk listing both."""
 
@@ -79,14 +95,18 @@ class DeskFixture(unittest.TestCase):
             return self.fixture._transport(self.address).ask(verb, payload)
 
     def metal_service(self, name: str = "fake-metal", devices: int = 2,
-                      build_gate=None, broken: bool = False) -> MetalService:
+                      build_gate=None, broken: bool = False,
+                      sample_gate: asyncio.Event | None = None) -> MetalService:
         """One metal container's books on fakes: factories that can be held
-        open (build_gate) or broken, for the booking claims."""
+        open (build_gate) or broken, for the booking claims — and engines
+        whose sampling waits at `sample_gate`, for the stop/reroute ones."""
         def engine_factory(regime, partition):
             if build_gate is not None:
                 build_gate.wait()
             if broken:
                 raise RuntimeError("the factory is broken")
+            if sample_gate is not None:
+                return GatedEngine(sample_gate, base=regime.base)
             return FakeEngine(base=regime.base)
 
         service = MetalService(
@@ -843,3 +863,146 @@ class DecommissionTest(DeskFixture):
         self.assertTrue(verdict["decommissioned"])
         self.assertFalse(verdict["decarved"])
         self.assertEqual(desk.listings, {})
+
+
+class StopTest(DeskFixture):
+    def test_stop_cancels_journals_and_a_resume_completes(self) -> None:
+        """The per-tenancy kill: a gated run is stopped mid-flight — the
+        reply arrives only after the death is COMPLETE (the roster row
+        failed, the detach journaled) — and re-adopting the same run_id
+        afterwards is a plain resume that runs to done. A second stop finds
+        nothing running and says so instead of raising."""
+        gate = asyncio.Event()
+        host = Host("both-a",
+                    engines=(GatedEngine(gate, base=BASE),),
+                    learner=FakeLearner(), store=self.store,
+                    regimes=(Regime("serve", "inference", BASE, 1),
+                             Regime("train", "training", BASE, 1)),
+                    schema_for=lambda base: fake_qwen_schema(4, base=base))
+        door = RemoteHost(LocalTransport(HostService(host)))
+
+        async def drive():
+            accepted = await door.adopt(arith_spec(self.train))
+            rid = accepted["run_id"]
+            first = await door.stop(rid)
+            again = await door.stop(rid)
+            gate.set()
+            resumed = await door.adopt(arith_spec(self.train))
+            await host._adoptions[rid]
+            return accepted, first, again, resumed, rid
+        accepted, first, again, resumed, rid = go(drive())
+        self.assertTrue(accepted["accepted"], accepted)
+        self.assertTrue(first["stopped"], first)
+        self.assertEqual(first["state"], "failed")
+        self.assertFalse(again["stopped"])           # already dead: the goal
+        self.assertTrue(resumed["accepted"], resumed)
+        self.assertEqual(host.roster[rid].status, "done")
+        detaches = [e["status"] for e in self.store.read_host_log("both-a")
+                    if e.get("event") == "detach"]
+        self.assertEqual(detaches, ["failed", "done"])
+
+
+class RerouteTest(DeskFixture):
+    def test_decommission_reroutes_running_work_to_fresh_metal(self) -> None:
+        """The teardown that moves its tenants: a gated run is mid-flight on
+        a carved pair when its learner host is decommissioned with reroute —
+        the desk replays its own ARCHIVED delivery onto a fresh carve (the
+        avoided listing off the table), the SAME run_id continues there, and
+        with the gate opened it runs to done. Restart-is-redial: nothing was
+        copied, because the store was the run all along."""
+        gate = asyncio.Event()
+        service = self.metal_service(devices=3, sample_gate=gate)
+        desk = self.desk_with_metal("fake-metal")
+
+        async def drive():
+            reply = await Campaigns(desk).submit(self.split_spec())
+            rid = reply["run_id"]
+            verdict = await desk.decommission(reply["host"], reroute=True)
+            gate.set()
+            landed = verdict["rerouted"][rid]["host"]
+            await service.hosts[landed]._adoptions[rid]
+            return reply, verdict, landed
+        reply, verdict, landed = go(drive())
+        rid = reply["run_id"]
+        self.assertTrue(verdict["decommissioned"], verdict)
+        moved = verdict["rerouted"][rid]
+        self.assertTrue(moved["rerouted"], moved)
+        self.assertEqual(moved["run_id"], rid)       # same identity: a resume
+        self.assertNotEqual(landed, reply["host"])
+        self.assertNotIn(reply["host"], desk.listings)
+        self.assertEqual(service.hosts[landed].roster[rid].status, "done")
+        table = RemoteDesk(LocalTransport(Campaigns(desk))).placements()
+        self.assertEqual(table[rid]["host"], landed)  # the binding moved
+        self.assertIn("demands", table[rid])          # and stayed replayable
+
+    def test_a_reroute_with_nowhere_to_go_leaves_the_run_running(self) -> None:
+        """PLACE-FIRST: without park, a reroute that would strand the run
+        (nothing else covers it, no metal can hold it) refuses with the boot
+        instructions and touches NOTHING — the run keeps running where it is
+        and finishes."""
+        gate = asyncio.Event()
+        service = self.metal_service(devices=2, sample_gate=gate)
+        desk = self.desk_with_metal("fake-metal")
+
+        async def drive():
+            reply = await Campaigns(desk).submit(self.split_spec())
+            rid = reply["run_id"]
+            refusal = await desk.reroute(rid, avoiding=reply["host"])
+            still = service.hosts[reply["host"]].roster[rid].status
+            gate.set()
+            await service.hosts[reply["host"]]._adoptions[rid]
+            return reply, refusal, still
+        reply, refusal, still = go(drive())
+        self.assertFalse(refusal["rerouted"], refusal)
+        self.assertTrue(refusal["boot"])
+        self.assertEqual(still, "running")           # nothing was stopped
+        self.assertEqual(
+            service.hosts[reply["host"]].roster[reply["run_id"]].status,
+            "done")
+
+    def test_decommission_parks_what_nothing_covers(self) -> None:
+        """The vision's other branch, over the wire: the host is coming down
+        and no metal can hold its tenant — the tenancy is STOPPED and
+        journaled PARKED with the boot instructions (the ask a human
+        answers), the teardown proceeds, and a later resubmission of the
+        same spec revives the SAME run from the store — onto the metal the
+        teardown just freed."""
+        gate = asyncio.Event()
+        service = self.metal_service(devices=2, sample_gate=gate)
+        desk = self.desk_with_metal("fake-metal")
+        remote = RemoteDesk(LocalTransport(Campaigns(desk)))
+
+        async def drive():
+            reply = await Campaigns(desk).submit(self.split_spec())
+            rid = reply["run_id"]
+            verdict = await remote.decommission(reply["host"], reroute=True)
+            gate.set()
+            revived = await Campaigns(desk).submit(self.split_spec())
+            await service.hosts[revived["host"]]._adoptions[rid]
+            return reply, verdict, revived
+        reply, verdict, revived = go(drive())
+        rid = reply["run_id"]
+        self.assertTrue(verdict["decommissioned"], verdict)
+        parked = verdict["rerouted"][rid]
+        self.assertTrue(parked["parked"], parked)
+        self.assertTrue(parked["boot"])
+        self.assertTrue(parked["stopped"]["stopped"])
+        self.assertEqual(revived["run_id"], rid)     # the same run, revived
+        self.assertEqual(
+            service.hosts[revived["host"]].roster[rid].status, "done")
+        parked_events = [e for e in self.store.read_fleet_log()
+                         if e.get("event") == "parked"]
+        self.assertEqual([e["run_id"] for e in parked_events], [rid])
+
+    def test_an_unarchived_delivery_cannot_be_replayed(self) -> None:
+        """Deliveries from before the archive carried rows and frame refuse
+        the replay with the cure named — resubmit through the campaign — and
+        nothing is stopped on the way out."""
+        desk = self.desk()
+        self.store.append_fleet_event({
+            "event": "place", "t": 0.0, "delivered": True,
+            "run_id": "cafe01", "host": "old-host",
+            "pools": {"main": "old-host"}, "accepted": True})
+        refusal = go(desk.reroute("cafe01"))
+        self.assertFalse(refusal["rerouted"])
+        self.assertIn("campaign", refusal["error"])

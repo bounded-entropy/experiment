@@ -410,10 +410,47 @@ class Host:
             self.submit(spec, schema, remotes=remotes, subdir=subdir))
         # a failed run already journals and rosters its failure (submit's own
         # except path); retrieving the exception here only keeps asyncio from
-        # shouting about a result nobody awaits
-        task.add_done_callback(lambda done: done.exception())
+        # shouting about a result nobody awaits — and a CANCELLED task (stop's
+        # doing) has no exception to retrieve, only one to re-raise, so it is
+        # left alone
+        task.add_done_callback(
+            lambda done: None if done.cancelled() else done.exception())
         self._adoptions[rid] = task
         return {"accepted": True, "run_id": rid, "state": "adopted"}
+
+    async def stop(self, run_id: str) -> dict:
+        """A tenancy told to die — adopt's per-run inverse, and the verb a
+        reroute rides: the adoption task is cancelled and AWAITED, so the
+        reply means the death is COMPLETE. The daemons unwind structurally
+        (they run under one TaskGroup, so cancelling the adoption cancels
+        them all), the roster row reads failed, the journal's detach is
+        written (submit's own except path does both), and the run_id is free
+        to adopt again — here or elsewhere. Stopping mid-update is safe by
+        resume-equivalence: the uncommitted update is redone on resume, and
+        nothing else exists outside the store. A run this host is not
+        running answers stopped: False instead of raising — already dead is
+        the goal state, not an error."""
+        task = self._adoptions.get(run_id)
+        if task is None or task.done():
+            told = self.roster.get(run_id)
+            return {"stopped": False, "run_id": run_id,
+                    "state": told.status if told is not None else "unknown"}
+        task.cancel()
+        # swallow the task's CancelledError, propagate our own (gather keeps
+        # the two apart; a real failure was already rostered and journaled by
+        # submit's except path)
+        await asyncio.gather(task, return_exceptions=True)
+        told = self.roster.get(run_id)
+        if told is not None and told.status == "running":
+            # cancelled before submit's try block ever ran: the eager roster
+            # row is still "running", so submit could not write its own
+            # bookkeeping — the journal must not lose a detach
+            told.status = "failed"
+            self.store.append_host_event(self.name, {
+                "event": "detach", "t": time.time(), "run_id": run_id,
+                "status": "failed"})
+        return {"stopped": True, "run_id": run_id,
+                "state": told.status if told is not None else "unknown"}
 
     def check_code_agreement(self, spec: ExperimentSpec,
                              claimed: Mapping[str, str] | None) -> None:
