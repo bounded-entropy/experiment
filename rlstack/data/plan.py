@@ -14,9 +14,13 @@ THE LEAF IS THE WHOLE TAXONOMY. `Sample` names a task to run under an
 environment, and until someone runs it the wave does not exist yet — that
 "not yet" is the only thing daemons ever await. `Replay` names a trajectory
 that is already sealed somewhere: this run's own rollouts, another run's
-waves, a content-addressed file. Live / replay / static stop being three
-feeds and become two leaf constructors, which is what lets one wave hold both
-(a fresh rollout beside its anchor) and one run go SFT then RL.
+waves, a content-addressed file. `Derive` is mint-then-make: a registered
+task MAKER turns an already-sealed trajectory into a NEW task (its critique
+prompt, its retry request), and the environment runs that — the reflect
+loop's leaf, and the reason a plan can pin an iterative run's whole SHAPE
+while its content is only derivable at runtime. Live / replay / static /
+iterative stop being four feeds and become three leaf constructors, which is
+what lets one wave hold any mix and one run go SFT then RL then reflect.
 
 Plans are written as jsonl — one line per wave — so a plan reads and diffs
 like the waves it describes, and a long run's plan streams rather than loads.
@@ -70,7 +74,32 @@ class Replay:
         return {"leaf": "replay", "ref": self.ref, "role": self.role}
 
 
-Leaf = Sample | Replay
+@dataclass(frozen=True)
+class Derive:
+    """Mint it, then make it: a registered task maker turns the sealed
+    trajectory at `source` into a NEW task, and `env` runs an episode on it.
+
+    `source` speaks Replay's ref grammar (`self://rollouts/<r>#<i>` and the
+    rest); within a rollout plan a self source must name an EARLIER wave —
+    the generator makes waves in order, so an earlier wave is always sealed
+    by the time this leaf runs, and a later one is a plan error, not an
+    await. The maker is registered code (@task_maker): its source hashes into
+    run identity through the spec's `gen.makers` declaration, and it is a
+    PURE function of the sealed bytes, so a resumed run re-mints the same
+    task to the byte.
+    """
+
+    source: str
+    maker: str
+    env: str
+    role: str = TRAIN
+
+    def row(self) -> dict:
+        return {"leaf": "derive", "source": self.source, "maker": self.maker,
+                "env": self.env, "role": self.role}
+
+
+Leaf = Sample | Replay | Derive
 
 
 @dataclass(frozen=True)
@@ -177,5 +206,9 @@ def _leaf(row: dict) -> Leaf:
         return Sample(row["task"], row["env"], row.get("role", TRAIN))
     if row["leaf"] == "replay":
         return Replay(row["ref"], row.get("role", TRAIN))
+    if row["leaf"] == "derive":
+        return Derive(row["source"], row["maker"], row["env"],
+                      row.get("role", TRAIN))
     raise PlanError(f"unknown leaf kind {row['leaf']!r}; plans hold "
-                    f"'sample' (make it) and 'replay' (take it)")
+                    f"'sample' (make it), 'replay' (take it) and "
+                    f"'derive' (mint it, then make it)")

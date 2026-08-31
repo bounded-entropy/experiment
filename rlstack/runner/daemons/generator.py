@@ -30,7 +30,8 @@ class Generator(Daemon):
                  spec: ExperimentSpec, plan: RunPlan, due_at: Mapping[int, int],
                  tasks: Mapping[str, Task], engine: Engine,
                  routes_at: Callable[[Bundle], Routes],
-                 initial_bundle: Bundle, max_inflight: int) -> None:
+                 initial_bundle: Bundle, max_inflight: int,
+                 refs=None) -> None:
         super().__init__(signals, arbiter, run)
         self.engine = engine
         self.gen = spec.gen
@@ -42,14 +43,23 @@ class Generator(Daemon):
         self.routes_at = routes_at
         self.initial_bundle = initial_bundle
         self.max_inflight = max_inflight
+        # the ref reader Derive leaves mint through (assemble.sample_wave);
+        # a plan without them never touches it
+        self.refs = refs
 
     # ---- the acquisition condition (override to change the alternation) -----
 
     def consumed_by(self, index: int) -> int:
-        """The update that first trains on rollout `index`. A rollout no update
-        names is paced as if it were its own update — it is dead weight either
-        way, and the submit gate is where that gets reported."""
-        return self.due_at.get(index, index)
+        """The update that first trains on rollout `index` — or, for a rollout
+        no update names, the first update consuming any LATER rollout: a
+        Derive chain's intermediate waves are un-referenced by construction
+        (training reads only the loop-final wave), and an intermediate is due
+        exactly when the wave it feeds is due. Only a rollout past EVERY
+        reference is dead weight, paced as its own update."""
+        if index in self.due_at:
+            return self.due_at[index]
+        later = [update for j, update in self.due_at.items() if j > index]
+        return min(later) if later else index
 
     def may_generate(self, index: int) -> bool:
         """Rollout r waits for commit u-1-B, where u is the update that first
@@ -82,7 +92,8 @@ class Generator(Daemon):
                     entry, index=index, tasks=self.tasks,
                     sampling=self.gen.sampling,
                     routes=self.routes_at(self.newest_bundle()),
-                    master=self.master, max_inflight=self.max_inflight)
+                    master=self.master, max_inflight=self.max_inflight,
+                    reader=self.refs)
             self.run.write_rollout(index, wave_to_rows(wave))
             await self.signals.notify()
 

@@ -304,7 +304,8 @@ def plan_daemons(spec: ExperimentSpec, *, run, store, engine_map, learner,
             spec=spec, plan=plans["rollout"],
             due_at=rollouts_needed(plans["train"].waves), tasks=tasks,
             engine=engine_map["main"], routes_at=routes_at,
-            initial_bundle=initial_bundle, max_inflight=max_inflight))
+            initial_bundle=initial_bundle, max_inflight=max_inflight,
+            refs=RefReader(store, run)))
     return daemons
 
 

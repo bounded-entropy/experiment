@@ -6,5 +6,5 @@ from rlstack.training.losses.base import (  # noqa: F401
 )
 from rlstack.training.losses import (  # noqa: F401  (registers builtins)
     grpo, grpo_latent_kl, grpo_latent_kl_gated, gspo, opd, opsd, ppo,
-    replay_distill, reverse_ppo, sdft, self_anchor, sft,
+    replay_distill, reverse_ppo, sdft, sdpo, self_anchor, sft,
 )

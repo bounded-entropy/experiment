@@ -87,6 +87,10 @@ LOSSES = Registry("loss")           # LossDef (below)
 ADAPTER_TYPES = Registry("adapter_type")  # AdapterTypeDef (policy/adapters/base.py):
                                     # one registered ADAPTER TYPE per entry,
                                     # which an AdapterSpec names by string
+MAKERS = Registry("task_maker")     # MakerDef (inference/makers/base.py): a
+                                    # Derive leaf names one; gen.makers
+                                    # declares them, so their source hashes
+                                    # into run identity like an environment's
 
 
 # ---------------------------------------------------------------------------
@@ -148,6 +152,8 @@ def code_hashes(spec: ExperimentSpec) -> dict[str, str]:
     if spec.gen is not None:
         for name in spec.gen.envs:
             add(ENVS, name)
+        for name in spec.gen.makers:
+            add(MAKERS, name)
 
     for adapter in spec.policy.bank.values():
         add(ADAPTER_TYPES, adapter.adapter_type)

@@ -17,17 +17,21 @@ import json
 import tempfile
 import unittest
 
-from common import cas_uri
+from common import cas_uri, make_turn
 from rlstack import (
     AlgoSpec, ExperimentSpec, FakeEngine, FakeLearner, GenSpec, GpuConfig,
-    GpuGroup, GroupPlan, Host, LocalStore, OptimSpec, Plans, PolicySpec,
-    RunPlan, Sample, Schedule, Seeds, Task, WavePlan, WaveRef, encode,
-    fake_qwen_schema, gpus, learner, lora, pool, validate, write_tasks,
+    GpuGroup, GroupPlan, Host, LocalStore, Message, OptimSpec, Plans,
+    PolicySpec, Role, Rollout, RunPlan, Sample, Schedule, Seeds, Task,
+    WavePlan, WaveRef, encode, fake_qwen_schema, gpus, learner, lora, pool,
+    validate, write_tasks,
 )
+from rlstack.data.plan import Derive, decode
 from rlstack.data.tasks.glyph_exchange import glyph_eval_tasks, glyph_train_tasks
 from rlstack.data.tasks.stamp_office import stamp_eval_tasks, stamp_train_tasks
-from rlstack.policy.adapters.reverse_value_head import reverse_value_head
-from rlstack.registry import ADAPTER_TYPES, ENVS, LOSSES, POST
+from rlstack.inference.makers.reflect import Reflect
+from rlstack.policy.adapters.spectral import spectral
+from rlstack.policy.adapters.value_head import value_head
+from rlstack.registry import ADAPTER_TYPES, ENVS, LOSSES, MAKERS, POST
 from rlstack.training.post.glyph_grade import GlyphGrade
 from rlstack.training.post.stamp_grade import StampGrade
 
@@ -194,7 +198,7 @@ def arm_spec(store, *, loss: str, post: tuple[str, ...],
 
 
 REVERSE_BANK = {"pi": lora("layers.0-3.self_attn.*", r=8),
-                "vh": reverse_value_head("final_hidden", d_model=64)}
+                "vh": value_head("final_hidden", d_model=64)}
 
 
 class WiringTest(unittest.TestCase):
@@ -209,7 +213,11 @@ class WiringTest(unittest.TestCase):
             self.assertIsNotNone(POST.get(name))
         for name in ("stamp_office", "glyph_exchange"):
             self.assertIsNotNone(ENVS.get(name))
-        self.assertIsNotNone(ADAPTER_TYPES.get("reverse_value_head"))
+        for name in ("value_head", "spectral"):
+            self.assertIsNotNone(ADAPTER_TYPES.get(name))
+        self.assertIsNotNone(MAKERS.get("reflect"))
+        self.assertIsNotNone(LOSSES.get("sdpo"))
+        self.assertIsNotNone(ENVS.get("reflect_retry"))
 
     def test_the_arm_shapes_validate_clean(self) -> None:
         arms = (
@@ -228,8 +236,7 @@ class WiringTest(unittest.TestCase):
 
     def test_the_head_refuses_a_weighted_site(self) -> None:
         bank = {"pi": lora("layers.0-3.self_attn.*", r=8),
-                "vh": reverse_value_head("layers.0.self_attn.q_proj",
-                                         d_model=64)}
+                "vh": value_head("layers.0.self_attn.q_proj", d_model=64)}
         spec = arm_spec(self.store, loss="reverse_ppo", post=("stamp_grade",),
                         bank=bank)
         codes = {issue.code for issue in validate(spec, SCHEMA)}
@@ -259,7 +266,290 @@ class ArmRunTest(unittest.TestCase):
         emission channel, exercised for the new head with no GPU."""
         entries = self.run_arm("reverse_ppo", ("stamp_grade",),
                                bank=REVERSE_BANK)
-        self.assertIn("reverse_values", json.dumps(entries[-1]))
+        self.assertIn('"values"', json.dumps(entries[-1]))
+
+    def test_spectral_grpo_on_the_stamp_office(self) -> None:
+        entries = self.run_arm(
+            "grpo", ("stamp_grade", "grpo_advantage"),
+            bank={"pi": spectral("layers.0-3.self_attn.*", k=8)})
+        self.assertIn("spectral_gain_span", json.dumps(entries[-1]))
+
+
+def sealed_attempt(task: Task, content: str):
+    """One sealed single-turn episode on `task` — the reflect maker's food."""
+    turn = make_turn(content, tuple(ord(c) for c in content))
+    return Rollout(task=task,
+                   messages=[Message(Role.USER, task.prompt), turn.message],
+                   turns=[turn]).seal()
+
+
+class ReflectLoopTest(unittest.TestCase):
+    def test_derive_rides_the_plan_wire(self) -> None:
+        plan = RunPlan((WavePlan((GroupPlan("g", (
+            Derive("self://rollouts/1#0", "reflect", "reflect_retry"),)),)),))
+        again = decode(encode(plan))
+        self.assertEqual(
+            again.waves[0].groups[0].leaves[0],
+            Derive("self://rollouts/1#0", "reflect", "reflect_retry"))
+
+    def test_the_reflect_maker_extends_the_transcript(self) -> None:
+        """The derived prompt IS the conversation so far plus the ask; the
+        metadata passes through (the graders judge retries), the reflection
+        counter climbs, and pointing the maker at its own output iterates."""
+        task = stamp_train_tasks()[0]
+        first = Reflect().make(sealed_attempt(task, "grab(47)"))
+        self.assertTrue(first.prompt.startswith(task.prompt))
+        self.assertIn("grab(47)", first.prompt)
+        self.assertIn("wrong", first.prompt)
+        self.assertEqual(first.meta["color"], "vex")
+        self.assertEqual(first.meta["reflection"], 1)
+        self.assertEqual(first.id, f"{task.id}~r1")
+        second = Reflect().make(sealed_attempt(first, "fold(47)"))
+        self.assertEqual(second.meta["reflection"], 2)
+        self.assertEqual(second.id, f"{task.id}~r2")
+        self.assertIn("fold(47)", second.prompt)
+
+    def test_the_reflect_env_criticizes_then_retries(self) -> None:
+        class StubClient:
+            def __init__(self) -> None:
+                self.calls = 0
+
+            async def sample(self, messages, stop=()):
+                self.calls += 1
+                return make_turn(f"turn-{self.calls}", (self.calls,))
+
+            def pool(self, name):
+                return self
+
+        from rlstack.registry import ENVS
+        task = stamp_train_tasks()[0]
+        rollout = go(ENVS.get("reflect_retry").instance.run(StubClient(), task))
+        self.assertEqual(len(rollout.turns), 2)
+        self.assertEqual(len(rollout.messages), 4)
+        self.assertIn("corrected", rollout.messages[2].content)  # the injected ask
+        self.assertEqual(rollout.turns[-1].message.content, "turn-2")
+
+    def test_the_loop_arm_runs_on_fake_metal(self) -> None:
+        """The whole iterative-SDPO shape, fakes end to end: Sample wave, two
+        Derive waves minted from it in order, training only on the loop-final
+        waves, the sdpo loss cloning final turns — two loops, two updates."""
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        store = LocalStore(tmp.name)
+        tasks = stamp_train_tasks()
+        uri = write_tasks(store, tasks)
+        ids = [t.id for t in tasks]
+
+        def loop_waves(base: int) -> list[WavePlan]:
+            attempt = WavePlan(tuple(
+                GroupPlan(t, (Sample(t, "stamp_office"),)) for t in ids))
+            reflect = lambda source_wave: WavePlan(tuple(
+                GroupPlan(t, (Derive(f"self://rollouts/{source_wave}#{i}",
+                                     "reflect", "reflect_retry"),))
+                for i, t in enumerate(ids)))
+            return [attempt, reflect(base + 1), reflect(base + 2)]
+
+        rollout = encode(RunPlan(tuple(loop_waves(0) + loop_waves(3))))
+        train = encode(RunPlan((WaveRef("self://rollouts/3"),
+                                WaveRef("self://rollouts/6"))))
+        store.cas_put(rollout)
+        store.cas_put(train)
+        spec = ExperimentSpec(
+            policy=PolicySpec(base=BASE,
+                              bank={"pi": lora("layers.0-3.self_attn.*", r=8)}),
+            gen=GenSpec(envs=("stamp_office", "reflect_retry"), tasks=(uri,),
+                        makers=("reflect",)),
+            plans=Plans(train=cas_uri(train), rollout=cas_uri(rollout)),
+            algo=AlgoSpec(loss="sdpo", post=("stamp_grade",),
+                          optim=OptimSpec("adamw", lr=1e-5),
+                          schedule=Schedule(microbatch_tokens=4096)),
+            gpu_config=GpuConfig(groups=(
+                GpuGroup(gpus(n=1), (pool("main"), learner())),)),
+            seeds=Seeds(master=29))
+        self.assertEqual(validate(spec, SCHEMA), [])
+        host = Host("loop-fake", engines=(FakeEngine(),), learner=FakeLearner(),
+                    store=store)
+        report = go(host.submit(spec, SCHEMA, store=store))
+        entries = store.peek_ledger(report.run_id)
+        self.assertEqual(len(entries), 2, entries)
+
+    def test_an_unknown_maker_is_a_validate_finding(self) -> None:
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        store = LocalStore(tmp.name)
+        spec = arm_spec(store, loss="grpo",
+                        post=("stamp_grade", "grpo_advantage"))
+        import dataclasses
+        spec = dataclasses.replace(
+            spec, gen=dataclasses.replace(spec.gen, makers=("nonesuch",)))
+        codes = {issue.code for issue in validate(spec, SCHEMA)}
+        self.assertIn("unknown-maker", codes)
+
+
+# ---------------------------------------------------------------------------
+# the numerical halves — torch ships in the deploy image, so these SKIP
+# locally and RUN in the image (test_plora's rule)
+# ---------------------------------------------------------------------------
+
+try:
+    import torch
+except ImportError:                                  # the client environment
+    torch = None
+
+needs_torch = unittest.skipUnless(
+    torch is not None, "torch is trainer metal: this suite runs in the image")
+
+if torch is not None:
+    from rlstack.data.flatten import TokenBatch
+    from rlstack.policy.adapters import spectral_torch, value_head_torch
+    from rlstack.policy.siteschema import SiteMeta
+    from rlstack.training.losses import PolicyOutputs
+    from rlstack.training.losses.reverse_ppo import reverse_ppo
+    from rlstack.training.losses.sdpo import sdpo as sdpo_loss
+
+
+@needs_torch
+class SpectralTorchTest(unittest.TestCase):
+    def one_site(self, k: int = 2, n: int = 6):
+        site = SiteMeta(name="lin", path="lin", has_weight=True,
+                        shape=(n, n), is_boundary=False)
+        state = spectral_torch.build((site,), {"k": k})
+        model = torch.nn.Module()
+        model.lin = torch.nn.Linear(n, n, bias=False)
+        with torch.no_grad():
+            model.lin.weight.copy_(torch.randn(
+                n, n, generator=torch.Generator().manual_seed(5)))
+        spectral_torch.install(model, state)
+        return state, model
+
+    def test_the_value_is_topk_and_the_gradient_is_dense(self) -> None:
+        """The straight-through contract: at most k directions move the
+        forward VALUE, every direction receives GRADIENT."""
+        state, _ = self.one_site(k=2, n=6)
+        with torch.no_grad():
+            state.delta["lin"].copy_(torch.tensor([.1, .2, .3, .4, .5, .6]))
+        eff = spectral_torch.effective_gains(state, "lin")
+        self.assertEqual(int((eff.detach() != 0).sum()), 2)
+        eff.sum().backward()
+        self.assertEqual(int((state.delta["lin"].grad != 0).sum()), 6)
+
+    def test_the_replay_delta_equals_the_served_adapter(self) -> None:
+        """Parity by construction: the forward's delta and the emitted peft
+        pair compute the same matrix."""
+        state, model = self.one_site(k=2, n=6)
+        with torch.no_grad():
+            state.delta["lin"].uniform_(-0.5, 0.5,
+                                        generator=torch.Generator().manual_seed(7))
+        x = torch.randn(3, 6, generator=torch.Generator().manual_seed(9))
+        replayed = spectral_torch._whole_batch_delta(x, state, "lin")
+        _, tensors = spectral_torch.unpack(spectral_torch.emit(state))
+        a = tensors["peft.base_model.model.lin.lora_A.weight"].to(torch.float32)
+        b = tensors["peft.base_model.model.lin.lora_B.weight"].to(torch.float32)
+        served = (x @ a.T) @ b.T
+        self.assertTrue(torch.allclose(replayed, served, atol=2e-2),
+                        (replayed - served).abs().max())
+
+    def test_emit_load_roundtrips_the_dense_gains(self) -> None:
+        state, model = self.one_site()
+        with torch.no_grad():
+            state.delta["lin"].uniform_(-1, 1,
+                                        generator=torch.Generator().manual_seed(3))
+        payload = spectral_torch.emit(state)
+        fresh, _ = self.one_site()
+        spectral_torch.load(fresh, payload)
+        self.assertTrue(torch.equal(fresh.delta["lin"], state.delta["lin"]))
+
+    def test_k_past_the_spectrum_is_refused(self) -> None:
+        site = SiteMeta(name="lin", path="lin", has_weight=True,
+                        shape=(4, 8), is_boundary=False)
+        with self.assertRaises(ValueError):
+            spectral_torch.build((site,), {"k": 5})
+
+
+@needs_torch
+class ValueHeadTorchTest(unittest.TestCase):
+    def head_on_stub(self):
+        site = SiteMeta(name="final_hidden", path="norm", has_weight=False,
+                        shape=None, is_boundary=True)
+        state = value_head_torch.build((site,), {"d_model": 8, "hidden": 4})
+
+        class Stub(torch.nn.Module):
+            def __init__(self) -> None:
+                super().__init__()
+                self.norm = torch.nn.Identity()
+                self.anchor = torch.nn.Parameter(torch.zeros(1))
+
+            def forward(self, h, attention_mask=None):
+                return self.norm(h)
+
+        model = Stub()
+        value_head_torch.install(model, state)
+        return state, model
+
+    def test_values_are_zero_at_version_zero_and_padding_is_zeroed(self) -> None:
+        state, model = self.head_on_stub()
+        mask = torch.tensor([[1.0, 1.0, 0.0]])
+        model(torch.randn(1, 3, 8), attention_mask=mask)
+        v = value_head_torch.values(state)
+        self.assertTrue(torch.equal(v, torch.zeros(1, 3)))   # zero-init head
+        with torch.no_grad():
+            state.w_out.uniform_(-1, 1)
+        model(torch.randn(1, 3, 8), attention_mask=mask)
+        v = value_head_torch.values(state)
+        self.assertNotEqual(float(v[0, 0]), 0.0)
+        self.assertEqual(float(v[0, 2]), 0.0)                # padding zeroed
+
+    def test_the_capture_is_detached(self) -> None:
+        state, model = self.head_on_stub()
+        h = torch.randn(1, 2, 8, requires_grad=True)
+        model(h, attention_mask=torch.ones(1, 2))
+        self.assertFalse(state.captured.requires_grad)
+
+
+def _hand_batch(reward: float = 1.0):
+    """One document: 1 injected token then 4 generated, two turns (1 + 3)."""
+    return TokenBatch(
+        token_ids=(9, 1, 2, 3, 4), loss_mask=(0, 1, 1, 1, 1),
+        behavior_logprobs=(0.0, -0.5, -0.5, -0.5, -0.5),
+        segment_ids=(-1, 0, 1, 1, 1), doc_starts=(0,),
+        postdata={"reward": (0.0, reward, reward, reward, reward)})
+
+
+@needs_torch
+class LossMathTest(unittest.TestCase):
+    def test_sdpo_clones_the_final_turn_only(self) -> None:
+        batch = _hand_batch()
+        lp = torch.tensor([0.0, -1.0, -2.0, -4.0, -6.0], requires_grad=True)
+        result = sdpo_loss(PolicyOutputs(logprobs=lp), batch)
+        self.assertAlmostEqual(float(result.loss), (2.0 + 4.0 + 6.0) / 3, places=6)
+        result.loss.backward()
+        self.assertEqual(float(lp.grad[1]), 0.0)     # turn 0: conditioning only
+
+    def test_reverse_ppo_warms_the_critic_first(self) -> None:
+        """Zero values whiten to zero credit: the whole objective is the value
+        regression, whose target includes the prompt-end position."""
+        batch = _hand_batch(reward=0.6)
+        lp = torch.tensor([0.0, -0.5, -0.5, -0.5, -0.5], requires_grad=True)
+        values = torch.zeros(1, 5, requires_grad=True)
+        result = reverse_ppo(
+            PolicyOutputs(logprobs=lp, provided={"values": values}), batch)
+        # 5 value targets (4 generated + prompt-end), each (0 - 0.6)^2
+        self.assertAlmostEqual(float(result.loss), 0.5 * 0.36, places=6)
+        result.loss.backward()
+        self.assertTrue(torch.all(lp.grad == 0))     # no credit yet
+        self.assertNotEqual(float(values.grad.abs().sum()), 0.0)
+
+    def test_reverse_ppo_credit_is_the_forward_difference(self) -> None:
+        """A value step at one token concentrates the (whitened) credit
+        there — the RUDDER decomposition, spot-checked."""
+        batch = _hand_batch(reward=1.0)
+        lp = torch.tensor([0.0, -0.5, -0.5, -0.5, -0.5], requires_grad=True)
+        values = torch.tensor([[0.0, 0.0, 1.0, 1.0, 1.0]])   # jumps at t=2
+        result = reverse_ppo(
+            PolicyOutputs(logprobs=lp, provided={"values": values}), batch)
+        result.loss.backward()
+        grads = lp.grad.abs()
+        self.assertEqual(int(torch.argmax(grads)), 2)        # credit at the jump
 
 
 if __name__ == "__main__":

@@ -41,6 +41,7 @@ from rlstack.client import PoolClient
 from rlstack.policy.siteschema import SiteMeta, SiteSchema, fake_qwen_schema, resolve
 from rlstack.policy.adapters import AdapterType, AdapterTypeDef, Mechanism, adapter_type
 from rlstack.inference.rollout import Rollout
+from rlstack.inference import makers as _makers   # registers task makers
 from rlstack.inference.environments import (
     Environment, EnvironmentDef, environment,       # registers builtin envs
 )

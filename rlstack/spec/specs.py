@@ -38,12 +38,15 @@ class GenSpec:
     `envs` is a declaration, not a use: identity is a pure function of the spec
     value (I3), so the environments whose source hashes into run_id have to be
     nameable without fetching a plan. The submit gate refuses any leaf naming
-    an environment not declared here. Scoring is NOT here — that is
-    postprocessing."""
+    an environment not declared here. `makers` is the same declaration for
+    the task makers Derive leaves name (mint-then-make: the reflect loop's
+    content derivation is registered code, so it hashes like an environment).
+    Scoring is NOT here — that is postprocessing."""
 
     envs: tuple[str, ...]         # registered @environment names
     tasks: tuple[str, ...]        # content-addressed: "cas://<sha>/..." each
     sampling: SamplingSpec = SamplingSpec()
+    makers: tuple[str, ...] = ()  # registered @task_maker names
 
 
 # ---------------------------------------------------------------------------

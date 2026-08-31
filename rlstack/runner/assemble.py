@@ -21,8 +21,11 @@ import asyncio
 from collections.abc import Callable, Mapping, Sequence
 from typing import Any
 
-from rlstack.data.plan import GroupPlan, PlanError, Replay, Sample, WavePlan, WaveRef, Waves
-from rlstack.data.trajectory import Group, Task, Trajectory, Wave
+from rlstack.data.plan import (
+    Derive, GroupPlan, PlanError, Replay, Sample, WavePlan, WaveRef, Waves,
+)
+from rlstack.data.trajectory import Group, Task, Trajectory, Wave, trajectory_from_row
+from rlstack.registry import MAKERS
 from rlstack.runner.refs import RefReader
 from rlstack.runner.seeds import derive
 from rlstack.runner.traffic import EnginePoolClient, Routes, run_episode
@@ -36,36 +39,65 @@ from rlstack.spec.specs import SamplingSpec
 async def sample_wave(plan: WavePlan, *, index: int, tasks: Mapping[str, Task],
                       sampling: SamplingSpec, routes: Routes, master: int,
                       phase: str = "rollout",
-                      max_inflight: int = 64) -> Wave:
-    """Run every Sample leaf of one planned wave; return the sealed Wave.
+                      max_inflight: int = 64,
+                      reader: RefReader | None = None) -> Wave:
+    """Run every Sample and Derive leaf of one planned wave; return the
+    sealed Wave.
 
     Deterministic given (master, phase, index) and the PLAN: an episode's seed
     is derived from its group key and its position in that group, so the same
     plan replays the same draws no matter how the leaves interleave in flight.
     Episodes are scheduled flat and reassembled in PLAN order, so completion
     order cannot reach the bytes (#53).
+
+    A Derive leaf MINTS its task first: `reader` resolves the source ref to a
+    sealed trajectory and the registered maker derives the task, purely — so
+    the mint re-runs identically on resume. The generator makes waves in
+    order, which is why a self source naming an EARLIER wave is always
+    already sealed, and one naming a later wave is a plan error rather than
+    an await.
     """
     limiter = asyncio.Semaphore(max_inflight)
     jobs: list[asyncio.Future] = []
     shape: list[int] = []
 
-    async def one(group_key: str, position: int, leaf: Sample) -> Trajectory:
+    def minted(group_key: str, leaf: Derive) -> Task:
+        if reader is None:
+            raise PlanError(
+                f"group {group_key!r} derives from {leaf.source!r} but this "
+                f"caller resolves no refs — Derive leaves need the run's "
+                f"reader")
+        row = reader.row(leaf.source)
+        if row is None:
+            raise PlanError(
+                f"group {group_key!r} derives from {leaf.source!r}, which is "
+                f"not sealed yet — a Derive sources an EARLIER wave (the "
+                f"generator makes waves in order)")
+        return MAKERS.get(leaf.maker).instance.make(trajectory_from_row(row))
+
+    async def one(group_key: str, position: int,
+                  leaf: Sample | Derive) -> Trajectory:
         async with limiter:
-            if leaf.task_id not in tasks:
-                raise PlanError(
-                    f"group {group_key!r} samples task {leaf.task_id!r}, which "
-                    f"no declared task set contains")
+            if isinstance(leaf, Derive):
+                task = minted(group_key, leaf)
+            else:
+                if leaf.task_id not in tasks:
+                    raise PlanError(
+                        f"group {group_key!r} samples task {leaf.task_id!r}, "
+                        f"which no declared task set contains")
+                task = tasks[leaf.task_id]
             seed = derive(master, phase, index, group_key, position)
             client = EnginePoolClient(routes, sampling, seed)
-            return await run_episode(leaf.env, tasks[leaf.task_id], client)
+            return await run_episode(leaf.env, task, client)
 
     for group in plan.groups:
         shape.append(len(group.leaves))
         for position, leaf in enumerate(group.leaves):
-            if not isinstance(leaf, Sample):
+            if not isinstance(leaf, (Sample, Derive)):
                 raise PlanError(
                     f"group {group.key!r}: a rollout plan MAKES trajectories, "
-                    f"so its leaves are Sample; got {type(leaf).__name__}")
+                    f"so its leaves are Sample or Derive; got "
+                    f"{type(leaf).__name__}")
             jobs.append(one(group.key, position, leaf))
 
     done = await asyncio.gather(*jobs)

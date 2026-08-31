@@ -25,6 +25,7 @@ from rlstack.registry import (
     ADAPTER_TYPES,
     ENVS,
     LOSSES,
+    MAKERS,
     POST,
 )
 from rlstack.spec.specs import PoolMember, ExperimentSpec, LearnerMember
@@ -98,6 +99,8 @@ def check_names_are_registered(spec: ExperimentSpec, schema: SiteSchema) -> list
     if spec.gen is not None:
         for index, name in enumerate(spec.gen.envs):
             look(ENVS, name, "unknown-env", f"gen.envs[{index}]")
+        for index, name in enumerate(spec.gen.makers):
+            look(MAKERS, name, "unknown-maker", f"gen.makers[{index}]")
     for entry_name, adapter in spec.policy.bank.items():
         look(ADAPTER_TYPES, adapter.adapter_type, "unknown-adapter",
              f"policy.bank.{entry_name}.adapter_type")

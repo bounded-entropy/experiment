@@ -54,9 +54,14 @@ def _prompt(purse: str, source: str, target: str, phrasing: int,
 
 def _task(purse: str, source: str, target: str, phrasing: int,
           chat: Chat) -> Task:
+    from rlstack.data.tasks.stamp_office import QWEN_CHAT
+
+    meta = {"purse": purse, "source": source, "target": target}
+    if chat is not None:
+        meta["chat"] = dict(QWEN_CHAT)     # one template, one set of pieces
     return Task(id=f"glyph-exchange/{purse}-{source}-{target}-p{phrasing}",
                 prompt=_prompt(purse, source, target, phrasing, chat),
-                meta={"purse": purse, "source": source, "target": target})
+                meta=meta)
 
 
 def glyph_train_tasks(chat: Chat = None) -> list[Task]:

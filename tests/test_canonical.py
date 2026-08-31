@@ -94,7 +94,7 @@ class TestCanonicalJsonShape(unittest.TestCase):
             canonical_json(GenSpec(envs=("math_single_turn",),
                                    tasks=("cas://abc/train.jsonl",),
                                    sampling=SamplingSpec(top_p=0.9))),
-            '{"__type__":"GenSpec","envs":["math_single_turn"],'
+            '{"__type__":"GenSpec","envs":["math_single_turn"],"makers":[],'
             '"sampling":{"__type__":"SamplingSpec","max_tokens":1024,'
             '"temperature":1.0,"top_p":0.9},"tasks":["cas://abc/train.jsonl"]}',
         )
@@ -111,7 +111,7 @@ class TestCanonicalJsonShape(unittest.TestCase):
             '"post":["verifier","grpo_advantage"],'
             '"schedule":{"__type__":"Schedule","max_policy_lag":0,'
             '"microbatch_tokens":16384}},'
-            '"gen":{"__type__":"GenSpec","envs":["math_single_turn"],'
+            '"gen":{"__type__":"GenSpec","envs":["math_single_turn"],"makers":[],'
             '"sampling":{"__type__":"SamplingSpec",'
             '"max_tokens":1024,"temperature":1.0,"top_p":1.0},'
             '"tasks":["cas://abc/train.jsonl"]},'

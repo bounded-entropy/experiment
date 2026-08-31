@@ -55,6 +55,16 @@ EVAL_DOCS = (23, 31, 58, 64, 76, 89, 15, 92)   # none of them a train doc
 
 Chat = Callable[[str], str] | None
 
+# The template's turn delimiters, stashed per task so a reflect maker and the
+# reflect_retry environment can APPEND turns in the same chat shape the
+# prompt was built with (they have no tokenizer). None with chat=None: the
+# maker's plain-text fallback serves unformatted sets.
+QWEN_CHAT = {"assistant_end": "<|im_end|>\n",
+             "user_open": "<|im_start|>user\n",
+             "user_close": "<|im_end|>\n",
+             "assistant_open": ("<|im_start|>assistant\n"
+                                "<think>\n\n</think>\n\n")}
+
 
 def _prompt(doc: int, color: str, phrasing: int, chat: Chat) -> str:
     text = f"{RULEBOOK}\n\n{REQUESTS[phrasing].format(doc=doc, color=color)}"
@@ -62,9 +72,12 @@ def _prompt(doc: int, color: str, phrasing: int, chat: Chat) -> str:
 
 
 def _task(doc: int, color: str, phrasing: int, chat: Chat) -> Task:
+    meta = {"doc": doc, "color": color, "drawer": DRAWERS[color]}
+    if chat is not None:
+        meta["chat"] = dict(QWEN_CHAT)
     return Task(id=f"stamp-office/{doc}-{color}-p{phrasing}",
                 prompt=_prompt(doc, color, phrasing, chat),
-                meta={"doc": doc, "color": color, "drawer": DRAWERS[color]})
+                meta=meta)
 
 
 def stamp_train_tasks(chat: Chat = None) -> list[Task]:
