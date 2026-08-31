@@ -1,12 +1,11 @@
 """The DSL campaign's pieces: two invented tool languages, their graders, and
-the two new losses (sdpo, reverse_ppo) wired end to end on fakes.
+the new loss (reverse_ppo) wired end to end on fakes.
 
 The claims under test: the graders pay the milestone ladders exactly (dense by
 design — the DAPO all-or-nothing lesson); the task builders are deterministic
 content with the stated generalization holes (mol never trains, ring
-directions eval wider than they train); dpo_pair marks each group's best and
-worst and nothing in an all-tie group; validate refuses the new losses when
-their columns or providers are missing and passes the campaign's actual arm
+directions eval wider than they train); validate refuses the new loss when
+its provider is missing and passes the campaign's actual arm
 shapes; and each arm shape RUNS on fake metal — seal, post, train, ledger —
 with the reverse head's provided name reaching the ledger's train block.
 """
@@ -27,14 +26,11 @@ from rlstack import (
 )
 from rlstack.data.tasks.glyph_exchange import glyph_eval_tasks, glyph_train_tasks
 from rlstack.data.tasks.stamp_office import stamp_eval_tasks, stamp_train_tasks
-from rlstack.data.trajectory import Group
 from rlstack.policy.adapters.reverse_value_head import reverse_value_head
 from rlstack.registry import ADAPTER_TYPES, ENVS, LOSSES, POST
-from rlstack.training.post.dpo_pair import DpoPair
 from rlstack.training.post.glyph_grade import GlyphGrade
 from rlstack.training.post.stamp_grade import StampGrade
 
-from common import make_turn, sealed
 
 BASE = "Qwen/Qwen3-0.6B"
 SCHEMA = fake_qwen_schema(4, base=BASE)
@@ -162,24 +158,6 @@ class TaskBuilderTest(unittest.TestCase):
         self.assertEqual(len({t.id for t in everything}), len(everything))
 
 
-class DpoPairTest(unittest.TestCase):
-    def process(self, rewards: list[float]) -> list[float]:
-        group = Group("g", [sealed(f"t-{i}") for i in range(len(rewards))])
-        told = go(DpoPair().process(group, {"reward": rewards}, None))
-        return list(told["pair"])
-
-    def test_best_and_worst_are_marked(self) -> None:
-        self.assertEqual(self.process([0.3, 1.0, 0.0, 0.5]),
-                         [0.0, 1.0, -1.0, 0.0])
-
-    def test_ties_break_by_sealed_order(self) -> None:
-        self.assertEqual(self.process([1.0, 1.0, 0.0, 0.0]),
-                         [1.0, 0.0, 0.0, -1.0])   # first highest, last lowest
-
-    def test_an_all_tie_group_marks_nothing(self) -> None:
-        self.assertEqual(self.process([0.5, 0.5, 0.5]), [0.0, 0.0, 0.0])
-
-
 # ---------------------------------------------------------------------------
 # the campaign's arm shapes: registration, validation, and fake metal
 # ---------------------------------------------------------------------------
@@ -226,9 +204,8 @@ class WiringTest(unittest.TestCase):
         self.store = LocalStore(tmp.name)
 
     def test_everything_is_registered(self) -> None:
-        for name in ("sdpo", "reverse_ppo"):
-            self.assertIsNotNone(LOSSES.get(name))
-        for name in ("stamp_grade", "glyph_grade", "dpo_pair"):
+        self.assertIsNotNone(LOSSES.get("reverse_ppo"))
+        for name in ("stamp_grade", "glyph_grade"):
             self.assertIsNotNone(POST.get(name))
         for name in ("stamp_office", "glyph_exchange"):
             self.assertIsNotNone(ENVS.get(name))
@@ -238,17 +215,11 @@ class WiringTest(unittest.TestCase):
         arms = (
             arm_spec(self.store, loss="grpo",
                      post=("stamp_grade", "grpo_advantage")),
-            arm_spec(self.store, loss="sdpo", post=("stamp_grade", "dpo_pair")),
             arm_spec(self.store, loss="reverse_ppo", post=("stamp_grade",),
                      bank=REVERSE_BANK),
         )
         for spec in arms:
             self.assertEqual(validate(spec, SCHEMA), [], spec.algo.loss)
-
-    def test_sdpo_without_dpo_pair_is_refused(self) -> None:
-        spec = arm_spec(self.store, loss="sdpo", post=("stamp_grade",))
-        codes = {issue.code for issue in validate(spec, SCHEMA)}
-        self.assertIn("unsatisfied-requires", codes)
 
     def test_reverse_ppo_without_the_head_is_refused(self) -> None:
         spec = arm_spec(self.store, loss="reverse_ppo", post=("stamp_grade",))
@@ -282,9 +253,6 @@ class ArmRunTest(unittest.TestCase):
 
     def test_grpo_on_the_stamp_office(self) -> None:
         self.run_arm("grpo", ("stamp_grade", "grpo_advantage"))
-
-    def test_sdpo_on_the_stamp_office(self) -> None:
-        self.run_arm("sdpo", ("stamp_grade", "dpo_pair"))
 
     def test_reverse_ppo_on_the_stamp_office(self) -> None:
         """The provided name reaches the ledger's train block — the provides
