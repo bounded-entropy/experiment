@@ -517,9 +517,18 @@ class RemoteDesk:
                          "base": r.base, "shape": r.shape} for r in regimes]})
 
     async def delist(self, name: str, reason: str = "") -> dict:
-        """The listing's retirement, over the same wire it entered by."""
+        """The listing's retirement, over the same wire it entered by —
+        bookkeeping only, the metal untouched. For teardown, decommission."""
         return await self._transport.call("delist", {"host": name,
                                                      "reason": reason})
+
+    async def decommission(self, name: str, force: bool = False) -> dict:
+        """Carve's inverse at the desk, one frame: decarve at the host's
+        metal (engine down, fraction back to residual) plus delist. Refused
+        with the running work NAMED when anything lives on or routes through
+        the host; `force` tears it down anyway."""
+        return await self._transport.call("decommission",
+                                          {"host": name, "force": force})
 
     async def register_metal(self, name: str, gpu: str, devices: int,
                              vram_gb: float, address: str) -> dict:

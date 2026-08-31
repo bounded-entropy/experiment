@@ -762,3 +762,84 @@ class BlindDeskTest(DeskFixture):
                                {"spec": {}, "code": None, "subdir": None}))
         self.assertFalse(reply["accepted"])
         self.assertIn("anchor", reply["error"])
+
+
+class DecommissionTest(DeskFixture):
+    def test_a_free_carve_is_torn_down_and_the_metal_reallocates(self) -> None:
+        """Carve's inverse end to end: the engine released, the fraction back
+        to residual, the listing delisted with the reason journaled — and the
+        SAME metal carves again from the freed fraction, which is the whole
+        meaning of reallocate."""
+        service = self.metal_service(devices=2)
+        desk = self.desk_with_metal("fake-metal")
+
+        async def drive():
+            reply = await Campaigns(desk).submit(self.split_spec())
+            trainer = service.hosts[reply["host"]]
+            await trainer._adoptions[reply["run_id"]]
+            verdicts = {}
+            for name in sorted(desk.listings):
+                verdicts[name] = await desk.decommission(name)
+            reborn = await Campaigns(desk).submit(arith_spec(
+                self.train, seeds=Seeds(master=23),
+                gpu_config=self.split_spec().gpu_config))
+            await service.hosts[reborn["host"]]._adoptions[reborn["run_id"]]
+            return verdicts, reborn
+        verdicts, reborn = go(drive())
+        for verdict in verdicts.values():
+            self.assertTrue(verdict["decommissioned"], verdict)
+            self.assertTrue(verdict["decarved"])
+        self.assertTrue(reborn["accepted"], reborn)   # the freed metal, reused
+        reasons = [e.get("reason") for e in self.store.read_fleet_log()
+                   if e.get("event") == "delist"]
+        self.assertEqual(reasons.count("decommissioned"), 2)
+
+    def test_running_work_refuses_by_name_even_through_routing(self) -> None:
+        """The guard is DEPENDENTS, not occupancy: while a run is in flight,
+        BOTH its anchor host and the serve host it merely routes through
+        refuse the decommission and name the run; once it finishes, both
+        yield without force."""
+        service = self.metal_service(devices=2)
+        desk = self.desk_with_metal("fake-metal")
+
+        async def drive():
+            reply = await Campaigns(desk).submit(self.split_spec())
+            refusals = {}
+            for name in sorted(desk.listings):
+                refusals[name] = await desk.decommission(name)
+            trainer = service.hosts[reply["host"]]
+            await trainer._adoptions[reply["run_id"]]
+            after = await desk.decommission(sorted(desk.listings)[0])
+            return reply, refusals, after
+        reply, refusals, after = go(drive())
+        for refusal in refusals.values():
+            self.assertFalse(refusal["decommissioned"], refusal)
+            self.assertIn(reply["run_id"], refusal["running"])
+        self.assertTrue(after["decommissioned"])      # done work holds nothing
+
+    def test_force_tears_down_anyway(self) -> None:
+        service = self.metal_service(devices=2)
+        desk = self.desk_with_metal("fake-metal")
+
+        async def drive():
+            reply = await Campaigns(desk).submit(self.split_spec())
+            serve_name = next(n for n in desk.listings
+                              if "learner" not in n)
+            forced = await desk.decommission(serve_name, force=True)
+            return reply, forced
+        reply, forced = go(drive())
+        self.assertTrue(forced["decommissioned"])
+        self.assertIn(reply["run_id"], forced["running"])   # it SAID so
+
+    def test_a_hand_listed_host_only_delists(self) -> None:
+        """No metal on the listing means nothing to decarve: the metal was
+        never the desk's to touch — bookkeeping retires, hardware stands."""
+        serving = self.stand_up("serve-a", "fleet://a", serves_pool=True,
+                                trains=False)
+        desk = self.desk()
+        desk.list_host("serve-a", serving.regimes, "fleet://a")
+        remote = RemoteDesk(LocalTransport(Campaigns(desk)))
+        verdict = go(remote.decommission("serve-a"))
+        self.assertTrue(verdict["decommissioned"])
+        self.assertFalse(verdict["decarved"])
+        self.assertEqual(desk.listings, {})

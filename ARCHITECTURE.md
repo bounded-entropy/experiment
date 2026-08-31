@@ -646,6 +646,13 @@ One currency and one decider per rung (I12):
   journaled and listed at the desk, the single writer.
 - **acquire / boot** — nothing fits. New metal costs money, so the desk
   answers with boot instructions and a human executes them.
+- **decommission** — carve's inverse, client-asked: decarve at the host's
+  metal (engine down, fraction back to residual) plus delist, one desk verb.
+  Refused with the running work NAMED when anything lives on or routes
+  through the host (the guard is DEPENDENTS off the journaled placements —
+  a serve host's roster is empty, so occupancy alone would lie); `force`
+  tears down anyway. Delist alone stays bookkeeping-only; `reap` is the same
+  composition applied to hosts that stopped answering.
 
 ### The host (`rlstack/runner/host.py`)
 

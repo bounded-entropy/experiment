@@ -464,6 +464,59 @@ class Desk:
                 "pools": {pool or "learner": listing.name
                           for pool, listing in placement.items()}}
 
+    def dependents(self, name: str) -> list[str]:
+        """Running runs whose LATEST journaled placement routes through
+        listing `name` — the guard decommission refuses over. Occupancy
+        alone would miss half of them: a serve host's roster is empty (a
+        tenancy lives at its anchor), but every placement journaled the
+        pools it landed on, and the rosters say which runs still run."""
+        placed: dict[str, dict] = {}
+        for event in self.store.read_fleet_log():
+            if event.get("event") == "place" and event.get("run_id"):
+                placed[event["run_id"]] = event.get("pools", {})
+        running: set[str] = set()
+        for listing in self.listings.values():
+            try:
+                tenants = listing.host.status().get("tenants", {})
+            except Exception:
+                continue                 # a silent host holds nothing running
+            running.update(rid for rid, told in tenants.items()
+                           if told.get("status") == "running")
+        return sorted(rid for rid, pools in placed.items()
+                      if rid in running and name in pools.values())
+
+    async def decommission(self, name: str, force: bool = False) -> dict:
+        """CARVE'S INVERSE, client-asked: tear the host down at its metal
+        (decarve — the engine shut down, the fraction back to residual) and
+        delist it, one verb. The refusal is the point: a host that running
+        work lives on OR routes through is NAMED rather than yanked, and
+        `force` says you mean it. A hand-listed host (no metal on its
+        listing) only delists — its metal was never the desk's to touch;
+        a silent metal delists too, reap's reasoning on demand: the
+        fraction freed itself when the container died. The freed metal is
+        reallocated by nothing more than existing rules — residual grew,
+        so the next placement's carve may land there."""
+        listing = self.listings.get(name)
+        if listing is None:
+            raise FleetError(f"host {name!r} is not listed with this desk")
+        holding = self.dependents(name)
+        if holding and not force:
+            return {"decommissioned": False, "host": name,
+                    "running": holding,
+                    "error": f"host {name!r} carries or serves running work "
+                             f"({', '.join(holding)}) — decommission with "
+                             f"force to tear it down anyway"}
+        decarved = False
+        if listing.metal and listing.metal in self.metal_remotes:
+            try:
+                reply = await self.metal_remotes[listing.metal].decarve(name)
+                decarved = bool(reply.get("decarved"))
+            except Exception:
+                pass
+        self.delist(name, reason="decommissioned")
+        return {"decommissioned": True, "host": name, "decarved": decarved,
+                "running": holding}
+
     async def reap(self, probes: int = 3, wait: float = 0.0) -> dict:
         """Every listing probed, the silent ones retried, the still-silent
         ones REAPED — the desk's answer to a host that died without saying
@@ -541,6 +594,9 @@ class Desk:
         if verb == "delist":
             self.delist(payload["host"], reason=payload.get("reason", ""))
             return {"delisted": payload["host"]}
+        if verb == "decommission":
+            return await self.decommission(
+                payload["host"], force=bool(payload.get("force", False)))
         if verb == "metal":
             # the metal container phones home its OWN existence, address
             # included — after this the desk can deduce and command against it

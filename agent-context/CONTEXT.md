@@ -3291,6 +3291,27 @@ specs; backends (local/modal/skypilot) and GPU topology are semantics-neutral.
     only the Trainer's is forced (the autograd arc and the seal cannot
     cross a wire).
 
+71. **DECOMMISSION: carve's inverse, client-asked.** The shutdown of the
+    gated pair proved the hole: delist is bookkeeping-only (the engine kept
+    serving after it), decarve existed only metal-side, and reap composes
+    them only for SILENT hosts — so retiring a LIVING host meant killing
+    containers by hand. New desk verb `decommission(host, force)`: decarve
+    at the listing's metal (release -> engine shutdown, fraction back to
+    residual) + delist(reason="decommissioned"), one frame, RemoteDesk
+    method included. THE GUARD IS DEPENDENTS, not occupancy: a serve host's
+    roster is empty (tenancies live at their anchor), so the desk joins the
+    journaled placements' pools against the live rosters' running runs and
+    refuses BY NAME; force proceeds. Hand-listed hosts (no metal on the
+    listing) only delist; a silent metal delists too (reap's reasoning on
+    demand). Reallocation is no new machinery: residual grew, the next
+    carve may land there — pinned by the carve-after-decommission test.
+    Closes the "no decommission rung" finding. Venue lessons from the same
+    shutdown, recorded for the deploy notes: stopping a Modal CONTAINER
+    does not stop a SPAWNED call (the serve() input reschedules onto a
+    fresh container — the standing shift's kill-switch is the app or the
+    call id), and desk-side probes of dead listings each knock-boot the
+    metal by name, so delist/decommission BEFORE the container kill.
+
 ## Open threads (do NOT treat as settled; flag when your answer touches them)
 
 - TODO (Samarth, settled intent — future, nothing now): BUNDLE LRU EVICTION
