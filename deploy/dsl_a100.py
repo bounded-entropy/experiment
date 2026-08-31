@@ -1,23 +1,25 @@
 """Two A100s the DESK owns end to end, and the DSL campaign running on them.
 
     MODAL_PROFILE=yu-masala-workspace modal deploy deploy/dsl_a100.py
-    ... run deploy/dsl_a100.py::up            # bare metal registers its plane
+    ... run deploy/dsl_a100.py::up            # both metals register their planes
     ... run deploy/dsl_a100.py::campaign      # all twelve arms through the desk
-    ... run deploy/dsl_a100.py::status        # listings, residual, roster
+    ... run deploy/dsl_a100.py::status        # listings, residuals, roster
     ... run deploy/dsl_a100.py::measure_now   # one measurement pass, by hand
-    ... run deploy/dsl_a100.py::stop --call-id <id>    # kill the metal
+    ... run deploy/dsl_a100.py::stop --call-id <id>    # kill one metal's shift
 
-THE VENUE (fleet_a100's, at two devices): the desk is its own warm CPU
-container; the A100 container wears ONLY a MetalService over BOTH devices —
-no standing hosts, the whole metal is residual — so every host on it is a
-desk-issued carve. The first submit carves the serve host (device 0) and the
-learner host (device 1); the other eleven join them: one engine, one
-learner, twelve tenants.
+THE VENUE: the desk is its own warm CPU container; each A100 is its OWN
+container wearing ONLY a MetalService over ONE device — two single-GPU
+metals (dsl-a, dsl-b) rather than one two-GPU worker, because Modal
+schedules 1xA100 workers readily while gpus=2 workers queue, and the stack
+never needed colocation: the anchor dials the serve pool over the wire (the
+proven OPD shape). The first submit carves the serve host on dsl-a and the
+learner host on dsl-b; the other eleven join them: one engine, one learner,
+twelve tenants.
 
 THE EXPERIMENT: two invented tool DSLs (the Stamp Office and the Glyph
 Exchange — the rulebook fits in the prompt, the verbs exist nowhere in
 pretraining), each trained on its TWO train requests only and measured on
-the full generalization sweep every 5 updates. Six arms per DSL:
+the generalization sweep every 5 updates. Six arms per DSL:
 
     grpo      lora r=16, plain GRPO                      — the baseline
     svd       plora k=8, gated latent KL, SVD basis      — the frozen frame
@@ -55,6 +57,15 @@ gpu_image = (
 )
 cpu_image = (modal.Image.debian_slim(python_version="3.12")
              .add_local_python_source("rlstack", "rlstack_engine"))
+build_image = (
+    # the factor build is CPU eigendecomposition: same libraries as the GPU
+    # image, no GPU, and the OMP cap lifted so eigh uses the cores it asks for
+    modal.Image.debian_slim(python_version="3.12")
+    .pip_install("torch==2.13.0", "transformers==5.16.1", "safetensors",
+                 "numpy", "huggingface_hub")
+    .env({"HF_HOME": "/hf"})
+    .add_local_python_source("rlstack", "rlstack_engine")
+)
 
 BASE = "Qwen/Qwen3-0.6B"
 STORE = "modal://rlstack-store"
@@ -73,25 +84,33 @@ SPECTRAL_K = 16
 EVAL_EVERY = 5
 EVAL_SAMPLES = 2
 EVAL_TEMPERATURE = 0.2
-RUNS_KEY = "measurements/dsl/runs.json"    # {run_id: family} — the cron's list
+RUNS_KEY = "measurements/dsl/runs.json"    # {run_id: {...}} — the cron's list
 
 SERVE_FRACTION = 0.85
 LEARN_FRACTION = 0.85
 
-METAL_NAME = "modal-2xa100"
-METAL_ADDRESS = "dsl://metal"
+# TWO single-GPU metals: name -> (Modal cls, address scheme). Placement's
+# ladder does the rest — the serve unit carves on dsl-a (first fit), the
+# learner unit no longer fits there and carves on dsl-b.
+METALS = {"dsl-a": {"cls": "MetalA", "scheme": "dsla"},
+          "dsl-b": {"cls": "MetalB", "scheme": "dslb"}}
 
 
 # ---------------------------------------------------------------------------
-# the venue's transports (I5): desk-by-name, host-by-address
+# the venue's transports (I5): desk-by-name, host-by-address, scheme-routed
 # ---------------------------------------------------------------------------
 
 def desk_handle():
     return modal.Cls.from_name(APP, "Desk")()
 
 
-def metal_handle():
-    return modal.Cls.from_name(APP, "Metal")()
+def metal_cls_for(address: str) -> str:
+    """The Modal cls behind an address — the scheme is the router."""
+    scheme = address.split("://", 1)[0]
+    for row in METALS.values():
+        if row["scheme"] == scheme:
+            return row["cls"]
+    raise KeyError(f"no metal serves scheme {scheme!r} (address {address!r})")
 
 
 class DeskTransport:
@@ -111,8 +130,9 @@ class DeskTransport:
 
 
 class MetalTransport:
-    """One host inside the metal container, addressed per frame; lazy lookup
-    so a desk rebuilt from an old journal holds dead listings harmlessly."""
+    """One host inside one metal container, addressed per frame; the scheme
+    picks the container, and lookup is lazy so a desk rebuilt from an old
+    journal holds dead listings harmlessly."""
 
     def __init__(self, address: str) -> None:
         self.address = address
@@ -120,7 +140,8 @@ class MetalTransport:
 
     def handle(self):
         if self._handle is None:
-            self._handle = metal_handle()
+            self._handle = modal.Cls.from_name(
+                APP, metal_cls_for(self.address))()
         return self._handle
 
     async def call(self, verb: str, payload: dict) -> dict:
@@ -137,7 +158,8 @@ class MetalPlaneTransport:
 
     def handle(self):
         if self._handle is None:
-            self._handle = metal_handle()
+            self._handle = modal.Cls.from_name(
+                APP, metal_cls_for(self.address))()
         return self._handle
 
     async def call(self, verb: str, payload: dict) -> dict:
@@ -192,42 +214,95 @@ class Desk:
 
 
 # ---------------------------------------------------------------------------
-# the metal: two bare devices, every host on them a desk-issued carve
+# the metals: two bare single-GPU containers, every host a desk-issued carve
 # ---------------------------------------------------------------------------
 
-@app.cls(image=gpu_image, gpu="A100-40GB:2",
+def bring_up_metal(name: str):
+    """One metal container's whole state: its books, its factories, its
+    router — shared by MetalA and MetalB, parameterized by the metal name."""
+    from rlstack import ModalVolumeStore
+    from rlstack.policy.siteschema import hf_schema
+    from rlstack.runner.desk import Metal as OwnedMetal, MetalService
+    from rlstack.runner.engines.vllm_engine import VllmEngine
+    from rlstack.runner.learners.torch_learner import TorchLearner
+
+    scheme = METALS[name]["scheme"]
+    store = ModalVolumeStore("/store", volume=store_volume, locator=STORE)
+    service = MetalService(
+        OwnedMetal(name, "A100-40GB", 1, 40.0), store=store,
+        engine_factory=lambda regime, partition: VllmEngine(
+            regime.base, tp=regime.shape,
+            gpu_memory_utilization=partition.memory,
+            max_model_len=2048, max_bundles=32, max_rank=16,
+            max_members=PLORA["members"], cas_get=store.cas_get,
+            serves=("lora", "plora", "spectral", "spectral_latent")),
+        # one device per container: the partition's device IS cuda:0 here,
+        # and the two-device learner-on-the-engine's-card failure mode is
+        # gone by construction
+        learner_factory=lambda regime, partition: TorchLearner(
+            device=f"cuda:{partition.devices[0]}"),
+        address_of=lambda host_name: f"{scheme}://{host_name}",
+        schema_for=hf_schema,
+        # routes may point at the OTHER metal's pools: the scheme routes the
+        # frame to the right container — the OPD three-host shape
+        dial=lambda address: MetalTransport(address),
+        release=lambda host: [engine.shutdown() for engine in host.engines])
+    print(f"[{name}] up, bare; residual {service.residual()}")
+    return store, service
+
+
+async def metal_shift(name: str, service) -> None:
+    """The standing shift shared by both metals: register the plane, then
+    hold the door open, a stats task following every carved host."""
+    import asyncio
+
+    from rlstack.runner.remote import RemoteDesk
+
+    scheme = METALS[name]["scheme"]
+    fleet = RemoteDesk(DeskTransport())
+    try:
+        await fleet.register_metal(name, "A100-40GB", 1, 40.0,
+                                   f"{scheme}://metal")
+        print(f"[{name}] registered on the metal plane")
+    except Exception as taken:
+        print(f"[{name}] not re-registered: {taken}")
+    stats: dict[str, asyncio.Task] = {}
+    tick = 0
+    try:
+        while True:
+            for host_service in list(service.services.values()):
+                host = host_service.host
+                if host.name not in stats:
+                    stats[host.name] = asyncio.create_task(host.run_stats())
+            await asyncio.sleep(60)
+            tick += 1
+            if tick % 5 == 0:
+                store_volume.commit()
+    finally:
+        for task in stats.values():
+            task.cancel()
+
+
+def roster_of(store, service) -> dict:
+    out = {}
+    for host_service in service.services.values():
+        for rid, tenancy in sorted(host_service.host.roster.items()):
+            entries = store.peek_ledger(rid)
+            out[rid] = {"status": tenancy.status,
+                        "host": host_service.host.name,
+                        "committed": int(entries[-1]["update"])
+                        if entries else 0}
+    return out
+
+
+@app.cls(image=gpu_image, gpu="A100-40GB",
          volumes={"/store": store_volume, "/hf": hf_cache},
          timeout=86400, scaledown_window=900, max_containers=1)
 @modal.concurrent(max_inputs=64)
-class Metal:
+class MetalA:
     @modal.enter()
     def bring_up(self) -> None:
-        from rlstack import ModalVolumeStore
-        from rlstack.policy.siteschema import hf_schema
-        from rlstack.runner.desk import Metal as OwnedMetal, MetalService
-        from rlstack.runner.engines.vllm_engine import VllmEngine
-        from rlstack.runner.learners.torch_learner import TorchLearner
-        from rlstack.runner.remote import LocalTransport
-
-        self.store = ModalVolumeStore("/store", volume=store_volume,
-                                      locator=STORE)
-        self.metal_service = MetalService(
-            OwnedMetal(METAL_NAME, "A100-40GB", 2, 40.0), store=self.store,
-            engine_factory=lambda regime, partition: VllmEngine(
-                regime.base, tp=regime.shape,
-                gpu_memory_utilization=partition.memory,
-                max_model_len=2048, max_bundles=32, max_rank=16,
-                max_members=PLORA["members"], cas_get=self.store.cas_get,
-                serves=("lora", "plora", "spectral", "spectral_latent")),
-            learner_factory=lambda regime, partition: TorchLearner(),
-            address_of=lambda name: f"dsl://{name}",
-            schema_for=hf_schema,
-            dial=lambda address: LocalTransport(
-                self.metal_service.service_for(address)),
-            release=lambda host: [engine.shutdown()
-                                  for engine in host.engines])
-        print(f"[metal] up: {METAL_NAME} bare; "
-              f"residual {self.metal_service.residual()}")
+        self.store, self.metal_service = bring_up_metal("dsl-a")
 
     @modal.method()
     async def host(self, address: str, verb: str, payload: dict) -> dict:
@@ -251,63 +326,57 @@ class Metal:
         return self.metal_service.answer(verb, payload)
 
     @modal.method()
-    def build_campaign_here(self) -> dict:
-        """Every arm as a canonical spec row, built INSIDE the container so
-        the task sets, plans and plora factor artifacts land on the store
-        this container reads. Also returns the eval-set uris the measurement
-        cron reads (the cron's image carries no tokenizer)."""
-        from rlstack.spec.canonical import canonical_json
-
-        specs, evals = campaign_specs(self.store)
-        rows = {name: json.loads(canonical_json(spec))
-                for name, spec in specs.items()}
-        store_volume.commit()
-        return {"specs": rows, "evals": evals}
-
-    @modal.method()
     def roster(self) -> dict:
-        out = {}
-        for service in self.metal_service.services.values():
-            for rid, tenancy in sorted(service.host.roster.items()):
-                entries = self.store.peek_ledger(rid)
-                out[rid] = {"status": tenancy.status,
-                            "host": service.host.name,
-                            "committed": int(entries[-1]["update"])
-                            if entries else 0}
-        return out
+        return roster_of(self.store, self.metal_service)
 
     @modal.method()
     async def serve(self) -> None:
-        """The container's standing shift: register the metal plane, then
-        hold the door open while carved hosts work. Stopping THIS call (or
-        `modal app stop`) kills the metal."""
-        import asyncio
+        await metal_shift("dsl-a", self.metal_service)
 
-        from rlstack.runner.remote import RemoteDesk
+    @modal.exit()
+    def bring_down(self) -> None:
+        for service in self.metal_service.services.values():
+            for engine in service.host.engines:
+                engine.shutdown()
 
-        fleet = RemoteDesk(DeskTransport())
-        try:
-            await fleet.register_metal(METAL_NAME, "A100-40GB", 2, 40.0,
-                                       METAL_ADDRESS)
-            print(f"[metal] registered {METAL_NAME} on the metal plane")
-        except Exception as taken:
-            print(f"[metal] {METAL_NAME} not re-registered: {taken}")
-        stats: dict[str, asyncio.Task] = {}
-        tick = 0
-        try:
-            while True:
-                for service in list(self.metal_service.services.values()):
-                    host = service.host
-                    if host.name not in stats:
-                        stats[host.name] = asyncio.create_task(
-                            host.run_stats())
-                await asyncio.sleep(60)
-                tick += 1
-                if tick % 5 == 0:
-                    store_volume.commit()
-        finally:
-            for task in stats.values():
-                task.cancel()
+
+@app.cls(image=gpu_image, gpu="A100-40GB",
+         volumes={"/store": store_volume, "/hf": hf_cache},
+         timeout=86400, scaledown_window=900, max_containers=1)
+@modal.concurrent(max_inputs=64)
+class MetalB:
+    @modal.enter()
+    def bring_up(self) -> None:
+        self.store, self.metal_service = bring_up_metal("dsl-b")
+
+    @modal.method()
+    async def host(self, address: str, verb: str, payload: dict) -> dict:
+        if verb == "adopt":
+            store_volume.reload()
+        return await self.metal_service.service_for(address).serve(verb,
+                                                                   payload)
+
+    @modal.method()
+    def host_ask(self, address: str, verb: str, payload: dict) -> dict:
+        return self.metal_service.service_for(address).answer(verb, payload)
+
+    @modal.method()
+    async def metal(self, verb: str, payload: dict) -> dict:
+        if verb == "carve":
+            store_volume.reload()
+        return await self.metal_service.serve(verb, payload)
+
+    @modal.method()
+    def metal_ask(self, verb: str, payload: dict) -> dict:
+        return self.metal_service.answer(verb, payload)
+
+    @modal.method()
+    def roster(self) -> dict:
+        return roster_of(self.store, self.metal_service)
+
+    @modal.method()
+    async def serve(self) -> None:
+        await metal_shift("dsl-b", self.metal_service)
 
     @modal.exit()
     def bring_down(self) -> None:
@@ -360,7 +429,7 @@ def family_tasks(store, family: str):
 
 
 def rl_plans(store, env: str, task_ids: list[str]):
-    """The five RL arms' shared shape: every update rolls both train tasks,
+    """The RL arms' shared shape: every update rolls both train tasks,
     GROUP_SIZE completions each."""
     from rlstack import GroupPlan, Plans, RunPlan, Sample, WavePlan, WaveRef, encode
 
@@ -404,18 +473,33 @@ def loop_plans(store, env: str, task_ids: list[str]):
         rollout=store.cas_put(encode(RunPlan(tuple(waves)))))
 
 
+FACTOR_URIS_KEY = "measurements/dsl/factors.json"    # {basis: cas uri}
+
+
 def ensure_factors(store, basis: str) -> str:
-    """The frozen plora artifact for this basis, built if the store has not
-    seen it — content addressing makes the rebuild free to be wrong about."""
+    """The frozen plora artifact for this basis. Content addressing makes a
+    REBUILD safe, but not cheap — 448 eigendecompositions — so the uri is
+    memoized on the store and the compute runs once."""
+    import json as _json
+
     from rlstack.policy.adapters.plora_factors import (
         build_factors, hf_weight_reader,
     )
     from rlstack.policy.siteschema import hf_schema, resolve
 
+    try:
+        known = _json.loads(store._read(FACTOR_URIS_KEY))
+    except Exception:
+        known = {}
+    if basis in known:
+        return known[basis]
     sites = resolve(hf_schema(BASE).sites, SITE)
-    return store.cas_put(build_factors(
+    uri = store.cas_put(build_factors(
         BASE, sites, PLORA["k"], hf_weight_reader(BASE), basis=basis,
         basis_seed=RANDOM_BASIS_SEED if basis == "random" else 0))
+    known[basis] = uri
+    store._write(FACTOR_URIS_KEY, _json.dumps(known, sort_keys=True).encode())
+    return uri
 
 
 def campaign_specs(store) -> tuple[dict, dict]:
@@ -497,6 +581,30 @@ def campaign_specs(store) -> tuple[dict, dict]:
     return specs, evals
 
 
+@app.function(image=build_image, cpu=16.0, memory=32768,
+              volumes={"/store": store_volume, "/hf": hf_cache},
+              timeout=7200)
+def build_campaign() -> dict:
+    """Every arm as a canonical spec row, built on a fat CPU box so the
+    factor eigendecompositions parallelize; the task sets, plans and factor
+    artifacts land on the store both metals read. Returns the spec rows and
+    the eval-set uris the measurement cron reads (its image carries no
+    tokenizer)."""
+    import os
+
+    os.environ["OMP_NUM_THREADS"] = "16"     # before torch first imports
+
+    from rlstack import ModalVolumeStore
+    from rlstack.spec.canonical import canonical_json
+
+    store = ModalVolumeStore("/store", volume=store_volume, locator=STORE)
+    specs, evals = campaign_specs(store)
+    rows = {name: json.loads(canonical_json(spec))
+            for name, spec in specs.items()}
+    store_volume.commit()
+    return {"specs": rows, "evals": evals}
+
+
 # ---------------------------------------------------------------------------
 # measurement: the generalization sweep, backfilled on a cadence
 # ---------------------------------------------------------------------------
@@ -515,7 +623,7 @@ def family_measurement(family: str, eval_ids: list[str]):
               schedule=modal.Period(minutes=10), timeout=3000)
 async def measure() -> None:
     """One idempotent pass per campaign run: restore each every-5th committed
-    version, sample the family's WHOLE eval sweep under the PLAIN environment
+    version, sample the family's eval sweep under the PLAIN environment
     (sdpo included — iteration-0 behavior is the honest metric), grade, and
     append what is missing. measure_run skips done points, so the cron only
     ever pays for new updates."""
@@ -595,16 +703,18 @@ async def reaper() -> None:
 
 @app.local_entrypoint()
 def up() -> None:
-    """Start the metal's shift and wait until the desk holds the metal."""
+    """Start BOTH metals' shifts and wait until the desk holds both planes."""
     from rlstack.runner.remote import RemoteDesk
 
-    call = metal_handle().serve.spawn()
-    print(f"[up] metal serving: call {call.object_id}")
-    print(f"[up] kill it later with: modal run deploy/dsl_a100.py::stop "
-          f"--call-id {call.object_id}")
+    for name, row in METALS.items():
+        call = modal.Cls.from_name(APP, row["cls"])().serve.spawn()
+        print(f"[up] {name} serving: call {call.object_id}")
+        print(f"[up] kill it later with: modal run deploy/dsl_a100.py::stop "
+              f"--call-id {call.object_id}")
     fleet = RemoteDesk(DeskTransport())
     for _ in range(90):
-        if METAL_NAME in fleet.status().get("metal", {}):
+        held = fleet.status().get("metal", {})
+        if all(name in held for name in METALS):
             break
         time.sleep(10)
     print(json.dumps(fleet.status(), indent=2))
@@ -613,12 +723,12 @@ def up() -> None:
 @app.local_entrypoint()
 async def campaign() -> None:
     """All twelve arms through the desk. The first submit CARVES the serve
-    and learner hosts (the engine builds inside that frame — minutes); the
-    rest JOIN them. The accepted run ids land in the store's campaign roster,
-    which is what the measurement cron reads."""
+    host on dsl-a and the learner host on dsl-b (the engine builds inside
+    that frame — minutes); the rest JOIN them. The accepted run ids land in
+    the store's campaign roster, which is what the measurement cron reads."""
     from rlstack.runner.remote import RemoteDesk, spec_from_json
 
-    told = metal_handle().build_campaign_here.remote()
+    told = await build_campaign.remote.aio()
     rows, evals = told["specs"], told["evals"]
     fleet = RemoteDesk(DeskTransport())
     roster: dict = {}
@@ -630,7 +740,7 @@ async def campaign() -> None:
         if reply.get("accepted"):
             roster[reply["run_id"]] = {"family": family,
                                        "eval": evals[family], "arm": name}
-    write_roster.remote(roster)
+    await write_roster.remote.aio(roster)
     print(f"[campaign] roster of {len(roster)} runs written to {RUNS_KEY}")
 
 
@@ -649,12 +759,21 @@ def status() -> None:
 
     fleet = RemoteDesk(DeskTransport())
     told = fleet.status()
+    residuals = {}
+    rosters = {}
+    for name, row in METALS.items():
+        scheme = row["scheme"]
+        try:
+            residuals[name] = RemoteMetal(
+                MetalPlaneTransport(f"{scheme}://metal")).residual()
+            rosters.update(modal.Cls.from_name(APP, row["cls"])().roster.remote())
+        except Exception as silent:
+            residuals[name] = f"silent: {silent}"
     print(json.dumps({
         "listings": told["listings"], "metal": told["metal"],
-        "residual": RemoteMetal(
-            MetalPlaneTransport(METAL_ADDRESS)).residual(),
+        "residual": residuals,
         "liveness": fleet.liveness(),
-        "roster": metal_handle().roster.remote()}, indent=2))
+        "roster": rosters}, indent=2))
 
 
 @app.local_entrypoint()
