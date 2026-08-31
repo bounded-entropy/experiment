@@ -409,12 +409,19 @@ class Host:
         task = asyncio.create_task(
             self.submit(spec, schema, remotes=remotes, subdir=subdir))
         # a failed run already journals and rosters its failure (submit's own
-        # except path); retrieving the exception here only keeps asyncio from
-        # shouting about a result nobody awaits — and a CANCELLED task (stop's
-        # doing) has no exception to retrieve, only one to re-raise, so it is
-        # left alone
-        task.add_done_callback(
-            lambda done: None if done.cancelled() else done.exception())
+        # except path) — but the EXCEPTION ITSELF would otherwise vanish into
+        # a retrieved future, and a silent adoption death is undiagnosable
+        # from any journal. Print the traceback where the host's stdout goes;
+        # a CANCELLED task (stop's doing) is left alone.
+        def adoption_ended(done, rid=rid, host=self.name):
+            if done.cancelled():
+                return
+            failure = done.exception()
+            if failure is not None:
+                import traceback
+                told = "".join(traceback.format_exception(failure))
+                print(f"[host {host}] adoption {rid} DIED:\n{told[-4000:]}")
+        task.add_done_callback(adoption_ended)
         self._adoptions[rid] = task
         return {"accepted": True, "run_id": rid, "state": "adopted"}
 

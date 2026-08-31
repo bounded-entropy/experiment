@@ -313,6 +313,10 @@ class MetalA:
 
     @modal.method()
     def host_ask(self, address: str, verb: str, payload: dict) -> dict:
+        if verb == "add_bundle":
+            store_volume.reload()   # a bundle may name desk/builder-written
+            #                         cas blobs (plora factors) this container
+            #                         has not seen yet
         return self.metal_service.service_for(address).answer(verb, payload)
 
     @modal.method()
@@ -358,6 +362,8 @@ class MetalB:
 
     @modal.method()
     def host_ask(self, address: str, verb: str, payload: dict) -> dict:
+        if verb == "add_bundle":
+            store_volume.reload()   # symmetric with MetalA: fresh cas view
         return self.metal_service.service_for(address).answer(verb, payload)
 
     @modal.method()
