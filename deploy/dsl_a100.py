@@ -551,6 +551,28 @@ async def measure() -> None:
 
 
 # ---------------------------------------------------------------------------
+# the suite, inside the image: the torch halves run where torch lives
+# ---------------------------------------------------------------------------
+
+test_image = gpu_image.add_local_dir("tests", "/root/tests")
+
+
+@app.function(image=test_image, gpu="A100-40GB",
+              volumes={"/hf": hf_cache}, timeout=3600)
+def run_tests() -> None:
+    import subprocess
+    import sys
+
+    done = subprocess.run(
+        [sys.executable, "-m", "unittest", "discover", "-s", "/root/tests"],
+        capture_output=True, text=True)
+    print(done.stdout[-4000:])
+    print(done.stderr[-8000:])
+    if done.returncode != 0:
+        raise RuntimeError("the suite failed in the image")
+
+
+# ---------------------------------------------------------------------------
 # the reaper: liveness delisting on a cadence
 # ---------------------------------------------------------------------------
 
@@ -597,7 +619,7 @@ async def campaign() -> None:
     fleet = RemoteDesk(DeskTransport())
     roster: dict = {}
     for name in sorted(rows):
-        reply = await fleet.submit(spec_from_json(rows[name]))
+        reply = await fleet.submit(spec_from_json(rows[name]), subdir="dsl")
         family = name.split("-")[0]
         print(f"[{name}] accepted={reply.get('accepted')} "
               f"run={reply.get('run_id')} host={reply.get('host')}")
