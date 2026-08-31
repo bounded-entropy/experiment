@@ -218,9 +218,9 @@ def emit(state: SpectralState) -> bytes:
             lora_b = (state.u[path][:, picked].to(torch.float32)
                       * eff[None, :])                               # [out, k]
         tensors[f"peft.{PEFT_PREFIX}{path}.lora_A.weight"] = \
-            lora_a.to(FROZEN_DTYPE).cpu()
+            lora_a.to(FROZEN_DTYPE).contiguous().cpu()
         tensors[f"peft.{PEFT_PREFIX}{path}.lora_B.weight"] = \
-            lora_b.to(FROZEN_DTYPE).cpu()
+            lora_b.to(FROZEN_DTYPE).contiguous().cpu()
     head = json.dumps({"k": state.k, "paths": list(state.paths)},
                       sort_keys=True, separators=(",", ":")).encode("utf-8")
     return len(head).to_bytes(8, "big") + head + st_save(tensors)

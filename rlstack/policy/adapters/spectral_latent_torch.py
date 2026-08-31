@@ -284,9 +284,9 @@ def member_peft(state: SlatentState, tag: str,
             lora_b = (state.u[path][:, picked].to(torch.float32)
                       * eff[picked][None, :])
             tensors[f"peft.{tag}.{PEFT_PREFIX}{path}.lora_A.weight"] = \
-                lora_a.to(FROZEN_DTYPE).cpu()
+                lora_a.to(FROZEN_DTYPE).contiguous().cpu()
             tensors[f"peft.{tag}.{PEFT_PREFIX}{path}.lora_B.weight"] = \
-                lora_b.to(FROZEN_DTYPE).cpu()
+                lora_b.to(FROZEN_DTYPE).contiguous().cpu()
     return tensors
 
 

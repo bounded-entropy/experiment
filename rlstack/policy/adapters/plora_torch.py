@@ -114,13 +114,13 @@ class PloraState:
     hidden: int
     factors: str                            # "cas://<sha>": the frozen half
     seed: int                               # this entry's init seed
-    basis: str = "svd"                      # "svd" | "random": the frozen
-    basis_seed: int = 0                     # directions' recipe + its seed
     paths: tuple[str, ...]                  # matched sites, in resolution order
     mu: torch.nn.Parameter                  # [latent]
     log_std: torch.nn.Parameter             # [latent]
     trunk: Hypernet
     heads: dict[str, torch.nn.Parameter]    # path -> [k*k, hidden], zero-init
+    basis: str = "svd"                      # "svd" | "random": the frozen
+    basis_seed: int = 0                     # directions' recipe + its seed
     u: dict[str, torch.Tensor] = field(default_factory=dict)   # path -> [out, k]
     a: dict[str, torch.Tensor] = field(default_factory=dict)   # path -> [k, in]
     version: int = 0

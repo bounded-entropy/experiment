@@ -554,7 +554,11 @@ async def measure() -> None:
 # the suite, inside the image: the torch halves run where torch lives
 # ---------------------------------------------------------------------------
 
-test_image = gpu_image.add_local_dir("tests", "/root/tests")
+test_image = (gpu_image
+              .add_local_dir("tests", "/root/tests")
+              # add_local_python_source ships .py only; the observer's static
+              # assets (observe/web) are content the asset tests serve
+              .add_local_dir("rlstack/observe/web", "/root/rlstack/observe/web"))
 
 
 @app.function(image=test_image, gpu="A100-40GB",
@@ -566,8 +570,8 @@ def run_tests() -> None:
     done = subprocess.run(
         [sys.executable, "-m", "unittest", "discover", "-s", "/root/tests"],
         capture_output=True, text=True)
-    print(done.stdout[-4000:])
-    print(done.stderr[-8000:])
+    print(done.stdout[-6000:])
+    print(done.stderr[-60000:])
     if done.returncode != 0:
         raise RuntimeError("the suite failed in the image")
 
