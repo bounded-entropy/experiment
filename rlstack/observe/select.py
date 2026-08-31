@@ -95,7 +95,7 @@ def metric_names(roots: Sequence[Store | Root]) -> list[str]:
                 names.update(k for k, v in entry.get(block, {}).items()
                              if isinstance(v, (int, float))
                              and not isinstance(v, bool))
-    front = [n for n in ("reward", "plora_kl", "loss", "logprob_gap") if n in names]
+    front = [n for n in ("reward", "latent_kl", "loss", "logprob_gap") if n in names]
     return front + sorted(names - set(front))
 
 

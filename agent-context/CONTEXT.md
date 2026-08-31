@@ -3347,6 +3347,54 @@ specs; backends (local/modal/skypilot) and GPU topology are semantics-neutral.
     finishes on the fresh carve under the same run_id; refused move
     leaves the run running to done; park + revive; unarchived refusal).
 
+73. **THE DSL CAMPAIGN: invented tool languages, the spectrum arms, and the
+    reflect loop.** Samarth's thesis under test: tiny trainable surfaces
+    (<100k params) leveraging what the model already holds, and language
+    itself as the credit channel. The pieces, all on branch dsl-campaign:
+    (1) TWO INVENTED DSLs — the Stamp Office (protocol: grab/fold/ink/seal/
+    file, invented colors, a color->drawer table) and the Glyph Exchange
+    (routing: four units on a one-way ring) — rulebook-in-prompt, verbs
+    absent from pretraining, dense milestone ladders (the DAPO
+    all-or-nothing lesson), 2 train requests vs a sweeping eval (mol never
+    trains; ring directions eval wider than they train). Task builders in
+    data/tasks/, graders IN the registered post classes (code_hashes reads
+    class source only). (2) SPECTRAL (SVF): one gain per singular direction
+    of each matched weight, top-k by |sigma*delta| served through plain
+    punica, straight-through backward so all directions compete; dense
+    gains ride the payload for resume, materialized peft pair for the
+    engine; NO factors artifact (the trainer recomputes the full SVD at
+    install). spectral_latent is its plora-style twin — gains GENERATED
+    from a latent (posterior + trunk + zero-init per-site heads), served as
+    members+mean materialized adapters, recording slatent_eps/member — the
+    "does the latent help" ablation. The latent-KL provided channel is
+    RENAMED plora_kl -> latent_kl so grpo_latent_kl(_gated) price either
+    adapter. plora grew basis="random" (scale-matched random orthonormal
+    frame, its own algo id) — the does-the-SVD-frame-matter control.
+    (3) THE REFLECT LOOP (iterative SDPO): Derive is the THIRD leaf
+    (mint-then-make: a registered TaskMaker turns a sealed trajectory into
+    a new task; source refs speak Replay's grammar; generator order
+    guarantees the source is sealed), MAKERS is a new registry declared in
+    GenSpec.makers and hashed by code_hashes (a NEW SPEC FIELD — canonical
+    bytes of every spec change, old rows decode), the reflect maker
+    re-serves the WHOLE transcript plus "what went wrong" (chat delimiters
+    ride in task meta["chat"]), reflect_retry is the two-turn env
+    (critique, injected retry ask, retry), and sdpo is FINAL-TURN behavior
+    cloning read off segment_ids — no reward in the loss; the graders ride
+    for the observer. Generator pacing gained the intermediate rule: an
+    un-referenced rollout is due when the first LATER referenced one is
+    (loop plans train only wave 3k). SCoRe's sandbagging caveat stands;
+    the Measurement (plain env, iteration-0 behavior) is the honest metric.
+    (4) REVERSE PPO IS DEAD: v1's suffix critic provably collapses (causal
+    hiddens make every window fully informed -> constant track -> credit
+    spikes at EOS); the v2 prefix/RUDDER rewrite was built, then Samarth
+    cut the arm — the loss is deleted; value_head KEEPS its new compute
+    half (boundary tap + mask hook + zero-init probe, provides "values")
+    with no consumer in the zoo. deploy/dsl_a100.py: 2xA100 (one metal
+    container, devices=2), desk-carved serve+learn hosts, twelve tenants
+    (6 arms x 2 DSLs: grpo / svd / nosvd / spectral / slatent / sdpo), a
+    10-minute measurement cron sweeping every run's eval set (phrasing 0)
+    under the PLAIN env, roster at measurements/dsl/runs.json.
+
 ## Open threads (do NOT treat as settled; flag when your answer touches them)
 
 - TODO (Samarth, settled intent — future, nothing now): BUNDLE LRU EVICTION

@@ -150,8 +150,36 @@ delta is `U_k C_s A` — a rank-k LoRA served through punica. The latent carries
 a posterior against a prior, so the run learns a DISTRIBUTION over adapters;
 the engine serves one version as an ensemble of drawn members plus the mean,
 records the noise it drew, and replay reparameterizes it against the current
-posterior.
+posterior. `basis="random"` is the frame control: the same top-k singular
+VALUES steering seeded random orthonormal directions — the arms differ in the
+basis and nothing else.
 `rlstack/policy/adapters/{plora,plora_torch,plora_vllm,plora_factors}.py`
+
+**spectral / spectral_latent** — SVF: one trainable gain per singular
+direction of each matched weight, `W' = U diag(σ·(1+δ)) Vᵀ` — no frame is
+chosen, no direction invented, and the whole spectrum can move. The served
+delta is the top-k directions by |σ·δ| (a rank-k punica adapter whose frame
+CHANGES as learning does), with a straight-through backward so unselected
+directions keep competing; the dense gains ride the payload for resume, and
+no factors artifact exists — the trainer recomputes the full SVD from the
+weight it holds at install. `spectral_latent` is the plora-style twin (gains
+GENERATED from a latent; posterior, KL, recorded draw, member ensemble) —
+the "does the latent help" ablation. Both provide `latent_kl`'s family:
+plora and spectral_latent share that channel name, which is what lets
+`grpo_latent_kl_gated` price either.
+`rlstack/policy/adapters/{spectral,spectral_torch,spectral_vllm,spectral_latent,spectral_latent_torch,spectral_latent_vllm}.py`
+
+**TaskMaker / Derive** — mint-then-make, the third leaf: a plan may name an
+episode whose task does not exist yet — `Derive(source, maker, env)` resolves
+`source` (Replay's ref grammar) to a sealed trajectory and a registered
+`@task_maker` derives the new task, PURELY, so resume re-mints to the byte.
+Declared in `GenSpec.makers`, hashed like an environment. The reflect loop is
+its first use: the maker re-serves the whole transcript plus "what went
+wrong", the `reflect_retry` env samples the critique and the retry, and the
+`sdpo` loss clones each document's final turn (read off `segment_ids` — no
+new masking primitive). An un-referenced rollout is due when the first later
+referenced one is — the generator's intermediate-wave pacing rule.
+`rlstack/data/plan.py`, `rlstack/inference/makers/`, `rlstack/inference/environments/reflect_retry.py`, `rlstack/training/losses/sdpo.py`
 
 **Site** — a canonical attachment point named by the checkpoint's own module
 path, resolved at Phase 0 against `site_space` = the schema ∪ every bank

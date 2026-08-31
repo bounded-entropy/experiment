@@ -8,5 +8,6 @@ from rlstack.policy.adapters.base import (  # noqa: F401
     AdapterType, AdapterTypeDef, Mechanism, adapter_type,
 )
 from rlstack.policy.adapters import (  # noqa: F401  (registers builtins)
-    attn_bias, lora, plora, soft_prompt, spectral, value_head,
+    attn_bias, lora, plora, soft_prompt, spectral, spectral_latent,
+    value_head,
 )

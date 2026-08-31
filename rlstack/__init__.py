@@ -24,7 +24,8 @@ __version__ = "0.0.1"
 from rlstack.spec.canonical import canonical_json, content_hash, run_id
 from rlstack.spec.flow import FlowGraph, FlowNode, flow_graph
 from rlstack.data.plan import (
-    GroupPlan, Replay, RunPlan, Sample, WavePlan, WaveRef, decode, encode,
+    Derive, GroupPlan, Replay, RunPlan, Sample, WavePlan, WaveRef, decode,
+    encode,
 )
 from rlstack.spec.specs import (
     AdapterSpec, AlgoSpec, BackendProfile, PoolMember, ExperimentSpec,

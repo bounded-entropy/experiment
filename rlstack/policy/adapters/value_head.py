@@ -2,8 +2,9 @@
 at all, so a bundle pins its version like any other delta but never ships a
 payload for it. What it contributes is `values`, a tensor the replay forward
 provides: v(t) read off the trunk's CAUSAL state at every position — the
-prefix value E[reward | prompt, completion <= t] once fit — which is what a
-hindsight-decomposition loss (reverse_ppo) differences into per-token credit.
+prefix value E[reward | prompt, completion <= t] once fit — for any loss
+that wants per-position value estimates (none in the zoo today; the head
+stands ready and its provided curve is watchable regardless).
 
 The trunk state h_t already encodes the whole prefix, task included, so the
 head itself is deliberately tiny: RMS-norm, one hidden layer, a

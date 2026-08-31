@@ -355,10 +355,10 @@ class EmissionTest(unittest.TestCase):
         self.store, self.train, self.heldout = arith_store(tmp.name)
 
     def test_the_summary_means_each_provided_name_across_microbatches(self) -> None:
-        stats = [TrainStats(1.0, 1.0, 0.0, 0.0, 4, provided={"plora_kl": 2.0}),
-                 TrainStats(3.0, 1.0, 0.0, 0.0, 4, provided={"plora_kl": 4.0})]
+        stats = [TrainStats(1.0, 1.0, 0.0, 0.0, 4, provided={"latent_kl": 2.0}),
+                 TrainStats(3.0, 1.0, 0.0, 0.0, 4, provided={"latent_kl": 4.0})]
         summary = _train_summary(stats)
-        self.assertEqual(summary["plora_kl"], 3.0)
+        self.assertEqual(summary["latent_kl"], 3.0)
         self.assertEqual(summary["loss"], 2.0)
         self.assertEqual(summary["microbatches"], 2)
 

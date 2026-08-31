@@ -7,7 +7,7 @@ drift — plus BETA times the posterior's KL to its prior, which is what stops
 the latent from collapsing to a point (and turning plora back into a plain
 LoRA) or wandering away from a prior nothing ever chose.
 
-Still pure math (I9): `plora_kl` is a PROVIDED tensor, recomputed by the same
+Still pure math (I9): `latent_kl` is a PROVIDED tensor, recomputed by the same
 forward that produced the logprobs, so requiring it plans no work and touches
 no metal.
 """
@@ -27,7 +27,7 @@ from rlstack.training.losses.grpo import grpo
 BETA = 1e-3
 
 
-@loss("grpo_latent_kl", requires=("advantage", "plora_kl"))
+@loss("grpo_latent_kl", requires=("advantage", "latent_kl"))
 def grpo_latent_kl(out: PolicyOutputs, batch: Any,
                    clip_eps: float = 0.2) -> LossResult:
     """The grpo surrogate plus BETA * KL(q||p), counted ONCE per update.
@@ -41,7 +41,7 @@ def grpo_latent_kl(out: PolicyOutputs, batch: Any,
     meaning what it says.
     """
     surrogate = grpo(out, batch, clip_eps)
-    kl = out.provided["plora_kl"]
+    kl = out.provided["latent_kl"]
     return LossResult(
         loss=surrogate.loss + BETA * kl / batch.microbatches_in_update,
         mean_ratio=surrogate.mean_ratio,
