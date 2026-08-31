@@ -106,7 +106,8 @@ class DeclarationTest(unittest.TestCase):
         self.assertEqual(entry.adapter_type, "plora")
         self.assertEqual(entry.init, {
             "k": 16, "latent": 32, "members": 8, "prior_std": 0.05,
-            "hidden": 128, "factors": FACTORS})
+            "hidden": 128, "factors": FACTORS,
+            "basis": "svd", "basis_seed": 0})
 
     def test_the_registry_holds_the_declaration_half(self) -> None:
         """Everything Phase 0 needs to reason about plora is reachable without

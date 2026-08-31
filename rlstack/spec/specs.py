@@ -308,20 +308,28 @@ def lora(site: str, r: int, tie: bool = False) -> AdapterSpec:
 
 def plora(site: str, k: int, latent: int = 32, members: int = 8,
           prior_std: float = 0.05, hidden: int = 128,
-          factors: str | None = None) -> AdapterSpec:
+          factors: str | None = None, basis: str = "svd",
+          basis_seed: int = 0) -> AdapterSpec:
     """Probabilistic LoRA: a rank-k delta whose k x k core is GENERATED from a
     latent draw, so the policy is a distribution over adapters rather than one.
 
-    Each matched weight M is factored once, offline, into its top-k singular
-    directions (`factors`, a "cas://<sha>" artifact); what trains is a small
-    hypernet mapping a latent z to each site's core, plus the latent's own
-    posterior N(mu, diag(exp(log_std)^2)) against a N(0, prior_std^2) prior.
-    `members` is how many draws the engine serves as one ensemble; a request
-    picks one by its seed, and score traffic gets the posterior mean.
+    Each matched weight M is factored once, offline, into frozen directions
+    (`factors`, a "cas://<sha>" artifact); what trains is a small hypernet
+    mapping a latent z to each site's core, plus the latent's own posterior
+    N(mu, diag(exp(log_std)^2)) against a N(0, prior_std^2) prior. `members`
+    is how many draws the engine serves as one ensemble; a request picks one
+    by its seed, and score traffic gets the posterior mean.
+
+    `basis` picks the frozen directions' recipe: "svd" is M's own top-k
+    singular directions; "random" is the control — the same top-k singular
+    VALUES steering random orthonormal directions drawn off `basis_seed`, so
+    the two arms differ in the basis and nothing else. The artifact named by
+    `factors` must be built with the same recipe (build_factors takes both).
     """
     return AdapterSpec(adapter_type="plora", site=site, init={
         "k": k, "latent": latent, "members": members,
-        "prior_std": prior_std, "hidden": hidden, "factors": factors})
+        "prior_std": prior_std, "hidden": hidden, "factors": factors,
+        "basis": basis, "basis_seed": basis_seed})
 
 
 def soft_prompt(site: str, n: int, d: int) -> AdapterSpec:

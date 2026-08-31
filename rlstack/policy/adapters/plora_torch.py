@@ -114,6 +114,8 @@ class PloraState:
     hidden: int
     factors: str                            # "cas://<sha>": the frozen half
     seed: int                               # this entry's init seed
+    basis: str = "svd"                      # "svd" | "random": the frozen
+    basis_seed: int = 0                     # directions' recipe + its seed
     paths: tuple[str, ...]                  # matched sites, in resolution order
     mu: torch.nn.Parameter                  # [latent]
     log_std: torch.nn.Parameter             # [latent]
@@ -159,6 +161,8 @@ def build(sites: tuple[SiteMeta, ...], init: dict) -> PloraState:
     return PloraState(
         k=k, latent=latent, members=members, prior_std=prior_std, hidden=hidden,
         factors=str(init["factors"]), seed=seed,
+        basis=str(init.get("basis", "svd")),
+        basis_seed=int(init.get("basis_seed", 0)),
         paths=tuple(meta.path for meta in sites),
         mu=torch.nn.Parameter(torch.zeros(latent, dtype=torch.float32)),
         log_std=torch.nn.Parameter(
@@ -413,10 +417,11 @@ def install(model: torch.nn.Module, state: PloraState) -> None:
 
     The factors are recomputed here from the base's own weight rather than read
     from the artifact, and that is deliberate: the trainer is already holding
-    the checkpoint, `top_svd_factors` is a pinned pure function of (weight, k),
-    and the artifact exists precisely for the side that ISN'T holding it — the
-    engine, whose copy lives inside vLLM. ALGO_ID is what makes the two agree;
-    an artifact built by another recipe is refused where it is read.
+    the checkpoint, both recipes are pinned pure functions (`top_svd_factors`
+    of (weight, k); `random_factors` of (weight, k, basis_seed, path)), and
+    the artifact exists precisely for the side that ISN'T holding it — the
+    engine, whose copy lives inside vLLM. The algo ids are what make the two
+    agree; an artifact built by another recipe is refused where it is read.
 
     Installation is additive (I8): a second tenant at the same site joins the
     PloraSite it finds. Placement happens here — the posterior, the hypernet and
@@ -428,7 +433,10 @@ def install(model: torch.nn.Module, state: PloraState) -> None:
         while isinstance(node, SiteWrapper):
             node = node.inner                 # the base module, under any chain
         weight = _site_weight(node, path)
-        u, a = plora_factors.top_svd_factors(weight, state.k)
+        u, a = (plora_factors.top_svd_factors(weight, state.k)
+                if state.basis == "svd"
+                else plora_factors.random_factors(weight, state.k,
+                                                  state.basis_seed, path))
         state.u[path] = u.to(weight.device)
         state.a[path] = a.to(weight.device)
         _place(state, weight.device)

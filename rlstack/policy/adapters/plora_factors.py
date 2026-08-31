@@ -25,6 +25,7 @@ type's methods (STYLE rule 7).
 
 from __future__ import annotations
 
+import hashlib
 import json
 from collections.abc import Callable, Mapping, Sequence
 
@@ -38,6 +39,13 @@ from rlstack.policy.siteschema import SiteMeta
 # let two artifacts claim one coordinate system; the constant is what makes the
 # refusal in read_factors mean something.
 ALGO_ID = "gram-eigh-fp32-canonical-sign-v1"
+
+# The CONTROL recipe: the same top-k singular VALUES (the weight's own scale)
+# steering RANDOM orthonormal directions instead of the singular ones — the
+# "does the SVD basis matter" ablation, with everything but the directions
+# held fixed. Deterministic off (basis_seed, path), never off the weight's
+# eigenvectors, so trainer and artifact agree by construction.
+RANDOM_ALGO_ID = "random-orthonormal-svd-scale-v1"
 
 # What the artifact STORES. bf16 because the engine serves bf16 and the
 # artifact is megabytes per site — fp32 would double it to buy precision vLLM
@@ -139,6 +147,46 @@ def top_svd_factors(weight: torch.Tensor,
     return u.contiguous(), (singular[:, None] * vh).contiguous()
 
 
+def random_factors(weight: torch.Tensor, k: int, basis_seed: int,
+                   path: str) -> tuple[torch.Tensor, torch.Tensor]:
+    """The control basis: `U` and `V` drawn orthonormal off (basis_seed, path),
+    `A = Sigma_k V^T` with Sigma_k the weight's own top-k singular values.
+
+    Everything about scale is kept from the SVD recipe — the leading singular
+    values still set A's magnitude, so a core trained here lives at the same
+    order of delta as one trained in the singular basis — and ONLY the
+    directions are randomized. `basis_seed` is pinned in the spec's init and
+    stamped into the artifact, which is what makes the trainer's recomputation
+    and the engine's artifact one coordinate system with no eigendecomposition
+    ambiguity to canonicalize.
+    """
+    if weight.ndim != 2:
+        raise ValueError(
+            f"plora factors a weight MATRIX, got shape {tuple(weight.shape)}")
+    if not 0 < k <= min(weight.shape):
+        raise ValueError(
+            f"plora k={k} must be in 1..{min(weight.shape)} for a "
+            f"{tuple(weight.shape)} weight")
+    matrix = weight.detach().to(dtype=torch.float32)
+    rows, columns = map(int, matrix.shape)
+    gram = (matrix @ matrix.mT if rows <= columns else matrix.mT @ matrix)
+    singular = _leading(torch.linalg.eigh(gram).eigenvalues, k, matrix.dtype)
+
+    def orthonormal(n: int, tag: str) -> torch.Tensor:
+        seed = int.from_bytes(hashlib.sha256(
+            f"{basis_seed}:{path}:{tag}".encode()).digest()[:8], "big")
+        drawn = torch.randn(n, k, dtype=torch.float32,
+                            generator=torch.Generator().manual_seed(seed))
+        q, r = torch.linalg.qr(drawn)
+        # fix QR's sign freedom the same way canonical_signs fixes the SVD's:
+        # make each column's diagonal of R positive
+        return q * torch.sign(torch.diagonal(r))[None, :]
+
+    u = orthonormal(rows, "u")
+    v = orthonormal(columns, "v")
+    return u.contiguous(), (singular[:, None] * v.mT).contiguous()
+
+
 def _leading(eigenvalues: torch.Tensor, k: int,
              dtype: torch.dtype) -> torch.Tensor:
     """The k largest singular values, descending. `eigh` returns eigenvalues
@@ -162,7 +210,8 @@ WeightReader = Callable[[str], torch.Tensor]
 
 
 def build_factors(base_id: str, site_metas: Sequence[SiteMeta], k: int,
-                  weight_reader: WeightReader) -> bytes:
+                  weight_reader: WeightReader, basis: str = "svd",
+                  basis_seed: int = 0) -> bytes:
     """Factor every matched site once and pack the result: the bytes a caller
     `cas_put`s and a spec then names.
 
@@ -170,18 +219,28 @@ def build_factors(base_id: str, site_metas: Sequence[SiteMeta], k: int,
     rather than a checkpoint, so the same builder serves an already-loaded
     model, an offline shard reader (hf_weight_reader below), or a test's
     handful of tensors. Sites are taken in path order, so the artifact's bytes
-    — and therefore its cas address — are a pure function of (base, k, sites).
+    — and therefore its cas address — are a pure function of
+    (base, k, sites, basis, basis_seed). `basis` picks the recipe: "svd" is
+    the singular directions, "random" the scale-matched control
+    (random_factors), and each stamps its own algo id.
     """
+    if basis not in ("svd", "random"):
+        raise ValueError(f"plora basis must be 'svd' or 'random', got {basis!r}")
     metas = sorted(site_metas, key=lambda meta: meta.path)
     tensors: dict[str, torch.Tensor] = {}
     for meta in metas:
         if not meta.has_weight:
             raise ValueError(
                 f"plora factors weighted sites only; {meta.name!r} has no weight")
-        u, a = top_svd_factors(weight_reader(meta.path), k)
+        u, a = (top_svd_factors(weight_reader(meta.path), k)
+                if basis == "svd"
+                else random_factors(weight_reader(meta.path), k, basis_seed,
+                                    meta.path))
         tensors[meta.path + U_SUFFIX] = u.to(FACTOR_DTYPE)
         tensors[meta.path + A_SUFFIX] = a.to(FACTOR_DTYPE)
-    return pack_artifact({"algo": ALGO_ID, "base": base_id, "k": int(k),
+    return pack_artifact({"algo": ALGO_ID if basis == "svd" else RANDOM_ALGO_ID,
+                          "base": base_id, "k": int(k),
+                          "basis_seed": int(basis_seed),
                           "paths": [meta.path for meta in metas]}, tensors)
 
 
@@ -198,11 +257,11 @@ def read_factors(payload: bytes, base: str | None = None,
     interpreted.
     """
     meta, tensors = unpack_artifact(payload)
-    if meta.get("algo") != ALGO_ID:
+    if meta.get("algo") not in (ALGO_ID, RANDOM_ALGO_ID):
         raise ValueError(
             f"plora factors were built by {meta.get('algo')!r}, this code reads "
-            f"{ALGO_ID!r} — the two do not share a sign convention, so the "
-            f"cores trained against one are the wrong policy under the other")
+            f"{ALGO_ID!r} or {RANDOM_ALGO_ID!r} — an unrecognized coordinate "
+            f"system is refused rather than interpreted")
     if base is not None and meta.get("base") != base:
         raise ValueError(
             f"plora factors were built for base {meta.get('base')!r}, this "
