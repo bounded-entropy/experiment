@@ -113,6 +113,21 @@ def metal_cls_for(address: str) -> str:
     raise KeyError(f"no metal serves scheme {scheme!r} (address {address!r})")
 
 
+def blocking_ask(fn):
+    """Run one blocking Modal call on its OWN thread and wait for it.
+
+    The desk's placement probes (Listing.alive / occupied / residual) are
+    SYNC calls made from inside the desk's async serve — a blocking `.remote`
+    there parks the whole event loop on Modal's blocking portal, and when the
+    probed input is capacity-queued or its container recycles, the desk
+    WEDGES (observed live). A fresh thread gives the blocking API a clean
+    home; the loop stays free."""
+    import concurrent.futures
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as one:
+        return one.submit(fn).result()
+
+
 class DeskTransport:
     def __init__(self) -> None:
         self._handle = None
@@ -126,7 +141,8 @@ class DeskTransport:
         return await self.handle().desk.remote.aio(verb, payload)
 
     def ask(self, verb: str, payload: dict) -> dict:
-        return self.handle().desk_ask.remote(verb, payload)
+        return blocking_ask(lambda: self.handle().desk_ask.remote(
+            verb, payload))
 
 
 class MetalTransport:
@@ -148,7 +164,8 @@ class MetalTransport:
         return await self.handle().host.remote.aio(self.address, verb, payload)
 
     def ask(self, verb: str, payload: dict) -> dict:
-        return self.handle().host_ask.remote(self.address, verb, payload)
+        return blocking_ask(lambda: self.handle().host_ask.remote(
+            self.address, verb, payload))
 
 
 class MetalPlaneTransport:
@@ -166,7 +183,8 @@ class MetalPlaneTransport:
         return await self.handle().metal.remote.aio(verb, payload)
 
     def ask(self, verb: str, payload: dict) -> dict:
-        return self.handle().metal_ask.remote(verb, payload)
+        return blocking_ask(lambda: self.handle().metal_ask.remote(
+            verb, payload))
 
 
 # ---------------------------------------------------------------------------
