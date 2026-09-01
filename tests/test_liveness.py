@@ -119,6 +119,19 @@ class GrammarTest(unittest.TestCase):
         self.assertTrue(match_expr(self.ROW, "name:k4 id:abc"))
         self.assertFalse(match_expr(self.ROW, "id:zzz"))
 
+    def test_dir_scope_is_the_whole_filing_subdir(self) -> None:
+        """dir: selects every run filed under runs/<X>/ — whole, so dir:gsm
+        is not dir:gsm-old — and a run's subdir never leaks into unscoped
+        terms (searching "gsm" must not select by filing accident)."""
+        filed = {**self.ROW, "subdir": "gsm"}
+        self.assertTrue(match_expr(filed, "dir:gsm"))
+        self.assertFalse(match_expr(filed, "dir:gsm-old"))
+        self.assertFalse(match_expr(filed, "dir:g"))
+        self.assertFalse(match_expr(self.ROW, "dir:gsm"))
+        self.assertTrue(match_expr(filed, "dir:gsm tag:plora"))
+        self.assertFalse(match_expr({**self.ROW, "subdir": "dsl",
+                                     "name": "gsm-like"}, "dir:gsm"))
+
 
 class OverlayTest(unittest.TestCase):
     def test_one_series_per_matching_run_off_the_ledgers(self) -> None:

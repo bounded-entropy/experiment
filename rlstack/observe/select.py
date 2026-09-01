@@ -7,9 +7,10 @@ inside a clause is AND. An UNSCOPED term is a case-insensitive regex (plain
 substring when it does not compile) over run_id + name + tags — NEVER the
 note: notes are prose, and prose mentioning "plora-vs-lora" must not make
 "plora" select lora runs. Scoped terms reach one field: `tag:X` matches a
-WHOLE tag (fullmatch, so tag:lora is not tag:plora), `name:X`, `id:X` and
-`note:X` search within that field. `prior=0.3 k=4 | latent=64` reads
-exactly as it looks. Empty selects everything.
+WHOLE tag (fullmatch, so tag:lora is not tag:plora), `dir:X` matches the
+WHOLE filing subdir (every run submitted under runs/X/), and `name:X`,
+`id:X`, `note:X` search within that field. `prior=0.3 k=4 | latent=64`
+reads exactly as it looks. Empty selects everything.
 
 The overlay reads LEDGERS ONLY: a metric is any numeric the train block or
 the post means carry, per update — which is every rail, every declared
@@ -47,9 +48,12 @@ def _clause(row: dict, clause: str) -> bool:
 
 def _term(row: dict, term: str) -> bool:
     scope, _, rest = term.partition(":")
-    if rest and scope in ("tag", "name", "id", "note"):
+    if rest and scope in ("tag", "name", "id", "note", "dir"):
         if scope == "tag":
             return any(_whole(rest, tag) for tag in row.get("tags") or [])
+        if scope == "dir":
+            # the filing subdir, whole: dir:gsm is not dir:gsm-old
+            return _whole(rest, str(row.get("subdir") or ""))
         field = {"name": "name", "id": "run_id", "note": "note"}[scope]
         return _search(rest, str(row.get(field) or ""))
     hay = " ".join([row.get("run_id", ""), row.get("name", ""),

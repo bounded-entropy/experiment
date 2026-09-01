@@ -44,7 +44,8 @@ function frame() {
   const bar = el("div", {class: "find"});
   const box = el("input", {id: "q", type: "search", autocomplete: "off",
       placeholder: "select runs: regex terms AND · \u201c | \u201d for OR "
-                 + "· tag:lora exact (e.g. plora prior=0.3 | tag:lora r=4)"});
+                 + "· tag:lora / dir:gsm exact "
+                 + "(e.g. plora prior=0.3 | tag:lora r=4 · dir:gsm)"});
   box.value = expr;
   let debounce = null;
   box.addEventListener("input", () => {
