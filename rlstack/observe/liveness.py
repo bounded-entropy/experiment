@@ -83,13 +83,19 @@ def liveness_by_host(events_by_host: Sequence[tuple[str, Sequence[dict]]],
 
 
 def stall_runs(rows: Sequence[dict], pulses: Mapping[str, dict]) -> None:
-    """The STALLED reading, in place: a running run on any host presumed or
-    known down. Unknown pulses stall nothing — a presumption of death needs
-    at least a silence, and "failed"/"done" already say what they say."""
+    """The STALLED reading, in place: a running run on a down host it still
+    RESIDES on. Residency is `open_hosts` — journals whose last word for the
+    run is an attach; a venue the run detached from (died on, resumed
+    elsewhere) is history and its death stalls nothing, while a crashed host
+    that lost its detach stays open and rightly stalls. Rows without an
+    `open_hosts` reading fall back to every host named. Unknown pulses stall
+    nothing — a presumption of death needs at least a silence, and
+    "failed"/"done" already say what they say."""
     for row in rows:
         if row.get("status") != "running":
             continue
-        down = [host for host in row.get("hosts", [])
+        resident = row.get("open_hosts", row.get("hosts", []))
+        down = [host for host in resident
                 if pulses.get(host, {}).get("live") is False]
         if down:
             row["status"] = "stalled"

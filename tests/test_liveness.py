@@ -72,6 +72,20 @@ class StallTest(unittest.TestCase):
         stall_runs(rows, {"a": {"live": None}})
         self.assertEqual(rows[0]["status"], "running")
 
+    def test_a_departed_venues_death_stalls_nothing(self) -> None:
+        """The run died on host "a" and resumed on host "b": residency on
+        "a" is CLOSED (open_hosts excludes it), so the dead venue is
+        provenance, not presence — the run keeps running. A crashed host
+        that lost its detach stays in open_hosts and still stalls."""
+        rows = [{"status": "running", "hosts": ["a", "b"],
+                 "open_hosts": ["b"]},
+                {"status": "running", "hosts": ["a", "b"],
+                 "open_hosts": ["a", "b"]}]
+        pulses = {"a": {"live": False}, "b": {"live": True}}
+        stall_runs(rows, pulses)
+        self.assertEqual([r["status"] for r in rows], ["running", "stalled"])
+        self.assertEqual(rows[1]["stalled_hosts"], ["a"])
+
 
 class GrammarTest(unittest.TestCase):
     ROW = {"run_id": "abc123", "name": "plora-k4-p0.3-l32-s12",

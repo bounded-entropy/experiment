@@ -70,6 +70,33 @@ class StatusTruthTest(unittest.TestCase):
         (row,) = runs_data([store])
         self.assertEqual(row["status"], "failed")
 
+    def test_a_dead_hosts_journal_cannot_shadow_a_live_reattach(self) -> None:
+        """The run hopped hosts: died on one venue, resumed on another. The
+        NEWEST event speaks for the run whichever host journal holds it —
+        journals are walked per host, so without the time gate the dead
+        host's detach(failed), iterated after the live host's re-attach,
+        would call the healthy second attempt by the first attempt's death
+        (observed live: six running arms shown failed by a dead venue)."""
+        for old_host, live_host in (("z-dead-venue", "a-live-venue"),
+                                    ("a-dead-venue", "z-live-venue")):
+            with self.subTest(order=(old_host, live_host)):
+                tmp = tempfile.mkdtemp()
+                store = LocalStore(tmp)
+                store.append_host_event(old_host, {
+                    "event": "attach", "t": 1.0, "run_id": "r1"})
+                store.append_host_event(old_host, {
+                    "event": "detach", "t": 2.0, "run_id": "r1",
+                    "status": "failed"})
+                store.append_host_event(live_host, {
+                    "event": "attach", "t": 3.0, "run_id": "r1"})
+                run = store.open_run("r1", manifest={"run_id": "r1"})
+                run.write_plan("train", arith_plan_blobs()["train"])
+                run.append_ledger({"update": 1})
+                (row,) = runs_data([store])
+                self.assertEqual(row["status"], "running")
+                self.assertEqual(sorted(row["hosts"]),
+                                 sorted([old_host, live_host]))
+
 
 class WindowTest(unittest.TestCase):
     def test_windowed_bounds_series_and_lanes_keep_open_residencies(self) -> None:

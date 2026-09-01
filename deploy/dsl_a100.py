@@ -223,7 +223,6 @@ class Desk:
 
     @modal.method()
     async def desk(self, verb: str, payload: dict) -> dict:
-        store_volume.reload()
         return await self.door.serve(verb, payload)
 
     @modal.method()
@@ -295,7 +294,7 @@ async def metal_shift(name: str, service) -> None:
             await asyncio.sleep(60)
             tick += 1
             if tick % 5 == 0:
-                store_volume.commit()
+                await store_volume.commit.aio()
     finally:
         for task in stats.values():
             task.cancel()
@@ -324,8 +323,6 @@ class MetalA:
 
     @modal.method()
     async def host(self, address: str, verb: str, payload: dict) -> dict:
-        if verb == "adopt":
-            store_volume.reload()
         return await self.metal_service.service_for(address).serve(verb,
                                                                    payload)
 
@@ -339,8 +336,6 @@ class MetalA:
 
     @modal.method()
     async def metal(self, verb: str, payload: dict) -> dict:
-        if verb == "carve":
-            store_volume.reload()
         return await self.metal_service.serve(verb, payload)
 
     @modal.method()
@@ -373,8 +368,6 @@ class MetalB:
 
     @modal.method()
     async def host(self, address: str, verb: str, payload: dict) -> dict:
-        if verb == "adopt":
-            store_volume.reload()
         return await self.metal_service.service_for(address).serve(verb,
                                                                    payload)
 
@@ -386,8 +379,6 @@ class MetalB:
 
     @modal.method()
     async def metal(self, verb: str, payload: dict) -> dict:
-        if verb == "carve":
-            store_volume.reload()
         return await self.metal_service.serve(verb, payload)
 
     @modal.method()
@@ -679,7 +670,7 @@ async def measure() -> None:
         told = await measure_run(
             store, rid, family_measurement(family, measured_ids), pool, tasks)
         print(f"[measure] {rid} ({family}): {told}")
-    store_volume.commit()
+    await store_volume.commit.aio()
 
 
 # ---------------------------------------------------------------------------

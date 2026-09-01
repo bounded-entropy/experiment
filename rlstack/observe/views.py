@@ -156,20 +156,36 @@ def runs_data(roots: Sequence[Store | Root]) -> list[dict]:
                 continue
             row = rows.setdefault((root.folder, run_id), {
                 "run_id": run_id, "folder": root.folder, "hosts": [],
-                "status": "running", "t": 0.0,
+                "status": "running", "t": 0.0, "_status_t": -1.0,
                 "store": event.get("store", root.store.describe())})
             if host not in row["hosts"]:
                 row["hosts"].append(host)
-            if event.get("event") == "detach":
-                row["status"] = event.get("status", "?")
-            else:
-                # a RE-attach reopens the story: resubmission is resume, and
-                # a status frozen at an old detach would call a healthy
-                # second attempt by its first attempt's death
-                row["status"] = "running"
-            row["t"] = max(row["t"], event.get("t", 0.0))
+            # residency per (run, host): a journal is chronological, so the
+            # host's last word decides — attach leaves it OPEN, detach CLOSES
+            # it. Stalling reads open residencies only: a venue the run left
+            # (died on and resumed elsewhere) is provenance, not presence.
+            row.setdefault("_open", {})[host] = (
+                event.get("event") == "attach")
+            # THE NEWEST EVENT SPEAKS FOR THE RUN, whichever host journal it
+            # lives in: a run hops hosts across generations (resubmission is
+            # resume), and journals are walked per host, so without the time
+            # gate an old host's dying detach — iterated after the live
+            # host's re-attach — would call a healthy second attempt by its
+            # first attempt's death (observed live: six running arms shown
+            # failed by a dead venue's journal).
+            when = float(event.get("t", 0.0))
+            if when >= row["_status_t"]:
+                row["_status_t"] = when
+                if event.get("event") == "detach":
+                    row["status"] = event.get("status", "?")
+                else:
+                    row["status"] = "running"
+            row["t"] = max(row["t"], when)
 
     for (folder, run_id), row in rows.items():
+        row.pop("_status_t", None)   # ordering scratch, not a view field
+        row["open_hosts"] = sorted(
+            host for host, open_ in row.pop("_open", {}).items() if open_)
         # the same run_id in more than one root: legitimate under #58 (one
         # spec, two folders), and the reason every link the observer emits
         # carries its folder — a bare /run/<id> must never silently pick one
