@@ -267,7 +267,7 @@ def bring_up_metal(name: str):
         engine_factory=lambda regime, partition: VllmEngine(
             regime.base, tp=regime.shape,
             gpu_memory_utilization=partition.memory,
-            max_model_len=2048, max_bundles=32, max_rank=16,
+            max_model_len=4096, max_bundles=32, max_rank=16,
             max_members=PLORA["members"], cas_get=store.cas_get,
             serves=("lora", "plora", "spectral", "spectral_latent")),
         learner_factory=lambda regime, partition: TorchLearner(
