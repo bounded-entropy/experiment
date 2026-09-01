@@ -113,19 +113,20 @@ def demands_from(rows: Sequence[Mapping]) -> tuple[Demand, ...]:
 
 
 def placement_units(demands: Sequence[Demand]) -> tuple[tuple[Demand, ...], ...]:
-    """Sleep groups place as ONE unit (their members alternate on one
-    partition, so they must land together — one host wearing masks);
-    concurrent members place one by one (per-capability hosts)."""
+    """A GpuGroup is a CO-LOCATION statement, so its members place as ONE
+    unit whatever the sharing: sleep members because they alternate on one
+    partition (one host wearing masks), concurrent members because the spec
+    put them on one card (the stress-matrix shape — engine and learner side
+    by side, the tenancy's pool LOCAL, no wire between them; two carves here
+    made the anchor self-dial its own container per sample, observed
+    parked). Separate groups place one by one onto per-capability hosts."""
     units: list[tuple[Demand, ...]] = []
-    seen_sleep: set[int] = set()
+    seen: set[int] = set()
     for demand in demands:
-        if demand.sharing == "sleep":
-            if demand.group in seen_sleep:
-                continue
-            seen_sleep.add(demand.group)
-            units.append(tuple(d for d in demands if d.group == demand.group))
-        else:
-            units.append((demand,))
+        if demand.group in seen:
+            continue
+        seen.add(demand.group)
+        units.append(tuple(d for d in demands if d.group == demand.group))
     return tuple(units)
 
 

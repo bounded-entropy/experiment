@@ -61,6 +61,16 @@ class DemandsTest(unittest.TestCase):
             GpuGroup(gpus(n=1), (learner(),)))))
         self.assertEqual(len(placement_units(demands)), 2)
 
+    def test_one_concurrent_group_is_one_unit(self) -> None:
+        """A GpuGroup co-locates whatever the sharing: pool and learner in
+        ONE concurrent group land on ONE host (the stress-matrix shape) so
+        the tenancy's pool is local — no wire, no self-dial."""
+        demands = demands_of(spec_with((
+            GpuGroup(gpus(n=1), (pool("main"), learner())),)))
+        units = placement_units(demands)
+        self.assertEqual(len(units), 1)
+        self.assertEqual(len(units[0]), 2)
+
 
 class SizingTest(unittest.TestCase):
     def test_a_gb_hint_becomes_a_fraction_of_one_device(self) -> None:
