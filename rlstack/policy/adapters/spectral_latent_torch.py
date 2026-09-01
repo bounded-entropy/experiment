@@ -296,10 +296,13 @@ def emit(state: SlatentState) -> bytes:
     half. The counter is the version — emit uses it, records it, then
     advances — so a resumed run's n-th emit ships the n-th ensemble."""
     noise = noise_for(state.seed, state.version, state.members, state.latent)
+    # the draw is CPU (a seeded Generator's home); the posterior lives on the
+    # weight's device — reparameterize where the parameters are
+    noise = noise.to(state.mu.device)
     tensors: dict[str, torch.Tensor] = {
         "posterior.mu": state.mu.data.cpu(),
         "posterior.log_std": state.log_std.data.cpu(),
-        "noise": noise,
+        "noise": noise.cpu(),
     }
     for key, value in state.trunk.state_dict().items():
         tensors[f"trunk.{key}"] = value.cpu()

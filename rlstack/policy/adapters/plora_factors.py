@@ -175,12 +175,15 @@ def random_factors(weight: torch.Tensor, k: int, basis_seed: int,
     def orthonormal(n: int, tag: str) -> torch.Tensor:
         seed = int.from_bytes(hashlib.sha256(
             f"{basis_seed}:{path}:{tag}".encode()).digest()[:8], "big")
+        # drawn on CPU — a seeded Generator is a CPU generator, and the draw
+        # must be device-independent to be reproducible — then MOVED to the
+        # weight's device, where the singular values already live
         drawn = torch.randn(n, k, dtype=torch.float32,
                             generator=torch.Generator().manual_seed(seed))
         q, r = torch.linalg.qr(drawn)
         # fix QR's sign freedom the same way canonical_signs fixes the SVD's:
         # make each column's diagonal of R positive
-        return q * torch.sign(torch.diagonal(r))[None, :]
+        return (q * torch.sign(torch.diagonal(r))[None, :]).to(matrix.device)
 
     u = orthonormal(rows, "u")
     v = orthonormal(columns, "v")

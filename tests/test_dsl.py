@@ -595,5 +595,37 @@ class SpectralLatentTorchTest(unittest.TestCase):
         self.assertTrue(torch.equal(fresh.mu.data, state.mu.data))
 
 
+@needs_torch
+class DevicePlacementTest(unittest.TestCase):
+    """The GPU-only device-mismatch class the fakes suite cannot see: seeded
+    Generators draw on CPU, weights live on cuda, and every recomposition
+    must meet on the weight's device (both bugs observed live on dsl-b)."""
+
+    def setUp(self) -> None:
+        if not torch.cuda.is_available():
+            self.skipTest("cuda-only: the mismatch needs two devices")
+
+    def test_random_factors_follow_the_weight_device(self) -> None:
+        from rlstack.policy.adapters import plora_factors
+
+        weight = torch.randn(8, 6, device="cuda")
+        u, a = plora_factors.random_factors(weight, 3, 7, "lin")
+        self.assertEqual(u.device.type, "cuda")
+        self.assertEqual(a.device.type, "cuda")
+
+    def test_slatent_emits_from_a_cuda_state(self) -> None:
+        site = SiteMeta(name="lin", path="lin", has_weight=True,
+                        shape=(6, 6), is_boundary=False)
+        state = spectral_latent_torch.build(
+            (site,), {"k": 2, "latent": 4, "members": 2,
+                      "prior_std": 0.05, "hidden": 8})
+        model = torch.nn.Module()
+        model.lin = torch.nn.Linear(6, 6, bias=False).cuda()
+        spectral_latent_torch.install(model, state)
+        payload = spectral_latent_torch.emit(state)     # must not device-mix
+        head, _ = spectral_latent_torch.unpack(payload)
+        self.assertEqual(int(head["members"]), 2)
+
+
 if __name__ == "__main__":
     unittest.main()
