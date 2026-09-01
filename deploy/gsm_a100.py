@@ -92,6 +92,7 @@ EVAL_SAMPLES = 2
 EVAL_TEMPERATURE = 0.2
 RUNS_KEY = "measurements/gsm/runs.json"      # {run_id: {...}} — the cron's list
 SCREEN_KEY = "measurements/gsm/screen.json"  # the screen's verdict
+ROWS_KEY = "measurements/gsm/rows-main.json"  # the dataset, fetched ONCE
 
 SERVE_FRACTION = 0.45
 LEARN_FRACTION = 0.40
@@ -384,10 +385,12 @@ def screen() -> dict:
     from transformers import AutoTokenizer
     from vllm import LLM, SamplingParams
 
-    from rlstack.data.tasks.gsm_symbolic import ASK, fetch_rows, gold_of
+    from rlstack import ModalVolumeStore
+    from rlstack.data.tasks.gsm_symbolic import ASK, gold_of
     from rlstack.training.post.final_answer import stated_answer
 
-    rows = fetch_rows("main")
+    store = ModalVolumeStore("/store", volume=store_volume, locator=STORE)
+    rows = gsm_rows(store)
     tokenizer = AutoTokenizer.from_pretrained(BASE)
     probes = []                      # (family, prompt, gold)
     for row in rows:
@@ -454,15 +457,30 @@ def chat_formatter():
     return chat
 
 
+def gsm_rows(store) -> list:
+    """The dataset rows, fetched from the datasets-server ONCE EVER and
+    cached on the store — re-fetching 5,000 rows per build drew an HTTP 429
+    (observed live), and the rows are immutable content anyway."""
+    from rlstack.data.tasks.gsm_symbolic import fetch_rows
+
+    try:
+        return json.loads(store._read(ROWS_KEY))
+    except Exception:
+        rows = fetch_rows("main")
+        store._write(ROWS_KEY, json.dumps(rows, sort_keys=True).encode())
+        store_volume.commit()
+        return rows
+
+
 def gsm_task_sets(store, verdict: dict):
     """(train uri, eval uri, train ids) for the screen's chosen families."""
     from rlstack.data.tasks.base import write_tasks
     from rlstack.data.tasks.gsm_symbolic import (
-        fetch_rows, gsm_eval_tasks, gsm_train_tasks,
+        gsm_eval_tasks, gsm_train_tasks,
     )
 
     chat = chat_formatter()
-    rows = fetch_rows("main")
+    rows = gsm_rows(store)
     train = gsm_train_tasks(rows, verdict["train_family"],
                             TRAIN_INSTANCES, chat)
     held = gsm_eval_tasks(rows, verdict["train_family"], TRAIN_INSTANCES,
