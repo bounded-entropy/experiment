@@ -48,12 +48,34 @@ def ui():
         fetched once ever, journals revalidate on the size a directory
         listing already carries."""
 
+        SNAPSHOT_TTL = 5.0
+
         def __init__(self) -> None:
             super().__init__()
-            self._entry_sizes: dict[str, int] = {}
+            self._sizes: dict[str, int] = {}
+            self._taken = 0.0
+            self._snap_lock = __import__("threading").Lock()
 
         def describe(self) -> str:
             return "modal://rlstack-store"
+
+        def _snapshot(self) -> dict[str, int]:
+            """ONE recursive listing answers every stat-shaped question for
+            SNAPSHOT_TTL seconds: per-call listdir RPCs made each cached
+            journal's revalidation cost a network round trip, multiplied by
+            every run on every poll (measured: the charts pages crawled)."""
+            import time as _time
+
+            with self._snap_lock:
+                if _time.time() - self._taken >= self.SNAPSHOT_TTL:
+                    sizes: dict[str, int] = {}
+                    for entry in store_volume.listdir("", recursive=True):
+                        size = getattr(entry, "size", None)
+                        if size is not None:
+                            sizes[entry.path.lstrip("/")] = int(size)
+                    self._sizes = sizes
+                    self._taken = _time.time()
+                return self._sizes
 
         def _read(self, key: str) -> bytes:
             try:
@@ -62,39 +84,16 @@ def ui():
                 raise FileNotFoundError(key) from None
 
         def _list(self, prefix: str) -> list[str]:
-            out: list[str] = []
-            try:
-                entries = store_volume.listdir(prefix.rstrip("/"),
-                                               recursive=True)
-            except Exception:
-                return out
-            for entry in entries:
-                path = entry.path.lstrip("/")
-                size = getattr(entry, "size", None)
-                if size is not None:
-                    self._entry_sizes[path] = int(size)
-                out.append(path)
-            return sorted(out)
+            want = prefix if prefix.endswith("/") else prefix + "/"
+            return sorted(k for k in self._snapshot() if k.startswith(want))
 
         def _exists(self, key: str) -> bool:
-            try:
-                self._size(key)
-                return True
-            except FileNotFoundError:
-                return False
+            return key in self._snapshot()
 
         def _size(self, key: str) -> int:
-            parent = key.rsplit("/", 1)[0] if "/" in key else ""
-            try:
-                for entry in store_volume.listdir(parent):
-                    path = entry.path.lstrip("/")
-                    size = getattr(entry, "size", None)
-                    if size is not None:
-                        self._entry_sizes[path] = int(size)
-            except Exception:
-                raise FileNotFoundError(key) from None
-            if key in self._entry_sizes:
-                return self._entry_sizes[key]
+            sizes = self._snapshot()
+            if key in sizes:
+                return sizes[key]
             raise FileNotFoundError(key)
 
         def _write(self, key: str, data: bytes) -> None:
@@ -146,16 +145,17 @@ def ui():
         return [body]
 
     def prewarm() -> None:
-        # the hot endpoint never goes cold: the walker pays, readers don't
+        # the hot endpoints never go cold: the walker pays, readers don't
         while True:
-            try:
-                call_inner("/api/runs?", {
-                    "REQUEST_METHOD": "GET", "PATH_INFO": "/api/runs",
-                    "QUERY_STRING": "", "SERVER_NAME": "prewarm",
-                    "SERVER_PORT": "80", "wsgi.url_scheme": "http",
-                    "wsgi.input": None, "wsgi.errors": None})
-            except Exception:
-                pass
+            for path in ("/api/runs", "/api/hosts", "/api/fleet"):
+                try:
+                    call_inner(path + "?", {
+                        "REQUEST_METHOD": "GET", "PATH_INFO": path,
+                        "QUERY_STRING": "", "SERVER_NAME": "prewarm",
+                        "SERVER_PORT": "80", "wsgi.url_scheme": "http",
+                        "wsgi.input": None, "wsgi.errors": None})
+                except Exception:
+                    pass
             time.sleep(10.0)
 
     threading.Thread(target=prewarm, daemon=True).start()
