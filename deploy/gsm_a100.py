@@ -554,11 +554,15 @@ def campaign_specs(store) -> tuple[dict, str]:
                                           overrides=overrides),
                           schedule=Schedule(microbatch_tokens=4096,
                                             max_policy_lag=lag)),
+            # ONE group, BOTH members: placement makes a single carve wearing
+            # both regimes (the stress-matrix shape), so routes are empty and
+            # the tenancy samples through its LOCAL pool — the two-carve
+            # variant made the anchor self-dial its own container for every
+            # sample, the unproven edge this venue wedged on
             gpu_config=GpuConfig(groups=(
                 GpuGroup(gpus=GpuSet(n=1), members=(
-                    PoolMember("main", tp=1, fraction=SERVE_FRACTION),)),
-                GpuGroup(gpus=GpuSet(n=1), members=(
-                    LearnerMember(fsdp=1, fraction=LEARN_FRACTION),)))),
+                    PoolMember("main", tp=1, fraction=SERVE_FRACTION),
+                    LearnerMember(fsdp=1, fraction=LEARN_FRACTION))),)),
             seeds=Seeds(master=SEED))
 
     specs = {

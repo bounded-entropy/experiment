@@ -54,15 +54,30 @@ QWEN_CHAT = {"assistant_end": "<|im_end|>\n",
                                 "<think>\n\n</think>\n\n")}
 
 
+def _page(url: str, tries: int = 5) -> dict:
+    """One page, retried: the datasets-server 502s transiently under load
+    (observed live), and a screen must not die of one bad gateway."""
+    import time
+
+    for attempt in range(tries):
+        try:
+            with urllib.request.urlopen(url, timeout=60) as r:
+                return json.loads(r.read().decode())
+        except Exception as told:
+            if attempt == tries - 1:
+                raise RuntimeError(f"datasets-server unreachable: {told}"
+                                   ) from None
+            time.sleep(2.0 * (attempt + 1))
+    raise AssertionError("unreachable")
+
+
 def fetch_rows(config: str = "main") -> list[dict]:
     """The dataset, page by page — IO only, no shaping. 5,000 rows for
     `main`; the harder `p1`/`p2` twins fetch the same way."""
     rows: list[dict] = []
     offset = 0
     while True:
-        with urllib.request.urlopen(
-                ROWS_API.format(config=config, offset=offset), timeout=60) as r:
-            page = json.loads(r.read().decode())
+        page = _page(ROWS_API.format(config=config, offset=offset))
         got = [row["row"] for row in page.get("rows", [])]
         if not got:
             return rows
