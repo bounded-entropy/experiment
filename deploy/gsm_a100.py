@@ -334,9 +334,11 @@ class MetalG:
 
     @modal.method()
     def host_ask(self, address: str, verb: str, payload: dict) -> dict:
-        if verb == "add_bundle":
-            store_volume.reload()   # a bundle may name desk/builder-written
-            #                         cas blobs this container has not seen
+        # NO reload here, deliberately: a reload invalidates the whole mount
+        # under every in-flight writer on THIS container (grpo/sdpo died
+        # mid-mkdir of the measure pass's first add_bundle, observed live) —
+        # and cross-container cas blobs are already served by the store's
+        # read fall-through to the volume's committed view.
         return self.metal_service.service_for(address).answer(verb, payload)
 
     @modal.method()
