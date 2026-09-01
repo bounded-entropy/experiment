@@ -183,8 +183,8 @@ class Desk:
 
         self.desk = Desk.from_journal(
             DeskStore("/store", volume=store_volume, locator=STORE),
-            connect=lambda address: RemoteHost(MetalTransport(address)),
-            connect_metal=lambda address: RemoteMetal(
+            host_for=lambda address: RemoteHost(MetalTransport(address)),
+            metal_for=lambda address: RemoteMetal(
                 MetalPlaneTransport(address)))
         # the composed door: the blind desk plus its spec-aware sidecar
         # (campaign.py) — one Transport surface, migrate included
@@ -241,7 +241,7 @@ class Metal:
             learner_factory=lambda regime, partition: TorchLearner(),
             address_of=lambda name: f"a100://{name}",
             schema_for=hf_schema,
-            dial=lambda address: LocalTransport(
+            transport_for=lambda address: LocalTransport(
                 self.metal_service.service_for(address)),
             release=lambda host: [engine.shutdown()
                                   for engine in host.engines])
@@ -304,9 +304,9 @@ class Metal:
 
         from rlstack.runner.remote import RemoteDesk
 
-        fleet = RemoteDesk(DeskTransport())
+        desk = RemoteDesk(DeskTransport())
         try:
-            await fleet.register_metal(METAL_NAME, "A100-40GB", 1, 40.0,
+            await desk.register_metal(METAL_NAME, "A100-40GB", 1, 40.0,
                                        METAL_ADDRESS)
             print(f"[metal] registered {METAL_NAME} on the metal plane")
         except Exception as taken:
@@ -455,12 +455,12 @@ def up() -> None:
     print(f"[up] metal serving: call {call.object_id}")
     print(f"[up] kill it later with: modal run deploy/fleet_a100.py::stop "
           f"--call-id {call.object_id}")
-    fleet = RemoteDesk(DeskTransport())
+    desk = RemoteDesk(DeskTransport())
     for _ in range(90):
-        if METAL_NAME in fleet.status().get("metal", {}):
+        if METAL_NAME in desk.status().get("metal", {}):
             break
         time.sleep(10)
-    print(json.dumps(fleet.status(), indent=2))
+    print(json.dumps(desk.status(), indent=2))
 
 
 @app.local_entrypoint()
@@ -472,9 +472,9 @@ async def pair(updates: int = 400) -> None:
     from rlstack.runner.remote import RemoteDesk, spec_from_json
 
     rows = metal_handle().build_pair_here.remote(updates)
-    fleet = RemoteDesk(DeskTransport())
+    desk = RemoteDesk(DeskTransport())
     for name in ("lora", "gated"):
-        reply = await fleet.submit(spec_from_json(rows[name]))
+        reply = await desk.submit(spec_from_json(rows[name]))
         print(f"[{name}]", json.dumps(reply, indent=2))
 
 
@@ -482,13 +482,13 @@ async def pair(updates: int = 400) -> None:
 def status() -> None:
     from rlstack.runner.remote import RemoteDesk, RemoteMetal
 
-    fleet = RemoteDesk(DeskTransport())
-    told = fleet.status()
+    desk = RemoteDesk(DeskTransport())
+    told = desk.status()
     print(json.dumps({
         "listings": told["listings"], "metal": told["metal"],
         "residual": RemoteMetal(
             MetalPlaneTransport(METAL_ADDRESS)).residual(),
-        "liveness": fleet.liveness(),
+        "liveness": desk.liveness(),
         "roster": metal_handle().roster.remote()}, indent=2))
 
 

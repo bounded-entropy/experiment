@@ -115,7 +115,7 @@ class DeskFixture(unittest.TestCase):
             learner_factory=lambda regime, partition: FakeLearner(),
             address_of=lambda host_name: f"fleet://carved/{host_name}",
             schema_for=lambda base: fake_qwen_schema(4, base=base),
-            dial=lambda address: self._transport(address))
+            transport_for=lambda address: self._transport(address))
         self.metal_services[name] = service
         self.metal_transports[f"metal://{name}"] = LocalTransport(service)
         return service
@@ -123,7 +123,7 @@ class DeskFixture(unittest.TestCase):
     def stand_up(self, name: str, address: str, *, serves_pool: bool,
                  trains: bool, solo: bool = False) -> Host:
         """One standing host: regimes it wears, a transport it answers on,
-        and — for a learner host — the dialer that resolves every OTHER
+        and — for a learner host — the resolver that turns every OTHER
         address in this test's little world."""
         regimes = []
         engines = ()
@@ -137,15 +137,15 @@ class DeskFixture(unittest.TestCase):
             learner=FakeLearner() if trains else None,
             store=self.store, regimes=tuple(regimes), solo=solo,
             schema_for=lambda base: fake_qwen_schema(4, base=base),
-            dial=lambda addr: self.transports[addr])
+            transport_for=lambda addr: self.transports[addr])
         self.transports[address] = LocalTransport(HostService(host))
         return host
 
     def desk(self) -> Desk:
         return Desk(
             self.store,
-            connect=lambda addr: RemoteHost(self.LazyTransport(self, addr)),
-            connect_metal=lambda addr: RemoteMetal(
+            host_for=lambda addr: RemoteHost(self.LazyTransport(self, addr)),
+            metal_for=lambda addr: RemoteMetal(
                 self.metal_transports[addr]))
 
     def desk_with_metal(self, *names) -> Desk:
@@ -254,7 +254,7 @@ class DeskTest(DeskFixture):
         self.assertIn("boot", second)
 
     def test_the_desk_rebuilds_from_its_own_journal(self) -> None:
-        """Kill -9 the desk: a new one redials every listed host from the
+        """Kill -9 the desk: a new one resolves every listed host from the
         journal and places exactly as the old one would."""
         serving = self.stand_up("serve-a", "fleet://a", serves_pool=True,
                                 trains=False)
@@ -265,7 +265,7 @@ class DeskTest(DeskFixture):
         first.list_host("train-b", trainer.regimes, "fleet://b")
 
         reborn = Desk.from_journal(
-            self.store, connect=lambda addr: RemoteHost(self.transports[addr]))
+            self.store, host_for=lambda addr: RemoteHost(self.transports[addr]))
         self.assertEqual(sorted(reborn.listings), ["serve-a", "train-b"])
         placement, boot = go(reborn.place_listings(demands_of(self.split_spec())))
         self.assertEqual(boot, [])
@@ -293,7 +293,7 @@ class DeskTest(DeskFixture):
                             partition=row, metal="node-a"))
         self.assertEqual(sorted(desk.listings), ["serve-a"])
         reborn = Desk.from_journal(
-            self.store, connect=lambda addr: RemoteHost(self.transports[addr]))
+            self.store, host_for=lambda addr: RemoteHost(self.transports[addr]))
         self.assertEqual(sorted(reborn.listings), ["serve-a"])
         self.assertEqual(reborn.listings["serve-a"].regimes,
                          serving.regimes)
@@ -397,11 +397,11 @@ class ProvisionTest(DeskFixture):
         desk = self.desk()
         desk.register_metal(Metal("node-a", "A100-80GB", 2, 80.0))
         reborn = Desk.from_journal(
-            self.store, connect=lambda addr: RemoteHost(self.transports[addr]))
+            self.store, host_for=lambda addr: RemoteHost(self.transports[addr]))
         self.assertEqual(reborn.metal["node-a"].vram_gb, 80.0)
         self.assertEqual(reborn.metal_remotes, {})   # no address, no plane
 
-    def test_metal_phones_home_and_the_rebuilt_desk_redials_it(self) -> None:
+    def test_metal_phones_home_and_the_rebuilt_desk_resolves_it(self) -> None:
         """The metal container registers its OWN existence over the wire,
         address included — and a desk rebuilt from the journal can deduce
         (residual) against it again."""
@@ -413,8 +413,8 @@ class ProvisionTest(DeskFixture):
         self.assertIn("fake-metal", desk.metal_remotes)
         reborn = Desk.from_journal(
             self.store,
-            connect=lambda addr: RemoteHost(self._transport(addr)),
-            connect_metal=lambda addr: RemoteMetal(
+            host_for=lambda addr: RemoteHost(self._transport(addr)),
+            metal_for=lambda addr: RemoteMetal(
                 self.metal_transports[addr]))
         self.assertEqual(reborn.metal["fake-metal"].devices, 2)
         self.assertEqual(reborn.metal_remotes["fake-metal"].residual(),
@@ -566,7 +566,7 @@ class LivenessTest(DeskFixture):
 
         desk.delist("dead-z")
         reborn = Desk.from_journal(
-            self.store, connect=lambda addr: RemoteHost(self.transports[addr]))
+            self.store, host_for=lambda addr: RemoteHost(self.transports[addr]))
         self.assertEqual(sorted(reborn.listings), ["alive-a"])
 
 
@@ -698,7 +698,7 @@ class ReapTest(DeskFixture):
         self.assertEqual((last_delist["host"], last_delist["reason"]),
                          ("gone", "reaped"))
         reborn = Desk.from_journal(
-            self.store, connect=lambda addr: RemoteHost(self._transport(addr)))
+            self.store, host_for=lambda addr: RemoteHost(self._transport(addr)))
         self.assertEqual(sorted(reborn.listings), ["reboots", "well"])
 
     def test_a_reaped_carve_frees_its_metal(self) -> None:

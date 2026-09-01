@@ -238,8 +238,8 @@ class Desk:
 
         self.desk = Desk.from_journal(
             GsmDeskStore("/store", volume=store_volume, locator=STORE),
-            connect=lambda address: RemoteHost(MetalTransport(address)),
-            connect_metal=lambda address: RemoteMetal(
+            host_for=lambda address: RemoteHost(MetalTransport(address)),
+            metal_for=lambda address: RemoteMetal(
                 MetalPlaneTransport(address)))
         self.door = Campaigns(self.desk)
         print(f"[desk] rebuilt from journal: {sorted(self.desk.listings)} "
@@ -281,7 +281,7 @@ def bring_up_metal(name: str):
             device=f"cuda:{partition.devices[0]}"),
         address_of=lambda host_name: f"{scheme}://{host_name}",
         schema_for=hf_schema,
-        dial=lambda address: MetalTransport(address),
+        transport_for=lambda address: MetalTransport(address),
         release=lambda host: [engine.shutdown() for engine in host.engines])
     print(f"[{name}] up, bare; residual {service.residual()}")
     return store, service
@@ -295,9 +295,9 @@ async def metal_shift(name: str, service) -> None:
     from rlstack.runner.remote import RemoteDesk
 
     scheme = METALS[name]["scheme"]
-    fleet = RemoteDesk(DeskTransport())
+    desk = RemoteDesk(DeskTransport())
     try:
-        await fleet.register_metal(name, "A100-40GB", 1, 40.0,
+        await desk.register_metal(name, "A100-40GB", 1, 40.0,
                                    f"{scheme}://metal")
         print(f"[{name}] registered on the metal plane")
     except Exception as taken:
@@ -691,8 +691,8 @@ async def measure() -> None:
     # pass — it never provisions. (resolve() may carve, and a cron firing on
     # a bare venue carved a rogue main-only host whose lazily-built second
     # engine OOMed the shared card and killed every tenancy — observed live.)
-    fleet = RemoteDesk(DeskTransport())
-    listings = fleet.status().get("listings", {})
+    desk = RemoteDesk(DeskTransport())
+    listings = desk.status().get("listings", {})
     serving = [row["address"] for name, row in sorted(listings.items())
                if "main-tp1" in name]
     if not serving:
@@ -730,13 +730,13 @@ def up() -> None:
         print(f"[up] {name} serving: call {call.object_id}")
         print(f"[up] kill it later with: modal run deploy/gsm_a100.py::stop "
               f"--call-id {call.object_id}")
-    fleet = RemoteDesk(DeskTransport())
+    desk = RemoteDesk(DeskTransport())
     for _ in range(90):
-        held = fleet.status().get("metal", {})
+        held = desk.status().get("metal", {})
         if all(name in held for name in METALS):
             break
         time.sleep(10)
-    print(json.dumps(fleet.status(), indent=2))
+    print(json.dumps(desk.status(), indent=2))
 
 
 @app.local_entrypoint()
@@ -753,10 +753,10 @@ async def campaign() -> None:
 
     told = await build_campaign.remote.aio()
     rows, meta = told["specs"], told["meta"]
-    fleet = RemoteDesk(DeskTransport())
+    desk = RemoteDesk(DeskTransport())
     roster: dict = {}
     for name in sorted(rows):
-        reply = await fleet.submit(spec_from_json(rows[name]),
+        reply = await desk.submit(spec_from_json(rows[name]),
                                    subdir="gsm-sweep")
         print(f"[{name}] accepted={reply.get('accepted')} "
               f"run={reply.get('run_id')} host={reply.get('host')} "
@@ -771,8 +771,8 @@ async def campaign() -> None:
 def status() -> None:
     from rlstack.runner.remote import RemoteDesk, RemoteMetal
 
-    fleet = RemoteDesk(DeskTransport())
-    told = fleet.status()
+    desk = RemoteDesk(DeskTransport())
+    told = desk.status()
     residuals = {}
     rosters = {}
     for name, row in METALS.items():
@@ -786,7 +786,7 @@ def status() -> None:
     print(json.dumps({
         "listings": told["listings"], "metal": told["metal"],
         "residual": residuals,
-        "liveness": fleet.liveness(),
+        "liveness": desk.liveness(),
         "roster": rosters}, indent=2))
 
 

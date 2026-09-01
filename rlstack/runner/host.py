@@ -108,7 +108,7 @@ class Host:
                  partition: Partition | None = None,
                  regimes: tuple[Regime, ...] = (),
                  capacity: float = 1.0, solo: bool = False,
-                 dial: Callable[[str], "Transport"] | None = None,
+                 transport_for: Callable[[str], "Transport"] | None = None,
                  schema_for: Callable[[str], SiteSchema] | None = None,
                  sampler=None) -> None:
         self.name = name
@@ -124,7 +124,7 @@ class Host:
         # or negotiated later — a deploy that means it says so at construction.
         self.solo = solo
         # Two more birth facts, both for ADOPTION — an experiment arriving
-        # over the wire instead of in-process. `dial` turns a pool ADDRESS
+        # over the wire instead of in-process. `transport_for` turns an ADDRESS
         # from an adopt frame into a TRANSPORT to the host serving it:
         # address formats are venue (I5), so the deploy that knows them hands
         # the resolver in, and THIS host wraps the transport with the pool's
@@ -132,7 +132,7 @@ class Host:
         # where, the spec knows what. `schema_for` compiles the base's
         # SiteSchema HERE — an adopted spec never ships a schema, because the
         # schema must describe the checkpoint THIS metal serves.
-        self.dial = dial
+        self.transport_for = transport_for
         self.schema_for = schema_for
         self._adoptions: dict[str, asyncio.Task] = {}
         self.sampler = sampler or sample_gpu
@@ -391,7 +391,7 @@ class Host:
             spec = self.decode_adoption(spec_row)
             self.check_code_agreement(spec, code)
             schema = self.derive_schema(spec)
-            remotes = self.dial_routes(spec, routes or {})
+            remotes = self.resolve_routes(spec, routes or {})
             binding = self.bind_pools(spec, remotes=frozenset(remotes))
             self.check_fit(spec, binding, remotes=frozenset(remotes))
             rid = experiment_identity(spec, schema)
@@ -516,22 +516,23 @@ class Host:
                 f"schema in tests)")
         return self.schema_for(spec.policy.base)
 
-    def dial_routes(self, spec: ExperimentSpec,
-                    routes: Mapping[str, str]) -> dict[str, Engine]:
-        """Every route dialed into a live Engine, ONCE, at the door: the
-        venue's dialer resolves the ADDRESS to a transport, and the pool's
+    def resolve_routes(self, spec: ExperimentSpec,
+                       routes: Mapping[str, str]) -> dict[str, Engine]:
+        """Every route resolved into a live Engine, ONCE, at the door: the
+        venue's resolver turns the ADDRESS into a transport, and the pool's
         declared capability (base, tp — read off the spec, the only side that
         knows it) wraps it into the RemotePool the runner will route to. A
-        host born without a dialer refuses routed adoption rather than
+        host born without a resolver refuses routed adoption rather than
         guessing what an address means; a route naming no declared pool is a
         placement bug and refused the same way."""
         if not routes:
             return {}
-        if self.dial is None:
+        if self.transport_for is None:
             raise HostError(
-                f"host {self.name!r} was born with no dial: it cannot resolve "
-                f"pool addresses {sorted(routes)} (pass dial= at construction "
-                f"— the deploy that owns the venue knows the address format)")
+                f"host {self.name!r} was born with no transport_for: it "
+                f"cannot resolve pool addresses {sorted(routes)} (pass "
+                f"transport_for= at construction — the deploy that owns the "
+                f"venue knows the address format)")
         from rlstack.runner.remote import RemotePool
 
         members = {member.name: member
@@ -546,7 +547,7 @@ class Host:
                     f"route {name!r} names no pool this spec declares "
                     f"({sorted(members)}) — routes are placement's answer to "
                     f"the spec's own demands")
-            remotes[name] = RemotePool(self.dial(address),
+            remotes[name] = RemotePool(self.transport_for(address),
                                        base=member.base or spec.policy.base,
                                        tp=member.tp)
         return remotes

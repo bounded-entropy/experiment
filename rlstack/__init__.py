@@ -88,7 +88,7 @@ from rlstack.runner.remote import (
 )
 from rlstack.runner.campaign import Campaigns, demands_of
 from rlstack.runner.desk import (
-    Demand, Desk, FleetError, Metal, demand_rows, demands_from,
+    Demand, Desk, DeskError, Metal, demand_rows, demands_from,
     fraction_for_gb,
 )
 from rlstack.runner.measure import Measurement, measure_run

@@ -339,6 +339,13 @@ the bf16 kernel difference, and GROWTH above that floor is the signal.
 
 ### The metal
 
+**Fleet** — the AGGREGATE of every standing host currently listed with the desk,
+across all metal. Not a class and not a process: a collective noun for what the
+fleet journal describes (`read_fleet_log` / `append_fleet_event`), which the Desk
+is the one writer of. The *service* is the **Desk**, the *record* is the journal,
+the *members* are Listings — "fleet" names none of those three on its own.
+`rlstack/runner/desk.py` (the journal), `rlstack/observe/host_series.py` (the view)
+
 **Metal** — registered owned hardware the fleet may carve: a name, a GPU kind, a
 device count, and one device's VRAM. Registering Metal *is* the acquire rung
 executed.
@@ -682,7 +689,7 @@ One currency and one decider per rung (I12):
   tears down anyway, and `reroute` MOVES the dependents first. Delist alone
   stays bookkeeping-only; `reap` is the same composition applied to hosts
   that stopped answering.
-- **reroute** — restart-is-redial: every delivery is ARCHIVED (demand rows +
+- **reroute** — a move is a restart: every delivery is ARCHIVED (demand rows +
   opaque frame ride the journaled placement, still unread), so moving a
   workload is replaying the desk's own delivery onto a fresh placement with
   one listing off the table — stop the old tenancy at its anchor, deliver
@@ -712,8 +719,8 @@ One currency and one decider per rung (I12):
   deliberately NOT on the Engine protocol: the seam an alternating host's
   arbiter hooks call to make a partition really hand the device back.
 - **adopt** — submit, without the submitter in-process: decode the frame's
-  canonical spec, derive the schema HERE (`schema_for`), dial the routes into
-  RemotePools (`dial` resolves an address to a transport; the pool's declared
+  canonical spec, derive the schema HERE (`schema_for`), resolve the routes into
+  RemotePools (`transport_for` turns an address into a transport; the pool's declared
   base/tp wrap it), run the custody checks fail-fast, roster the tenancy
   EAGERLY, and run it as a background task on this host's own loop. The reply
   is acceptance, never completion — the ledger is the result channel.

@@ -91,9 +91,9 @@ def serving_pool():
     regime is where this client's traffic goes — placement without a carve."""
     from rlstack.runner.remote import RemoteDesk, RemotePool
 
-    fleet = RemoteDesk(DeskTransport())
-    told = fleet.status()["listings"]
-    alive = fleet.liveness()
+    desk = RemoteDesk(DeskTransport())
+    told = desk.status()["listings"]
+    alive = desk.liveness()
     for name, row in sorted(told.items()):
         if not alive.get(name):
             continue

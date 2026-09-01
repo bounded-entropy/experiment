@@ -22,7 +22,7 @@ from __future__ import annotations
 import json
 from collections.abc import Mapping, Sequence
 
-from rlstack.runner.desk import Demand, Desk, FleetError, demand_rows
+from rlstack.runner.desk import Demand, Desk, DeskError, demand_rows
 from rlstack.spec.specs import ExperimentSpec, PoolMember
 
 
@@ -118,11 +118,11 @@ class Campaigns:
             try:
                 manifest = self.store.peek_manifest(rid)
                 if manifest is None:
-                    raise FleetError(f"no manifest for {rid!r} in this store")
+                    raise DeskError(f"no manifest for {rid!r} in this store")
                 spec = spec_from_json(manifest["spec"])
                 entries = self.store.peek_ledger(rid)
                 if not entries:
-                    raise FleetError(
+                    raise DeskError(
                         f"{rid!r} committed nothing — resubmit it plainly; "
                         f"a warm start from nowhere is a fresh run wearing "
                         f"a parent it never had")
@@ -166,19 +166,19 @@ class Campaigns:
         train = plan_of("train")
         rollout = plan_of("rollout")
         if train is None or rollout is None:
-            raise FleetError(
+            raise DeskError(
                 f"{rid!r} carries no sliceable plans (pre-#59 run?) — "
                 f"migrate it full-plan")
         expected = tuple(WaveRef(f"self://rollouts/{u}")
                          for u in range(1, len(train) + 1))
         if train.waves != expected or len(rollout) != len(train):
-            raise FleetError(
+            raise DeskError(
                 f"{rid!r}'s plans are not the standard on-policy pairing — "
                 f"self:// refs are index-coupled, so slicing would retarget "
                 f"them. Migrate it full-plan (remaining_only=False)")
         remaining = len(train) - committed
         if remaining <= 0:
-            raise FleetError(f"{rid!r} committed its whole plan — nothing "
+            raise DeskError(f"{rid!r} committed its whole plan — nothing "
                              f"remaining to migrate")
         return Plans(
             train=self.store.cas_put(encode(RunPlan(tuple(

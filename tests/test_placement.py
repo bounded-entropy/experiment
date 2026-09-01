@@ -15,7 +15,7 @@ import unittest
 
 from common import arith_spec, arith_store
 from rlstack import (
-    Demand, FleetError, GpuConfig, GpuGroup, Metal, Regime, demands_of,
+    Demand, DeskError, GpuConfig, GpuGroup, Metal, Regime, demands_of,
     fraction_for_gb, gpus, learner, pool,
 )
 from rlstack.runner.desk import covers, placement_units
@@ -64,7 +64,7 @@ class DemandsTest(unittest.TestCase):
     def test_one_concurrent_group_is_one_unit(self) -> None:
         """A GpuGroup co-locates whatever the sharing: pool and learner in
         ONE concurrent group land on ONE host (the stress-matrix shape) so
-        the tenancy's pool is local — no wire, no self-dial."""
+        the tenancy's pool is local — no wire at all."""
         demands = demands_of(spec_with((
             GpuGroup(gpus(n=1), (pool("main"), learner())),)))
         units = placement_units(demands)
@@ -80,7 +80,7 @@ class SizingTest(unittest.TestCase):
             0.25)
 
     def test_more_than_one_device_holds_is_the_acquire_rung(self) -> None:
-        with self.assertRaises(FleetError):
+        with self.assertRaises(DeskError):
             fraction_for_gb(25.0, Metal("node-a", "L4", 4))
 
 

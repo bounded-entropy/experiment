@@ -39,7 +39,7 @@ from rlstack.runner.remote import (
 )
 
 
-class FleetError(RuntimeError):
+class DeskError(RuntimeError):
     """A placement the fleet may not decide alone (acquire is a human's) or
     a plan it cannot execute."""
 
@@ -68,7 +68,7 @@ def fraction_for_gb(gb: float, metal: Metal) -> float:
     acquire rung — so it raises instead of clamping."""
     fraction = gb / metal.vram_gb
     if fraction > 1.0 + 1e-9:
-        raise FleetError(
+        raise DeskError(
             f"{gb:g} GB is more than one {metal.gpu} device holds "
             f"({metal.vram_gb:g} GB on {metal.name!r}) — VRAM per shard past "
             f"one device is the acquire rung (bigger metal), not a fraction")
@@ -118,7 +118,8 @@ def placement_units(demands: Sequence[Demand]) -> tuple[tuple[Demand, ...], ...]
     partition (one host wearing masks), concurrent members because the spec
     put them on one card (the stress-matrix shape — engine and learner side
     by side, the tenancy's pool LOCAL, no wire between them; two carves here
-    made the anchor self-dial its own container per sample, observed
+    made the anchor reach its own container over the wire per sample,
+    observed
     parked). Separate groups place one by one onto per-capability hosts."""
     units: list[tuple[Demand, ...]] = []
     seen: set[int] = set()
@@ -148,7 +149,7 @@ def regime_of(demand: Demand) -> Regime:
 @dataclass(frozen=True)
 class Listing:
     """One standing host as the desk knows it: the BIRTH FACTS placement
-    matches on (regimes, solo), the ADDRESS other hosts dial its pools at,
+    matches on (regimes, solo), the ADDRESS other hosts reach its pools at,
     and the RemoteHost the desk itself adopts through. A listing is a
     description, never the host — the metal lives in the host's own
     container, which is the entire reason the desk can be a CPU process."""
@@ -211,34 +212,35 @@ class Desk:
     """
 
     def __init__(self, store: Store,
-                 connect: Callable[[str], "RemoteHost"],
-                 connect_metal: Callable[[str], "RemoteMetal"] | None = None,
+                 host_for: Callable[[str], "RemoteHost"],
+                 metal_for: Callable[[str], "RemoteMetal"] | None = None,
                  ) -> None:
         self.store = store
-        self.connect = connect          # address -> RemoteHost: the desk's dialer
-        # address -> RemoteMetal: the dialer for the METAL PLANE — the verbs
+        # address -> RemoteHost: how the desk reaches a listed host
+        self.host_for = host_for
+        # address -> RemoteMetal: how it reaches the METAL PLANE — the verbs
         # that create and free hosts (carve/decarve) and the residual the
-        # desk deduces from. Venue like `connect`; a desk born without it
+        # desk deduces from. Venue like `host_for`; a desk born without it
         # still places over listings and answers misses with boot
         # instructions, it just cannot command a carve.
-        self.connect_metal = connect_metal
+        self.metal_for = metal_for
         self.metal: dict[str, Metal] = {}
         self.metal_remotes: dict[str, "RemoteMetal"] = {}
         self.listings: dict[str, Listing] = {}
 
     @classmethod
     def from_journal(cls, store: Store,
-                     connect: Callable[[str], "RemoteHost"],
-                     connect_metal: Callable[[str], "RemoteMetal"] | None = None,
+                     host_for: Callable[[str], "RemoteHost"],
+                     metal_for: Callable[[str], "RemoteMetal"] | None = None,
                      ) -> "Desk":
-        """The desk, rebuilt from its own record: every `list` event redials,
-        every addressed `metal` event redials the metal plane. Kill -9 the
+        """The desk, rebuilt from its own record: every `list` event resolves
+        its address again, and so does every addressed `metal` event. Kill -9 the
         desk and nothing was lost but a process — the same recovery shape as
         attach, on the fleet plane."""
-        desk = cls(store, connect, connect_metal)
+        desk = cls(store, host_for, metal_for)
         for event in store.read_fleet_log():
             if event.get("event") == "list":
-                desk.listings[event["host"]] = _listing_from(event, connect)
+                desk.listings[event["host"]] = _listing_from(event, host_for)
             elif event.get("event") == "delist":
                 desk.listings.pop(event["host"], None)
             elif event.get("event") == "metal":
@@ -247,22 +249,22 @@ class Desk:
                     devices=int(event.get("devices", 1)),
                     vram_gb=float(event.get("vram_gb", 24.0)))
                 address = event.get("address")
-                if address and connect_metal is not None:
-                    desk.metal_remotes[event["name"]] = connect_metal(address)
+                if address and metal_for is not None:
+                    desk.metal_remotes[event["name"]] = metal_for(address)
         return desk
 
     def register_metal(self, metal: Metal, address: str | None = None) -> None:
         """The acquire rung, recorded at the desk: what the fleet OWNS and may
         carve against. Journaled like a listing, so a rebuilt desk knows its
         inventory too. `address` is where that metal's own container answers
-        the metal plane (carve/decarve/residual) — with it and a dialer the
+        the metal plane (carve/decarve/residual) — with it and a resolver the
         desk can command the standing carve; without it the row is inventory
         only and misses still answer with boot instructions."""
         if metal.name in self.metal:
-            raise FleetError(f"metal {metal.name!r} is already registered")
+            raise DeskError(f"metal {metal.name!r} is already registered")
         self.metal[metal.name] = metal
-        if address and self.connect_metal is not None:
-            self.metal_remotes[metal.name] = self.connect_metal(address)
+        if address and self.metal_for is not None:
+            self.metal_remotes[metal.name] = self.metal_for(address)
         self.store.append_fleet_event({
             "event": "metal", "t": time.time(), "name": metal.name,
             "gpu": metal.gpu, "devices": metal.devices,
@@ -279,12 +281,12 @@ class Desk:
         the metal's own books. Refuses a taken name — a listing
         is never replaced."""
         if name in self.listings:
-            raise FleetError(
+            raise DeskError(
                 f"host {name!r} is already listed with this desk; a listing "
                 f"is never replaced — delist first if the container is gone")
         self.listings[name] = Listing(name=name, regimes=tuple(regimes),
                                       address=address, solo=solo,
-                                      host=self.connect(address),
+                                      host=self.host_for(address),
                                       partition=dict(partition) if partition
                                       else None,
                                       metal=metal)
@@ -302,7 +304,7 @@ class Desk:
         which). Journaled like the listing was, so a rebuilt desk knows the
         departure too; the metal itself was never the desk's to touch."""
         if name not in self.listings:
-            raise FleetError(f"host {name!r} is not listed with this desk")
+            raise DeskError(f"host {name!r} is not listed with this desk")
         del self.listings[name]
         self.store.append_fleet_event({
             "event": "delist", "t": time.time(), "host": name,
@@ -552,7 +554,7 @@ class Desk:
 
     async def reroute(self, run_id: str, avoiding: str = "",
                       park: bool = False) -> dict:
-        """RESTART-IS-REDIAL: move a delivered workload by replaying the
+        """A MOVE IS A RESTART: move a delivered workload by replaying the
         desk's own archived delivery — place the archived demand rows again
         with `avoiding` off the table, stop the old tenancy at whichever
         listing's roster carries it, and deliver the archived frame to the
@@ -616,7 +618,7 @@ class Desk:
         work lives on OR routes through is NAMED rather than yanked, and
         `force` says you mean it. With `reroute` the running work is MOVED
         first: each dependent replayed onto a fresh placement with this
-        listing off the table (restart-is-redial), and one nothing else
+        listing off the table (a move is a restart), and one nothing else
         covers is stopped and journaled PARKED — the host is coming down
         either way, and a parked run waits whole in the store for metal a
         human adds. A hand-listed host (no metal on its listing) only
@@ -627,7 +629,7 @@ class Desk:
         carve may land there."""
         listing = self.listings.get(name)
         if listing is None:
-            raise FleetError(f"host {name!r} is not listed with this desk")
+            raise DeskError(f"host {name!r} is not listed with this desk")
         holding = self.dependents(name)
         moved: dict[str, dict] = {}
         if holding and reroute:
@@ -776,14 +778,14 @@ def covers(regimes: Sequence[Regime], demand: Demand) -> bool:
 
 
 def _listing_from(event: Mapping,
-                  connect: Callable[[str], "RemoteHost"]) -> Listing:
+                  host_for: Callable[[str], "RemoteHost"]) -> Listing:
     """A journal `list` event back as a Listing — from_journal's one row."""
     return Listing(
         name=event["host"],
         regimes=tuple(Regime(r["name"], r["capability"], r["base"], r["shape"])
                       for r in event["regimes"]),
         address=event["address"], solo=bool(event.get("solo", False)),
-        host=connect(event["address"]),
+        host=host_for(event["address"]),
         partition=event.get("partition"), metal=event.get("metal", ""))
 
 
@@ -818,7 +820,7 @@ class MetalService:
                  learner_factory: Callable[[Regime, Partition], Learner],
                  address_of: Callable[[str], str],
                  schema_for: Callable[[str], SiteSchema] | None = None,
-                 dial: Callable[[str], Transport] | None = None,
+                 transport_for: Callable[[str], Transport] | None = None,
                  release: Callable[[Host], None] | None = None) -> None:
         self.metal = metal
         self.store = store
@@ -827,11 +829,11 @@ class MetalService:
         # address formats are venue (I5): the venue mints a born host's
         # address, and the venue unmakes what the factories made (`release`,
         # decarve's teardown — an engine shutdown on real metal, nothing on
-        # fakes). schema_for/dial are the adoption birth facts every host
+        # fakes). schema_for/transport_for are the adoption birth facts every host
         # born here is handed, same as a hand-built one.
         self.address_of = address_of
         self.schema_for = schema_for
-        self.dial = dial
+        self.transport_for = transport_for
         self.release = release
         self.hosts: dict[str, Host] = {}
         self.addresses: dict[str, str] = {}         # host name -> address
@@ -849,11 +851,11 @@ class MetalService:
         no stated fraction cannot be accounted, and unaccounted metal is the
         double-book this class exists to kill."""
         if host.partition is None:
-            raise FleetError(
+            raise DeskError(
                 f"host {host.name!r} has no partition: a metal's books count "
                 f"fractions, so every host on them must own one")
         if host.name in self.hosts:
-            raise FleetError(f"host {host.name!r} is already on this metal")
+            raise DeskError(f"host {host.name!r} is already on this metal")
         self.hosts[host.name] = host
         self.addresses[host.name] = address
         self.services[address] = HostService(host)
@@ -952,7 +954,7 @@ class MetalService:
                 carved_learner = self.learner_factory(regime, partition)
         return Host(name, engines=tuple(engines), learner=carved_learner,
                     store=self.store, partition=partition, regimes=regimes,
-                    schema_for=self.schema_for, dial=self.dial)
+                    schema_for=self.schema_for, transport_for=self.transport_for)
 
     def decarve(self, name: str) -> dict:
         """The inverse, for the reaper and the deliberate retirement: the
@@ -978,7 +980,7 @@ class MetalService:
         of KeyError-ing inside a frame handler."""
         service = self.services.get(address)
         if service is None:
-            raise FleetError(
+            raise DeskError(
                 f"no host answers at {address!r} on metal "
                 f"{self.metal.name!r} (decarved, or never carved); serving "
                 f"{sorted(self.services)}")

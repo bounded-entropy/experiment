@@ -188,12 +188,12 @@ class SweepMetal:
             partition=Partition("modal-a100", (0,), LEARN_FRACTION, "A100-80GB"),
             regimes=(Regime("train-fsdp1", "training", BASE, 1),),
             schema_for=hf_schema,
-            dial=lambda address: transports[address])
+            transport_for=lambda address: transports[address])
         transports[LEARN_ADDRESS] = LocalTransport(HostService(self.learn_host))
 
         self.desk = Desk(
             self.store,
-            connect=lambda address: RemoteHost(transports[address]))
+            host_for=lambda address: RemoteHost(transports[address]))
         self.desk.list_host("sweep-serve", self.serve_host.regimes,
                             SERVE_ADDRESS)
         self.desk.list_host("sweep-train", self.learn_host.regimes,
@@ -245,7 +245,7 @@ class SweepMetal:
 
         async def one(row: dict) -> tuple[str, int]:
             pool = RemotePool(
-                self.learn_host.dial(SERVE_ADDRESS), base=BASE, tp=1)
+                self.learn_host.transport_for(SERVE_ADDRESS), base=BASE, tp=1)
             spec = spec_from_json(row)
             report = await self.learn_host.submit(
                 spec, self.schema, remotes={"main": pool})
@@ -345,11 +345,11 @@ async def via_desk(desk_arms: int = 8) -> None:
 
     handle = deployed_metal()
     rows = handle.build_rows_here.remote(grid()[-desk_arms:])
-    fleet = RemoteDesk(ClsTransport(handle))
+    desk = RemoteDesk(ClsTransport(handle))
     print(f"[via_desk] status before: "
-          f"{sorted(fleet.status()['listings'])}")
+          f"{sorted(desk.status()['listings'])}")
     for row in rows:
-        reply = await fleet.submit(row)
+        reply = await desk.submit(row)
         print(f"[via_desk] {reply.get('run_id')} accepted="
               f"{reply.get('accepted')} host={reply.get('host')} "
               f"{reply.get('error', '')}")

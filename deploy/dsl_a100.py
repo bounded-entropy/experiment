@@ -214,8 +214,8 @@ class Desk:
 
         self.desk = Desk.from_journal(
             DeskStore("/store", volume=store_volume, locator=STORE),
-            connect=lambda address: RemoteHost(MetalTransport(address)),
-            connect_metal=lambda address: RemoteMetal(
+            host_for=lambda address: RemoteHost(MetalTransport(address)),
+            metal_for=lambda address: RemoteMetal(
                 MetalPlaneTransport(address)))
         self.door = Campaigns(self.desk)
         print(f"[desk] rebuilt from journal: {sorted(self.desk.listings)} "
@@ -262,7 +262,7 @@ def bring_up_metal(name: str):
         schema_for=hf_schema,
         # routes may point at the OTHER metal's pools: the scheme routes the
         # frame to the right container — the OPD three-host shape
-        dial=lambda address: MetalTransport(address),
+        transport_for=lambda address: MetalTransport(address),
         release=lambda host: [engine.shutdown() for engine in host.engines])
     print(f"[{name}] up, bare; residual {service.residual()}")
     return store, service
@@ -276,9 +276,9 @@ async def metal_shift(name: str, service) -> None:
     from rlstack.runner.remote import RemoteDesk
 
     scheme = METALS[name]["scheme"]
-    fleet = RemoteDesk(DeskTransport())
+    desk = RemoteDesk(DeskTransport())
     try:
-        await fleet.register_metal(name, "A100-40GB", 1, 40.0,
+        await desk.register_metal(name, "A100-40GB", 1, 40.0,
                                    f"{scheme}://metal")
         print(f"[{name}] registered on the metal plane")
     except Exception as taken:
@@ -652,8 +652,8 @@ async def measure() -> None:
     except Exception:
         print("[measure] no campaign roster yet")
         return
-    fleet = RemoteDesk(DeskTransport())
-    placed = await fleet.resolve([Demand(
+    desk = RemoteDesk(DeskTransport())
+    placed = await desk.resolve([Demand(
         pool="main", capability="inference", base=BASE, shape=1,
         memory=SERVE_FRACTION, group=0, sharing="concurrent")])
     if not placed.get("placed"):
@@ -726,13 +726,13 @@ def up() -> None:
         print(f"[up] {name} serving: call {call.object_id}")
         print(f"[up] kill it later with: modal run deploy/dsl_a100.py::stop "
               f"--call-id {call.object_id}")
-    fleet = RemoteDesk(DeskTransport())
+    desk = RemoteDesk(DeskTransport())
     for _ in range(90):
-        held = fleet.status().get("metal", {})
+        held = desk.status().get("metal", {})
         if all(name in held for name in METALS):
             break
         time.sleep(10)
-    print(json.dumps(fleet.status(), indent=2))
+    print(json.dumps(desk.status(), indent=2))
 
 
 @app.local_entrypoint()
@@ -745,10 +745,10 @@ async def campaign() -> None:
 
     told = await build_campaign.remote.aio()
     rows, evals = told["specs"], told["evals"]
-    fleet = RemoteDesk(DeskTransport())
+    desk = RemoteDesk(DeskTransport())
     roster: dict = {}
     for name in sorted(rows):
-        reply = await fleet.submit(spec_from_json(rows[name]), subdir="dsl")
+        reply = await desk.submit(spec_from_json(rows[name]), subdir="dsl")
         family = name.split("-")[0]
         print(f"[{name}] accepted={reply.get('accepted')} "
               f"run={reply.get('run_id')} host={reply.get('host')}")
@@ -772,8 +772,8 @@ def write_roster(roster: dict) -> None:
 def status() -> None:
     from rlstack.runner.remote import RemoteDesk, RemoteMetal
 
-    fleet = RemoteDesk(DeskTransport())
-    told = fleet.status()
+    desk = RemoteDesk(DeskTransport())
+    told = desk.status()
     residuals = {}
     rosters = {}
     for name, row in METALS.items():
@@ -787,7 +787,7 @@ def status() -> None:
     print(json.dumps({
         "listings": told["listings"], "metal": told["metal"],
         "residual": residuals,
-        "liveness": fleet.liveness(),
+        "liveness": desk.liveness(),
         "roster": rosters}, indent=2))
 
 
