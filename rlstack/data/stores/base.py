@@ -283,14 +283,20 @@ class Store(ABC):
         return f"cas://{digest}"
 
     def cas_get(self, uri: str) -> bytes:
-        """Read back a cas://<sha>[/label] object (the label is cosmetic)."""
+        """Read back a cas://<sha>[/label] object (the label is cosmetic).
+
+        Reads THROUGH `_read`, never an existence pre-check: a backend's
+        miss fall-through (ModalVolumeStore answers a mount miss from the
+        volume's committed view) must serve cas blobs too — an `_exists`
+        gate on the mount alone killed forty adoptions whose plans another
+        container had committed moments earlier (observed live)."""
         if not uri.startswith("cas://"):
             raise ValueError(f"not a cas uri: {uri!r}")
         digest = uri[len("cas://"):].strip("/").split("/")[0]
-        key = f"cas/{digest}/blob"
-        if not self._exists(key):
-            raise FileNotFoundError(f"cas object not found: {uri}")
-        return self._read(key)
+        try:
+            return self._read(f"cas/{digest}/blob")
+        except FileNotFoundError:
+            raise FileNotFoundError(f"cas object not found: {uri}") from None
 
     def describe(self) -> str:
         """Where this store's data lives, for journals and CLIs — a path,
