@@ -33,6 +33,15 @@ continue is in the repo.
 
 - Ultra-readable code beats clever code; spec vocabulary goes in executable
   positions. Docstrings state the rule a thing enforces.
+- ALWAYS pair a background submit/campaign/deploy chain with a Monitor, never
+  a bare completion notification: stream the accept/refusal/error lines
+  (grep must cover failure signatures, not just success), and have the
+  monitor emit a status heartbeat AT MOST EVERY 5 MINUTES when nothing
+  changes (change-detect loop: accepts/errors counts + log tail) so
+  SILENCE ITSELF fires a check-in on that cadence. A hung submit produces
+  no completion for hours (the desk's 3600s input timeout, observed live);
+  the 5-minute tick is the alarm. Keep foreground probes fast and bounded
+  (spawn + get(timeout=...), no sleeps, no unbounded log streams).
 - One named function/method per rule; typed records, no meta-dict bags, no
   duck-typing (we own both sides of every interface).
 - Spec-shape changes get a new numbered entry in agent-context/CONTEXT.md —
