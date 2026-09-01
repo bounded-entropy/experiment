@@ -97,6 +97,11 @@ ROWS_KEY = "measurements/gsm/rows-main.json"  # the dataset, fetched ONCE
 SERVE_FRACTION = 0.45
 LEARN_FRACTION = 0.40
 
+# ANY of these unblocks the venue — 0.6B at fractional budgets fits every
+# card here, and the scheduler takes whichever frees first (a stale A100
+# queue sat 45+ minutes; the iteration loop pays for GPU loyalty)
+GPUS = ["A100-40GB", "L40S", "A100-80GB", "H100"]
+
 METALS = {"gsm-a": {"cls": "MetalG", "scheme": "gsma"}}
 
 
@@ -319,7 +324,7 @@ def roster_of(store, service) -> dict:
     return out
 
 
-@app.cls(image=gpu_image, gpu="A100-40GB",
+@app.cls(image=gpu_image, gpu=GPUS,
          volumes={"/store": store_volume, "/hf": hf_cache},
          timeout=86400, scaledown_window=900, max_containers=1)
 @modal.concurrent(max_inputs=64)
@@ -369,7 +374,7 @@ class MetalG:
 # the screen: the base model over every family, low-but-nonzero found
 # ---------------------------------------------------------------------------
 
-@app.function(image=gpu_image, gpu="A100-40GB",
+@app.function(image=gpu_image, gpu=GPUS,
               volumes={"/store": store_volume, "/hf": hf_cache},
               timeout=7200)
 def screen() -> dict:
