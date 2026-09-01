@@ -97,6 +97,37 @@ class StatusTruthTest(unittest.TestCase):
                 self.assertEqual(sorted(row["hosts"]),
                                  sorted([old_host, live_host]))
 
+    def test_a_newborn_files_under_its_attach_subdir(self) -> None:
+        """The attach line lands moments before the run directory's manifest:
+        a reader snapshotting between the two must file the newborn under
+        the attach event's subdir, not at the store's top for one refresh
+        (observed live: gsm arms hopping root -> subdir). Once the directory
+        exists, the scan is truth and agrees."""
+        tmp = tempfile.mkdtemp()
+        store = LocalStore(tmp)
+        store.append_host_event("h", {
+            "event": "attach", "t": 1.0, "run_id": "r1", "subdir": "gsm"})
+        (row,) = runs_data([store])
+        self.assertEqual(row["subdir"], "gsm")
+        run = store.open_run("r1", manifest={"run_id": "r1"}, subdir="gsm")
+        run.write_plan("train", arith_plan_blobs()["train"])
+        (row,) = runs_data([store])
+        self.assertEqual(row["subdir"], "gsm")
+
+    def test_an_old_journal_without_subdir_still_files_by_scan(self) -> None:
+        """Pre-rename journals carry no subdir on attach: the directory scan
+        alone files the run, and a missing directory reads as top-level."""
+        tmp = tempfile.mkdtemp()
+        store = LocalStore(tmp)
+        store.append_host_event("h", {
+            "event": "attach", "t": 1.0, "run_id": "r1"})
+        (row,) = runs_data([store])
+        self.assertEqual(row["subdir"], "")
+        run = store.open_run("r1", manifest={"run_id": "r1"}, subdir="deep/dir")
+        run.write_plan("train", arith_plan_blobs()["train"])
+        (row,) = runs_data([store])
+        self.assertEqual(row["subdir"], "deep/dir")
+
 
 class WindowTest(unittest.TestCase):
     def test_windowed_bounds_series_and_lanes_keep_open_residencies(self) -> None:

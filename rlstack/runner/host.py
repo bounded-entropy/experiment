@@ -335,7 +335,12 @@ class Host:
             "event": "attach", "t": time.time(), "run_id": rid,
             "pools": sorted(binding), "remotes": sorted(remote_pools),
             "plan": spec.plans.train,     # the shape, by reference (#59)
-            "store": run_store.describe()})
+            "store": run_store.describe(),
+            # filing rides the attach so an observer knows it from the run's
+            # FIRST breath: the run directory's manifest lands moments after
+            # this line, and a reader snapshotting between the two would
+            # otherwise file the newborn at the store's top for one refresh
+            "subdir": subdir or ""})
         try:
             report = await run_experiment_async(
                 spec, schema, run_store, binding, self.learner,

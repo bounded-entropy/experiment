@@ -180,6 +180,15 @@ def runs_data(roots: Sequence[Store | Root]) -> list[dict]:
                     row["status"] = event.get("status", "?")
                 else:
                     row["status"] = "running"
+            # filing from the attach itself (newest wins): the run directory's
+            # manifest lands moments AFTER the attach line, so a snapshot can
+            # hold the event and not the directory — without this, a newborn
+            # files at the store's top for one refresh, then hops into its
+            # subdir (observed live on the gsm arms)
+            if (event.get("event") == "attach" and "subdir" in event
+                    and when >= row.get("_subdir_t", -1.0)):
+                row["_subdir_t"] = when
+                row["_attach_subdir"] = event.get("subdir") or ""
             row["t"] = max(row["t"], when)
 
     for (folder, run_id), row in rows.items():
@@ -203,16 +212,20 @@ def runs_data(roots: Sequence[Store | Root]) -> list[dict]:
         # detach events, and observability must not let that read as failure
         if isinstance(target, int) and target > 0 and committed >= target:
             row["status"] = "done"
+        # the SUBDIR the run's directory was filed under at birth ("" at the
+        # top): the directory scan is truth once the manifest exists; the
+        # attach event's word covers the birth window before it does
+        attach_subdir = row.pop("_attach_subdir", None)
+        row.pop("_subdir_t", None)
         for index, root in enumerate(known):
             if root.folder == folder:
                 row.update(annotated(annotations[index].get(run_id)))
-                # the SUBDIR the run's directory was filed under at birth
-                # ("" at the top): organization inside one store, where the
-                # #58 folder is which store — two axes, never one
-                row["subdir"] = filings[index].get(run_id, "")
+                filed = filings[index].get(run_id)
+                row["subdir"] = (filed if filed is not None
+                                 else attach_subdir or "")
                 break
         else:
-            row["subdir"] = ""
+            row["subdir"] = attach_subdir or ""
     return sorted(rows.values(), key=lambda r: r["t"])
 
 
