@@ -35,51 +35,128 @@ image = (
 @modal.concurrent(max_inputs=32)
 @modal.wsgi_app(label="rlstack-ui")
 def ui():
+    from rlstack.data.stores.base import Store, StoreError
+    from rlstack.observe.ui import ui_app
+
+    class VolumeReadStore(Store):
+        """The observer's store with NO MOUNT AT ALL: every byte verb rides
+        the volume SDK's committed view, which is always fresh — no reload
+        tick (a reload half-invalidates a mount mid-scan: runs hopped
+        root -> subdir on click-out), no gate (reads queued behind a slow
+        reload until /api/runs timed out at 60s, both observed live).
+        CachedReadStore above makes repeat reads free: immutable bytes are
+        fetched once ever, journals revalidate on the size a directory
+        listing already carries."""
+
+        def __init__(self) -> None:
+            super().__init__()
+            self._entry_sizes: dict[str, int] = {}
+
+        def describe(self) -> str:
+            return "modal://rlstack-store"
+
+        def _read(self, key: str) -> bytes:
+            try:
+                return b"".join(store_volume.read_file(key))
+            except Exception:
+                raise FileNotFoundError(key) from None
+
+        def _list(self, prefix: str) -> list[str]:
+            out: list[str] = []
+            try:
+                entries = store_volume.listdir(prefix.rstrip("/"),
+                                               recursive=True)
+            except Exception:
+                return out
+            for entry in entries:
+                path = entry.path.lstrip("/")
+                size = getattr(entry, "size", None)
+                if size is not None:
+                    self._entry_sizes[path] = int(size)
+                out.append(path)
+            return sorted(out)
+
+        def _exists(self, key: str) -> bool:
+            try:
+                self._size(key)
+                return True
+            except FileNotFoundError:
+                return False
+
+        def _size(self, key: str) -> int:
+            parent = key.rsplit("/", 1)[0] if "/" in key else ""
+            try:
+                for entry in store_volume.listdir(parent):
+                    path = entry.path.lstrip("/")
+                    size = getattr(entry, "size", None)
+                    if size is not None:
+                        self._entry_sizes[path] = int(size)
+            except Exception:
+                raise FileNotFoundError(key) from None
+            if key in self._entry_sizes:
+                return self._entry_sizes[key]
+            raise FileNotFoundError(key)
+
+        def _write(self, key: str, data: bytes) -> None:
+            raise StoreError("the observer writes nothing")
+
+        def _append_line(self, key: str, line: str) -> None:
+            raise StoreError("the observer writes nothing")
+
+        def _delete(self, key: str) -> None:
+            raise StoreError("the observer deletes nothing")
+
     import threading
     import time
 
-    from rlstack import ModalVolumeStore
-    from rlstack.observe.ui import ui_app
+    inner = ui_app([VolumeReadStore()])
+    cache: dict[str, tuple[float, str, list, bytes]] = {}
+    TTL = 12.0
+    building = threading.Lock()
 
-    gate = threading.Lock()
+    def call_inner(key: str, environ: dict) -> tuple[str, list, bytes]:
+        caught: dict = {}
 
-    class GatedStore(ModalVolumeStore):
-        """Every read holds the gate the refresher's reload takes: a reload
-        landing DURING a scan half-invalidates the mount under it, and the
-        runs list then files runs at the store's top for one response
-        (observed live: a run hopping root -> subdir on click-out). Reads
-        gate one call at a time — the wide window (a whole directory scan)
-        is closed; the between-calls sliver is covered by the attach event's
-        own subdir."""
+        def catch(status, headers, exc_info=None):
+            caught["status"], caught["headers"] = status, list(headers)
 
-        def _read(self, key):
-            with gate:
-                return super()._read(key)
+        body = b"".join(inner(environ, catch))
+        cache[key] = (time.time(), caught["status"], caught["headers"], body)
+        return caught["status"], caught["headers"], body
 
-        def _list(self, prefix):
-            with gate:
-                return super()._list(prefix)
+    def cached_app(environ, start_response):
+        """GET responses cached for TTL seconds: one reader pays the SDK
+        walk, every poll inside the window answers from memory (measured:
+        17s -> instant). Non-GETs and cache misses pass through."""
+        key = (environ.get("PATH_INFO", "") + "?"
+               + environ.get("QUERY_STRING", ""))
+        if environ.get("REQUEST_METHOD") != "GET":
+            return inner(environ, start_response)
+        held = cache.get(key)
+        if held is not None and time.time() - held[0] < TTL:
+            _, status, headers, body = held
+        else:
+            with building:      # one rebuild at a time; late arrivals reuse
+                held = cache.get(key)
+                if held is not None and time.time() - held[0] < TTL:
+                    _, status, headers, body = held
+                else:
+                    status, headers, body = call_inner(key, environ)
+        start_response(status, headers)
+        return [body]
 
-        def _exists(self, key):
-            with gate:
-                return super()._exists(key)
-
-    store = GatedStore("/store", volume=store_volume,
-                       locator="modal://rlstack-store")
-
-    def refresher() -> None:
-        # Freshness rides a BACKGROUND tick, never the request path — and
-        # the tick takes the same gate the reads hold, so a reload waits for
-        # the in-flight call instead of invalidating the mount under it.
-        # The observer serves a snapshot at most ~15s stale, which its
-        # stale-tail tolerance already licenses.
+    def prewarm() -> None:
+        # the hot endpoint never goes cold: the walker pays, readers don't
         while True:
-            time.sleep(15.0)
             try:
-                with gate:
-                    store_volume.reload()
+                call_inner("/api/runs?", {
+                    "REQUEST_METHOD": "GET", "PATH_INFO": "/api/runs",
+                    "QUERY_STRING": "", "SERVER_NAME": "prewarm",
+                    "SERVER_PORT": "80", "wsgi.url_scheme": "http",
+                    "wsgi.input": None, "wsgi.errors": None})
             except Exception:
                 pass
+            time.sleep(10.0)
 
-    threading.Thread(target=refresher, daemon=True).start()
-    return ui_app([store])
+    threading.Thread(target=prewarm, daemon=True).start()
+    return cached_app
