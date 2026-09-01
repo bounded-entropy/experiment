@@ -100,6 +100,25 @@ class UiTest(unittest.TestCase):
     def test_series_is_none_for_an_unknown_run(self) -> None:
         self.assertIsNone(run_series(self.store, "nope"))
 
+    def test_a_measurement_is_a_first_class_chart_metric(self) -> None:
+        """The charts page plots `<measurement>:<mean>` beside the ledger
+        metrics: the name appears in the menu, and its overlay series carries
+        the measurement's points at the measured versions."""
+        from rlstack.observe.select import metric_names, overlay
+
+        self.store.append_host_event("h", {
+            "event": "attach", "t": 1.0, "run_id": self.report.run_id})
+        names = metric_names([self.store])
+        self.assertIn("heldout:reward", names)
+        self.assertIn("reward", names)
+        told = overlay([self.store], "heldout:reward")
+        (series,) = told["series"]
+        self.assertEqual(series["run_id"], self.report.run_id)
+        self.assertEqual(series["points"], [[2, 0.2], [4, 0.4]])
+        # the ledger reading is untouched by the qualified grammar
+        plain = overlay([self.store], "reward")
+        self.assertTrue(plain["series"][0]["points"])
+
     def test_wsgi_app_serves_page_and_api(self) -> None:
         refreshes = []
         app = ui_app([self.store], refresh=lambda: refreshes.append(1))

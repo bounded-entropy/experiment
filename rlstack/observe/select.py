@@ -85,10 +85,13 @@ def _entry_value(entry: dict, metric: str) -> float | None:
 
 
 def metric_names(roots: Sequence[Store | Root]) -> list[str]:
-    """Every metric the newest ledgers carry, reward first: the union of
-    numeric keys under train and post, read from a sample of runs — a name
-    list is a menu, not a census."""
+    """Every metric the newest ledgers carry, reward first — plus every
+    MEASUREMENT metric as `<measurement>:<mean>` (heldout:reward): a
+    measurement is a first-class plottable, not only the run page's dashed
+    overlay. The union is read from a sample of runs — a name list is a
+    menu, not a census."""
     names: set[str] = set()
+    measured: set[str] = set()
     rows = runs_data(rooted(roots))
     for row in rows[-NAME_SAMPLE:]:
         root = _root_of(roots, row)
@@ -99,14 +102,23 @@ def metric_names(roots: Sequence[Store | Root]) -> list[str]:
                 names.update(k for k, v in entry.get(block, {}).items()
                              if isinstance(v, (int, float))
                              and not isinstance(v, bool))
+        for name, told in root.store.read_measurements(row["run_id"]).items():
+            for point in told.get("points", [])[-3:]:
+                measured.update(
+                    f"{name}:{k}" for k, v in point.get("means", {}).items()
+                    if isinstance(v, (int, float)) and not isinstance(v, bool))
     front = [n for n in ("reward", "latent_kl", "loss", "logprob_gap") if n in names]
-    return front + sorted(names - set(front))
+    lead = [n for n in ("heldout:reward", "heldout:exact") if n in measured]
+    return front + lead + sorted((names - set(front)) | (measured - set(lead)))
 
 
 def overlay(roots: Sequence[Store | Root], metric: str,
             expr: str = "") -> dict:
     """The wandb reading: one series per selected run, x = update, newest
-    runs first, capped at SERIES_LIMIT with the cap said out loud."""
+    runs first, capped at SERIES_LIMIT with the cap said out loud. A metric
+    named `<measurement>:<mean>` plots that measurement's points at the
+    measured versions instead of the ledger's blocks."""
+    measurement, _, mean = metric.partition(":")
     rows = [row for row in runs_data(rooted(roots)) if match_expr(row, expr)]
     rows.reverse()                                  # newest first
     dropped = max(0, len(rows) - SERIES_LIMIT)
@@ -116,10 +128,19 @@ def overlay(roots: Sequence[Store | Root], metric: str,
         if root is None:
             continue
         points = []
-        for entry in root.store.peek_ledger(row["run_id"]):
-            value = _entry_value(entry, metric)
-            if value is not None and isinstance(entry.get("update"), int):
-                points.append([entry["update"], value])
+        if mean:
+            told = root.store.read_measurements(row["run_id"]).get(measurement)
+            for point in (told or {}).get("points", []):
+                value = point.get("means", {}).get(mean)
+                if (isinstance(value, (int, float))
+                        and not isinstance(value, bool)
+                        and isinstance(point.get("update"), int)):
+                    points.append([point["update"], float(value)])
+        else:
+            for entry in root.store.peek_ledger(row["run_id"]):
+                value = _entry_value(entry, metric)
+                if value is not None and isinstance(entry.get("update"), int):
+                    points.append([entry["update"], value])
         if points:
             series.append({"run_id": row["run_id"], "name": row.get("name", ""),
                            "folder": row["folder"], "status": row["status"],
