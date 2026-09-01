@@ -393,6 +393,16 @@ class Desk:
                 continue
             if not born.get("carved"):
                 continue                # raced: booked away between ask and command
+            corpse = self.listings.get(born["host"])
+            if corpse is not None and corpse.metal == metal_name:
+                # carve names EMBED the metal, so only this metal can re-mint
+                # one — and a metal that re-minted a listed name has RECYCLED
+                # (its counter reset), which means the old container and every
+                # host on it are gone. The standing listing is a corpse by
+                # construction (probing would lie: the newborn answers at the
+                # same name-derived address); reap it in place. A collision
+                # from any other source still hits list_host's refusal.
+                self.delist(born["host"], reason="superseded by a new carve")
             self.store.append_fleet_event({
                 "event": "provision", "t": time.time(), "host": born["host"],
                 "metal": metal_name, "request": request,

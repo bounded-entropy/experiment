@@ -865,6 +865,41 @@ class DecommissionTest(DeskFixture):
         self.assertEqual(desk.listings, {})
 
 
+class SupersededCarveTest(DeskFixture):
+    def test_a_recycled_metals_same_name_carve_reaps_the_corpse(self) -> None:
+        """A metal container recycle resets its carve counter, so a fresh
+        carve can re-mint a DEAD listing's exact name (observed live). The
+        carve's success proves the metal owns the name now, so the desk reaps
+        the corpse in place and lists the newborn; a same-name listing that
+        still ANSWERS falls through to list_host's refusal — the true
+        collision stays loud."""
+        service = self.metal_service(devices=2)
+        desk = self.desk_with_metal("fake-metal")
+
+        async def drive():
+            first = await Campaigns(desk).submit(self.split_spec())
+            await service.hosts[first["host"]]._adoptions[first["run_id"]]
+            # the container generation turns over: books empty, counter reset,
+            # every carved address dead — the same object, so the desk's plane
+            # transport still reaches it, exactly as a redeployed cls would
+            service.hosts.clear()
+            service.addresses.clear()
+            service.services.clear()
+            service.carves = 0
+            reborn = await Campaigns(desk).submit(arith_spec(
+                self.train, seeds=Seeds(master=31),
+                gpu_config=self.split_spec().gpu_config))
+            await service.hosts[reborn["host"]]._adoptions[reborn["run_id"]]
+            return first, reborn
+        first, reborn = go(drive())
+        self.assertTrue(reborn["accepted"], reborn)
+        self.assertEqual(sorted(reborn["pools"].values()),
+                         sorted(first["pools"].values()))   # same minted names
+        reasons = [e.get("reason") for e in self.store.read_fleet_log()
+                   if e.get("event") == "delist"]
+        self.assertEqual(reasons.count("superseded by a new carve"), 2)
+
+
 class StopTest(DeskFixture):
     def test_stop_cancels_journals_and_a_resume_completes(self) -> None:
         """The per-tenancy kill: a gated run is stopped mid-flight — the
