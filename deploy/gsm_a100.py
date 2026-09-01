@@ -666,14 +666,18 @@ async def measure() -> None:
     except Exception:
         print("[measure] no campaign roster yet")
         return
+    # A MEASUREMENT IS AN OBSERVER: it joins a listed pool or it skips the
+    # pass — it never provisions. (resolve() may carve, and a cron firing on
+    # a bare venue carved a rogue main-only host whose lazily-built second
+    # engine OOMed the shared card and killed every tenancy — observed live.)
     fleet = RemoteDesk(DeskTransport())
-    placed = await fleet.resolve([Demand(
-        pool="main", capability="inference", base=BASE, shape=1,
-        memory=SERVE_FRACTION, group=0, sharing="concurrent")])
-    if not placed.get("placed"):
-        print(f"[measure] no pool to measure through: {placed}")
+    listings = fleet.status().get("listings", {})
+    serving = [row["address"] for name, row in sorted(listings.items())
+               if "main-tp1" in name]
+    if not serving:
+        print(f"[measure] nothing listed serves main: {sorted(listings)}")
         return
-    pool = RemotePool(MetalTransport(placed["pools"]["main"]), base=BASE, tp=1)
+    pool = RemotePool(MetalTransport(serving[0]), base=BASE, tp=1)
     for rid, entry in sorted(listed.items()):
         tasks = {t.id: t for t in load_tasks(store, entry["eval"])}
         told = await measure_run(
