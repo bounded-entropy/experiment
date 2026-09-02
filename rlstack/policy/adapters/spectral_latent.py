@@ -37,7 +37,7 @@ MEMBER_RECORD = "slatent_member"    # which ensemble member served it
 
 # The provided tensors — recomputed by every training forward. latent_kl is
 # the SHARED latent-KL channel (plora provides the same name), which is what
-# lets grpo_latent_kl_gated price either adapter unchanged.
+# lets one latent-KL loss price either adapter unchanged.
 KL_PROVIDED = "latent_kl"
 SIGMA_PROVIDED = "spectral_sigma_mean"    # posterior scale: here to be WATCHED
 

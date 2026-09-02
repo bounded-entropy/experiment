@@ -165,8 +165,8 @@ no factors artifact exists — the trainer recomputes the full SVD from the
 weight it holds at install. `spectral_latent` is the plora-style twin (gains
 GENERATED from a latent; posterior, KL, recorded draw, member ensemble) —
 the "does the latent help" ablation. Both provide `latent_kl`'s family:
-plora and spectral_latent share that channel name, which is what lets
-`grpo_latent_kl_gated` price either.
+plora and spectral_latent share that channel name, so one latent-KL loss
+prices either.
 `rlstack/policy/adapters/{spectral,spectral_torch,spectral_vllm,spectral_latent,spectral_latent_torch,spectral_latent_vllm}.py`
 
 **TaskMaker / Derive** — mint-then-make, the third leaf: a plan may name an
@@ -174,12 +174,12 @@ episode whose task does not exist yet — `Derive(source, maker, env)` resolves
 `source` (Replay's ref grammar) to a sealed trajectory and a registered
 `@task_maker` derives the new task, PURELY, so resume re-mints to the byte.
 Declared in `GenSpec.makers`, hashed like an environment. The reflect loop is
-its first use: the maker re-serves the whole transcript plus "what went
-wrong", the `reflect_retry` env samples the critique and the retry, and the
-`sdpo` loss clones each document's final turn (read off `segment_ids` — no
-new masking primitive). An un-referenced rollout is due when the first later
-referenced one is — the generator's intermediate-wave pacing rule.
-`rlstack/data/plan.py`, `rlstack/inference/makers/`, `rlstack/inference/environments/reflect_retry.py`, `rlstack/training/losses/sdpo.py`
+its first use: the `reflect` maker re-serves the whole transcript plus "what
+went wrong"; the env that samples the critique and the loss that clones the
+final turn live with the campaign that uses them. An un-referenced rollout is
+due when the first later referenced one is — the generator's intermediate-wave
+pacing rule.
+`rlstack/data/plan.py`, `rlstack/inference/makers/`
 
 **Site** — a canonical attachment point named by the checkpoint's own module
 path, resolved at Phase 0 against `site_space` = the schema ∪ every bank

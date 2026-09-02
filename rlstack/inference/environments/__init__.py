@@ -8,6 +8,5 @@ from rlstack.inference.environments.base import (  # noqa: F401
     Environment, EnvironmentDef, PoolClient, environment,
 )
 from rlstack.inference.environments import (  # noqa: F401  (registers builtins)
-    dapo_math, glyph_exchange, math_single_turn, noop, reflect_retry,
-    stamp_office,
+    dapo_math, math_single_turn, noop,
 )

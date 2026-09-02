@@ -155,11 +155,10 @@ def spec_for(store, task_id, held_out, updates, master):
                     sampling=SamplingSpec(temperature=1.0, max_tokens=MAX_TOKENS)),
         plans=plans,
         algo=AlgoSpec(
-            # accuracy first, then the KL: the prior's pull is gated on the
-            # group solving the problem, so early updates are pure GRPO and a
-            # solved group hands its share of the update to the prior
-            loss="grpo_latent_kl_gated",
-            post=("final_answer", "group_accuracy", "grpo_advantage"),
+            # the ungated latent KL: the prior's pull from the first update
+            # (the accuracy-gated variant lives with the campaign that uses it)
+            loss="grpo_latent_kl",
+            post=("final_answer", "grpo_advantage"),
             # THE OVERRIDE IS THE POINT of the dotted grammar: the hypernet is
             # an ordinary network and may be decayed; the posterior is a
             # distribution's parameters, where decay would be a second,
