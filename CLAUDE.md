@@ -14,7 +14,7 @@ continue is in the repo.
    different meaning is a finding.
 3. **agent-context/CONTEXT.md** — the decision log. Chronological, numbered;
    later entries supersede earlier ones (#28–#48 cover the current shape:
-   the trajectory/wave rename, the loss zoo + stress matrix, the GpuArbiter,
+   the trajectory/wave rename, the loss zoo + stress matrix, the Arbiter,
    the multi-tenant Learner, the Host, the operational CLI + observe/, the
    flow graph + dictionary.json, the #38 loss-purity ruling, the scoring
    verb + real opsd, the observer UI + custom panels, #43: the fleet —
@@ -28,6 +28,9 @@ continue is in the repo.
    #43). Invariants I1–I12. Deltas after the fold-in live in CONTEXT.md
    (incl. #55's terminology: the spec text still says gpuset/kind/llm in
    places — swap at the v4 fold).
+5. **knowledge/** — the ADRs: one file per major architectural change,
+   written and ANSWERED before the code exists. `knowledge/TEMPLATE.md` is
+   the form; the section below is the rule.
 
 ## Working norms (Samarth's, stated across sessions)
 
@@ -42,90 +45,65 @@ continue is in the repo.
   lazy). Resume-equivalence (`tests/test_resume.py`) is byte-identical run
   dirs — protect it.
 
-## State at handover
+## Architectural design records (knowledge/)
 
-- THE RUN'S SHAPE IS DATA (#59/#60/#61): a RunPlan is waves x groups x
-  leaves, written as a cas artifact and pinned in the spec, so group_size /
-  trajectories_per_wave / n_updates / epochs_per_wave are gone from Schedule
-  (one wave IS one gradient update). A leaf is Sample (make it — the only
-  "not yet" a daemon awaits) or Replay (take one already sealed), which
-  collapses live/replay/static into leaf constructors and lets one wave mix
-  them. Residency is not durable and need not be: `detach` is the fifth
-  rollout-lowering verb, BundleResidency bounds a pool (LRU, never a pinned
-  bundle), and restore rebuilds any committed version from the store with the
-  content-addressed id as the proof. DAPO-Math-17k is on the volume
-  (17,547 train / 370 eval, thinking OFF); deploy/dapo_grpo.py is the
-  campaign. THE OPEN BLOCKER IS SCIENCE, NOT PLUMBING: at group_size 8 the
-  14B scores all-or-nothing per group, so advantage was -0.0 and the updates
-  carried no signal — a pass-rate filter is the standard answer and is not
-  built. Activation checkpointing (#61) is committed but UNPROVEN on metal.
-- THE VOCABULARY IS RENAMED (#54/#55): ARCHITECTURE.md is the universal
-  reference and docstrings speak it. "Kind" (for adapters) is dead — the
-  registered class is AdapterType (`@adapter_type`, ADAPTER_TYPES,
-  AdapterSpec.adapter_type); Regime/Demand say `capability`;
-  Partition.gpuset → `.metal`; the PoolClient param is `client` (not llm);
-  TokenBatch.post → `.postdata`; VllmEngine takes max_bundles/max_rank.
-  The identity move is ACCEPTED: registry strings + class sources hash
-  into run_id, so pre-rename stores are read-only history (the observer
-  tolerates old journal keys; one regression test pins that).
-- 609 tests green on fakes (torch-gated skips run in the image). Real
-  metal is PROVEN through the stress matrix (deploy/stress_l4.py): seven
-  concurrent tenants — grpo/ppo/gspo/sft/sdft/replay_distill/self_anchor,
-  live + replay + static sources, a judge pool, lag=2 — on one Modal L4
-  with ONE shared engine and ONE shared multi-tenant learner, plus
-  sleep-sharing kill/resume and cross-container resume, all green. Image
-  pinned: vllm 0.28.0 / torch 2.13.0 / transformers 5.16.1. The observer
-  UI is deployed (…--rlstack-ui.modal.run), verified live.
-- The fleet (#43, I12) is METAL-PROVEN through #45/#47: hosts are ATOMIC
-  PURPOSED PARTITIONS (Partition + Regimes, attested at birth, never
-  reshaped; >1 regime alternates on the host's own arbiter group);
-  sharding is a build fact (Engine.tp / Learner.fsdp, shape-matched at
-  submit); runner/fleet.py climbs join → carve (journaled) → acquire
-  (human); runner/remote.py is the wire (HostService: admission at the
-  serving host; RemotePool: full Engine protocol, byte-identical to local
-  on fakes). TP=2/4 inference, score_tokens, the Modal-cls transport
-  (deploy/modal_host.py), and FsdpTorchLearner (fsdp=2, kill/resume,
-  width-free sealed bytes) are all proven on L4 metal. The learner is
-  never remote — the runner goes to it.
-- The trainer batches (#44): additive install + row routing (the
-  trainer-side punica; rlstack/policy/adapters/replay.py is the seam),
-  16/16 metal parity incl. two tenants' deltas in one forward; swap-install
-  is gone.
-- THE MILESTONE END TEST IS GREEN (#47): true OPD — `opd` is sampled-token
-  reverse KL (score-function gradient) over a teacher_logprobs token_level
-  column scored by a LIVE Qwen3-32B tp=4 teacher host, student inference
-  tp=2, learner fsdp=2, three containers over ModalTransport (run
-  c0f65f24362b: KL 0.356→0.285 nats over 4 updates, gap at the kernel
-  floor). The old replay-matching loss is renamed replay_distill.
-- Experiments are tenants submitted to hosts, each with its own run store
-  (one experiment, one store, for life). The GpuArbiter owns admission;
-  leases are gone. The observer (rlstack/observe/, `python -m rlstack
-  {hosts,runs,gpu,ui}`) reads journals + peeks only — since #57 the peeks
-  include SEALED per-update artifacts (peek_wave/peek_postdata), never
-  live state; the UI renders each run from its own dictionary.json.
-- The loss is pure math (#38): requires names data columns only; post
-  processors produce everything else (token_level = per-token channel; a
-  processor may score through any declared pool, cross-base included).
-- SUB-GPU HOSTS ARE METAL-PROVEN (#51/#52, deploy/partition_l4.py): many
-  fractional partitions coexist on one device (vLLM budgets against device
-  total, so partitions compose additively), real sleep alternation hands
-  HBM back (~9.9 GiB on an L4), joins are fraction-free, refusals correct,
-  a failed carve leaves neighbors serving. Partitions carry their gpu kind
-  (#49, fraction_for_gb is the one GB↔fraction meeting point); carve names
-  are unique + journal-safe, factories receive the Partition, VllmEngine
-  has an honest sleep seam (#52). Adapter lowerings are ONE contract per
-  (kind, side) (#48: demands/attach/apply/align + reaches; vllm_engine.py
-  is a mechanism-blind bus). Evaluator samples concurrently with
-  order-independent bytes; rank teardown is bounded (#53).
-- OBSERVABILITY IS LIVE (#56/#57 on top of #50): hosts journal windowed
-  `traffic` events (tokens/s, TTFT, admission wait, inflight — counted at
-  seams we own, drained on the stats tick) and per-update `update` events
-  (the four phases: collect/post/train/seal) — wall clock lives ONLY in
-  host journals, never a run dir (resume-equivalence holds, sha-proven).
-  The UI is rlstack/observe/web/ (native ES modules, no build step): step
-  economics, logprob_gap as the parity rail, fleet aggregates, redrawn GPU
-  cards, and the wave browser — sealed waves one click deep, trajectories
-  as chat.
+A **major architectural change gets an ADR before it gets code.** The ADR
+records the original intent verbatim, turns it into a plan a human can read,
+and ends in a list of questions Samarth answers one by one. Nothing is
+implemented until every question carries an answer and the status says
+`Accepted`.
+
+**Be judicious.** The bar is: a new primitive, a new daemon or verb, a change
+to an invariant (I1–I12) or to a store layout, a new folder region or a
+crossing of STYLE.md rule 8's import graph, anything that changes run identity
+or the resume-equivalence bytes, or a decision that will be re-litigated in six
+months. A bug fix, a new loss or postprocessor in an existing shape, a test, a
+deploy script, or a rename does NOT get an ADR — it gets a commit. Writing an
+ADR for a small change devalues the ones that matter; skipping one for a large
+change costs a rewrite. If it is genuinely borderline, ask Samarth rather than
+guessing.
+
+**The form** — copy `knowledge/TEMPLATE.md` to
+`knowledge/NNNN-kebab-title.md` (next free number, zero-padded to four):
+
+- **Meta** — date, title, status (`Proposed` → `Answered` → `Accepted` →
+  `Implemented`, or `Rejected` / `Superseded by ADR NNNN`), the folders it
+  touches, the invariants it bears on, the CONTEXT entries it extends.
+- **Original prompt** — Samarth's words, verbatim and uncut.
+- **Context / problem** — what is true today, what breaks, why the existing
+  primitives do not already answer it. File and line, and the measurement if
+  one exists.
+- **Decision** — the shape in the repo's own vocabulary (ARCHITECTURE.md),
+  then: **touched vs. untouched** files (the untouched list is the blast
+  radius, each with its reason); **promises vs. non-promises** (what is true
+  after the commit, in checkable terms — and what it deliberately does not do
+  or prove on metal); **interfaces** (which protocol, which verb, which gate
+  check, which store key, what `observe/` sees); and **sketches** — the two or
+  three signatures that make "agree" a decidable question, not the
+  implementation.
+- **Questions** — numbered, each a real fork with a recommendation and the
+  consequence of the other branch. Cover the races, the crash-midway state, the
+  resume path, and the byte-identity obligations explicitly; a question with an
+  obvious answer is padding, and an unasked race is a rewrite. Each ends with a
+  blank `> **Samarth:**` line, answered `agree` or `disagree` plus reasoning.
+- **Outcome** — filled at implementation: what landed, what the answers
+  changed, the test count, what stayed unproven, the CONTEXT entry number.
+
+**The loop.** Write the ADR and commit it at `Proposed` — the commit is the
+handoff, not a draft in chat. Samarth answers inline and commits; the agent
+re-reads, folds every `disagree` into the Decision (a disagreement that changes
+the shape may open new questions — ask them rather than assuming), and marks
+`Accepted`. Only then does code get written. Do not implement against an
+unanswered question and do not silently take the recommendation.
+
+**Its relation to CONTEXT.md.** The ADR is the decision BEFORE the code; the
+CONTEXT entry is the record AFTER it — what actually landed, what metal proved,
+what stayed open. Both exist for a spec-shape change: the ADR is where the
+questions were answered, the numbered CONTEXT entry is the canon that later
+sessions read. Cross-reference each in the other, fold into
+`agent-context/rl-stack-spec.md` when an invariant moved, and set the ADR to
+`Implemented`. A superseded ADR is never edited away — it gets
+`Superseded by ADR NNNN` and stays, because the reasoning is the artifact.
 
 ## Quick commands
 
@@ -141,39 +119,3 @@ modal run deploy/stress_l4.py                   # the full stress matrix (~1h)
 modal run deploy/opd_l4.py                      # OPD 8B←32B, three hosts (~15m)
 modal run deploy/fsdp_l4.py                     # the FSDP ladder on 2xL4
 ```
-
-## Known-open work (deliberate, logged)
-
-- The async scorer daemon: teacher scoring currently rides the Trainer's
-  post phase INLINE (sequential 32B prefills block each gradient); the
-  scorer is a store-synced daemon that writes postdata ahead of the
-  trainer (design settled in conversation + CONTEXT; version-pinning rule:
-  post traffic to the POLICY pool pins the wave's recorded policy_version).
-  Also un-batched/un-cached teacher scoring, and the notify-deletion TODO.
-- Multi-GPU leftovers (#45/#47): host linger/GC back to residual; a
-  measured join-refusal signal; the cross-tenant training coalescer (#44
-  designed it); streamed sample replies + a local tokenizer beside
-  RemotePool; kill/resume of the three-host OPD run (mechanism proven,
-  wire untested); the trainer-side cross-tenant batching determinism rule.
-- Adapter unruns (#46): soft prompt at tp>1; a soft-prompt tenant over the
-  RemotePool wire; an opsd tenant through score_tokens-under-soft-prompt.
-  Open ruling for Samarth: per-adapter-type lr scaling (a type's sensible lr ~
-  1/sqrt(param count); a mixed-kind bank with empty OptimSpec.overrides is
-  arguably a validate warning — the soft-prompt collapse at lr=1e-2 is the
-  evidence, CONTEXT #46).
-- Parity certificates designed (#25, rlstack_engine/certificates.py) but
-  unwired — logprob_gap is the running alarm.
-- side_attention rollout half: NOT PROVEN, honestly blocked — vllm 0.28.0
-  has no LSE seam on the dense FlashAttention path (#46; the plugin's probe
-  names the missing symbols; reachability reports NONE). Replay half IS
-  proven (4-D attention mask). Unblocks: FlexAttention score_mod, or a
-  vllm bump that plumbs return_softmax_lse.
-- Async post daemon ("scorer"), pool-annotated flow graph, eval `terminal`
-  bit, S3Store, generation-only runs (algo=None: needs a committing Sealer
-  daemon + wave-shape knobs out of Schedule) — designed in CONTEXT, not
-  built. UI named next (#57 shipped throughput emission, per-wave
-  distributions, and the wave browser): token drill-down, cross-run curve
-  comparison, and vLLM-internal occupancy (KV cache / scheduler —
-  version-coupled, only if the seam-level numbers prove insufficient).
-- Open threads listed at the foot of CONTEXT.md (identity rings, schedule
-  split, Wave/ArchiveContext typing).
