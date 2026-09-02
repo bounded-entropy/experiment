@@ -3,9 +3,9 @@
 | | |
 |---|---|
 | **Date** | 2026-09-01 |
-| **Status** | Proposed |
+| **Status** | Proposed — Q1–Q12 answered in session 2026-09-01 and folded; Q4a, Q8a and the re-posed Q10 are open |
 | **Author** | Claude Fable 5.1 (session: gsm-campaign, the ADR 0001 review) |
-| **Touches** | `runner/` (host, desk's MetalService, remote, interfaces, a new residents module), `runner/learners/`, `runner/fakes.py`, `deploy/`, `observe/` (one view), `tests/` |
+| **Touches** | `runner/` (host, desk's MetalService, remote, interfaces, a new residents module), `runner/learners/`, `runner/fakes.py`, `data/stores/` (one opener), `deploy/`, `observe/` (one view, one move), `tests/` |
 | **Invariants** | I8 (multi-tenancy on both sides), I12 (a host is atomic and never reshaped), I5 (topology is semantics-neutral), I7 (the substrate is certified) |
 | **CONTEXT** | extends #43 (the host), #44 (row routing), #45 (the rank chorus), #51/#52 (sub-GPU hosts, the sleep seam), #53 (bounded rank teardown), #68 (the metal plane), #69 (the blind desk); answers ADR 0001's Q4 with its branch (b); the entry number lands at implementation |
 
@@ -45,6 +45,28 @@
 > the shape of this request
 
 > everything you said makes a lot of sense to me. let's implement
+
+And, answering the twelve questions of this ADR in session:
+
+> Q1) engines and learners.
+> Q2) yes, the loss should stay bound at install, because otherwise momentum,
+> etc. doesnt make much sense.
+> Q3) emitted bytes. eventually, the other mode we will support is NCCL
+> directly between two residents (dont do anything too drastic that would
+> prevent this from happening in the future)
+> Q4) isn't building not a property of deploy or a particular venue, but rather
+> a universal property? like, given a specific partition, it's deterministic
+> how to build on there, right?
+> Q5) sure that works
+> Q6) sure let's reason about that later.
+> Q7) yes, a restart should go through the entire loop of resubmitting and
+> recarving so the metalservice (and by proxy, the desk and observer) knows
+> whats up
+> Q8) does this imply that a learner can't sleep? why?
+> Q9) yes
+> Q10) what are frames?
+> Q11) sure
+> Q12) sure
 
 ## Context / problem
 
@@ -112,13 +134,29 @@ init seed, `torch_learner.py:40`), and the optimizer settings. The chorus
 broadcasts the full spec to every follower. A process cut along this seam must
 carry a typed projection, or the learner keeps owning experiment facts.
 
-**One more fact, about alternation.** `VllmEngine.sleep`/`wake`
+**A third fact, about how a resident is built.** Every venue hands
+`MetalService` lambdas (`gsm_a100.py:268`): `VllmEngine(regime.base,
+tp=regime.shape, gpu_memory_utilization=partition.memory, max_model_len=4096,
+max_bundles=32, max_rank=16, max_members=…, cas_get=store.cas_get, serves=…)`
+and `TorchLearner(device=f"cuda:{partition.devices[0]}")`. Read them closely
+and they are two things interleaved: what follows from (regime, partition) —
+the class, the base, the width, the device, the fraction — and what does not:
+the capacity knobs (`max_model_len`, `max_bundles`, `max_rank`, `max_members`,
+`serves`, sleep mode; a learner's dtype, grad clip, activation checkpointing)
+and where the store is. The first kind is universal and lives in a deploy by
+accident; the second is a typed record nobody has written, so it travels as
+keyword arguments inside a closure that cannot cross a process.
+
+**A fourth, about alternation.** `VllmEngine.sleep`/`wake`
 (`vllm_engine.py:312`) are "THE evict verb an alternating host's arbiter hook
 calls" — and on this branch nothing wires them: no `wake=`/`evict=` appears in
 `rlstack/` or `deploy/`, and `Host._attach_regimes` (`host.py:218`) attaches
-without hooks. Alternation here is admission-only. Across a process boundary
-these verbs must become door verbs on the resident, which is also the moment to
-wire them.
+without hooks. Alternation here is admission-only: an "alternating" host holds
+both residents' footprints at once and only serializes their compute. The
+Learner has no sleep verb at all, so even a wired host would keep a second
+copy of the base — the learner's frozen one, beside the engine's — resident
+through every sampling phase. ADR 0001's Q7 lets alternating members each
+declare most of a partition; that is honest only if both hand it back.
 
 *Unmeasured:* the per-microbatch cost of a `TokenBatch` frame over a local
 pipe, and the per-update cost of the emitted bytes. Both are bounded below by
@@ -131,17 +169,56 @@ supervised child of the metal's container process, born with
 `CUDA_VISIBLE_DEVICES` equal to its partition's devices and a memory cap equal
 to its partition's fraction (vLLM: `gpu_memory_utilization`, as today; torch:
 `set_per_process_memory_fraction` on every visible device, before the base
-loads), answering at an address over a local `Transport`. The Host stays in the
-metal process as the DOOR — arbiter, roster, runner and daemons, journal — and
-holds proxies: `RemotePool` over the local transport for each engine (the class
-it already is) and a new `RemoteLearner` for its learner. The rank chorus
-becomes internal to the learner resident: rank 0 IS the resident, its followers
-are its children, and `CUDA_VISIBLE_DEVICES` makes "rank r on `cuda:r`" true by
-construction. The Learner protocol's `install` takes a typed `Parameterization`
-instead of an `ExperimentSpec`, and the learner package imports no spec class.
-`MetalService`'s books hold process handles; `decarve` is the teardown ladder;
-a dead resident is a dead host (I12). `describe()` and `status()` name each
-resident with its pid and whether it answers. The Trainer does not move.
+loads), answering at an address over a local multiplexed `Transport`. The Host
+stays in the metal process as the DOOR — arbiter, roster, runner and daemons,
+journal — and holds proxies: `RemotePool` over the local transport for each
+engine (the class it already is) and a new `RemoteLearner` for its learner. The
+rank chorus becomes internal to the learner resident: rank 0 IS the resident,
+its followers are its children, and `CUDA_VISIBLE_DEVICES` makes "rank r on
+`cuda:r`" true by construction. The Learner protocol's `install` takes a typed
+`Parameterization` instead of an `ExperimentSpec`, the loss bound there by
+registry key (Q2: the optimizer's moments belong to one loss), and the learner
+package imports no spec class. `MetalService`'s books hold process handles;
+`decarve` is the teardown ladder; a dead resident is a dead host (I12), and its
+tenants come back only through the whole loop — resubmit, recarve — so the
+metal, the desk and the observer agree on what happened (Q7). `describe()` and
+`status()` name each resident with its pid and whether it answers. The Trainer
+does not move.
+
+**Building a resident is rlstack's, not a venue's (Q4).** `runner/residents.py`
+owns `build_engine(regime, partition, build, store)` and `build_learner(regime,
+partition, build)`: the class, base, width, device and fraction follow from
+(regime, partition) — `tp = shape`; `fsdp = shape`, so a sharded regime leads
+a chorus and an unsharded one is a plain `TorchLearner` on `cuda:0`, which
+after the pin IS the partition's first device — and the capacity knobs arrive
+as typed `EngineBuild` / `LearnerBuild` records. The venue contributes exactly
+two JSON-safe values at bring-up: those records and a `StoreAddress` the child
+opens its own store from. No callable crosses to a child, and the same
+(regime, partition, build) builds the same resident on every venue.
+
+**The door speaks the same verbs to both kinds (Q8).** `sleep`/`wake` are door
+verbs for engines AND learners. An engine's are vLLM's level-1 sleep, as today.
+A learner's are new: `sleep` moves the frozen base, every tenant's params and
+moments to host RAM and returns the allocator's cache; `wake` restores. A
+resident's `hello` says whether it `sleeps`, and the Host wires `evict`/`wake`
+hooks for every resident that does — which un-orphans the sleep seam on this
+branch and makes an alternating host hold ONE base copy at a time. Whether the
+learner half lands in this pass is Q8a.
+
+**What is kept open for the NCCL mode (Q3).** Samarth named the next mode:
+payloads moving between two residents over NCCL, with no process in between.
+This ADR is that mode's precondition rather than its obstacle — each resident
+owns its own CUDA context in its own process, which is what a process group
+needs — and it keeps three things deliberately loose so the mode lands as a
+codec and a verb, not a rewrite: (a) frames are the CONTROL channel and payload
+bytes are encoded by ONE codec (`encode_emitted`, beside `encode_bundle`), so
+by-reference carriage later replaces the codec while the verbs stay; (b) a
+resident has a stable identity (label, pid, door) and the metal process holds
+every handle on a host, so it can broker a rendezvous (an address and a port in
+a later `hello`) without a new registry; (c) nothing routes payloads THROUGH
+the metal process by construction — today's `emit` bytes pass through the
+Trainer because the Trainer owns the store and the bundle, not because the
+transport requires it. A learner-to-engine `transfer` verb is a later ADR.
 
 ARCHITECTURE.md's "Resident / daemon" entry says the Trainer sits beside its
 Learner "because the autograd arc and the seal cannot cross a wire". Half of
@@ -153,7 +230,8 @@ Deliberately NOT in this ADR: the cross-tenant coalescer (#44's design — a
 scheduler behind the learner's door, which this boundary makes a real door and
 otherwise does not touch); a local tokenizer beside `RemotePool` (this makes it
 due, not done); the memory UNIT (ADR 0001 — the cap takes whatever
-`Partition.memory` is, a fraction today); interconnect topology.
+`Partition.memory` is, a fraction today); awaitable learner verbs (Q6: sync
+now, reasoned about later); the NCCL transfer verb; interconnect topology.
 
 ### Touched / untouched
 
@@ -165,26 +243,37 @@ due, not done); the memory UNIT (ADR 0001 — the cap takes whatever
   engine-verb half of today's `HostService.serve`/`answer`, admission-free —
   admission stays in `HostService`, which now delegates through the proxy), the
   JSON codecs for `TokenBatch`/`TrainStats`/`Emitted`/`Parameterization` (bytes
-  as base64, the way `encode_bundle` already does at `:99`), and a multiplexed
-  local transport. This file IS the wire.
-- **Touched** — `runner/residents.py` (new): `ResidentBirth` (what a child is
-  told), `Resident` (spawn, the local transport, `alive()`, `stop()`), the two
-  child mains (engine, learner), and the teardown ladder lifted from
-  `ranks.py`. Rule 8: `runner/` is the substrate — "who may occupy the metal";
-  stdlib `multiprocessing` at module scope, torch only inside the child mains.
+  as base64, the way `encode_bundle` already does at `:99`), and the
+  multiplexed local transport (Q5). This file IS the wire.
+- **Touched** — `runner/residents.py` (new): `EngineBuild`/`LearnerBuild`,
+  `ResidentBirth` (what a child is told), the universal `build_engine`/
+  `build_learner`, `Resident` (spawn, the local transport, `hello`, `alive()`,
+  `stop()`), the two child mains, and the teardown ladder lifted from
+  `ranks.py` (Q9). Rule 8: `runner/` is the substrate — "who may occupy the
+  metal"; stdlib `multiprocessing` at module scope, torch only inside the child
+  mains and the builders (rule 7, lazy).
+- **Touched** — `data/stores/`: `StoreAddress` (backend name, root, locator)
+  and `open_store(address)` — the one place backends are known by name, which
+  is what "one file per backend" already implies. `observe/locate.py`'s
+  `store_for` becomes a caller of it. A filing move: a child must open the
+  store the metal opened, and the observer's resolver is the wrong region to
+  import from `runner/`.
 - **Touched** — `runner/host.py`: `Host` takes proxies; `_attach_regimes` wires
-  `evict`/`wake` to the resident door (Q8); `attest_regimes` reads build facts
-  off the proxies (`RemotePool.tp`, `RemoteLearner.fsdp`, both from the hello
-  frame); `status()` grows `residents`; the `host-up` event carries their
-  labels and pids; the Partition docstring's claim becomes true.
-- **Touched** — `runner/desk.py`, `MetalService` only: `build` spawns one
-  resident per regime instead of calling factories in a thread; the books hold
-  `Resident` handles; `decarve` runs the ladder; a resident's exit decarves its
-  host (Q7); `describe()` reports residents. `Metal`, `Desk`, `carve`'s
-  booking rule and the journal are untouched.
+  `evict`/`wake` to the door of every resident whose hello says `sleeps` (Q8);
+  `attest_regimes` reads build facts off the proxies (`RemotePool.tp`,
+  `RemoteLearner.fsdp`, both from hello); `status()` grows `residents`; the
+  `host-up` event carries their labels and pids; the Partition docstring's
+  claim becomes true.
+- **Touched** — `runner/desk.py`, `MetalService` only: takes `builds` and a
+  `StoreAddress` instead of factories; `build` spawns one resident per regime
+  instead of calling lambdas in a thread; the books hold `Resident` handles;
+  `decarve` runs the ladder; a resident's exit decarves its host (Q7);
+  `describe()` reports residents and the metal's build recipe. `Metal`, `Desk`,
+  `carve`'s booking rule and the journal are untouched.
 - **Touched** — `runner/learners/torch_learner.py`, `fsdp_torch.py`: `install`
   reads a `Parameterization`; `_init_seed` moves to the runner (`loop.py`);
-  the `ExperimentSpec` import goes; `_follow_rank` caps its own device.
+  the `ExperimentSpec` import goes; `_follow_rank` caps its own device;
+  `TorchLearner.sleep`/`wake` (Q8a decides whether now).
 - **Touched** — `runner/learners/ranks.py`: the ladder is imported from
   `residents.py` rather than owned here; the header docstring's "the container
   is that partition" becomes a statement of fact.
@@ -193,16 +282,19 @@ due, not done); the memory UNIT (ADR 0001 — the cap takes whatever
   seeds there.
 - **Touched** — `runner/fakes.py`: `FakeLearner.install` signature; both fakes
   are already stdlib and picklable by module reference, so they run inside a
-  child unchanged otherwise.
-- **Touched** — `deploy/*.py`: factories become BUILDERS a child can import by
-  qualified name (Q4); `release=` disappears (decarve is process teardown);
-  `@modal.exit` tears residents down through the ladder; the Modal-facing
-  routers (`host`/`host_ask`/`metal`/`metal_ask`) are unchanged.
+  child unchanged otherwise; a fake `EngineBuild`/`LearnerBuild` is the empty
+  record.
+- **Touched** — `deploy/*.py`: the lambdas go; each venue passes
+  `EngineBuild(...)`, `LearnerBuild(...)` and a `StoreAddress` to
+  `MetalService` at bring-up; `release=` disappears (decarve is process
+  teardown); `@modal.exit` tears residents down through the ladder; the
+  Modal-facing routers (`host`/`host_ask`/`metal`/`metal_ask`) are unchanged.
 - **Touched** — `observe/views.py`: `hosts_data`/`render_hosts` show the
   resident rows the `host-up` event now carries. `observe/web/` renders them
   on the hosts page — one row per resident, no new page.
 - **Touched** — `ARCHITECTURE.md`: Resident, Rank chorus, Resident / daemon,
-  Host, MetalService entries recoded to the shape above.
+  Host, MetalService entries recoded to the shape above; `EngineBuild`/
+  `LearnerBuild`/`StoreAddress` defined once.
 - **Touched** — `tests/`: `test_host`, `test_desk`, `test_remote` (the
   learner's byte-identity test in the shape of `test_a_remote_main_pool_is_
   byte_identical_to_local`), `test_ranks`, `test_architecture` (one new edge:
@@ -215,20 +307,25 @@ due, not done); the memory UNIT (ADR 0001 — the cap takes whatever
   was drawn in the wrong place.
 - **Untouched** — `runner/engines/vllm_engine.py`: device selection is the
   process's, the fraction is already the constructor's, sleep/wake/shutdown
-  already exist. Claimed here; checked at implementation.
+  already exist, and `ServingBuild` (`policy/adapters/rollout.py:31`) stays the
+  lowering-facing record it is — `EngineBuild` is what a venue declares,
+  `ServingBuild` is what the built engine tells its lowerings. Claimed here;
+  checked at implementation.
 - **Untouched** — `runner/arbiter.py`: residents are keyed by object identity,
   and the proxy is the object; hooks are async callables, and the door verbs
   are async callables.
 - **Untouched** — `spec/`, `spec/canonical.py`: machinery names are not hashed
-  (#55); no field of the canonical tree moves. `run_id` is unchanged for every
-  existing run.
-- **Untouched** — `data/stores/`: no new store key, no new journal file. The
-  `host-up` event gains a field in a host journal, outside every run dir.
+  (#55); no field of the canonical tree moves; the capacity knobs stay OUT of
+  the spec (Q4a) exactly as they are out of it today. `run_id` is unchanged for
+  every existing run.
+- **Untouched** — `data/stores/base.py` and the backends' bytes: no new store
+  key, no new journal file. The `host-up` event gains a field in a host
+  journal, outside every run dir.
 - **Untouched** — `runner/remote.py`'s `RemotePool`, `RemoteHost`,
   `RemoteMetal`, `RemoteDesk`, `LocalTransport`: `RemotePool` gains no code
   and one more caller (the Host itself); the rest never see a resident.
 - **Untouched** — `runner/desk.py`'s `Desk`: listings stay host-granular; the
-  desk never learns the word resident (see non-promises).
+  desk never learns the word resident, nor a build recipe (see Q4a).
 - **Untouched** — `runner/residency.py` (`BundleResidency`): lives inside the
   engine resident, exactly as it lives inside the engine object today.
 - **Untouched** — `policy/`, `training/`, `inference/`, `rlstack_engine/`: the
@@ -246,25 +343,41 @@ due, not done); the memory UNIT (ADR 0001 — the cap takes whatever
   base loads; an allocation past it is an OOM in THAT process, killing that
   resident and never a neighbor. A run whose engine and learner are process
   residents is byte-identical, on fakes, to the same run in-process. The
-  learner package imports no spec class, pinned by `test_architecture`. A dead
-  resident is a dead host: the metal decarves it, frees its booking, and the
-  desk's next probe reaps the listing. `status()` and `describe()` name each
-  resident with pid and liveness, and `nvidia-smi` attributes memory to it.
-  Teardown is bounded: the ladder's budget per resident, compounded once for a
-  learner's chorus. Every venue keeps working on 1-device metals. The suite is
-  green.
+  learner package imports no spec class, pinned by `test_architecture`. No
+  callable crosses to a child; the same (regime, partition, build) builds the
+  same resident on every venue, by rlstack's own code. A dead resident is a
+  dead host: the metal decarves it, frees its booking, and the desk's next
+  probe reaps the listing; nothing is restarted in place. `status()` and
+  `describe()` name each resident with pid and liveness, and `nvidia-smi`
+  attributes memory to it. Every resident whose hello says `sleeps` is wired
+  into its host's alternation. Teardown is bounded: the ladder's budget per
+  resident, compounded once for a learner's chorus. Every venue keeps working
+  on 1-device metals. The suite is green.
 - **Non-promises.** It does not build the coalescer. It does not add a local
   tokenizer — `engine.tokenize` per trajectory becomes a process round-trip,
   measured in the Outcome and fixed in its own commit if the number says so. It
   does not change the memory unit. It does not prove a multi-device metal with
   split partitions on metal until a 2+-device venue runs: the pin is asserted
   by device count, the topology is not. It does not teach the desk about
-  residents — listings stay host-granular, and a host with a dead resident is
-  reaped as a dead host. It does not restart a dead resident in place (Q7). It
-  does not change vLLM's own internal process structure. It does not make the
-  learner's verbs awaitable (Q6).
+  residents or build recipes — listings and capability matching stay as they
+  are. It does not restart a dead resident in place. It does not change vLLM's
+  own internal process structure. It does not make the learner's verbs
+  awaitable. It does not build the NCCL transfer verb, only refrains from
+  blocking it. Learner sleep at `fsdp > 1` is UNPROVEN whatever Q8a decides:
+  `fully_shard`'s DTensor parameters (`fsdp_torch.py:128`) make offload a
+  separate proof, and a sharded learner reports `sleeps: false` until it lands.
 
 ### Interfaces
+
+**A frame** (Q10) is the repo's word for one message on a `Transport`
+(`remote.py:213`): a verb name plus a JSON-safe payload dict, and the JSON-safe
+reply dict that comes back — `call(verb, payload)` on the admitted, async path
+and `ask(verb, payload)` on the admission-free, sync one. `RemotePool.add_bundle`
+sends the frame `("add_bundle", {"base", "tp", "bundle": {"bundle_id",
+"policy_version", "payloads": {name: base64}, "adapter_types"}})` and gets `{}`
+back; `LocalTransport` round-trips every frame through `json.dumps`/`loads` so
+a same-process wire is held to the same contract as a real one. Frames are the
+CONTROL channel. A future NCCL data channel between residents runs beside them.
 
 The Learner protocol keeps five verbs; `install` takes a `Parameterization`.
 Two new wire pairs mirror the one that exists: `RemoteLearner`/`LearnerService`
@@ -274,11 +387,11 @@ with admission left behind in `HostService`, which now admits and then forwards
 through the proxy. Admission is unchanged: it happens once, at the serving
 host's arbiter, and traffic is counted at that seam as before. The resident
 door adds verbs on no protocol: `hello` (birth facts — kind, base, `tp` or
-`fsdp`, `sleeps`, devices seen, cap applied, pid), `sleep`/`wake` (engine
-residents that report `sleeps`), `stop`. `MetalService.describe()["hosts"][h]`
-gains `residents`; `Host.status()` gains `residents`; the `host-up` journal
-event carries `residents: [{label, pid}]`. `observe/` sees one more row per
-host. Nothing on the fleet journal's `list`/`metal`/`provision` rows changes.
+`fsdp`, `sleeps`, devices seen, cap applied, pid), `sleep`/`wake`, `stop`.
+`MetalService.describe()` gains `builds` (the metal's recipe) and, per host,
+`residents`; `Host.status()` gains `residents`; the `host-up` journal event
+carries `residents: [{label, pid}]`. `observe/` sees one more row per host.
+Nothing on the fleet journal's `list`/`metal`/`provision` rows changes.
 
 ### Sketches
 
@@ -317,14 +430,49 @@ class Learner(Protocol):
              optim: Mapping[str, bytes] | None) -> None: ...
 
 
-# runner/residents.py — one process wearing one regime of one host
+# data/stores/ — how a child opens the store the metal opened
+@dataclass(frozen=True)
+class StoreAddress:
+    backend: str                         # "local" | "modal_volume" — one file per backend, named here
+    root: str                            # the mount or directory
+    locator: str                         # the store's own locator, as it describes itself
+
+def open_store(address: StoreAddress) -> Store: ...
+
+
+# runner/residents.py — what is universal, and what a venue declares
+@dataclass(frozen=True)
+class EngineBuild:                       # the capacity knobs a venue declares; nothing placement-shaped
+    max_model_len: int
+    max_bundles: int
+    max_rank: int
+    max_members: int
+    serves: tuple[str, ...]              # the adapter types this build pays for
+    enable_sleep_mode: bool
+    enforce_eager: bool = True
+
+@dataclass(frozen=True)
+class LearnerBuild:
+    dtype: str                           # "bfloat16"
+    grad_clip: float
+    checkpoint_activations: bool
+
 @dataclass(frozen=True)
 class ResidentBirth:
     label: str                           # "<host>:<regime>"
     partition: Partition
     regime: Regime
-    builder: str                         # "package.module:function", importable in the image (Q4)
-    venue: Mapping[str, Any]             # JSON-safe venue facts the builder takes (store locator, caches)
+    build: EngineBuild | LearnerBuild
+    store: StoreAddress
+
+def build_engine(regime: Regime, partition: Partition, build: EngineBuild, store: Store) -> Engine:
+    """UNIVERSAL: VllmEngine(regime.base, tp=regime.shape,
+    gpu_memory_utilization=partition.memory, cas_get=store.cas_get, **build)."""
+
+def build_learner(regime: Regime, partition: Partition, build: LearnerBuild) -> Learner:
+    """UNIVERSAL: shape 1 -> TorchLearner(device="cuda:0", ...);
+    shape n -> lead_fsdp_learner(width=n, ...). cuda:0 IS the partition's first
+    device once CUDA_VISIBLE_DEVICES is pinned."""
 
 class Resident:
     @classmethod
@@ -338,13 +486,23 @@ class Resident:
 
 def learner_main(birth: ResidentBirth, conn) -> None:
     """The child: cap every visible device at partition.memory BEFORE the base
-    loads, lead the chorus at fsdp=regime.shape, serve LearnerService frames
-    until stop, end the chorus, exit."""
+    loads, build_learner, serve LearnerService frames until stop, end the
+    chorus, exit."""
 
 def engine_main(birth: ResidentBirth, conn) -> None:
-    """The child: build the engine at gpu_memory_utilization=partition.memory,
-    tp=regime.shape, serve EngineService frames concurrently on its own loop
-    until stop, shut the engine down, exit."""
+    """The child: open_store(birth.store), build_engine, serve EngineService
+    frames concurrently on its own loop until stop, shut the engine down, exit."""
+
+
+# runner/learners/torch_learner.py — the learner's half of alternation (Q8a)
+class TorchLearner:
+    async def sleep(self) -> None:
+        """Hand the device back: base, every tenant's params and moments to
+        pinned host RAM; empty the allocator's cache. Idempotent."""
+    async def wake(self) -> None:
+        """The inverse. Placement is settled before any verb runs, so no
+        forward meets a half-woken learner — the arbiter switches at zero
+        in-flight work, as for engines."""
 
 
 # runner/remote.py — the learner's wire, the shape RemotePool already has
@@ -361,7 +519,7 @@ class LearnerService:
 def build(self, name, regimes, devices, memory) -> Host:
     partition = Partition(self.metal.name, devices, memory, self.metal.gpu)
     residents = [Resident.spawn(ResidentBirth(f"{name}:{r.name}", partition, r,
-                                              self.builder_for(r), self.venue))
+                                              self.builds.for_regime(r), self.store_address))
                  for r in regimes]
     engines = [RemotePool(res.transport, base=res.hello["base"], tp=res.hello["tp"])
                for res in residents if res.hello["kind"] == "inference"]
@@ -386,7 +544,7 @@ If the other branch: engines get pinned and capped, the learner keeps the
 metal process's whole allocator, and `Partition.memory` stays a claim for half
 of every alternating host.
 
-> **Samarth:**
+> **Samarth:** engines and learners.
 
 **Q2. The learner's boundary: a typed `Parameterization` at install, loss bound
 there and resolved in the learner's registry, and the learner imports no spec
@@ -405,7 +563,8 @@ the learner-side lookup is attested, not assumed.
 If the other branch: the spec keeps crossing and the learner keeps reading it —
 the boundary exists in the process table and not in the code.
 
-> **Samarth:**
+> **Samarth:** yes, the loss should stay bound at install, because otherwise
+> momentum, etc. doesnt make much sense.
 
 **Q3. Emitted bytes on the wire, or the learner writes the cas and returns
 addresses?** `emit` returns `{entry: bytes}` for adapters and moments; the
@@ -419,24 +578,60 @@ sub-second — measured in the Outcome and revisited only with a number.
 If the other branch: the learner holds a store handle and a write path, and
 "where the bytes go" is decided on both sides of the boundary.
 
-> **Samarth:**
+> **Samarth:** emitted bytes. eventually, the other mode we will support is
+> NCCL directly between two residents (dont do anything too drastic that would
+> prevent this from happening in the future)
 
-**Q4. How does the child learn to build its resident?** Today a venue hands
-`MetalService` lambdas (`engine_factory=lambda regime, partition:
-VllmEngine(...)`, `gsm_a100.py:268`) that close over a store, a scheme, and a
-transport. A spawn-context child cannot receive a lambda, and importing a
-deploy module inside a child executes its Modal app definition at import.
-Recommendation: **builders by qualified name plus JSON-safe venue facts.** Each
-venue exposes module-level `build_engine(regime, partition, venue)` and
-`build_learner(regime, partition, venue)` in an importable module with no app
-object in it (a `deploy/<venue>_builders.py`, or the existing module split so
-its builders import clean); `ResidentBirth.builder` names one; `venue` carries
-the store locator, the HF cache path, the engine's capacity knobs. The child
-constructs its own `Store` from the locator — `cas_get` is then the child's
-own. No callable ever crosses.
-If the other branch: pickled callables — only module-level functions pickle by
-reference anyway, so this is the same design with the name hidden inside
-pickle's opcode stream and the app import as a side effect.
+*Folded:* the Decision's "kept open for the NCCL mode" paragraph — one payload
+codec, stable resident identities the metal can broker, no payload routed
+through the metal process by construction. The transfer verb is a later ADR.
+
+**Q4. How does the child learn to build its resident?** As first drafted:
+builders by qualified name plus a JSON bag of venue facts, on the premise that
+building was the venue's. Samarth's answer rejects the premise, and the code
+agrees with him — see the Context's third fact: every deploy lambda is the
+universal part (class, base, width, device, fraction — all functions of
+(regime, partition)) interleaved with a typed record nobody had written (the
+capacity knobs) and a store to read from.
+Recommendation, refolded: **building is rlstack's. `runner/residents.py` owns
+`build_engine`/`build_learner`; `EngineBuild`/`LearnerBuild` are typed records;
+the venue declares them and a `StoreAddress` at bring-up and nothing else. The
+child opens its own store through `open_store`. No name-by-string, no bag, no
+callable.** Given (regime, partition, build) the resident is determined, on
+every venue; the build record is the one input that is not derivable from the
+partition, which is why it is a record and not an argument list.
+If the other branch: builders stay in `deploy/`, reached by name, and the same
+regime on two venues can build two different residents for reasons no record
+states.
+
+> **Samarth:** isn't building not a property of deploy or a particular venue,
+> but rather a universal property? like, given a specific partition, it's
+> deterministic how to build on there, right?
+
+*Folded:* yes, with one refinement — deterministic given the partition, the
+regime, AND a build record. The record holds what the partition cannot tell
+you: how long a context, how many bundles, which adapter types the build pays
+for, whether it sleeps; a learner's dtype and clip. Those are not derivable and
+are not in the spec either, which raises Q4a.
+
+**Q4a. Where does the build record live?** It is not derivable from the
+partition (Q4), and it is not in the spec today — `PoolMember` is (name, base,
+tp, n, fraction) and `LearnerMember` is (fsdp, fraction) (`specs.py:161`).
+Recommendation: **on the metal, at bring-up: `MetalService(metal, builds=
+Builds(engine=EngineBuild(...), learner=LearnerBuild(...)), store=
+StoreAddress(...))`, reported in `describe()` and stamped into every hello.
+One recipe per metal; every resident it carves is built from it. The desk
+stays blind to it — capability matching is (base, shape), as today.** This
+keeps the knobs out of identity (a capacity knob in the canonical tree would
+make a `max_model_len` bump a different `run_id`, the thing I5 forbids), and it
+is honest about what they already are: deploy constants, now typed and visible.
+It also leaves a known asymmetry in place rather than hiding it: two metals
+with different `max_model_len` both "serve (base, tp)", and a join cannot tell
+them apart. That is true today and is a placement question for its own entry.
+If the other branch (per carve, from the desk): the carve request carries a
+build record, so the DEMAND side must know engine capacity — either the spec
+grows the knobs (into identity) or the campaign layer invents them (a third
+place, unrecorded).
 
 > **Samarth:**
 
@@ -455,7 +650,7 @@ exactly as before.
 If the other branch: one frame in flight per resident, and the throughput
 parity #45 proved over `RemotePool` is lost inside the container.
 
-> **Samarth:**
+> **Samarth:** sure that works
 
 **Q6. Learner verbs stay synchronous and blocking, or become awaitable?**
 Today `forward_backward` is a sync call on the host's event loop, so the loop
@@ -469,7 +664,7 @@ permits (other daemons' work during a step) reasoned about on its own.**
 If the other branch: the boundary and the scheduling change land together, and
 a resume-equivalence difference has two suspects.
 
-> **Samarth:**
+> **Samarth:** sure let's reason about that later.
 
 **Q7. A resident dies — an OOM in the learner, a wedged engine core. What is
 the host, and who notices?** The books are per host (I12: atomic, never
@@ -488,20 +683,55 @@ If the other branch (restart in place): the metal rebuilds the resident on the
 same partition, re-installs every tenant, re-adds every bundle, and journals
 none of it — a second lifecycle hidden from the desk and the observer.
 
-> **Samarth:**
+> **Samarth:** yes, a restart should go through the entire loop of resubmitting
+> and recarving so the metalservice (and by proxy, the desk and observer) knows
+> whats up
 
 **Q8. Alternation crosses the door, and gets wired.** The arbiter's `evict`/
 `wake` hooks are async callables; the engine's `sleep`/`wake` exist and are
-wired by nothing on this branch.
-Recommendation: **`Host._attach_regimes` wires `evict=resident.sleep` and
-`wake=resident.wake` for every engine resident whose hello reports
-`sleeps: true`, over the door. Learners attach with no hooks: a learner cannot
-hand memory back today, and an alternating host with a learner relies on the
-engine side's sleep — exactly today's #52 mechanism, now reachable.** The
-switch still happens only at zero in-flight work, so no frame meets a
-half-woken engine.
+wired by nothing on this branch. As first drafted this question said a learner
+"cannot hand memory back today" and wired hooks for engines only.
+Recommendation, refolded: **`sleep`/`wake` are door verbs for BOTH kinds, and
+`Host._attach_regimes` wires `evict`/`wake` for every resident whose hello
+reports `sleeps: true`, engine or learner.** The switch still happens only at
+zero in-flight work, so no frame meets a half-woken resident.
 If the other branch: alternation stays admission-only, and a multi-member
 group under ADR 0001 sizes for both residents resident at once.
+
+> **Samarth:** does this imply that a learner can't sleep? why?
+
+*Folded:* no — the draft mistook an absence for an inability. A learner holds
+the frozen base, each tenant's adapter params and Adam moments, accumulated
+grads between `forward_backward` and `optim_step`, and the allocator's cached
+blocks; activations exist only inside a step. Every one of those can move to
+host RAM and back, which is exactly what vLLM's level-1 sleep does for the
+engine (weights to host RAM, KV cache discarded). Nothing in torch prevents it;
+the repo simply never wrote the verb, because alternation on this branch is
+admission-only and nobody needed it. It matters more than it looks: on an
+alternating host the learner's frozen base is a SECOND COPY of the weights the
+engine holds, resident through every sampling phase; ADR 0001's Q7 lets
+alternating members each want most of the partition, which is honest only if
+both hand it back; and vLLM checks free device memory at build, so an engine
+sized for the whole partition refuses to boot beside a learner that never
+sleeps. Cost: the base crosses PCIe each way — a 14B bf16 base is ~28 GB, one
+to two seconds per switch on an A100 — the same order as the engine's own
+sleep. What is NOT simple is `fsdp > 1`: `fully_shard` parameters are DTensors
+and their offload is its own proof (non-promises). Hence Q8a.
+
+**Q8a. Does learner sleep land in this pass?**
+Recommendation: **yes, for `fsdp = 1`: `TorchLearner.sleep`/`wake` as
+sketched, `hello` reports `sleeps: true` for an unsharded learner and `false`
+for a sharded one, and the hook wiring is the same code path as the engine's.
+The cap makes the absence visible — a capped learner and a capped engine on
+one partition, each sized for it, cannot both be awake — so shipping the door
+verb without the learner's half would leave every alternating host oversized
+by one base copy, which ADR 0001's sizing then has to lie about.** A sharded
+learner keeps today's behavior (no hooks, co-resident) and says so in its
+hello.
+If the other branch: the door verbs land symmetric and the learner's `sleep`
+is a stub that reports `sleeps: false`; alternating hosts keep two base copies
+resident; ADR 0001's Q7 needs a sum rule after all for the learner-bearing
+case.
 
 > **Samarth:**
 
@@ -516,24 +746,31 @@ what it signalled; the outer budget is the inner budget plus one grace.**
 If the other branch: two ladders, and #53's lesson — a lost report from an
 unjoined child — is re-learnable in the copy that drifts.
 
-> **Samarth:**
+> **Samarth:** yes
 
-**Q10. Frames are JSON, and byte identity is the test.** The `Transport`
-contract says frames are JSON-safe, and `LocalTransport` enforces it with a
-round-trip (`remote.py:319`). The chorus ships `TokenBatch` by pickle today.
-Recommendation: **JSON frames, honoring the contract: tuples become lists and
-back, floats survive Python's repr round-trip losslessly, bytes are base64.
-`TokenBatch.token_extras`/`doc_turn_extras` are recording-channel values that
-already journal as JSON, so they are JSON-safe by construction — and a value
-that is not will now fail loudly at the wire instead of quietly in a pickle.
-The pin is one test in `test_remote`'s shape: a run with process residents is
-byte-identical to the in-process run on fakes; `test_resume.py` stays green
-untouched.**
+**Q10. Frames are JSON, and byte identity is the test.** A frame is defined
+under Interfaces: one verb's JSON-safe payload dict and its JSON-safe reply,
+the unit every `Transport` in the repo carries; `LocalTransport` enforces the
+contract with a `json.dumps`/`loads` round-trip (`remote.py:319`). The chorus
+ships `TokenBatch` by pickle today, outside that contract, because it never
+had a Transport.
+Recommendation: **JSON frames for the resident wire, honoring the contract:
+tuples become lists and back, floats survive Python's repr round-trip
+losslessly, bytes are base64. `TokenBatch.token_extras`/`doc_turn_extras` are
+recording-channel values that already seal as canonical jsonl
+(`waves/<update>.jsonl.gz`, `stores/base.py:12`), so they are JSON-safe by
+construction — and a value that is not will now fail loudly at the wire
+instead of quietly in a pickle. The pin is one test in `test_remote`'s shape:
+a run with process residents is byte-identical to the in-process run on
+fakes; `test_resume.py` stays green untouched.** Frames are the control
+channel; the NCCL data channel Q3 names runs beside them and is not a frame.
 If the other branch: pickle over the pipe — faster, outside the contract, and
 a leak of non-JSON state into a batch goes unnoticed until it reaches a real
 wire.
 
-> **Samarth:**
+> **Samarth:** what are frames?
+
+> **Samarth (with the definition above):**
 
 **Q11. Real child processes in the fakes suite.** The suite is stdlib-only and
 ~5 s. `FakeEngine` and `FakeLearner` are stdlib and picklable by module
@@ -545,7 +782,7 @@ grows by a second or two and the boundary is exercised for real on every run.
 If the other branch: an in-process "resident" double, and the first real
 process bug is found on a GPU.
 
-> **Samarth:**
+> **Samarth:** sure
 
 **Q12. What the observer sees.** Residents are internal to a host; the desk's
 listings stay host-granular.
@@ -558,7 +795,7 @@ If the other branch: `describe()` only — visible to the desk, invisible to the
 observer, and the "which pools are living" the prompt asked for is a wire call
 away instead of on the page.
 
-> **Samarth:**
+> **Samarth:** sure
 
 ## Outcome
 
