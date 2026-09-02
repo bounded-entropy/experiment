@@ -182,6 +182,25 @@ class HostTest(unittest.TestCase):
         render_runs([self.store])
         self.assertTrue(staged.exists())
 
+    def test_status_reports_the_work_at_the_door(self) -> None:
+        """The two numbers the desk's idleness test reads (ADR 0003):
+        `in_flight` is work admitted and not yet left, `admitted` is a
+        MONOTONE count since birth — so traffic BETWEEN two observations is
+        visible even though nothing is in flight at either."""
+        host = self.host()
+        engine = host.engines[0]
+        host.arbiter.attach(engine, label="test")
+        self.assertEqual((host.status()["in_flight"],
+                          host.status()["admitted"]), (0, 0))
+
+        async def one_admitted_request():
+            async with host.arbiter.admit(engine):
+                return host.status()["in_flight"]
+        self.assertEqual(go(one_admitted_request()), 1)
+        # the traffic is over — nothing in flight, but the door remembers
+        self.assertEqual(host.status()["in_flight"], 0)
+        self.assertEqual(host.status()["admitted"], 1)
+
 
 if __name__ == "__main__":
     unittest.main()

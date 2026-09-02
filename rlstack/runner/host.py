@@ -603,7 +603,9 @@ class Host:
         """The metal as this host sees it: the partition it was born onto
         (the Metal's name, kind of GPU, devices, fraction — as a row, so a
         status crosses the wire unchanged), state (arbiter residency),
-        declared load, and the tenant roster."""
+        declared load, the WORK AT THE DOOR (in flight now, and admitted
+        since birth — what the desk's idleness test reads, ADR 0003), and
+        the tenant roster."""
         return {
             "host": self.name,
             "engines": [engine.base or "*" for engine in self.engines],
@@ -612,6 +614,8 @@ class Host:
             "solo": self.solo,
             "declared_load": round(self.arbiter.declared_load(), 3),
             "residency": self.arbiter.residency(),
+            "in_flight": self.arbiter.in_flight(),
+            "admitted": self.arbiter.admitted(),
             "residents": [r.row() for r in self.residents],
             "tenants": {rid: {"status": t.status, "pools": t.pools,
                               "updates_completed": t.updates_completed}

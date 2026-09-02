@@ -66,6 +66,9 @@ class Arbiter:
         self.clock = clock
         self.meter = meter or TrafficMeter()
         self.switches: list[str] = []       # residency history, labels
+        # every admission since this door was born, monotone: the desk's
+        # idleness test compares it ACROSS ticks (ADR 0003, Q1)
+        self.admissions = 0
         self._residents: dict[int, _Resident] = {}
         self._objects: dict[int, object] = {}   # keep attached objects alive
         self._groups: dict[str, _Group] = {}
@@ -126,6 +129,22 @@ class Arbiter:
         entry = self._residents.get(id(obj))
         return entry.group if entry is not None else None
 
+    def in_flight(self) -> int:
+        """Work admitted at this door and not yet left, summed over every
+        resident — "is anything running here right now", the half of the
+        desk's idleness test that a counter cannot see (a single long
+        admission moves no counter across two ticks; ADR 0003, Q1)."""
+        return sum(entry.in_flight for entry in self._residents.values())
+
+    def admitted(self) -> int:
+        """Admissions since this door was born, monotone. The desk compares
+        it ACROSS ticks: a counter that moved means work passed here since
+        the last observation even though nothing was in flight at either
+        instant — which is what keeps a PURE CLIENT's host (a measurement
+        cron, an evaluator: admitted traffic, no tenancy) from being
+        released out from under its own sampling (ADR 0003, Q1)."""
+        return self.admissions
+
     def residency(self) -> dict[str, str | None]:
         """Per exclusive group: the resident's label (None: nothing yet).
         The partition's STATE, as the host's status reports it."""
@@ -147,6 +166,7 @@ class Arbiter:
         entry = self._entry(obj)
         if entry.group is None:
             entry.in_flight += 1
+            self.admissions += 1
             self.meter.admitted(0.0)
             try:
                 yield
@@ -168,6 +188,7 @@ class Arbiter:
             if group.resident is not obj:
                 await self._switch(group, obj, entry)
             entry.in_flight += 1
+            self.admissions += 1
             # this request's own wait, not the resident's oldest: two callers
             # of one resident queue independently
             self.meter.admitted(self.clock() - queued)
