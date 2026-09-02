@@ -166,7 +166,7 @@ worse than a fraction — it is wrong confidently.
   NCCL buffers, unsharded activations) does not divide, so the estimate is
   optimistic as `tp` grows and the number is a reservation you pad. It says
   nothing about interconnect topology, multi-node collectives, or links between
-  partitions — that is ADR 0002.
+  partitions — that is its own later ADR.
 
 ### Interfaces
 
@@ -267,23 +267,87 @@ If the other branch **(b) one process per partition** — correct, and a rewrite
 where the books live: `self.hosts` / `self.pending` / `self.services` are
 process-local, which is the same ceiling that makes a Metal unable to span
 containers. That is its own ADR, not a clause in this one.
+*Since drafted:* ADR 0002 ("a resident is a process") takes branch (b) for
+engines AND learners, because the torch memory cap is per process too — so
+this question is answered there, and here it reduces to: does this ADR
+state the obligation in the meantime, or defer the whole of "which" to 0002?
 
 > **Samarth:**
 
-**Q5. A metal container restarts onto a different card — who wins, the journal or
-the device?** `register_metal` refuses a taken name (`desk.py:264`) and
-`gsm_a100.py:297` catches the refusal and prints "not re-registered." Under
-fractions that was survivable. Under GB it is silent corruption: the desk keeps
-the OLD card's `vram_gb` forever while the container runs on a new one, and with
-`GPUS = [...]` a restart onto a different kind is routine.
-Recommendation: **re-registration UPDATES the row when the address matches**,
-journaled as a fresh `metal` event, and `from_journal` replays last-write-wins. A
-name+address pair identifies one container's standing claim; its measured facts
-are whatever it last reported.
+**Q5. A metal container restarts — who wins, the journal or the device, and what
+IS a re-registration?** Today `register_metal` refuses a taken name
+(`desk.py:264`); every venue catches the refusal and prints "not re-registered"
+(`gsm_a100.py:297`, `dsl_a100.py:285`, `fleet_a100.py:313`,
+`gsm_sweep_a100.py:304`), and `up` then finds the name in `status()` and reports
+the plane held — on the journal's row. Three facts the code adds to the question
+as first drafted:
+
+- *The address cannot tell a restart from a second `up`.* The plane address is
+  minted from the scheme (`f"{scheme}://metal"`, `gsm_a100.py:294`), so it is
+  identical across container generations AND across a double `up` on the same
+  live container — the case the "not re-registered" print handles benignly
+  today. "Update when the address matches" needs a second discriminator, or it
+  must be safe to apply in both cases.
+- *The row is the desk's VIEW, not its books.* Under this ADR's own interface
+  placement the crossing lives at the metal: the desk deduces from the live
+  `residual()` in GB and the metal's build converts against its own (Q6:
+  measured) `Metal`, which is fresh at every bring-up. `desk.metal[name]` is
+  read by `status()` (`desk.py:706`) and by nothing on the placement path —
+  `provision_unit` reads `metal_remotes` only (`desk.py:386`). What a stale row
+  corrupts is the view — `status()`, the observer's fleet page, the boot
+  instructions — plus any desk-side acquire-rung pre-check this ADR adds
+  (`vram_gb / shape` against one device). That check therefore stays at the
+  metal, where the card is known.
+- *What a restart actually breaks is the generation.* `MetalService.hosts`,
+  `pending` and `carves` are process-local: a reborn container is bare with its
+  counter reset, while the desk still lists every host carved on it,
+  `metal=name`. The code knows this failure and handles it LAZILY —
+  `provision_unit` reaps a corpse when a fresh carve re-mints its exact name
+  (`test_a_recycled_metals_same_name_carve_reaps_the_corpse`), and `reap`
+  concludes silent listings on a 15-minute schedule. A re-registration is an
+  EARLIER and STRONGER signal of the same event — the metal says "up, bare" —
+  and today it is thrown away.
+
+The fleet journal is outside run identity and outside every run dir
+(`stores/base.py:488`), so nothing here bears on resume-equivalence.
+
+Recommendation: **a re-registration of a known name AT THE SAME ADDRESS is the
+container generation turning over. The row is overwritten with the frame's
+measured facts and journaled as a fresh `metal` event — `from_journal` already
+assigns per event (`desk.py:246`), so replay is last-write-wins with no change —
+and the desk immediately RECONCILES that metal's listings by probe: the reaper's
+own conclusion scoped to one metal, with zero retries, because the metal itself
+just said it is up, so a silent host on it is dead, not rebooting. Each corpse
+is delisted with `reason="metal re-registered"`; no decarve, the fraction freed
+itself when the container did.** Probing, rather than trusting the frame's
+snapshot of its books, is what makes a double `up` a no-op (living hosts answer
+and stay listed) and what closes the race where the desk carved onto the
+newborn before its registration frame landed (the newborn answers too). A
+same-name registration from a DIFFERENT address stays a loud refusal: that is
+two deploys colliding on a name, not a restart. The "not re-registered"
+try/except leaves every venue.
 If the other branch: registration stays write-once and a card change requires an
 explicit deregister — one more human step in a loop that already pays for GPU
-loyalty, and the failure mode when someone forgets is a wrong number rather than
-an error.
+loyalty, and the failure mode when someone forgets is a wrong number in
+`status()` rather than an error; the orphaned listings stay the scheduled
+reaper's for up to 15 minutes.
+
+> **Samarth:**
+
+**Q5a. Where does registration run — the shift, or bring-up?** Today it is the
+first act of `metal_shift`, inside the `serve` input that `up` spawns once
+(`gsm_a100.py:708`); `@modal.enter` (`gsm_a100.py:332`) builds the books and
+registers nothing. A container reborn by any other knock — a `host` call, the
+reaper's probe, a carve — comes up bare, un-registered, and holding its old row
+at the desk; nothing in Q5 fires until a human re-runs `up`. (Modal may
+re-deliver the spawned `serve` input to a new container; we do not rely on it.)
+Recommendation: **registration moves into `bring_up`, beside the measurement Q6
+puts there — the container announces itself the moment it exists, and
+`metal_shift` keeps only the stats loop and the volume commit.** Register-at-
+birth is exactly the phone-home contract `list_host` already holds hosts to.
+If the other branch: registration stays the shift's first act, a knock-booted
+metal is an unregistered stranger until the next `up`, and Q5's rule is
+reachable only through the human loop.
 
 > **Samarth:**
 
