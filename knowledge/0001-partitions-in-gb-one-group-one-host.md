@@ -3,7 +3,7 @@
 | | |
 |---|---|
 | **Date** | 2026-09-01 |
-| **Status** | Proposed — Q1–Q3, Q5, Q5a, Q7 answered; Q4 closed by ADR 0002; Q5b–Q5d open; Q6, Q8–Q10 carry offered defaults |
+| **Status** | Accepted (2026-09-01) — every question answered; Q5b–Q5d and the Q6/Q8–Q10 defaults resolved by the agent at Samarth's delegation |
 | **Author** | Claude Opus 5 (session: gsm-campaign review) |
 | **Touches** | `spec/`, `runner/` (desk, host, campaign), `deploy/`, `tests/` |
 | **Invariants** | I3 (identity is computed), I5 (topology is semantics-neutral), I12 (a host is atomic and never reshaped) |
@@ -125,8 +125,12 @@ the knock IS the boot), the reborn container registers itself at bring-up
 that metal is rerouted — re-placed onto whatever fits, the reborn metal
 included, and redelivered, which is resume. A HOST dying alone (a resident's
 OOM, ADR 0002 Q7) is not auto-restarted: decarve, delist, and a human
-resubmit — Samarth's boundary, stated. The mechanism's three forks are Q5b–Q5d;
-this paragraph is folded into Touched / Interfaces once they are answered.
+resubmit — Samarth's boundary, stated. Q5b–Q5d were delegated and resolved as
+recommended: the reaper knocks through the plane address (a `boot_for`
+resolver where a knock does not boot), the shift's duties move into the
+metal's own process, the desk's recipe row is canon and rides every carve, and
+reap composes with reroute, parking what nothing fits and retrying parked runs
+on every `metal` registration.
 
 ### Touched / untouched
 
@@ -140,14 +144,27 @@ this paragraph is folded into Touched / Interfaces once they are answered.
 - **Touched** — `runner/desk.py`: `Demand.memory` (fraction) → `Demand.vram_gb`
   (total) and `Demand.sharing` deleted; `placement_units` reverts to one unit per
   group; `provision_unit` computes per-device GB; `MetalService.residual` /
-  `choose_devices` book in GB; `Metal` gains a measuring constructor.
+  `choose_devices` book in GB; `Metal` gains a measuring constructor
+  (`MetalService.measure()`, Q6).
+- **Touched** — `runner/desk.py`, the supervision loop (Q5–Q5d):
+  `register_metal` UPDATES a known name at the same address (fresh `metal`
+  event; `from_journal` already replays last-write-wins) and reaps that metal's
+  listings by probe with zero retries; a different address stays a refusal.
+  The desk grows a `boot_for` resolver beside `host_for`/`metal_for`; `reap`
+  knocks a silent metal, then reroutes every run whose latest placement was on
+  its reaped hosts (`reroute(run_id, avoiding, park=True)`), and a `metal`
+  registration retries every parked run. The carve request carries the desk's
+  `builds` row and `MetalService.build` builds from it; a re-registration with
+  a different recipe updates the row.
 - **Touched** — `runner/campaign.py`: `demands_of` stops reading `sharing` and
   passes `vram_gb` through. This is the one place specs become demands, so the
   unit crossing belongs here or nowhere.
 - **Touched** — `runner/host.py`: `Partition.memory` docstring states it is
   DERIVED from a GB demand and is the substrate's unit, not the spec's.
 - **Touched** — `deploy/*.py`: every `gpu_config` rewritten; every
-  `OwnedMetal(...)` / `register_metal(...)` takes measured facts.
+  `OwnedMetal(...)` / `register_metal(...)` takes measured facts; registration
+  moves into bring-up (Q5a) and the shift's stats tasks and commit tick move
+  into the metal's own process (Q5b); the "not re-registered" catch goes.
 - **Touched** — `tests/test_canonical.py`: the expected canonical literal.
 
 - **Untouched** — `tests/test_resume.py`. It computes `run_id` from the report
@@ -172,7 +189,11 @@ this paragraph is folded into Touched / Interfaces once they are answered.
   (no `max()` collapse). A member's declared size reaches the substrate that
   enforces it, or the build refuses. `sharing` and `GpuSet` do not appear in the
   canonical bytes. A per-rank slice larger than one device raises the acquire
-  rung by name instead of clamping. The fakes suite is green.
+  rung by name instead of clamping. A metal that dies and comes back at the
+  same address is re-registered with its measured facts and its corpses
+  reaped, with no human step; every run placed on it is rerouted or parked,
+  and a parked run is retried on the next registration — all proven on fakes.
+  The fakes suite is green.
 - **Non-promises.** It does not prove the split gsm shape on metal — the
   two-carve variant is exactly what parked before, and it is UNPROVEN until a
   run lands. It does not ship default factories or a default `transport_for`, so
@@ -182,7 +203,10 @@ this paragraph is folded into Touched / Interfaces once they are answered.
   NCCL buffers, unsharded activations) does not divide, so the estimate is
   optimistic as `tp` grows and the number is a reservation you pad. It says
   nothing about interconnect topology, multi-node collectives, or links between
-  partitions — that is its own later ADR.
+  partitions — that is its own later ADR. It does not observe a real Modal
+  preempt: the reap → knock → re-register → reroute loop is UNPROVEN on Modal
+  until one happens or is forced. It does not delete the Modal store itself —
+  that is an operator's step, named in the Outcome, never run by an agent.
 
 ### Interfaces
 
@@ -195,6 +219,13 @@ GB free per device. The gate keeps `check_members_match_their_shape`
 (`tp`/`fsdp` are still build facts attested against live metal) and loses the
 fraction-sum check. `observe/` sees no change: `Partition.row()` still reports a
 fraction, because that is what the partition owns.
+
+The supervision loop meets the wire it already has: the `metal` verb accepts a
+known name at the same address (update) and refuses it at another (collision);
+`carve` requests grow `builds`; `reap`'s verdicts grow `rerouted` and `parked`
+per run beside `alive | recovered | reaped` per listing; the desk's resolvers
+grow `boot_for(name)`. `observe/` sees the same `parked`/`provision` rows #72
+already renders.
 
 ### Sketches
 
@@ -412,7 +443,11 @@ If the other branch: the desk learns a second venue vocabulary (shelling out
 to `modal`, or spawning `serve` by handle), and a metal whose shift died
 quietly stops committing its volume with nobody noticing.
 
-> **Samarth:**
+> **Samarth:** i think you can resolve 5b 5c and 5d yourself.
+
+*Resolved (agent, as recommended):* the reaper knocks through the plane
+address it holds; `boot_for` for venues whose knock does not boot; the shift's
+duties move into the metal's process.
 
 **Q5c. Which copy of the recipe is canon on respawn?** Two exist: the deploy's
 constants, re-declared at every bring-up (ADR 0002 Q4a), and the desk's
@@ -429,7 +464,10 @@ rebuild a metal whose image changed underneath it, and two containers of one
 metal name can build different residents for the same regime across a
 redeploy with no record of the switch.
 
-> **Samarth:**
+> **Samarth:** (delegated with Q5b)
+
+*Resolved (agent, as recommended):* the desk's row is canon, rides every carve,
+and a different recipe at re-registration updates it.
 
 **Q5d. Reap → reroute: the auto-recontinue, its park, and its retry.** The
 reaper today delists a silent host and stops; the runs on it are orphaned
@@ -451,7 +489,11 @@ makes the recontinued run the same run.
 If the other branch: reap parks always and a human resubmits — the preempt
 costs a human wake-up, which is the case the answer to Q5 rules out.
 
-> **Samarth:**
+> **Samarth:** (delegated with Q5b)
+
+*Resolved (agent, as recommended):* reap → knock → reroute with park; parked
+runs retried on every `metal` registration; crash-midway idempotence via the
+journaled placement and `stop_anchored`.
 
 **Q6. Where does measurement live?** CLAUDE.md requires the fakes suite to be
 stdlib-only with torch lazy, and tests construct `Metal("node-a", "L4", 4)`
@@ -462,7 +504,8 @@ venues only. Measurement is an act, not a field.
 If the other branch: measuring inside `Metal.__post_init__` makes every test
 construction import torch and breaks the stdlib-only rule.
 
-> **Samarth:**
+> **Samarth:** (offered as a default in session, 2026-09-01; no objection —
+> taken as agree: the measuring classmethod; `Metal` stays a plain record)
 
 **Q7. Does `check_fractions_fit` convert to GB or get deleted?** It sums a
 group's fractions and refuses past 1.0 (`validate.py:397`) — correct for
@@ -484,7 +527,8 @@ placement decision; a field nothing reads is a promise the system does not keep.
 If the other branch: it stays as documentation of an intent, in the canonical
 bytes, hashing into every `run_id`.
 
-> **Samarth:**
+> **Samarth:** (offered as a default in session, 2026-09-01; no objection —
+> taken as agree: `PoolMember.n` deleted with `GpuSet`)
 
 **Q9. Does `GpuGroup` keep its name now that one group is exactly one host?**
 Recommendation: **rename to `HostSpec`**, and `GpuConfig.groups` → `hosts`. It
@@ -496,7 +540,8 @@ group.
 If the other branch: `GpuGroup` stays and the central claim of this ADR is true
 in the code and invisible in the vocabulary — the same asymmetry, one layer up.
 
-> **Samarth:**
+> **Samarth:** (offered as a default in session, 2026-09-01; no objection —
+> taken as agree: `GpuGroup` → `HostSpec`, `GpuConfig.groups` → `hosts`)
 
 **Q10. What does `vram_gb=None` mean?**
 Recommendation: **a whole device per shard** — today's meaning of
@@ -505,7 +550,8 @@ know the card; it stays a sentinel resolved at the metal.
 If the other branch: make it required and every unsized deploy refuses at
 validate — more honest, and it means no spec runs until it has been sized.
 
-> **Samarth:**
+> **Samarth:** (offered as a default in session, 2026-09-01; no objection —
+> taken as agree: `vram_gb=None` means a whole device per shard)
 
 ## Outcome
 
