@@ -567,7 +567,7 @@ def campaign_specs(store) -> tuple[dict, dict]:
     """All twelve arms as values plus the measurement's map:
     ({family}-{arm} -> ExperimentSpec, {family: eval uri})."""
     from rlstack import (
-        AlgoSpec, ExperimentSpec, GenSpec, GpuConfig, HostSpec,
+        AlgoSpec, ExperimentSpec, GenSpec, Topology, HostSpec,
         LearnerMember, OptimSpec, PolicySpec, PoolMember, SamplingSpec,
         Schedule, Seeds, lora, plora,
     )
@@ -601,7 +601,7 @@ def campaign_specs(store) -> tuple[dict, dict]:
                                               overrides=overrides),
                               schedule=Schedule(microbatch_tokens=4096,
                                                 max_policy_lag=lag)),
-                gpu_config=GpuConfig(hosts=(
+                topology=Topology(hosts=(
                     HostSpec((PoolMember("main", tp=1, vram_gb=SERVE_GB),)),
                     HostSpec((LearnerMember(fsdp=1, vram_gb=LEARN_GB),)))),
                 seeds=Seeds(master=SEED))

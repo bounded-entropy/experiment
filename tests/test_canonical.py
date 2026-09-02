@@ -16,7 +16,7 @@ from rlstack.spec.specs import (
     PoolMember,
     ExperimentSpec,
     GenSpec,
-    GpuConfig,
+    Topology,
     HostSpec,
     OptimSpec,
     PolicySpec,
@@ -68,7 +68,7 @@ def _small_spec() -> ExperimentSpec:
             optim=OptimSpec("adamw", lr=1e-5),
             schedule=Schedule(),
         ),
-        gpu_config=GpuConfig(
+        topology=Topology(
             hosts=(HostSpec((pool("main"), learner())),)
         ),
         seeds=Seeds(master=0),
@@ -104,26 +104,22 @@ class TestCanonicalJsonShape(unittest.TestCase):
         self.assertEqual(
             canonical_json(_small_spec()),
             '{"__type__":"ExperimentSpec","algo":{"__type__":"AlgoSpec",'
-            '"loss":"grpo",'
-            '"optim":{"__type__":"OptimSpec","betas":[0.9,0.95],"lr":1e-05,'
-            '"name":"adamw","overrides":{},"weight_decay":0.0},'
-            '"post":["verifier","grpo_advantage"],'
-            '"schedule":{"__type__":"Schedule","max_policy_lag":0,'
-            '"microbatch_tokens":16384}},'
+            '"loss":"grpo","optim":{"__type__":"OptimSpec","betas":[0.9,0.95],'
+            '"lr":1e-05,"name":"adamw","overrides":{},"weight_decay":0.0},'
+            '"post":["verifier","grpo_advantage"],"schedule":{"__type__":"Schedule",'
+            '"max_policy_lag":0,"microbatch_tokens":16384}},'
             '"gen":{"__type__":"GenSpec","envs":["math_single_turn"],"makers":[],'
-            '"sampling":{"__type__":"SamplingSpec",'
-            '"max_tokens":1024,"temperature":1.0,"top_p":1.0},'
-            '"tasks":["cas://abc/train.jsonl"]},'
-            '"gpu_config":{"__type__":"GpuConfig","hosts":[{"__type__":"HostSpec",'
-            '"members":[{"__type__":"PoolMember","base":null,"name":"main",'
-            '"tp":1,"vram_gb":null},{"__type__":"LearnerMember","fsdp":1,'
-            '"vram_gb":null}]}]},"init":null,'
-            '"plans":{"__type__":"Plans",'
-            '"rollout":"cas://plan/roll","train":"cas://plan/train"},'
-            '"policy":{"__type__":"PolicySpec","bank":{"pi":{"__type__":'
-            '"AdapterSpec","adapter_type":"lora","init":{"r":16,"tie":false},'
-            '"site":"layers.*.mlp.*","trainable":true}},"base":"Qwen/Qwen3-1.7B"},'
-            '"seeds":{"__type__":"Seeds","master":0},"tier":"lab"}',
+            '"sampling":{"__type__":"SamplingSpec","max_tokens":1024,'
+            '"temperature":1.0,"top_p":1.0},"tasks":["cas://abc/train.jsonl"]},'
+            '"init":null,"plans":{"__type__":"Plans","rollout":"cas://plan/roll",'
+            '"train":"cas://plan/train"},"policy":{"__type__":"PolicySpec",'
+            '"bank":{"pi":{"__type__":"AdapterSpec","adapter_type":"lora",'
+            '"init":{"r":16,"tie":false},"site":"layers.*.mlp.*","trainable":true}},'
+            '"base":"Qwen/Qwen3-1.7B"},"seeds":{"__type__":"Seeds","master":0},'
+            '"tier":"lab","topology":{"__type__":"Topology",'
+            '"hosts":[{"__type__":"HostSpec","members":[{"__type__":"PoolMember",'
+            '"base":null,"name":"main","tp":1,"vram_gb":null},'
+            '{"__type__":"LearnerMember","fsdp":1,"vram_gb":null}]}]}}',
         )
 
     def test_the_plans_are_in_the_identity_by_reference(self) -> None:
@@ -267,13 +263,13 @@ class TestContentHash(unittest.TestCase):
             ),
             "tp": dataclasses.replace(
                 base,
-                gpu_config=GpuConfig(
+                topology=Topology(
                     hosts=(HostSpec((pool("main", tp=2), learner())),)
                 ),
             ),
             "vram_gb": dataclasses.replace(
                 base,
-                gpu_config=GpuConfig(
+                topology=Topology(
                     hosts=(HostSpec((pool("main", vram_gb=12), learner())),)
                 ),
             ),

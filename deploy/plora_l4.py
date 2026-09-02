@@ -139,7 +139,7 @@ def train_plan(updates):
 
 def spec_for(store, task_id, held_out, updates, master):
     """The experiment as one value."""
-    from rlstack import (AlgoSpec, ExperimentSpec, GenSpec, GpuConfig,
+    from rlstack import (AlgoSpec, ExperimentSpec, GenSpec, Topology,
                          HostSpec, LearnerMember, OptimSpec, Plans,
                          PolicySpec, PoolMember, SamplingSpec, Schedule, Seeds,
                          encode, plora)
@@ -174,7 +174,7 @@ def spec_for(store, task_id, held_out, updates, master):
             # rule that the knob must bite still holds — completions here are
             # up to ~1300 tokens.
             schedule=Schedule(microbatch_tokens=512, max_policy_lag=1)),
-        gpu_config=GpuConfig(hosts=(
+        topology=Topology(hosts=(
             HostSpec((PoolMember("main", tp=1, vram_gb=MAIN_GB),)),
             HostSpec((PoolMember("eval", tp=1, vram_gb=EVAL_GB),)),
             HostSpec((LearnerMember(fsdp=1, vram_gb=LEARNER_GB),)))),

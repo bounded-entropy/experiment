@@ -593,7 +593,7 @@ def campaign_specs(store) -> tuple[dict, str]:
     """The four arms as values plus the eval-set uri:
     ({name -> ExperimentSpec}, eval uri)."""
     from rlstack import (
-        AlgoSpec, ExperimentSpec, GenSpec, GpuConfig, HostSpec,
+        AlgoSpec, ExperimentSpec, GenSpec, Topology, HostSpec,
         LearnerMember, OptimSpec, PolicySpec, PoolMember, SamplingSpec,
         Schedule, Seeds, lora,
     )
@@ -627,7 +627,7 @@ def campaign_specs(store) -> tuple[dict, str]:
             # members would ALTERNATE them and force lag 0). The anchor
             # reaches main over the wire, scheme-routed into the same
             # container — UNPROVEN on metal: the fused shape parked here
-            gpu_config=GpuConfig(hosts=(
+            topology=Topology(hosts=(
                 HostSpec((PoolMember("main", tp=1, vram_gb=SERVE_GB),)),
                 HostSpec((LearnerMember(fsdp=1, vram_gb=LEARN_GB),)))),
             seeds=Seeds(master=SEED))

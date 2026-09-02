@@ -29,7 +29,7 @@ from rlstack.data.plan import (
 )
 from rlstack.spec.specs import (
     AdapterSpec, AlgoSpec, BackendProfile, PoolMember, ExperimentSpec,
-    GenSpec, GpuConfig, HostSpec, LearnerMember, OptimSpec, PolicySpec,
+    GenSpec, Topology, HostSpec, LearnerMember, OptimSpec, PolicySpec,
     Plans, SamplingSpec, Schedule, Seeds, WarmStart,
     attn_bias, learner, lora, plora, pool, soft_prompt,
 )
@@ -79,7 +79,7 @@ from rlstack.runner.assemble import realize, rollouts_needed, sample_wave
 from rlstack.runner.refs import RefReader
 from rlstack.runner.post import run_pipeline
 from rlstack.runner.signals import RunSignals
-from rlstack.runner.arbiter import GpuArbiter
+from rlstack.runner.arbiter import Arbiter
 from rlstack.runner.daemons import Daemon, Generator, Scorer, Trainer
 from rlstack.runner.host import (
     Host, HostError, Partition, Regime, Tenancy,

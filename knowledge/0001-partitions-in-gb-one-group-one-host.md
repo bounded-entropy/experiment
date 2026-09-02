@@ -618,3 +618,12 @@ volume: run dirs and cas blobs, the desks' fleet journals (`fleet/*.jsonl` —
 listings vanish and every metal re-registers itself at boot), and the
 dataset rows cache (`measurements/gsm/rows-main.json`). Every pre-#75 run_id
 is unreachable under the new canonical bytes.
+
+**Follow-up rename, same identity break (2026-09-01).** With the store slated
+for deletion and every pre-#75 run_id already unreachable, two names that no
+longer said anything about GPUs were changed in one commit rather than paid
+for as a second break later: `GpuConfig` → `Topology` and the field
+`gpu_config` → `topology` (I5's own word — the spec now speaks the invariant),
+and the machinery name `GpuArbiter` → `Arbiter` (it governs a partition, not
+a device; not hashed). The canonical golden was regenerated; `topology` sorts
+after `tier`. CONTEXT.md and the ADR bodies keep the old spellings as history.

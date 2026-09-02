@@ -100,7 +100,7 @@ def spec_for(arm: dict, factors: dict[str, str], store):
     """One arm as one ExperimentSpec: the same one-task plans, the same
     schedule, the bank and optimizer the arm names."""
     from rlstack import (
-        AlgoSpec, ExperimentSpec, GenSpec, GpuConfig, GroupPlan, HostSpec,
+        AlgoSpec, ExperimentSpec, GenSpec, Topology, GroupPlan, HostSpec,
         LearnerMember, OptimSpec, Plans, PolicySpec, PoolMember,
         RunPlan, Sample, SamplingSpec, Schedule, Seeds, WavePlan, WaveRef,
         encode, lora, plora,
@@ -137,7 +137,7 @@ def spec_for(arm: dict, factors: dict[str, str], store):
                                       weight_decay=0.0, overrides=overrides),
                       schedule=Schedule(microbatch_tokens=512,
                                         max_policy_lag=1)),
-        gpu_config=GpuConfig(hosts=(
+        topology=Topology(hosts=(
             HostSpec((PoolMember("main", tp=1, vram_gb=SERVE_GB),)),
             HostSpec((LearnerMember(fsdp=1, vram_gb=LEARN_GB),)))),
         seeds=Seeds(master=arm["seed"]))

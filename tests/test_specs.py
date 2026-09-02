@@ -20,7 +20,7 @@ from rlstack.spec.specs import (
     PoolMember,
     ExperimentSpec,
     GenSpec,
-    GpuConfig,
+    Topology,
     HostSpec,
     LearnerMember,
     OptimSpec,
@@ -62,7 +62,7 @@ def example_1(bank: dict[str, AdapterSpec] | None = None) -> ExperimentSpec:
             schedule=Schedule(microbatch_tokens=16384,
                               max_policy_lag=0),
         ),
-        gpu_config=GpuConfig(hosts=(
+        topology=Topology(hosts=(
             HostSpec((pool("main", tp=2),)),
             HostSpec((learner(fsdp=2),)),
             HostSpec((pool("eval", tp=1),)),
@@ -88,7 +88,7 @@ class TestConstruction(unittest.TestCase):
         """One HostSpec is one host: a single member is a dedicated host, and
         a HostSpec carries members and nothing else — no device set, no
         sharing word (ADR 0001)."""
-        serve, train, _ = self.exp.gpu_config.hosts
+        serve, train, _ = self.exp.topology.hosts
         self.assertIsInstance(serve.members[0], PoolMember)
         self.assertIsInstance(train.members[0], LearnerMember)
         self.assertEqual(serve.members[0].name, "main")
@@ -110,7 +110,7 @@ class TestConstruction(unittest.TestCase):
         """Pure demand: shard widths and GB, no device counts, no nodes, no
         provider names. `vram_gb` is TOTAL across the shards (Q3), so the
         number survives a re-sharding untouched."""
-        config = GpuConfig(hosts=(
+        config = Topology(hosts=(
             HostSpec((pool("main", tp=2, vram_gb=120),)),
             HostSpec((learner(fsdp=8, vram_gb=400),)),
         ))
@@ -132,7 +132,7 @@ class TestFrozen(unittest.TestCase):
             (exp, "seeds", Seeds(master=0)),
             (exp.policy, "base", "other"),
             (exp.algo.schedule, "microbatch_tokens", 1),
-            (exp.gpu_config.hosts[0], "members", ()),
+            (exp.topology.hosts[0], "members", ()),
         ]:
             with self.assertRaises(FrozenInstanceError):
                 setattr(obj, field_name, value)

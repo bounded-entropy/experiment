@@ -11,7 +11,7 @@ The map, by responsibility — read top to bottom:
                     admit residents, work, write + notify
     signals.py      the LOGICAL half of the blackboard: awaitable predicates
                     over the store — daemons never call each other
-    arbiter.py      the PHYSICAL half: the GpuArbiter owns admission to the
+    arbiter.py      the PHYSICAL half: the Arbiter owns admission to the
                     metal — object-keyed residents, exclusive groups from
                     a multi-member HostSpec, sticky drain-until-blocked
     traffic.py      what travels to pools: EnginePoolClient (sample +

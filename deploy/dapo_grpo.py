@@ -77,7 +77,7 @@ def train_plan(updates):
 def spec_for(store, train_tasks, eval_tasks, updates, master, init=None):
     """The experiment as one value. `init` starts it from another run's
     sealed policy — a birth fact, consumed once at Phase 1 and never again."""
-    from rlstack import (AlgoSpec, ExperimentSpec, GenSpec, GpuConfig,
+    from rlstack import (AlgoSpec, ExperimentSpec, GenSpec, Topology,
                          HostSpec, LearnerMember, OptimSpec, Plans,
                          PolicySpec, PoolMember, SamplingSpec, Schedule, Seeds,
                          encode, lora)
@@ -103,7 +103,7 @@ def spec_for(store, train_tasks, eval_tasks, updates, master, init=None):
                       schedule=Schedule(microbatch_tokens=512, max_policy_lag=1)),
         init=init,
         # two dedicated hosts, a whole device per shard (vram_gb None)
-        gpu_config=GpuConfig(hosts=(
+        topology=Topology(hosts=(
             HostSpec((PoolMember("main", tp=2),)),
             HostSpec((LearnerMember(fsdp=2),)))),
         seeds=Seeds(master=master))

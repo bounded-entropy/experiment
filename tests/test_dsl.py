@@ -19,7 +19,7 @@ import unittest
 
 from common import cas_uri, make_turn
 from rlstack import (
-    AlgoSpec, ExperimentSpec, FakeEngine, FakeLearner, GenSpec, GpuConfig,
+    AlgoSpec, ExperimentSpec, FakeEngine, FakeLearner, GenSpec, Topology,
     HostSpec, GroupPlan, Host, LocalStore, Message, OptimSpec, Plans,
     PolicySpec, Role, Rollout, RunPlan, Sample, Schedule, Seeds, Task,
     WavePlan, WaveRef, encode, fake_qwen_schema, learner, lora, pool,
@@ -193,7 +193,7 @@ def arm_spec(store, *, loss: str, post: tuple[str, ...],
         algo=AlgoSpec(loss=loss, post=post,
                       optim=OptimSpec("adamw", lr=1e-5),
                       schedule=Schedule(microbatch_tokens=2048)),
-        gpu_config=GpuConfig(hosts=(HostSpec((pool("main"),)),
+        topology=Topology(hosts=(HostSpec((pool("main"),)),
                                     HostSpec((learner(),)))),
         seeds=Seeds(master=23))
 
@@ -371,7 +371,7 @@ class ReflectLoopTest(unittest.TestCase):
             algo=AlgoSpec(loss="sdpo", post=("stamp_grade",),
                           optim=OptimSpec("adamw", lr=1e-5),
                           schedule=Schedule(microbatch_tokens=4096)),
-            gpu_config=GpuConfig(hosts=(HostSpec((pool("main"),)),
+            topology=Topology(hosts=(HostSpec((pool("main"),)),
                                         HostSpec((learner(),)))),
             seeds=Seeds(master=29))
         self.assertEqual(validate(spec, SCHEMA), [])

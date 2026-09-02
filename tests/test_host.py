@@ -16,7 +16,7 @@ from dataclasses import replace
 
 from common import arith_spec, arith_store
 from rlstack import (
-    FakeEngine, FakeLearner, GpuConfig, HostSpec, Host, HostError, Partition,
+    FakeEngine, FakeLearner, Topology, HostSpec, Host, HostError, Partition,
     Regime, Seeds, SpecError, fake_qwen_schema, learner, pool,
     run_experiment,
 )
@@ -77,7 +77,7 @@ class HostTest(unittest.TestCase):
         judge_engine = FakeEngine(base="Qwen/Qwen3-8B")
         host = self.host(engines=(FakeEngine(base="Qwen/Qwen3-0.6B"),
                                   judge_engine))
-        spec = arith_spec(self.train, gpu_config=GpuConfig(hosts=(
+        spec = arith_spec(self.train, topology=Topology(hosts=(
             HostSpec((pool("main"),)),
             HostSpec((pool("judge", base="Qwen/Qwen3-8B"),)),
             HostSpec((learner(),)))))
@@ -96,7 +96,7 @@ class HostTest(unittest.TestCase):
         declared load stays the host's own — and the one refusal FIT still
         owns is a learner member on a host wearing no learner."""
         host = self.host()
-        heavy = arith_spec(self.train, gpu_config=GpuConfig(hosts=(
+        heavy = arith_spec(self.train, topology=Topology(hosts=(
             HostSpec((pool("main", vram_gb=60),)),
             HostSpec((learner(vram_gb=60),)))))
         go(host.submit(heavy, SCHEMA))
@@ -276,12 +276,12 @@ class ShapeAndRegimeTest(unittest.TestCase):
         tp2 = FakeEngine(base="Qwen/Qwen3-8B", tp=2)
         host = Host("shaped", engines=(FakeEngine(), tp2),
                     learner=FakeLearner(), store=self.store)
-        spec = arith_spec(self.train, gpu_config=GpuConfig(hosts=(
+        spec = arith_spec(self.train, topology=Topology(hosts=(
             HostSpec((pool("judge", base="Qwen/Qwen3-8B", tp=2),)),
             HostSpec((pool("main"),)), HostSpec((learner(),)))))
         self.assertIs(host.bind_pools(spec)["judge"], tp2)
 
-        four = arith_spec(self.train, gpu_config=GpuConfig(hosts=(
+        four = arith_spec(self.train, topology=Topology(hosts=(
             HostSpec((pool("judge", base="Qwen/Qwen3-8B", tp=4),)),
             HostSpec((pool("main"),)), HostSpec((learner(),)))))
         with self.assertRaises(HostError) as caught:
@@ -314,7 +314,7 @@ class ShapeAndRegimeTest(unittest.TestCase):
                      Regime("learner-fsdp1", "training", None, 1)))
         def heavy(master: int):
             return arith_spec(self.train, seeds=Seeds(master=master),
-                              gpu_config=GpuConfig(hosts=(
+                              topology=Topology(hosts=(
                                   HostSpec((pool("main", vram_gb=30),
                                             learner(vram_gb=20))),)))
 
@@ -341,7 +341,7 @@ class ShapeAndRegimeTest(unittest.TestCase):
                                          {"event": "host-up"})
 
     def test_learner_shape_mismatch_is_a_binding_issue(self) -> None:
-        spec = arith_spec(self.train, gpu_config=GpuConfig(hosts=(
+        spec = arith_spec(self.train, topology=Topology(hosts=(
             HostSpec((pool("main"),)), HostSpec((learner(fsdp=2),)))))
         with self.assertRaises(SpecError) as caught:
             run_experiment(spec, SCHEMA, self.store, FakeEngine(),

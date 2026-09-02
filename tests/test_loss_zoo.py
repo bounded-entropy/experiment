@@ -9,7 +9,7 @@ import tempfile
 import unittest
 
 from rlstack import (
-    AlgoSpec, GpuConfig, HostSpec, OptimSpec, Plans, Schedule,
+    AlgoSpec, Topology, HostSpec, OptimSpec, Plans, Schedule,
     fake_qwen_schema, learner, pool, validate,
 )
 from tests.common import arith_spec, arith_store
@@ -51,7 +51,7 @@ class LossZooTest(unittest.TestCase):
             overrides["gen"] = None
             overrides["plans"] = Plans(train="cas://plan/replay")
         if loss in TEACHER:
-            overrides["gpu_config"] = GpuConfig(hosts=(
+            overrides["topology"] = Topology(hosts=(
                 HostSpec((pool("main"),)),
                 HostSpec((pool("teacher", base="Qwen/Qwen3-32B"),)),
                 HostSpec((learner(),))))

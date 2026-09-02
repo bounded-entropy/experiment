@@ -391,7 +391,7 @@ def pair_specs(store, updates: int):
     """The two arms as values: identical everywhere but the bank and the
     loss. Returns {"lora": spec, "gated": spec}."""
     from rlstack import (
-        AlgoSpec, ExperimentSpec, GenSpec, GpuConfig, HostSpec,
+        AlgoSpec, ExperimentSpec, GenSpec, Topology, HostSpec,
         LearnerMember, OptimSpec, PolicySpec, PoolMember,
         SamplingSpec, Schedule, Seeds, lora, plora,
     )
@@ -411,7 +411,7 @@ def pair_specs(store, updates: int):
                                           overrides=overrides),
                           schedule=Schedule(microbatch_tokens=512,
                                             max_policy_lag=1)),
-            gpu_config=GpuConfig(hosts=(
+            topology=Topology(hosts=(
                 HostSpec((PoolMember("main", tp=1, vram_gb=SERVE_GB),)),
                 HostSpec((LearnerMember(fsdp=1, vram_gb=LEARN_GB),)))),
             seeds=Seeds(master=SEED))

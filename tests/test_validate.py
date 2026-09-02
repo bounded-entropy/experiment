@@ -12,7 +12,7 @@ from rlstack.registry import loss
 from rlstack.runner.fakes import FakeEngine
 from rlstack.training.post.base import PostProcessor, postprocessor
 from rlstack.spec.specs import (
-    AdapterSpec, AlgoSpec, ExperimentSpec, GenSpec, GpuConfig, HostSpec,
+    AdapterSpec, AlgoSpec, ExperimentSpec, GenSpec, Topology, HostSpec,
     OptimSpec, PolicySpec, Plans, Schedule, Seeds, WarmStart,
     learner, lora, pool,
 )
@@ -89,7 +89,7 @@ def clean_spec(**overrides: Any) -> ExperimentSpec:
         algo=AlgoSpec(loss="grpo", post=("verifier", "grpo_advantage"),
                       optim=OptimSpec("adamw", lr=1e-5),
                       schedule=Schedule()),
-        gpu_config=GpuConfig(hosts=(HostSpec((pool("main"),)),
+        topology=Topology(hosts=(HostSpec((pool("main"),)),
                                     HostSpec((learner(),)))),
         seeds=Seeds(master=0),
     )
@@ -298,11 +298,11 @@ class TestReachability(unittest.TestCase):
 
 class TestTopology(unittest.TestCase):
     def test_no_hosts(self) -> None:
-        spec = clean_spec(gpu_config=GpuConfig(hosts=()))
+        spec = clean_spec(topology=Topology(hosts=()))
         self.assertIn("no-hosts", codes(spec))
 
     def test_duplicate_pool(self) -> None:
-        spec = clean_spec(gpu_config=GpuConfig(hosts=(
+        spec = clean_spec(topology=Topology(hosts=(
             HostSpec((pool("main"), learner())),
             HostSpec((pool("main"),)),
         )))
@@ -311,14 +311,14 @@ class TestTopology(unittest.TestCase):
     def test_a_learner_alternating_with_an_engine_binds_the_lag(self) -> None:
         """One HostSpec, learner and engine: they ALTERNATE, generation and
         training take turns, so a lag buffer contradicts the topology."""
-        alternating = GpuConfig(hosts=(HostSpec((pool("main"), learner())),))
+        alternating = Topology(hosts=(HostSpec((pool("main"), learner())),))
         laggy = replace(clean_spec().algo,
                         schedule=Schedule(max_policy_lag=1))
-        spec = clean_spec(gpu_config=alternating, algo=laggy)
+        spec = clean_spec(topology=alternating, algo=laggy)
         self.assertEqual(codes(spec), {"alternation-lag-conflict"})
 
     def test_an_alternating_host_with_lag_zero_is_fine(self) -> None:
-        spec = clean_spec(gpu_config=GpuConfig(hosts=(
+        spec = clean_spec(topology=Topology(hosts=(
             HostSpec((pool("main"), learner())),)))
         self.assertEqual(validate(spec, SCHEMA), [])
 
@@ -326,11 +326,11 @@ class TestTopology(unittest.TestCase):
         """main and a judge taking turns on their own host leave the learner
         training elsewhere: generation is not serialized against training,
         so the lag buffer stays the spec's to choose."""
-        pools_only = GpuConfig(hosts=(
+        pools_only = Topology(hosts=(
             HostSpec((pool("main"), pool("judge"))), HostSpec((learner(),))))
         laggy = replace(clean_spec().algo,
                         schedule=Schedule(max_policy_lag=2))
-        spec = clean_spec(gpu_config=pools_only, algo=laggy)
+        spec = clean_spec(topology=pools_only, algo=laggy)
         self.assertEqual(validate(spec, SCHEMA), [])
 
     def test_sizes_are_never_summed_at_the_gate(self) -> None:
@@ -338,16 +338,16 @@ class TestTopology(unittest.TestCase):
         alternating members may each want most of a card (they take turns),
         and whether two dedicated hosts fit one metal is placement's
         question, answered against a real residual."""
-        generous = clean_spec(gpu_config=GpuConfig(hosts=(
+        generous = clean_spec(topology=Topology(hosts=(
             HostSpec((pool("main", vram_gb=70), learner(vram_gb=70))),)))
         self.assertEqual(validate(generous, SCHEMA), [])
-        two = clean_spec(gpu_config=GpuConfig(hosts=(
+        two = clean_spec(topology=Topology(hosts=(
             HostSpec((pool("main", vram_gb=70),)),
             HostSpec((learner(vram_gb=70),)))))
         self.assertEqual(validate(two, SCHEMA), [])
 
     def test_main_pool_missing(self) -> None:
-        spec = clean_spec(gpu_config=GpuConfig(hosts=(
+        spec = clean_spec(topology=Topology(hosts=(
             HostSpec((pool("rollout"),)), HostSpec((learner(),)))))
         self.assertEqual(codes(spec), {"main-pool-missing"})
 
@@ -393,7 +393,7 @@ class TestSpecError(unittest.TestCase):
             algo=AlgoSpec(loss="nope", post=("also_nope",),
                           optim=OptimSpec("adamw", lr=1e-5),
                           schedule=Schedule(microbatch_tokens=0)),
-            gpu_config=GpuConfig(hosts=()),
+            topology=Topology(hosts=()),
         )
         with self.assertRaises(SpecError) as caught:
             validate_or_raise(broken, SCHEMA)
@@ -428,7 +428,7 @@ class TestPostPools(unittest.TestCase):
     def test_judge_with_declared_pool_is_clean(self) -> None:
         spec = clean_spec(
             algo=self.judge_algo(),
-            gpu_config=GpuConfig(hosts=(
+            topology=Topology(hosts=(
                 HostSpec((pool("main"),)), HostSpec((pool("judge"),)),
                 HostSpec((learner(),)))))
         self.assertEqual(validate(spec, SCHEMA), [])
@@ -446,7 +446,7 @@ class TestPostPoolCoresidency(unittest.TestCase):
         return replace(base, post=("llm_judge", "grpo_advantage"))
 
     def alternate_all(self):
-        return GpuConfig(hosts=(
+        return Topology(hosts=(
             HostSpec((pool("main"), pool("judge"), learner())),))
 
     def test_algo_judge_alone_coexists_with_alternating_main(self) -> None:
@@ -454,13 +454,13 @@ class TestPostPoolCoresidency(unittest.TestCase):
         so a judge-only pipeline is FINE even when its pool alternates with
         main — three-way alternation, one resident at a time."""
         spec = clean_spec(algo=self.judge_algo(),
-                          gpu_config=self.alternate_all())
+                          topology=self.alternate_all())
         self.assertNotIn("post-pools-conflict", codes(spec))
 
     def test_judge_on_its_own_host_is_clean(self) -> None:
         spec = clean_spec(
             algo=self.judge_algo(),
-            gpu_config=GpuConfig(hosts=(
+            topology=Topology(hosts=(
                 HostSpec((pool("main"), learner())),
                 HostSpec((pool("judge"),)),)))
         self.assertNotIn("post-pools-conflict", codes(spec))

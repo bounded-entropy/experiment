@@ -16,7 +16,7 @@ from dataclasses import replace
 
 from common import arith_spec, arith_store
 from rlstack import (
-    FakeEngine, FakeLearner, GpuArbiter, GpuConfig, HostSpec, RunSignals,
+    FakeEngine, FakeLearner, Arbiter, Topology, HostSpec, RunSignals,
     Schedule, fake_qwen_schema, learner, pool, run_experiment,
 )
 
@@ -51,7 +51,7 @@ class ArbiterTest(unittest.TestCase):
     """The physical half: admission semantics of one exclusive group."""
 
     def two_residents(self, **kwargs):
-        arbiter = GpuArbiter(**kwargs)
+        arbiter = Arbiter(**kwargs)
         engine, trainer = object(), object()
         log: list[str] = []
         arbiter.attach(engine, label="engine:main", group="sleep:0",
@@ -147,7 +147,7 @@ class ArbiterTest(unittest.TestCase):
         `quantum` has elapsed since the last one."""
         async def scenario():
             now = [0.0]
-            arbiter = GpuArbiter(quantum=10.0, clock=lambda: now[0])
+            arbiter = Arbiter(quantum=10.0, clock=lambda: now[0])
             engine, trainer = object(), object()
             arbiter.attach(engine, label="engine:main", group="sleep:0")
             arbiter.attach(trainer, label="learner", group="sleep:0")
@@ -175,7 +175,7 @@ class ArbiterTest(unittest.TestCase):
         in-flight work drains and the waiter enters."""
         async def scenario():
             now = [0.0]
-            arbiter = GpuArbiter(max_wait=5.0, clock=lambda: now[0])
+            arbiter = Arbiter(max_wait=5.0, clock=lambda: now[0])
             engine, trainer = object(), object()
             arbiter.attach(engine, label="engine:main", group="sleep:0")
             arbiter.attach(trainer, label="learner", group="sleep:0")
@@ -218,14 +218,14 @@ class ArbiterTest(unittest.TestCase):
 
     def test_admit_all_of_nothing_is_a_no_op(self) -> None:
         async def scenario():
-            arbiter = GpuArbiter()
+            arbiter = Arbiter()
             async with arbiter.admit_all(()):
                 return "ran"
 
         self.assertEqual(go(scenario()), "ran")
 
     def test_attach_is_idempotent_and_group_change_is_loud(self) -> None:
-        arbiter = GpuArbiter()
+        arbiter = Arbiter()
         engine = object()
         arbiter.attach(engine, label="engine:main", group=None, fraction=0.45)
         arbiter.attach(engine, label="engine:judge", group=None)   # same object
@@ -285,7 +285,7 @@ class BlackboardRunTest(unittest.TestCase):
     def test_alternating_colocation_runs_green(self) -> None:
         """One HostSpec, both members: main and the learner ALTERNATE on one
         partition (the exclusive arbiter group), and the run still commits."""
-        spec = arith_spec(self.train, self.heldout, gpu_config=GpuConfig(hosts=(
+        spec = arith_spec(self.train, self.heldout, topology=Topology(hosts=(
             HostSpec((pool("main"), learner())),)))
         report, run = self.run_spec(spec)
         self.assertEqual(len(run.read_ledger()), 4)

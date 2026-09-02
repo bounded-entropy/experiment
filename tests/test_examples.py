@@ -19,7 +19,7 @@ from rlstack import (
     AlgoSpec,
     ExperimentSpec,
     GenSpec,
-    GpuConfig,
+    Topology,
     HostSpec,
     Group,
     GroupPlan,
@@ -158,7 +158,7 @@ def example_1() -> ExperimentSpec:
                             overrides={"head": {"lr": 3e-6}}),
             schedule=Schedule(),
         ),
-        gpu_config=GpuConfig(hosts=(
+        topology=Topology(hosts=(
             HostSpec((pool("main", tp=2),)),
             HostSpec((learner(fsdp=2),)),
             HostSpec((pool("eval"),)),
@@ -329,7 +329,7 @@ class TestExample5MultiNode(unittest.TestCase):
             plans=plans_for("tool_use"),
             algo=replace(example_1().algo,
                          schedule=Schedule(max_policy_lag=1)),
-            gpu_config=GpuConfig(hosts=(
+            topology=Topology(hosts=(
                 HostSpec((pool("main", tp=2, vram_gb=120),)),
                 HostSpec((learner(fsdp=8, vram_gb=400),)),
                 HostSpec((pool("eval"),)),
@@ -353,7 +353,7 @@ class TestExample6Replicates(unittest.TestCase):
             policy=PolicySpec(base="Qwen/Qwen3-1.7B",
                               bank={"pi": lora("layers.0-31.mlp.*", r=16)}),
             plans=example_1().plans,
-            gpu_config=GpuConfig(hosts=(
+            topology=Topology(hosts=(
                 HostSpec((pool("main", vram_gb=7),)),
                 HostSpec((learner(vram_gb=6),)),
             )),
@@ -371,7 +371,7 @@ class TestExample6Replicates(unittest.TestCase):
         """ADR 0001 (Q7): sizes are GB and the gate holds no metal, so
         whether two hosts fit one card is placement's question, answered
         against a real residual — the gate no longer sums anything."""
-        generous = replace(self.base(), gpu_config=GpuConfig(hosts=(
+        generous = replace(self.base(), topology=Topology(hosts=(
             HostSpec((pool("main", vram_gb=70),)),
             HostSpec((learner(vram_gb=70),)))))
         self.assertEqual(validate(generous, SCHEMA_17B), [])

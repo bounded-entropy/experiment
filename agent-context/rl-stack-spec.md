@@ -72,10 +72,10 @@ partition; the member vocabulary is closed at two workload kinds — **pools**
 — and everything else (rollout, eval, judges, teachers) is traffic routed to
 pool *names*. Memory is declared in GB, TOTAL across shards (never a fraction
 of a card the spec does not know), so the same experiment hashes identically
-on an L4 fleet and an H100 fleet. Any two GpuConfigs execute the same
+on an L4 fleet and an H100 fleet. Any two Topologies execute the same
 experiment; placement changes wall-clock, never results. Scheduling (the
 arbiter's policy, the host chosen, `max_inflight`) is likewise outside
-identity. A gpu_config may declare demands no single host can satisfy —
+identity. A topology may declare demands no single host can satisfy —
 several hosts answering one experiment is the normal case, not a special one
 (#47: teacher, student inference, and learner on three containers is the
 proven shape).
@@ -164,7 +164,7 @@ class ExperimentSpec:
     gen: GenSpec | None              # inference world; None = pure-offline run
     trajectories: TrajectorySource   # training world's ONLY input (I1)
     algo: AlgoSpec | None            # training world; None = generation-only run
-    gpu_config: GpuConfig            # semantics-neutral (I5)
+    topology: Topology               # semantics-neutral (I5)
     seeds: Seeds
     init: WarmStart | None = None    # warm-start from another run's sealed state
     eval: EvalSpec | None = None     # firewalled measurement
@@ -259,7 +259,7 @@ class HostSpec:                      # ONE HOST: one placement unit, one
                                      #   alternating with an engine implies lag 0)
 
 @dataclass(frozen=True)
-class GpuConfig:
+class Topology:
     hosts: tuple[HostSpec, ...]
 
 @dataclass(frozen=True)
@@ -310,7 +310,7 @@ class LlmJudge(PostProcessor):       #   seal, before the loss (I9)
                                      #   (one float per generated token — the
                                      #   channel for teacher/hinted logprobs)
     pools = ("judge",)               # pools this processor SAMPLES from — checked
-                                     #   against gpu_config at submit
+                                     #   against topology at submit
     sampling = SamplingSpec(...)     # its own knobs (a judge is not the policy)
     async def process(self, group, data, llm) -> Mapping[str, Sequence]: ...
                                      # llm.pool(name) reaches ANY pool; judges are
@@ -384,7 +384,7 @@ class Learner(Protocol):             # training metal (TorchLearner / FakeLearne
 # run_experiment(spec, schema, store, engines, learner) remains the direct form.
 
 # THE FLEET (runner/desk.py) holds Metal + listings and climbs the I12 ladder:
-# demands_of(spec) reads (capability, base, shape, vram_gb) off gpu_config;
+# demands_of(spec) reads (capability, base, shape, vram_gb) off topology;
 # one HostSpec places as ONE unit (a multi-member one is a multi-regime host
 # whose members alternate). place() -> Plan(Join|Carve|Acquire);
 # apply() executes the automatic rungs (carves journaled in fleet/log.jsonl);
@@ -475,7 +475,7 @@ Observer (rlstack/observe/):  read-only derivations over stores + journals —
 
 ```python
 from rlstack import (ExperimentSpec, PolicySpec, GenSpec, TrajectorySource,
-                     AlgoSpec, EvalSpec, Seeds, OptimSpec, Schedule, GpuConfig,
+                     AlgoSpec, EvalSpec, Seeds, OptimSpec, Schedule, Topology,
                      HostSpec, pool, learner, lora)
 
 exp = ExperimentSpec(
@@ -491,7 +491,7 @@ exp = ExperimentSpec(
                                     max_policy_lag=0)),
     eval=EvalSpec(tasks="cas://8c31.../heldout.jsonl", every=5, n_samples=2,
                   post=("verifier",)),
-    gpu_config=GpuConfig(hosts=(HostSpec((pool("main", vram_gb=18),)),
+    topology=Topology(hosts=(HostSpec((pool("main", vram_gb=18),)),
                                 HostSpec((learner(vram_gb=16),)))),
     seeds=Seeds(master=17),
 )
@@ -520,7 +520,7 @@ never named anything.
 @postprocessor("llm_judge")
 class LlmJudge(PostProcessor):
     produces = ("reward",)
-    pools = ("judge",)                       # submit-checked against gpu_config
+    pools = ("judge",)                       # submit-checked against topology
     sampling = SamplingSpec(temperature=0.0, max_tokens=16)
     async def process(self, group, data, llm):
         judge = llm.pool("judge")            # any pool, by name
@@ -528,7 +528,7 @@ class LlmJudge(PostProcessor):
 
 exp_judge = replace(exp, algo=replace(exp.algo,
                     post=("llm_judge", "grpo_advantage")),
-                    gpu_config=...)          # + pool("judge") — same engine may
+                    topology=...)            # + pool("judge") — same engine may
                                              #   back both names (I8)
 
 # a distillation loss: pure math over a column post produced (I9)
@@ -594,7 +594,7 @@ seals; envs never do.
 ### Example 5 — Multi-GPU demand (unchanged shape, current names)
 
 ```python
-gpu_config = GpuConfig(hosts=(
+topology = Topology(hosts=(
     HostSpec((pool("main", tp=2, vram_gb=120),)),   # 60 GB per shard
     HostSpec((learner(fsdp=8, vram_gb=400),)),      # 50 GB per shard
 ))

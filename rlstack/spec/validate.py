@@ -66,10 +66,10 @@ def _issue(code: str, path: str, message: str) -> ValidationIssue:
 def _declared_pools(spec: ExperimentSpec) -> dict[str, str]:
     """Engine pool name -> the spec path that declares it."""
     pools: dict[str, str] = {}
-    for hi, host in enumerate(spec.gpu_config.hosts):
+    for hi, host in enumerate(spec.topology.hosts):
         for mi, member in enumerate(host.members):
             if isinstance(member, PoolMember) and member.name not in pools:
-                pools[member.name] = f"gpu_config.hosts[{hi}].members[{mi}]"
+                pools[member.name] = f"topology.hosts[{hi}].members[{mi}]"
     return pools
 
 
@@ -342,20 +342,20 @@ def check_sites_reachable_on(
 
 def check_hosts_exist(spec: ExperimentSpec, schema: SiteSchema) -> list[ValidationIssue]:
     """The topology declares at least one host."""
-    if spec.gpu_config.hosts:
+    if spec.topology.hosts:
         return []
-    return [_issue("no-hosts", "gpu_config", "gpu_config declares no hosts")]
+    return [_issue("no-hosts", "topology", "topology declares no hosts")]
 
 
 def check_pool_names_are_unique(spec: ExperimentSpec, schema: SiteSchema) -> list[ValidationIssue]:
     """Each engine pool name appears on exactly one host."""
     issues = []
     first: dict[str, str] = {}
-    for hi, host in enumerate(spec.gpu_config.hosts):
+    for hi, host in enumerate(spec.topology.hosts):
         for mi, member in enumerate(host.members):
             if not isinstance(member, PoolMember):
                 continue
-            path = f"gpu_config.hosts[{hi}].members[{mi}]"
+            path = f"topology.hosts[{hi}].members[{mi}]"
             if member.name in first:
                 issues.append(_issue(
                     "duplicate-pool", path,
@@ -383,7 +383,7 @@ def check_alternation_implies_zero_lag(spec: ExperimentSpec, schema: SiteSchema)
     nothing here: the learner elsewhere keeps training while they switch."""
     if spec.algo is None:
         return []
-    if not any(alternates_the_learner(h) for h in spec.gpu_config.hosts):
+    if not any(alternates_the_learner(h) for h in spec.topology.hosts):
         return []
     lag = spec.algo.schedule.max_policy_lag
     if lag == 0:
@@ -400,7 +400,7 @@ def check_traffic_routes_to_declared_pools(spec: ExperimentSpec, schema: SiteSch
     issues = []
     if spec.gen is not None and "main" not in pools:
         issues.append(_issue(
-            "main-pool-missing", "gpu_config",
+            "main-pool-missing", "topology",
             f"gen traffic routes to the pool named 'main', which no host declares; "
             f"pools: {', '.join(sorted(pools)) or '(none)'}"))
     return issues
@@ -413,7 +413,7 @@ def check_pools_serve_their_base(spec: ExperimentSpec, engine_map) -> list[Valid
     None — fakes standing in for metal — serve anything. Outside CHECKS
     because it consults live engine objects, so the loop runs it at submit."""
     declared_base: dict[str, str] = {}
-    for host in spec.gpu_config.hosts:
+    for host in spec.topology.hosts:
         for member in host.members:
             if isinstance(member, PoolMember):
                 declared_base[member.name] = member.base or spec.policy.base
@@ -423,7 +423,7 @@ def check_pools_serve_their_base(spec: ExperimentSpec, engine_map) -> list[Valid
         served = getattr(engine, "base", None)
         if expected is not None and served is not None and served != expected:
             issues.append(_issue(
-                "pool-base-mismatch", f"gpu_config({name})",
+                "pool-base-mismatch", f"topology({name})",
                 f"pool {name!r} declares base {expected!r} but the engine "
                 f"handed for it serves {served!r}"))
     return issues
@@ -438,7 +438,7 @@ def check_members_match_their_shape(spec: ExperimentSpec, engine_map,
     check_pools_serve_their_base, this consults live metal, so the loop runs
     it at submit."""
     declared_tp: dict[str, int] = {}
-    for host in spec.gpu_config.hosts:
+    for host in spec.topology.hosts:
         for member in host.members:
             if isinstance(member, PoolMember):
                 declared_tp[member.name] = member.tp
@@ -447,14 +447,14 @@ def check_members_match_their_shape(spec: ExperimentSpec, engine_map,
         expected = declared_tp.get(name)
         if expected is not None and engine.tp != expected:
             issues.append(_issue(
-                "pool-shape-mismatch", f"gpu_config({name})",
+                "pool-shape-mismatch", f"topology({name})",
                 f"pool {name!r} declares tp={expected} but the engine handed "
                 f"for it is built tp={engine.tp}"))
-    for host in spec.gpu_config.hosts:
+    for host in spec.topology.hosts:
         for member in host.members:
             if isinstance(member, LearnerMember) and learner.fsdp != member.fsdp:
                 issues.append(_issue(
-                    "learner-shape-mismatch", "gpu_config(learner)",
+                    "learner-shape-mismatch", "topology(learner)",
                     f"the spec declares fsdp={member.fsdp} but the learner "
                     f"handed is built fsdp={learner.fsdp}"))
     return issues
@@ -504,7 +504,7 @@ def check_post_pools_can_coreside(spec: ExperimentSpec, schema: SiteSchema) -> l
     pipeline's set is its processors' declared pools (the Scorer admits exactly
     those — they are its whole half by the split rule)."""
     alternating_host: dict[str, int] = {}
-    for hi, host in enumerate(spec.gpu_config.hosts):
+    for hi, host in enumerate(spec.topology.hosts):
         if len(host.members) < 2:
             continue
         for member in host.members:
@@ -529,7 +529,7 @@ def check_post_pools_can_coreside(spec: ExperimentSpec, schema: SiteSchema) -> l
                 issues.append(_issue(
                     "post-pools-conflict", field,
                     f"pipeline needs pools {members} co-resident, but they "
-                    f"alternate on gpu_config.hosts[{hi}] — an alternating "
+                    f"alternate on topology.hosts[{hi}] — an alternating "
                     f"host cannot serve one pipeline"))
     return issues
 

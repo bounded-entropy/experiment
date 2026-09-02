@@ -42,7 +42,7 @@ the commit bit, and daemons synchronize through it and nothing else.
 **Spec** — a frozen dataclass of declarative values. A spec never does setup
 and never touches a GPU; it *is* identity (I3). `ExperimentSpec` is the whole
 experiment as one value, composed of `PolicySpec` / `GenSpec` /
-`TrajectorySource` / `AlgoSpec` / `GpuConfig` / `Seeds` / `WarmStart`.
+`TrajectorySource` / `AlgoSpec` / `Topology` / `Seeds` / `WarmStart`.
 A run's identity is its TRAINING loop: measurement is not in the spec (#70).
 `rlstack/spec/specs.py`
 
@@ -501,7 +501,7 @@ mount-only view — a resident reads cas blobs and writes nothing.
 `rlstack/data/stores/base.py`, `rlstack/data/stores/address.py`
 
 **Pool** — a NAME traffic routes to, with two lives: declared capacity
-(`PoolMember` in a `GpuConfig`) and a runtime routing entry (`Routes`: pool name
+(`PoolMember` in a `Topology`) and a runtime routing entry (`Routes`: pool name
 → engine + pinned bundle). The name↔metal relation is many-to-many — one engine
 may back many pool names, one pool may fan over several engines.
 `rlstack/spec/specs.py` (`PoolMember`), `rlstack/runner/traffic.py`
@@ -534,7 +534,7 @@ resident's pin makes "rank r on cuda:r" true by construction, and every
 follower caps its own device. The teardown ladder is `residents.py`'s.
 `rlstack/runner/learners/ranks.py`
 
-**Arbiter** — the physical half of the blackboard: a `GpuArbiter` constructed by
+**Arbiter** — the physical half of the blackboard: an `Arbiter` constructed by
 whoever owns the metal (a Host makes its own unless handed one) and shared by
 every experiment admitted to it. It governs its owner's partition, not the
 device — several sub-GPU hosts on one device each admit independently.

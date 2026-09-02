@@ -138,7 +138,7 @@ def _spec_classes() -> dict[str, type]:
         specs.SamplingSpec, specs.GenSpec, specs.AdapterSpec,
         specs.PolicySpec, specs.Plans, specs.OptimSpec, specs.Schedule,
         specs.AlgoSpec, specs.PoolMember, specs.LearnerMember,
-        specs.HostSpec, specs.GpuConfig, specs.Seeds, specs.WarmStart,
+        specs.HostSpec, specs.Topology, specs.Seeds, specs.WarmStart,
         specs.ExperimentSpec,
     )
     return {cls.__name__: cls for cls in classes}

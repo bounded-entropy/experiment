@@ -14,7 +14,7 @@ continue is in the repo.
    different meaning is a finding.
 3. **agent-context/CONTEXT.md** — the decision log. Chronological, numbered;
    later entries supersede earlier ones (#28–#48 cover the current shape:
-   the trajectory/wave rename, the loss zoo + stress matrix, the GpuArbiter,
+   the trajectory/wave rename, the loss zoo + stress matrix, the Arbiter,
    the multi-tenant Learner, the Host, the operational CLI + observe/, the
    flow graph + dictionary.json, the #38 loss-purity ruling, the scoring
    verb + real opsd, the observer UI + custom panels, #43: the fleet —
@@ -121,7 +121,7 @@ continue is in the repo.
   c0f65f24362b: KL 0.356→0.285 nats over 4 updates, gap at the kernel
   floor). The old replay-matching loss is renamed replay_distill.
 - Experiments are tenants submitted to hosts, each with its own run store
-  (one experiment, one store, for life). The GpuArbiter owns admission;
+  (one experiment, one store, for life). The Arbiter owns admission;
   leases are gone. The observer (rlstack/observe/, `python -m rlstack
   {hosts,runs,gpu,ui}`) reads journals + peeks only — since #57 the peeks
   include SEALED per-update artifacts (peek_wave/peek_postdata), never

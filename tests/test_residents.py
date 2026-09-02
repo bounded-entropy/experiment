@@ -29,7 +29,7 @@ import unittest
 from common import arith_spec, arith_store
 from rlstack import (
     Builds, Emitted, EntryInstall, FakeEngine, FakeEngineBuild, FakeLearner,
-    FakeLearnerBuild, GpuConfig, HostSpec, Host, LearnerService,
+    FakeLearnerBuild, Topology, HostSpec, Host, LearnerService,
     LocalTransport, Metal, OptimSettings, Parameterization, Partition, Regime,
     RemoteLearner, RemotePool, Resident, ResidentBirth, ResidentError,
     SiteMeta, TokenBatch, fake_qwen_schema, learner, pool,
@@ -54,7 +54,7 @@ def go(coro):
 
 def alternating_spec(train_uri: str):
     """One HostSpec wearing both regimes — the alternating shape, one carve."""
-    return arith_spec(train_uri, gpu_config=GpuConfig(hosts=(
+    return arith_spec(train_uri, topology=Topology(hosts=(
         HostSpec((pool("main"), learner())),)))
 
 

@@ -32,7 +32,7 @@ from typing import Any
 from common import arith_spec, arith_store, sealed
 from test_resume import CrashingStore, SimulatedCrash
 from rlstack import (
-    Bundle, FakeEngine, FakeLearner, GpuArbiter, GpuConfig, HostSpec, Group,
+    Bundle, FakeEngine, FakeLearner, Arbiter, Topology, HostSpec, Group,
     LocalStore, Message, PostProcessor, Role, Rollout, RunSignals, Scorer, Task,
     Trajectory, Turn, Wave, fake_qwen_schema, learner, pool, postprocessor,
     run_experiment, validate,
@@ -73,7 +73,7 @@ def judged_spec(train_uri: str, heldout_uri: str | None = None):
     return replace(
         base,
         algo=replace(base.algo, post=("llm_judge", "grpo_advantage")),
-        gpu_config=GpuConfig(hosts=(
+        topology=Topology(hosts=(
             HostSpec((pool("main"),)), HostSpec((pool("judge"),)),
             HostSpec((learner(),)))))
 
@@ -192,7 +192,7 @@ class SplitOrderGateTest(unittest.TestCase):
         base = arith_spec(self.train)
         spec = replace(
             base, algo=replace(base.algo, post=pipeline),
-            gpu_config=GpuConfig(hosts=(
+            topology=Topology(hosts=(
                 HostSpec((pool("main"),)), HostSpec((pool("judge"),)),
                 HostSpec((learner(),)))))
         return [issue.code for issue in validate(spec, SCHEMA)]
@@ -215,7 +215,7 @@ class SplitOrderGateTest(unittest.TestCase):
         spec = replace(
             base, algo=replace(base.algo, post=(
                 "verifier", "scorer_test_pooled_consumer", "grpo_advantage")),
-            gpu_config=GpuConfig(hosts=(
+            topology=Topology(hosts=(
                 HostSpec((pool("main"),)), HostSpec((pool("judge"),)),
                 HostSpec((learner(),)))))
         issue = next(i for i in validate(spec, SCHEMA)
@@ -303,7 +303,7 @@ class VersionPinningTest(unittest.TestCase):
         self.initial = Bundle(bundle_id="bundle:initial", policy_version={"pi": 0})
 
     def scorer_for(self, spec) -> Scorer:
-        return Scorer(RunSignals(), GpuArbiter(), self.run,
+        return Scorer(RunSignals(), Arbiter(), self.run,
                       spec=spec, plan=RunPlan(()),
                       refs=RefReader(self.store, self.run), residents=(),
                       routes_at=lambda bundle: {}, initial_bundle=self.initial)
@@ -335,7 +335,7 @@ class VersionPinningTest(unittest.TestCase):
         base = arith_spec(self.train)
         teacher = replace(base, algo=replace(
             base.algo, loss="opd", post=("verifier", "teacher_logprobs")),
-            gpu_config=GpuConfig(hosts=(
+            topology=Topology(hosts=(
                 HostSpec((pool("main"),)),
                 HostSpec((pool("teacher", base=TEACHER_BASE),)),
                 HostSpec((learner(),)))))
@@ -490,7 +490,7 @@ class ScorerConditionTest(unittest.TestCase):
         self.run = self.store.open_run("rid", manifest={"run_id": "rid"})
 
     def scorer(self) -> Scorer:
-        return Scorer(RunSignals(), GpuArbiter(), self.run,
+        return Scorer(RunSignals(), Arbiter(), self.run,
                       spec=selfscored_spec(self.train), plan=RunPlan(()),
                       refs=RefReader(self.store, self.run), residents=(),
                       routes_at=lambda bundle: {},

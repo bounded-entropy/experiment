@@ -9,7 +9,7 @@ from dataclasses import replace
 
 from common import arith_spec, arith_store
 from rlstack import (
-    GpuConfig, HostSpec, learner, pool, run_experiment,
+    Topology, HostSpec, learner, pool, run_experiment,
     Seeds,
     FakeEngine, FakeLearner, PolicySpec, WarmStart, flatten, lora,
     fake_qwen_schema, run_experiment, trajectory_from_row,
@@ -223,7 +223,7 @@ class JudgePoolTest(unittest.TestCase):
         return replace(
             base,
             algo=replace(base.algo, post=("llm_judge", "grpo_advantage")),
-            gpu_config=GpuConfig(hosts=(
+            topology=Topology(hosts=(
                 HostSpec((pool("main"),)), HostSpec((pool("judge"),)),
                 HostSpec((learner(),)))))
 

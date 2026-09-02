@@ -34,7 +34,7 @@ from rlstack.data.stores.base import RunHandle
 from rlstack.data.trajectory import Wave, wave_from_rows
 from rlstack.policy.compile import Bundle
 from rlstack.registry import POST
-from rlstack.runner.arbiter import GpuArbiter
+from rlstack.runner.arbiter import Arbiter
 from rlstack.runner.assemble import realize
 from rlstack.runner.daemons.base import Daemon
 from rlstack.runner.interfaces import Engine
@@ -52,7 +52,7 @@ SCORER = "scorer"
 
 
 class Scorer(Daemon):
-    def __init__(self, signals: RunSignals, arbiter: GpuArbiter, run: RunHandle,
+    def __init__(self, signals: RunSignals, arbiter: Arbiter, run: RunHandle,
                  *, spec: ExperimentSpec, plan: RunPlan, refs: RefReader,
                  residents: tuple[Engine, ...],
                  routes_at: Callable[[Bundle], Routes],

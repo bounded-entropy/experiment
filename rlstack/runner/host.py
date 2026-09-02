@@ -30,7 +30,7 @@ from dataclasses import dataclass, field
 
 from rlstack.data.stores.base import Store
 from rlstack.policy.siteschema import SiteSchema
-from rlstack.runner.arbiter import GpuArbiter
+from rlstack.runner.arbiter import Arbiter
 from rlstack.runner.interfaces import Engine, Learner
 from rlstack.runner.loop import (
     RunReport, experiment_identity, run_experiment_async,
@@ -117,7 +117,7 @@ class Tenancy:
 class Host:
     def __init__(self, name: str, *, engines: Sequence[Engine],
                  learner: Learner | None, store: Store,
-                 arbiter: GpuArbiter | None = None,
+                 arbiter: Arbiter | None = None,
                  partition: Partition | None = None,
                  regimes: tuple[Regime, ...] = (),
                  solo: bool = False,
@@ -135,7 +135,7 @@ class Host:
         # because the daemons cannot tell and were never meant to.
         self.residents = tuple(residents)
         self.store = store
-        self.arbiter = arbiter or GpuArbiter()
+        self.arbiter = arbiter or Arbiter()
         self.partition = partition
         self.regimes = regimes
         # A birth fact like the partition and the regimes (I12): this host's
@@ -298,7 +298,7 @@ class Host:
         model at that shape. Pools named in `remotes` are served by ANOTHER
         host and skip local binding."""
         binding: dict[str, Engine] = {}
-        for host in spec.gpu_config.hosts:
+        for host in spec.topology.hosts:
             for member in host.members:
                 if not isinstance(member, PoolMember):
                     continue
@@ -324,7 +324,7 @@ class Host:
         residents enforce it per process (vLLM's reservation, torch's cap); a
         JOIN is always memory-free because the weights already live. A remote
         pool is another partition's footprint and never counts here."""
-        for host in spec.gpu_config.hosts:
+        for host in spec.topology.hosts:
             for member in host.members:
                 if isinstance(member, PoolMember):
                     continue
@@ -560,7 +560,7 @@ class Host:
         from rlstack.runner.remote import RemotePool
 
         members = {member.name: member
-                   for host in spec.gpu_config.hosts
+                   for host in spec.topology.hosts
                    for member in host.members
                    if isinstance(member, PoolMember)}
         remotes: dict[str, Engine] = {}

@@ -594,7 +594,7 @@ def campaign_specs(store) -> tuple[dict, dict]:
     the train family x the four methods — ({name -> ExperimentSpec},
     {name: {"family": F, "eval": uri}})."""
     from rlstack import (
-        AlgoSpec, ExperimentSpec, GenSpec, GpuConfig, HostSpec,
+        AlgoSpec, ExperimentSpec, GenSpec, Topology, HostSpec,
         LearnerMember, OptimSpec, PolicySpec, PoolMember, SamplingSpec,
         Schedule, Seeds, lora,
     )
@@ -631,7 +631,7 @@ def campaign_specs(store) -> tuple[dict, dict]:
                 # TWO HostSpecs, two carves, two honest bookings on one
                 # card (ADR 0001); one HostSpec with both members would
                 # alternate them and force lag 0. UNPROVEN on metal
-                gpu_config=GpuConfig(hosts=(
+                topology=Topology(hosts=(
                     HostSpec((PoolMember("main", tp=1, vram_gb=SERVE_GB),)),
                     HostSpec((LearnerMember(fsdp=1, vram_gb=LEARN_GB),)))),
                 seeds=Seeds(master=SEED))

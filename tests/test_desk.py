@@ -20,7 +20,7 @@ import json
 
 from common import arith_spec, arith_store
 from rlstack import (
-    FakeEngine, FakeLearner, GpuConfig, Host, HostSpec, Metal, Regime, Seeds,
+    FakeEngine, FakeLearner, Topology, Host, HostSpec, Metal, Regime, Seeds,
     fake_qwen_schema, learner, pool,
 )
 from rlstack.runner.host import Partition
@@ -194,7 +194,7 @@ class DeskFixture(unittest.TestCase):
     def split_spec(self):
         """main on one partition, the learner on another — the two-listing
         placement (two HostSpecs, two dedicated hosts)."""
-        return arith_spec(self.train, gpu_config=GpuConfig(hosts=(
+        return arith_spec(self.train, topology=Topology(hosts=(
             HostSpec((pool("main"),)), HostSpec((learner(),)))))
 
 
@@ -249,7 +249,7 @@ class DeskTest(DeskFixture):
         other_store, other_train, _ = arith_store(tmp.name)
         plain = Host("plain", engines=(FakeEngine(base=BASE),),
                      learner=FakeLearner(), store=other_store)
-        spec = arith_spec(other_train, gpu_config=GpuConfig(hosts=(
+        spec = arith_spec(other_train, topology=Topology(hosts=(
             HostSpec((pool("main"),)), HostSpec((learner(),)))))
         report = go(plain.submit(spec, SCHEMA))
         self.assertEqual(reply["run_id"], report.run_id)
@@ -875,7 +875,7 @@ class DecommissionTest(DeskFixture):
                 verdicts[name] = await desk.decommission(name)
             reborn = await Campaigns(desk).submit(arith_spec(
                 self.train, seeds=Seeds(master=23),
-                gpu_config=self.split_spec().gpu_config))
+                topology=self.split_spec().topology))
             await service.hosts[reborn["host"]]._adoptions[reborn["run_id"]]
             return verdicts, reborn
         verdicts, reborn = go(drive())
@@ -961,7 +961,7 @@ class SupersededCarveTest(DeskFixture):
             service.carves = 0
             reborn = await Campaigns(desk).submit(arith_spec(
                 self.train, seeds=Seeds(master=31),
-                gpu_config=self.split_spec().gpu_config))
+                topology=self.split_spec().topology))
             await service.hosts[reborn["host"]]._adoptions[reborn["run_id"]]
             return first, reborn
         first, reborn = go(drive())

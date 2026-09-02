@@ -1,7 +1,7 @@
 """The pure placement vocabulary: demands, units, sizing, the join rule.
 
 These are the fleet plane's pure functions — no desk, no metal, no store.
-The claims: a spec's gpu_config reads as capability demands with the anchor
+The claims: a spec's topology reads as capability demands with the anchor
 on the learner (the learner is never remote, said ONCE, in campaign.py) and
 its GB passed through as declared (ADR 0001); ONE HostSpec is ONE placement
 unit; a unit's per-device GB is its largest member's, a whole device sized
@@ -16,7 +16,7 @@ import unittest
 
 from common import arith_spec, arith_store
 from rlstack import (
-    Demand, DeskError, GpuConfig, HostSpec, Metal, Regime, demands_of,
+    Demand, DeskError, Topology, HostSpec, Metal, Regime, demands_of,
     fraction_for_gb, learner, pool,
 )
 from rlstack.runner.desk import covers, placement_units, unit_gb
@@ -29,7 +29,7 @@ BASE = "Qwen/Qwen3-0.6B"
 def spec_with(hosts):
     tmp = tempfile.TemporaryDirectory()
     store, train, _ = arith_store(tmp.name)
-    made = arith_spec(train, gpu_config=GpuConfig(hosts=hosts))
+    made = arith_spec(train, topology=Topology(hosts=hosts))
     tmp.cleanup()
     return made
 

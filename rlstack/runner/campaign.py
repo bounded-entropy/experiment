@@ -3,7 +3,7 @@
 The desk is workload-blind (runner/desk.py) — its vocabulary is Demands and
 frames. This module is the other side of that boundary, the only place that
 turns an ExperimentSpec INTO the desk's vocabulary: `demands_of` reads the
-gpu_config as capability demands and marks the learner demand as the ANCHOR
+topology as capability demands and marks the learner demand as the ANCHOR
 (the learner is never remote, so the frame lands where the learner builds —
 that rule lives here, with the spec, never at the desk), and `frame_for`
 wraps the canonical row with the client's code claim.
@@ -27,14 +27,14 @@ from rlstack.spec.specs import ExperimentSpec, PoolMember
 
 
 def demands_of(spec: ExperimentSpec) -> tuple[Demand, ...]:
-    """The spec's gpu_config as capability demands, learner marked ANCHOR.
+    """The spec's topology as capability demands, learner marked ANCHOR.
     One HostSpec is one placement unit (its index is the demand's `group`),
     and `vram_gb` passes through AS DECLARED — total across shards, None for
     a whole device per shard. The spec speaks GB and so does the desk; the
     crossing to a partition's fraction happens once, at the metal's build,
     where the card is known (ADR 0001) — never here."""
     out: list[Demand] = []
-    for hi, host in enumerate(spec.gpu_config.hosts):
+    for hi, host in enumerate(spec.topology.hosts):
         for member in host.members:
             if isinstance(member, PoolMember):
                 out.append(Demand(

@@ -16,7 +16,7 @@ from rlstack.data.plan import RunPlan, WavePlan
 from rlstack.data.stores.base import RunHandle
 from rlstack.data.trajectory import Task, wave_to_rows
 from rlstack.policy.compile import Bundle
-from rlstack.runner.arbiter import GpuArbiter
+from rlstack.runner.arbiter import Arbiter
 from rlstack.runner.assemble import sample_wave
 from rlstack.runner.daemons.base import Daemon
 from rlstack.runner.interfaces import Engine
@@ -26,7 +26,7 @@ from rlstack.spec.specs import ExperimentSpec
 
 
 class Generator(Daemon):
-    def __init__(self, signals: RunSignals, arbiter: GpuArbiter, run: RunHandle, *,
+    def __init__(self, signals: RunSignals, arbiter: Arbiter, run: RunHandle, *,
                  spec: ExperimentSpec, plan: RunPlan, due_at: Mapping[int, int],
                  tasks: Mapping[str, Task], engine: Engine,
                  routes_at: Callable[[Bundle], Routes],

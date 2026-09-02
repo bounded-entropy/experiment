@@ -18,7 +18,7 @@ import unittest
 
 from common import arith_spec, arith_store
 from rlstack import (
-    Bundle, FakeEngine, FakeLearner, GpuArbiter, GpuConfig, HostSpec, Host,
+    Bundle, FakeEngine, FakeLearner, Arbiter, Topology, HostSpec, Host,
     HostService,
     LocalTransport, Mechanism, Message, Regime, RemotePool, Role,
     SamplingSpec, SiteMeta, fake_qwen_schema, learner, pool,
@@ -74,9 +74,9 @@ class RemoteRunTest(unittest.TestCase):
         door = HostService(serving)
         main, aux = (RemotePool(LocalTransport(door)),
                      RemotePool(LocalTransport(door)))
-        spec = arith_spec(train, gpu_config=GpuConfig(hosts=(
+        spec = arith_spec(train, topology=Topology(hosts=(
             HostSpec((pool("main"), pool("aux"))), HostSpec((learner(),)))))
-        arbiter = GpuArbiter()
+        arbiter = Arbiter()
         report = run_experiment(spec, SCHEMA, store, {"main": main, "aux": aux},
                                 FakeLearner(), arbiter=arbiter)
         self.assertEqual(report.updates_completed, 4)

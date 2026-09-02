@@ -380,7 +380,7 @@ class TeacherDistillationTest(unittest.TestCase):
 
         from common import arith_spec, arith_store
         from rlstack import (
-            FakeLearner, GpuConfig, HostSpec, fake_qwen_schema, learner,
+            FakeLearner, Topology, HostSpec, fake_qwen_schema, learner,
             pool, run_experiment,
         )
 
@@ -394,7 +394,7 @@ class TeacherDistillationTest(unittest.TestCase):
                          post=("verifier", "teacher_logprobs")),
             # the teacher is a DECLARED pool on another base — placement then
             # decides it lives on other metal; the spec never says where (#43)
-            gpu_config=GpuConfig(hosts=(
+            topology=Topology(hosts=(
                 HostSpec((pool("main", vram_gb=8),)),
                 HostSpec((pool("teacher", base=TEACHER_BASE, vram_gb=10),)),
                 HostSpec((learner(vram_gb=8),)))))

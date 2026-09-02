@@ -9,7 +9,7 @@ from typing import Any
 
 
 from rlstack import (
-    AlgoSpec, ExperimentSpec, GenSpec, GpuConfig, GroupPlan, HostSpec,
+    AlgoSpec, ExperimentSpec, GenSpec, Topology, GroupPlan, HostSpec,
     LocalStore, Message, OptimSpec, Plans, PolicySpec, Role, Rollout, RunPlan,
     Sample, Schedule, Seeds, Task, Trajectory, Turn, WavePlan, WaveRef, encode,
     learner, lora, pool,
@@ -97,7 +97,7 @@ def arith_spec(train_uri: str, heldout_uri: str | None = None,
                       schedule=Schedule(microbatch_tokens=64)),
         # main and the learner as two dedicated hosts (the side-by-side
         # shape); an alternating single host is HostSpec((pool, learner))
-        gpu_config=GpuConfig(hosts=(HostSpec((pool("main"),)),
+        topology=Topology(hosts=(HostSpec((pool("main"),)),
                                     HostSpec((learner(),)))),
         seeds=Seeds(master=17),
     )

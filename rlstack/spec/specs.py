@@ -194,7 +194,7 @@ class HostSpec:
 
 
 @dataclass(frozen=True)
-class GpuConfig:
+class Topology:
     """All hosts. Each pool name appears once; feasibility is checked at
     submit, and what fits WHERE is placement's question, answered against a
     real residual — never here."""
@@ -249,7 +249,7 @@ class ExperimentSpec:
     gen: GenSpec | None           # inference world; None = pure-offline run
     plans: Plans                  # the shape: which trajectories, which wave
     algo: AlgoSpec | None         # training world; None = generation-only run
-    gpu_config: GpuConfig         # semantics-neutral (I5)
+    topology: Topology            # semantics-neutral (I5)
     seeds: Seeds
     init: WarmStart | None = None
     tier: str = "lab"             # "lab" | "release"

@@ -27,7 +27,7 @@ from rlstack.runner.daemons import Daemon, Generator, Scorer, Trainer
 from rlstack.runner.interfaces import (
     Engine, EntryInstall, Learner, OptimSettings, Parameterization,
 )
-from rlstack.runner.arbiter import GpuArbiter
+from rlstack.runner.arbiter import Arbiter
 from rlstack.runner.meters import HostJournal
 from rlstack.data.plan import RunPlan, decode
 from rlstack.runner.assemble import rollouts_needed
@@ -57,7 +57,7 @@ class RunReport:
 def run_experiment(spec: ExperimentSpec, schema: SiteSchema, store: Store,
                    engines: Engine | Mapping[str, Engine], learner: Learner,
                    max_inflight: int = 64,
-                   arbiter: GpuArbiter | None = None,
+                   arbiter: Arbiter | None = None,
                    subdir: str | None = None) -> RunReport:
     """Submit and drive one experiment to completion. Safe to call again on the
     same spec: identical identity attaches and continues (or no-ops if done).
@@ -95,7 +95,7 @@ async def run_experiment_async(
         spec: ExperimentSpec, schema: SiteSchema, store: Store,
         engines: Engine | Mapping[str, Engine], learner: Learner,
         max_inflight: int = 64,
-        arbiter: GpuArbiter | None = None,
+        arbiter: Arbiter | None = None,
         journal: HostJournal | None = None,
         subdir: str | None = None) -> RunReport:
     """The async form of run_experiment — the multi-tenant entry.
@@ -172,7 +172,7 @@ async def run_experiment_async(
     resolved = {name: resolve(space, a.site) for name, a in bank.items()}
     learner.install(rid, parameterization_of(spec, resolved))
     if arbiter is None:
-        arbiter = GpuArbiter()
+        arbiter = Arbiter()
     attach_residents(spec, engine_map, learner, arbiter)
 
     policy_version = {name: 0 for name in bank}
@@ -354,7 +354,7 @@ def pipeline_residents(pipeline, engine_map) -> tuple[Engine, ...]:
 
 
 def attach_residents(spec: ExperimentSpec, engine_map, learner,
-                     arbiter: GpuArbiter) -> None:
+                     arbiter: Arbiter) -> None:
     """Register this experiment's metal with the (possibly shared) arbiter.
 
     Object-keyed and idempotent: two pools backed by one engine are ONE
@@ -378,7 +378,7 @@ def attach_residents(spec: ExperimentSpec, engine_map, learner,
     """
     pool_group: dict[str, str | None] = {}
     learner_group: str | None = None
-    for hi, host in enumerate(spec.gpu_config.hosts):
+    for hi, host in enumerate(spec.topology.hosts):
         alternating = len(host.members) > 1
         for member in host.members:
             if isinstance(member, PoolMember):

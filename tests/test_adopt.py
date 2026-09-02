@@ -17,7 +17,7 @@ import unittest
 
 from common import arith_spec, arith_store
 from rlstack import (
-    FakeEngine, FakeLearner, GpuConfig, HostSpec, Host, fake_qwen_schema,
+    FakeEngine, FakeLearner, Topology, HostSpec, Host, fake_qwen_schema,
     learner, plora, pool,
 )
 from rlstack.runner.remote import (
@@ -65,8 +65,8 @@ class SpecRoundtripTest(unittest.TestCase):
         decoded = spec_from_json(row_of(spec))
         self.assertEqual(decoded, spec)
         self.assertIsInstance(decoded.gen.envs, tuple)
-        self.assertIsInstance(decoded.gpu_config.hosts, tuple)
-        self.assertIsInstance(decoded.gpu_config.hosts[0].members, tuple)
+        self.assertIsInstance(decoded.topology.hosts, tuple)
+        self.assertIsInstance(decoded.topology.hosts[0].members, tuple)
 
     def test_an_unknown_tag_is_refused(self) -> None:
         with self.assertRaises(TypeError):
@@ -159,7 +159,7 @@ class AdoptTest(unittest.TestCase):
             return LocalTransport(HostService(aux))
 
         host = self.host(transport_for=transport_for)
-        spec = arith_spec(self.train, gpu_config=GpuConfig(hosts=(
+        spec = arith_spec(self.train, topology=Topology(hosts=(
             HostSpec((pool("main"),)), HostSpec((learner(),)),
             HostSpec((pool("aux"),)))))
         reply = self.adopt_and_finish(host, spec, routes={"aux": "fleet://aux"})
@@ -183,7 +183,7 @@ class AdoptTest(unittest.TestCase):
         self.assertFalse(reply["accepted"])
         self.assertIn("transport_for", reply["error"])
 
-        wide = arith_spec(self.train, gpu_config=GpuConfig(hosts=(
+        wide = arith_spec(self.train, topology=Topology(hosts=(
             HostSpec((pool("main", tp=2),)), HostSpec((learner(),)))))
         reply = go(self.host().adopt(row_of(wide)))
         self.assertFalse(reply["accepted"])

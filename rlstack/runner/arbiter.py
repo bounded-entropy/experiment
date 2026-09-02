@@ -1,4 +1,4 @@
-"""GpuArbiter: the physical resource owns admission; experiments only request.
+"""Arbiter: the physical resource owns admission; experiments only request.
 
 An arbiter is constructed by whoever owns the metal — a Host makes its own
 unless handed one — and is shared by every experiment admitted to it, which is
@@ -47,7 +47,7 @@ class _Group:
     handoff_to: object | None = None        # aging: stop feeding the resident
 
 
-class GpuArbiter:
+class Arbiter:
     def __init__(self, *, quantum: float = 0.0, max_wait: float | None = None,
                  clock: Callable[[], float] = time.monotonic,
                  meter: TrafficMeter | None = None) -> None:
