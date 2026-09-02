@@ -49,6 +49,25 @@ def call(app, path: str):
     return captured["status"], captured["headers"], body
 
 
+def fabricate_heldout(store, run_id) -> None:
+    """Both eras of held-out data, hand-written: LEGACY in-run summaries (a
+    pre-#70 run's eval/ — nothing writes these any more, but old runs must
+    render) and a MEASUREMENT (the #70 shape)."""
+    import json as _json
+    for update in (2, 4):
+        store._write(
+            f"{store.run_prefix(run_id)}/eval/{update}/summary.json",
+            _json.dumps({"update": update, "episodes": 16,
+                         "means": {"reward": 0.25 * update}}).encode())
+    store.open_measurement(run_id, "heldout",
+                           {"every": 2, "post": ["verifier"]})
+    for update in (2, 4):
+        store.append_measurement_point(
+            run_id, "heldout",
+            {"update": update, "episodes": 16,
+             "means": {"reward": 0.1 * update}})
+
+
 class UiTest(unittest.TestCase):
     def setUp(self) -> None:
         tmp = tempfile.TemporaryDirectory()
@@ -56,6 +75,7 @@ class UiTest(unittest.TestCase):
         self.store, train, heldout = arith_store(tmp.name)
         self.report = run_experiment(arith_spec(train, heldout), SCHEMA,
                                      self.store, FakeEngine(), FakeLearner())
+        fabricate_heldout(self.store, self.report.run_id)
 
     def test_series_joins_ledger_dictionary_and_eval(self) -> None:
         series = run_series(self.store, self.report.run_id)
@@ -67,6 +87,11 @@ class UiTest(unittest.TestCase):
             self.assertIn("logprob_gap", update["train"])
         self.assertEqual([e["update"] for e in series["eval"]], [2, 4])
         self.assertIn("reward", series["eval"][0]["means"])
+        # ...and the #70 shape beside it: named measurements, points intact
+        told = {m["name"]: m for m in series["measurements"]}
+        self.assertEqual([pt["update"] for pt in told["heldout"]["points"]],
+                         [2, 4])
+        self.assertEqual(told["heldout"]["manifest"]["every"], 2)
         # the walkback priority rides in, ready for the page
         feeding = [c["name"] for c in series["dictionary"]["columns"]
                    if c["feeds_loss"]]
@@ -74,6 +99,25 @@ class UiTest(unittest.TestCase):
 
     def test_series_is_none_for_an_unknown_run(self) -> None:
         self.assertIsNone(run_series(self.store, "nope"))
+
+    def test_a_measurement_is_a_first_class_chart_metric(self) -> None:
+        """The charts page plots `<measurement>:<mean>` beside the ledger
+        metrics: the name appears in the menu, and its overlay series carries
+        the measurement's points at the measured versions."""
+        from rlstack.observe.select import metric_names, overlay
+
+        self.store.append_host_event("h", {
+            "event": "attach", "t": 1.0, "run_id": self.report.run_id})
+        names = metric_names([self.store])
+        self.assertIn("heldout:reward", names)
+        self.assertIn("reward", names)
+        told = overlay([self.store], "heldout:reward")
+        (series,) = told["series"]
+        self.assertEqual(series["run_id"], self.report.run_id)
+        self.assertEqual(series["points"], [[2, 0.2], [4, 0.4]])
+        # the ledger reading is untouched by the qualified grammar
+        plain = overlay([self.store], "reward")
+        self.assertTrue(plain["series"][0]["points"])
 
     def test_wsgi_app_serves_page_and_api(self) -> None:
         refreshes = []
@@ -88,6 +132,7 @@ class UiTest(unittest.TestCase):
         self.assertEqual(status, "200 OK")          # same document, JS routes
 
         status, headers, body = call(app, "/api/runs")
+        body = json.dumps(json.loads(body)["runs"]).encode()
         self.assertEqual(status, "200 OK")
         runs = json.loads(body)
         self.assertEqual(runs, [])                  # no host journal: raw run
@@ -101,6 +146,21 @@ class UiTest(unittest.TestCase):
         status, _, _ = call(app, "/api/run/nope")
         self.assertEqual(status, "404 Not Found")
         self.assertEqual(len(refreshes), 3)         # every API read refreshed
+
+    def test_a_racing_read_is_a_503_never_a_lying_404(self) -> None:
+        """An exception inside an API read (a reload swapping files under a
+        scan) answers 503 "try again" — the page must be able to tell a
+        transient from the server's own positive "no such run", and the
+        worker must survive it."""
+        def racing():
+            raise FileNotFoundError("swapped mid-scan")
+        app = ui_app([self.store], refresh=racing)
+        status, _, body = call(app, f"/api/run/{self.report.run_id}")
+        self.assertEqual(status, "503 Service Unavailable")
+        self.assertIn("transient", json.loads(body)["error"])
+        status, _, _ = call(ui_app([self.store]),
+                            f"/api/run/{self.report.run_id}")
+        self.assertEqual(status, "200 OK")          # the worker lived
 
     def test_api_reads_never_mutate_a_live_run(self) -> None:
         staged = self.store.path_of(
@@ -121,7 +181,7 @@ class UiTest(unittest.TestCase):
             "pools": ["policy"], "n_updates": 4, "store": self.store.describe()})
         app = ui_app([self.store])
         _, _, body = call(app, "/api/runs")
-        row = json.loads(body)[0]
+        row = json.loads(body)["runs"][0]
         for field in ("run_id", "status", "committed", "target", "hosts"):
             self.assertIn(field, row)
         self.assertEqual(row["run_id"], self.report.run_id)
@@ -202,6 +262,7 @@ class DerivedSeriesTest(unittest.TestCase):
         self.store, train, heldout = arith_store(tmp.name)
         self.report = run_experiment(arith_spec(train, heldout), SCHEMA,
                                      self.store, FakeEngine(), FakeLearner())
+        fabricate_heldout(self.store, self.report.run_id)
 
     def test_derived_panels_compute_with_eval_overlay(self) -> None:
         panels = [{"name": "excess", "expr": "reward - 0.5"},

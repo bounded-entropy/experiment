@@ -84,21 +84,40 @@ def hosts_data(roots: Sequence[Store | Root]) -> list[dict]:
     out = []
     for root, host, events in _events_by_host(roots):
         ups = [e for e in events if e.get("event") == "host-up"]
-        attached = {e["run_id"] for e in events if e.get("event") == "attach"}
-        detach = {e["run_id"]: e.get("status", "?") for e in events
-                  if e.get("event") == "detach"}
+        # per-run last word, then the ledger's: an attach after a detach is a
+        # resume (running again), and commits reaching the plan mean done even
+        # when the final detach died with its container
+        status_by_run: dict[str, str] = {}
+        for e in events:
+            rid = e.get("run_id")
+            if not rid:
+                continue
+            if e.get("event") == "attach":
+                status_by_run[rid] = "running"
+            elif e.get("event") == "detach":
+                status_by_run[rid] = e.get("status", "?")
+        for rid, status in list(status_by_run.items()):
+            if status != "done":
+                committed, target = _progress(root.store, rid)
+                if isinstance(target, int) and target > 0 and committed >= target:
+                    status_by_run[rid] = "done"
         out.append({
             "host": host,
             "folder": root.folder,
             "journal_store": root.store.describe(),
             "engines": ups[-1].get("engines", []) if ups else [],
             "partition": ups[-1].get("partition") if ups else None,
+            # the processes the host was born with (ADR 0002): label + pid
+            # off the last host-up, so "which residents are living" reads
+            # off the journal without a probe
+            "residents": ups[-1].get("residents", []) if ups else [],
             "boots": len(ups),
             "first_seen": events[0].get("t") if events else None,
             "last_seen": events[-1].get("t") if events else None,
-            "running": sorted(attached - detach.keys()),
-            "done": sum(1 for s in detach.values() if s == "done"),
-            "failed": sum(1 for s in detach.values() if s == "failed"),
+            "running": sorted(r for r, s in status_by_run.items()
+                              if s == "running"),
+            "done": sum(1 for s in status_by_run.values() if s == "done"),
+            "failed": sum(1 for s in status_by_run.values() if s == "failed"),
         })
     return out
 
@@ -109,6 +128,10 @@ def render_hosts(roots: Sequence[Store | Root]) -> str:
         lines.append(f"host {qualified(h['folder'], h['host'])}")
         lines.append(f"  metal   : {_metal(h['partition'])}")
         lines.append(f"  engines : {', '.join(h['engines']) or '?'}")
+        if h["residents"]:
+            lines.append("  residents: " + ", ".join(
+                f"{r.get('label', '?')} (pid {r.get('pid', '?')})"
+                for r in h["residents"]))
         lines.append(f"  journal : {h['journal_store']}")
         lines.append(f"  seen    : first {_when(h['first_seen'])}  last "
                      f"{_when(h['last_seen'])}  ({h['boots']} boot"
@@ -132,6 +155,7 @@ def runs_data(roots: Sequence[Store | Root]) -> list[dict]:
     read here, written by the CLI, and consulted by no experiment."""
     known = rooted(roots)
     annotations = [root.store.read_annotations() for root in known]
+    filings = [root.store.run_subdirs() for root in known]
     rows: dict[tuple[str, str], dict] = {}
     for root, host, events in _events_by_host(known):
         for event in events:
@@ -140,15 +164,45 @@ def runs_data(roots: Sequence[Store | Root]) -> list[dict]:
                 continue
             row = rows.setdefault((root.folder, run_id), {
                 "run_id": run_id, "folder": root.folder, "hosts": [],
-                "status": "running", "t": 0.0,
+                "status": "running", "t": 0.0, "_status_t": -1.0,
                 "store": event.get("store", root.store.describe())})
             if host not in row["hosts"]:
                 row["hosts"].append(host)
-            if event.get("event") == "detach":
-                row["status"] = event.get("status", "?")
-            row["t"] = max(row["t"], event.get("t", 0.0))
+            # residency per (run, host): a journal is chronological, so the
+            # host's last word decides — attach leaves it OPEN, detach CLOSES
+            # it. Stalling reads open residencies only: a venue the run left
+            # (died on and resumed elsewhere) is provenance, not presence.
+            row.setdefault("_open", {})[host] = (
+                event.get("event") == "attach")
+            # THE NEWEST EVENT SPEAKS FOR THE RUN, whichever host journal it
+            # lives in: a run hops hosts across generations (resubmission is
+            # resume), and journals are walked per host, so without the time
+            # gate an old host's dying detach — iterated after the live
+            # host's re-attach — would call a healthy second attempt by its
+            # first attempt's death (observed live: six running arms shown
+            # failed by a dead venue's journal).
+            when = float(event.get("t", 0.0))
+            if when >= row["_status_t"]:
+                row["_status_t"] = when
+                if event.get("event") == "detach":
+                    row["status"] = event.get("status", "?")
+                else:
+                    row["status"] = "running"
+            # filing from the attach itself (newest wins): the run directory's
+            # manifest lands moments AFTER the attach line, so a snapshot can
+            # hold the event and not the directory — without this, a newborn
+            # files at the store's top for one refresh, then hops into its
+            # subdir (observed live on the gsm arms)
+            if (event.get("event") == "attach" and "subdir" in event
+                    and when >= row.get("_subdir_t", -1.0)):
+                row["_subdir_t"] = when
+                row["_attach_subdir"] = event.get("subdir") or ""
+            row["t"] = max(row["t"], when)
 
     for (folder, run_id), row in rows.items():
+        row.pop("_status_t", None)   # ordering scratch, not a view field
+        row["open_hosts"] = sorted(
+            host for host, open_ in row.pop("_open", {}).items() if open_)
         # the same run_id in more than one root: legitimate under #58 (one
         # spec, two folders), and the reason every link the observer emits
         # carries its folder — a bare /run/<id> must never silently pick one
@@ -161,10 +215,25 @@ def runs_data(roots: Sequence[Store | Root]) -> list[dict]:
                    holding[0] if holding else None)
         committed, target = (_progress(own.store, run_id) if own else (0, "?"))
         row["committed"], row["target"] = committed, target
+        # THE LEDGER IS TRUTH: a run whose commits reached its plan is done,
+        # whatever the journal's tail says — a crashed container loses its
+        # detach events, and observability must not let that read as failure
+        if isinstance(target, int) and target > 0 and committed >= target:
+            row["status"] = "done"
+        # the SUBDIR the run's directory was filed under at birth ("" at the
+        # top): the directory scan is truth once the manifest exists; the
+        # attach event's word covers the birth window before it does
+        attach_subdir = row.pop("_attach_subdir", None)
+        row.pop("_subdir_t", None)
         for index, root in enumerate(known):
             if root.folder == folder:
                 row.update(annotated(annotations[index].get(run_id)))
+                filed = filings[index].get(run_id)
+                row["subdir"] = (filed if filed is not None
+                                 else attach_subdir or "")
                 break
+        else:
+            row["subdir"] = attach_subdir or ""
     return sorted(rows.values(), key=lambda r: r["t"])
 
 
@@ -205,9 +274,14 @@ def render_runs(roots: Sequence[Store | Root], grep: str = "") -> str:
             lines.append(f"folder {folder}")
         lines.append(f"{'run':<14} {'name':<18} {'tags':<16} {'status':<8} "
                      f"{'committed':>9}  {'host(s)':<20} {'last event':<15} store")
-        for row in rows:
-            if row["folder"] != folder:
-                continue
+        mine = [row for row in rows if row["folder"] == folder]
+        seen_dir: str | None = None
+        for row in sorted(mine, key=lambda r: (r.get("subdir", ""), r["t"])):
+            subdir = row.get("subdir", "")
+            if subdir != seen_dir:
+                if subdir:
+                    lines.append(f"  dir {subdir}/")
+                seen_dir = subdir
             status = row["status"] + (" ⚠FORK" if row["forked"] else "")
             progress = f"{row['committed']}/{row['target']}"
             # the same id elsewhere: the other FOLDERS when they differ, and

@@ -18,12 +18,10 @@ from rlstack.spec.specs import (
     AlgoSpec,
     BackendProfile,
     PoolMember,
-    EvalSpec,
     ExperimentSpec,
     GenSpec,
-    GpuConfig,
-    GpuSet,
-    GpuGroup,
+    Topology,
+    HostSpec,
     LearnerMember,
     OptimSpec,
     PolicySpec,
@@ -34,7 +32,6 @@ from rlstack.spec.specs import (
     WarmStart,
     attn_bias,
     pool,
-    gpus,
     learner,
     lora,
     soft_prompt,
@@ -56,8 +53,7 @@ def example_1(bank: dict[str, AdapterSpec] | None = None) -> ExperimentSpec:
         ),
         gen=GenSpec(envs=("math_single_turn",),
                     tasks=("cas://3fa9c2.../math_train.jsonl",)),
-        plans=Plans(train="cas://plan/train", rollout="cas://plan/roll",
-                    eval="cas://plan/eval"),
+        plans=Plans(train="cas://plan/train", rollout="cas://plan/roll"),
         algo=AlgoSpec(
             loss="grpo",
             post=("verifier", "grpo_advantage"),
@@ -66,11 +62,10 @@ def example_1(bank: dict[str, AdapterSpec] | None = None) -> ExperimentSpec:
             schedule=Schedule(microbatch_tokens=16384,
                               max_policy_lag=0),
         ),
-        eval=EvalSpec(every=10),
-        gpu_config=GpuConfig(groups=(
-            GpuGroup(gpus(n=6), (pool("main", tp=2, n=3), learner(fsdp=2)),
-                  sharing="concurrent"),
-            GpuGroup(gpus(n=1), (pool("eval", tp=1, n=1),)),
+        topology=Topology(hosts=(
+            HostSpec((pool("main", tp=2),)),
+            HostSpec((learner(fsdp=2),)),
+            HostSpec((pool("eval", tp=1),)),
         )),
         seeds=Seeds(master=17),
     )
@@ -90,11 +85,14 @@ class TestConstruction(unittest.TestCase):
         self.assertEqual(self.exp.tier, "lab")
 
     def test_topology_members(self) -> None:
-        main_group = self.exp.gpu_config.groups[0]
-        self.assertIsInstance(main_group.members[0], PoolMember)
-        self.assertIsInstance(main_group.members[1], LearnerMember)
-        self.assertEqual(main_group.members[0].name, "main")
-        self.assertEqual(main_group.sharing, "concurrent")
+        """One HostSpec is one host: a single member is a dedicated host, and
+        a HostSpec carries members and nothing else — no device set, no
+        sharing word (ADR 0001)."""
+        serve, train, _ = self.exp.topology.hosts
+        self.assertIsInstance(serve.members[0], PoolMember)
+        self.assertIsInstance(train.members[0], LearnerMember)
+        self.assertEqual(serve.members[0].name, "main")
+        self.assertEqual([f.name for f in fields(HostSpec)], ["members"])
 
     def test_equality_and_replace(self) -> None:
         self.assertEqual(self.exp, example_1())
@@ -102,26 +100,29 @@ class TestConstruction(unittest.TestCase):
         self.assertNotEqual(self.exp, other)
 
     def test_optional_halves(self) -> None:
-        offline = replace(self.exp, gen=None, eval=None,
+        offline = replace(self.exp, gen=None,
                           plans=Plans(train="cas://plan/train"))
         self.assertIsNone(offline.gen)
         generation_only = replace(self.exp, algo=None)
         self.assertIsNone(generation_only.algo)
 
-    def test_multi_node_topology_example_5(self) -> None:
-        config = GpuConfig(groups=(
-            GpuGroup(gpus(n=16, nodes=2), (pool("main", tp=2, n=8),)),
-            GpuGroup(gpus(n=8), (learner(fsdp=8),)),
+    def test_sharded_topology_example_5(self) -> None:
+        """Pure demand: shard widths and GB, no device counts, no nodes, no
+        provider names. `vram_gb` is TOTAL across the shards (Q3), so the
+        number survives a re-sharding untouched."""
+        config = Topology(hosts=(
+            HostSpec((pool("main", tp=2, vram_gb=120),)),
+            HostSpec((learner(fsdp=8, vram_gb=400),)),
         ))
-        self.assertEqual(config.groups[0].gpus.nodes, 2)
-        self.assertEqual(config.groups[0].members[0].n, 8)
+        self.assertEqual(config.hosts[0].members[0].tp, 2)
+        self.assertEqual(config.hosts[1].members[0].vram_gb, 400)
 
-    def test_fractional_colocation_example_6(self) -> None:
-        solo = GpuGroup(gpus(ids=("0",)),
-                     (pool("main", n=2, fraction=0.30), learner(fraction=0.25)),
-                     sharing="concurrent")
-        self.assertEqual(solo.members[0].fraction, 0.30)
-        self.assertEqual(solo.gpus.ids, ("0",))
+    def test_alternating_host_example_6(self) -> None:
+        """Several members on one HostSpec ALTERNATE on one partition; a
+        member without a size wants a whole device per shard (Q10)."""
+        both = HostSpec((pool("main", vram_gb=12), learner()))
+        self.assertEqual(both.members[0].vram_gb, 12)
+        self.assertIsNone(both.members[1].vram_gb)
 
 
 class TestFrozen(unittest.TestCase):
@@ -131,7 +132,7 @@ class TestFrozen(unittest.TestCase):
             (exp, "seeds", Seeds(master=0)),
             (exp.policy, "base", "other"),
             (exp.algo.schedule, "microbatch_tokens", 1),
-            (exp.gpu_config.groups[0], "sharing", "sleep"),
+            (exp.topology.hosts[0], "members", ()),
         ]:
             with self.assertRaises(FrozenInstanceError):
                 setattr(obj, field_name, value)
@@ -188,12 +189,6 @@ class TestVocabularies(unittest.TestCase):
                 with self.assertRaises(ValueError):   # PlanError is one
                     parse(ref)
 
-    def test_sharing_vocabulary(self) -> None:
-        group = GpuGroup(gpus(n=1), (learner(),), sharing="sleep")
-        self.assertEqual(group.sharing, "sleep")
-        with self.assertRaises(ValueError):
-            GpuGroup(gpus(n=1), (learner(),), sharing="timeshare")
-
     def test_tier_vocabulary(self) -> None:
         self.assertEqual(replace(example_1(), tier="release").tier, "release")
         with self.assertRaises(ValueError):
@@ -223,16 +218,16 @@ class TestDefaults(unittest.TestCase):
         are absent when a run makes nothing (every train leaf is sealed
         elsewhere) or measures nothing."""
         p = Plans(train="cas://plan/train")
-        self.assertEqual((p.rollout, p.eval), (None, None))
+        self.assertEqual(p.rollout, None)
 
-    def test_eval_spec(self) -> None:
-        """Eval keeps only when it runs, what scores it, and where the traffic
-        goes: `tasks`, `env` and `n_samples` left with the SHAPE (#59), which
-        is plans.eval — one wave per eval point, held out leaf by leaf."""
-        e = EvalSpec()
-        self.assertEqual((e.every, e.post, e.pool), (10, (), "main"))
-        self.assertEqual([f.name for f in fields(EvalSpec)],
-                         ["every", "post", "pool"])
+    def test_measurement_left_the_spec(self) -> None:
+        """#70: a run's identity is its training loop. Plans carries no eval
+        and the spec no EvalSpec — measurement is an observation OUTSIDE the
+        run (runner/measure.py), configured by its own manifest."""
+        self.assertEqual([f.name for f in fields(Plans)],
+                         ["train", "rollout"])
+        self.assertNotIn("eval",
+                         [f.name for f in fields(ExperimentSpec)])
 
     def test_schedule(self) -> None:
         """Schedule has exactly TWO fields, because the plan states the rest:
@@ -268,15 +263,11 @@ class TestDefaults(unittest.TestCase):
 
 
 class TestSugar(unittest.TestCase):
-    def test_gpus(self) -> None:
-        self.assertEqual(gpus(6), GpuSet(n=6))
-        self.assertEqual(gpus(16, nodes=2), GpuSet(n=16, nodes=2))
-        self.assertEqual(gpus(ids=("0", "1")), GpuSet(ids=("0", "1")))
-
     def test_pool_and_learner(self) -> None:
-        self.assertEqual(pool("main", tp=2, n=3),
-                         PoolMember(name="main", tp=2, n=3))
+        self.assertEqual(pool("main", tp=2, vram_gb=30),
+                         PoolMember(name="main", tp=2, vram_gb=30))
         self.assertEqual(learner(fsdp=2), LearnerMember(fsdp=2))
+        self.assertIsNone(pool("main").vram_gb)
 
     def test_lora(self) -> None:
         a = lora("layers.*.mlp.*", r=16)

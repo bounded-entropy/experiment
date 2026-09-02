@@ -38,26 +38,15 @@ class GenSpec:
     `envs` is a declaration, not a use: identity is a pure function of the spec
     value (I3), so the environments whose source hashes into run_id have to be
     nameable without fetching a plan. The submit gate refuses any leaf naming
-    an environment not declared here. Scoring is NOT here — that is
-    postprocessing."""
+    an environment not declared here. `makers` is the same declaration for
+    the task makers Derive leaves name (mint-then-make: the reflect loop's
+    content derivation is registered code, so it hashes like an environment).
+    Scoring is NOT here — that is postprocessing."""
 
     envs: tuple[str, ...]         # registered @environment names
     tasks: tuple[str, ...]        # content-addressed: "cas://<sha>/..." each
     sampling: SamplingSpec = SamplingSpec()
-
-
-@dataclass(frozen=True)
-class EvalSpec:
-    """Firewalled measurement: immutable bundle versions + held-out tasks only.
-
-    WHAT eval samples is Plans.eval — one wave per eval point, held-out tasks
-    named leaf by leaf — so `tasks`, `env` and `n_samples` are not knobs here
-    any more than they are in a rollout. What remains is when it runs, what
-    scores it, and where the traffic goes."""
-
-    every: int = 10               # run after every N optim updates
-    post: tuple[str, ...] = ()    # scoring pipeline over eval trajectories
-    pool: str = "main"            # which engine pool carries eval traffic
+    makers: tuple[str, ...] = ()  # registered @task_maker names
 
 
 # ---------------------------------------------------------------------------
@@ -95,7 +84,8 @@ class Plans:
     `train` is what the Trainer consumes, one wave per update, and its LENGTH
     is the run's length. `rollout` is what the Generator makes, one wave per
     rollout index; None means the run samples nothing (every train leaf is
-    already sealed elsewhere). `eval` is one wave per eval point.
+    already sealed elsewhere). Measurement has no plan here: it is not part
+    of the run (a Measurement follows the ledger from outside, observe-side).
 
     Each uri's sha IS the plan's content hash, so a plan hashes into run_id
     exactly as if it were written inline, while the spec stays readable.
@@ -103,7 +93,6 @@ class Plans:
 
     train: str                    # "cas://<sha>"
     rollout: str | None = None
-    eval: str | None = None
 
 
 @dataclass(frozen=True)
@@ -154,71 +143,63 @@ class AlgoSpec:
 
 
 # ---------------------------------------------------------------------------
-# topology — semantics-neutral (I5): moving members between groups never
-# changes results, only throughput
+# topology — semantics-neutral (I5): moving members between hosts never
+# changes results, only throughput. One HostSpec is one host (ADR 0001).
 # ---------------------------------------------------------------------------
-
-@dataclass(frozen=True)
-class GpuSet:
-    """Pure device demand: what, never where (I5) — placement decides that.
-    Literal ids are only for pinning a dedicated daemon."""
-
-    n: int | None = None
-    nodes: int = 1
-    ids: tuple[str, ...] | None = None
-
 
 @dataclass(frozen=True)
 class PoolMember:
     """A pool's declared capacity: the name traffic routes to, serving sample
     and score under it. `tp` is the width the engine handed for it must be
-    BUILT at, never a request."""
+    BUILT at, never a request. `vram_gb` is the memory it needs, in GB, TOTAL
+    across its tp shards (the per-device need is vram_gb / tp, so the number
+    is invariant under re-sharding, as I5 requires); None means a whole
+    device per shard. GB, never a fraction: 0.625 of an L4 is 15 GB and of
+    an H100 is 50 GB, and the metal that lands it knows which card it is."""
 
     name: str
     base: str | None = None       # None → the policy base
     tp: int = 1
-    n: int = 1
-    fraction: float | None = None # share of the group's GPU memory
+    vram_gb: float | None = None  # TOTAL across shards; None = a whole device per shard
 
 
 @dataclass(frozen=True)
 class LearnerMember:
     """The differentiable fwd/bwd workload; `fsdp` is likewise a build width
-    the handed learner must already have."""
+    the handed learner must already have, and `vram_gb` is total across the
+    fsdp shards, None a whole device per shard."""
 
     fsdp: int = 1
-    fraction: float | None = None
+    vram_gb: float | None = None
 
 
 Member = PoolMember | LearnerMember
 
 
 @dataclass(frozen=True)
-class GpuGroup:
-    """The unit of colocation: members co-resident on one GpuSet.
+class HostSpec:
+    """ONE HOST: a single placement unit, carved as one Partition and listed
+    as one Host. One member is a dedicated host; several members ALTERNATE on
+    its partition — one resident live at a time (the host's own exclusive
+    arbiter group), so a learner alternating with an engine serializes
+    generation and training and implies max_policy_lag == 0. Two workloads
+    that should run side by side are two HostSpecs, two carves, two honest
+    bookings — never one host wearing both at once.
 
     The member vocabulary is closed at pool + learner; everything else
     (rollout, eval, judge, teacher) is traffic routed to named pools.
-    sharing="sleep" makes it an exclusive group: the learner alternates with
-    the engines on the same memory, and therefore implies max_policy_lag == 0.
     """
 
-    gpus: GpuSet
     members: tuple[Member, ...]
-    sharing: str = "concurrent"
-
-    def __post_init__(self) -> None:
-        if self.sharing not in ("concurrent", "sleep"):
-            raise ValueError(
-                f"GpuGroup.sharing must be 'concurrent' or 'sleep', got {self.sharing!r}"
-            )
 
 
 @dataclass(frozen=True)
-class GpuConfig:
-    """All groups. Each pool name appears once; feasibility is checked at submit."""
+class Topology:
+    """All hosts. Each pool name appears once; feasibility is checked at
+    submit, and what fits WHERE is placement's question, answered against a
+    real residual — never here."""
 
-    groups: tuple[GpuGroup, ...]
+    hosts: tuple[HostSpec, ...]
 
 
 # ---------------------------------------------------------------------------
@@ -268,10 +249,9 @@ class ExperimentSpec:
     gen: GenSpec | None           # inference world; None = pure-offline run
     plans: Plans                  # the shape: which trajectories, which wave
     algo: AlgoSpec | None         # training world; None = generation-only run
-    gpu_config: GpuConfig         # semantics-neutral (I5)
+    topology: Topology            # semantics-neutral (I5)
     seeds: Seeds
     init: WarmStart | None = None
-    eval: EvalSpec | None = None
     tier: str = "lab"             # "lab" | "release"
 
     def __post_init__(self) -> None:
@@ -289,7 +269,7 @@ class ExperimentSpec:
 class BackendProfile:
     """Where a run executes. The manifest records which profile ran it."""
 
-    kind: str                     # "local" | "modal" | "skypilot"
+    kind: str                     # a venue name, e.g. "local", "modal", "aws"
     gpu: str = ""
     nodes: int = 1
     idle: str = "keep"
@@ -300,20 +280,15 @@ class BackendProfile:
 # sugar — plain constructors, nothing hidden
 # ---------------------------------------------------------------------------
 
-def gpus(n: int | None = None, nodes: int = 1, ids: tuple[str, ...] | None = None) -> GpuSet:
-    """gpus(6) | gpus(16, nodes=2) | gpus(ids=("0", "1"))."""
-    return GpuSet(n=n, nodes=nodes, ids=ids)
+def pool(name: str, base: str | None = None, tp: int = 1,
+         vram_gb: float | None = None) -> PoolMember:
+    """One declared pool, served by its host's metal."""
+    return PoolMember(name=name, base=base, tp=tp, vram_gb=vram_gb)
 
 
-def pool(name: str, base: str | None = None, tp: int = 1, n: int = 1,
-            fraction: float | None = None) -> PoolMember:
-    """One declared pool, served by this group's metal."""
-    return PoolMember(name=name, base=base, tp=tp, n=n, fraction=fraction)
-
-
-def learner(fsdp: int = 1, fraction: float | None = None) -> LearnerMember:
+def learner(fsdp: int = 1, vram_gb: float | None = None) -> LearnerMember:
     """The differentiable member."""
-    return LearnerMember(fsdp=fsdp, fraction=fraction)
+    return LearnerMember(fsdp=fsdp, vram_gb=vram_gb)
 
 
 def lora(site: str, r: int, tie: bool = False) -> AdapterSpec:
@@ -323,20 +298,28 @@ def lora(site: str, r: int, tie: bool = False) -> AdapterSpec:
 
 def plora(site: str, k: int, latent: int = 32, members: int = 8,
           prior_std: float = 0.05, hidden: int = 128,
-          factors: str | None = None) -> AdapterSpec:
+          factors: str | None = None, basis: str = "svd",
+          basis_seed: int = 0) -> AdapterSpec:
     """Probabilistic LoRA: a rank-k delta whose k x k core is GENERATED from a
     latent draw, so the policy is a distribution over adapters rather than one.
 
-    Each matched weight M is factored once, offline, into its top-k singular
-    directions (`factors`, a "cas://<sha>" artifact); what trains is a small
-    hypernet mapping a latent z to each site's core, plus the latent's own
-    posterior N(mu, diag(exp(log_std)^2)) against a N(0, prior_std^2) prior.
-    `members` is how many draws the engine serves as one ensemble; a request
-    picks one by its seed, and score traffic gets the posterior mean.
+    Each matched weight M is factored once, offline, into frozen directions
+    (`factors`, a "cas://<sha>" artifact); what trains is a small hypernet
+    mapping a latent z to each site's core, plus the latent's own posterior
+    N(mu, diag(exp(log_std)^2)) against a N(0, prior_std^2) prior. `members`
+    is how many draws the engine serves as one ensemble; a request picks one
+    by its seed, and score traffic gets the posterior mean.
+
+    `basis` picks the frozen directions' recipe: "svd" is M's own top-k
+    singular directions; "random" is the control — the same top-k singular
+    VALUES steering random orthonormal directions drawn off `basis_seed`, so
+    the two arms differ in the basis and nothing else. The artifact named by
+    `factors` must be built with the same recipe (build_factors takes both).
     """
     return AdapterSpec(adapter_type="plora", site=site, init={
         "k": k, "latent": latent, "members": members,
-        "prior_std": prior_std, "hidden": hidden, "factors": factors})
+        "prior_std": prior_std, "hidden": hidden, "factors": factors,
+        "basis": basis, "basis_seed": basis_seed})
 
 
 def soft_prompt(site: str, n: int, d: int) -> AdapterSpec:

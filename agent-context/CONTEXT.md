@@ -2910,13 +2910,6 @@ specs; backends (local/modal/skypilot) and GPU topology are semantics-neutral.
     locally, having no HF checkout to read; and nothing in `observe/` learned
     the word plora, because the dictionary is what the UI reads.
 
-APPEND VERBATIM to agent-context/CONTEXT.md, immediately after entry 64's last
-line ("...the word plora, because the dictionary is what the UI reads.") and
-before the "## Open threads" heading. Renumber to 66 if the adopt workstream
-lands 65 first.
-
----8<--- cut here ---8<---
-
 65. **THE SCORER: the fourth daemon, and post traffic leaves the gradient's
     critical path.** #47 measured the problem and named it: a teacher column
     computed inside the Trainer's post phase makes every gradient wait on a fan
@@ -3023,8 +3016,615 @@ lands 65 first.
     is never deleted at the merge: deletion has exactly two meanings in this
     store and neither is "a reader is done".
 
+66. **THE GATED LATENT KL: accuracy first, then the prior.** Ported from the
+    arc-agi-ttt harness, where the ordering is EMERGENT rather than written: a
+    group whose completions are all correct has an all-tie, z-scored-to-zero
+    advantage, so a constant KL term is simply the only gradient left once the
+    task is solved. rlstack's `grpo_latent_kl` already had that emergent half;
+    what the TTT campaign wants is the other half made explicit — NO prior
+    pull while the policy is still learning to be right. Two primitives, both
+    existing shapes:
+    - `training/post/group_accuracy.py`: consumes `reward`, produces
+      `accuracy` — the group's mean reward, one copy per row. The group is the
+      gate's scope on purpose: it is the advantage's baseline scope, so "this
+      group is solved" and "this group's advantage is identically zero" are
+      the same fact, and the gate hands exactly the dead rows to the prior.
+    - `training/losses/grpo_latent_kl_gated.py`: grpo's surrogate verbatim
+      (called, not restated) plus `gate * BETA * kl / microbatches_in_update`,
+      where the gate is the masked fraction of tokens whose `accuracy` reached
+      `FULL_ACCURACY` (1.0, a module constant like BETA and for the same
+      reason: the threshold IS the objective, so sweeping it must change
+      run_id). The gate is a COLUMN, not a branch in the trainer (I9/#38).
+    THE ENDPOINTS ARE EXACT regardless of packing — nothing solved pays no KL,
+    everything solved pays the whole BETA and coincides with `grpo_latent_kl`
+    to the float (pinned by test). Between them the effective beta is the
+    per-microbatch solved fractions averaged, a wave statistic that depends
+    mildly on how `pack` split the update — stated in the docstring rather
+    than hidden, and accepted: the alternative (a per-update gate) has no
+    scope to live in, because a postprocessor sees one group and a loss sees
+    one microbatch. deploy/plora_l4.py now runs
+    `grpo_latent_kl_gated` with `("final_answer", "group_accuracy",
+    "grpo_advantage")` — still ONE task (the screened 4/8 problem), where the
+    gate reads plainly: pure GRPO until a group goes 8/8, then that group's
+    share of the update becomes compression toward the prior. 740 tests green
+    on fakes (6 new); the three numeric assertions (gate closed = grpo
+    exactly, gate open = grpo_latent_kl exactly, half solved = BETA/2) are
+    torch-gated and run in the image. NOT run on metal yet.
+
 ---8<--- cut here ---8<---
 
+68. **THE SUBMISSION DOOR AND THE STANDING FLEET: adopt, the desk, and the
+    mixed-family chain — three rulings, one arc, each proven by the failure
+    that demanded it.** (Renumbered from a colliding #66 at the
+    worktree merge; chronologically it sits between #65 and #67.) The deployment model was always "experiments request
+    resources and join matching hosts", and the fleet could PLACE (#43) but
+    nothing could DELIVER: `submit` was an in-process method, so a campaign
+    could only run where its script already stood. This entry is the missing
+    delivery, built outward from one verb.
+    - **`Host.adopt(spec_row, routes)` — submit, without the submitter
+      in-process.** The frame is the spec's canonical JSON plus placement's
+      routes (pool name -> ADDRESS, for pools this host does not serve). The
+      schema is derived HOST-SIDE (`schema_for`, a birth fact): an adopted
+      spec never ships a schema, so identity is computed where the code that
+      will run lives (I3) and a client cannot ship one the metal disagrees
+      with. The reply is ACCEPTANCE — {run_id, state} — never completion: the
+      ledger is the result channel and peeks are the door, as for any run.
+      Custody checks (bind, fit, solo) run fail-fast in the reply; the submit
+      gate still runs at Phase 0 inside the tenancy task. RE-ADOPTION IS
+      RESUME, the same way resubmission always was. Two fixes the desk's own
+      tests forced, both now rules: `dial` resolves an address to a
+      TRANSPORT and the HOST wraps it with the pool's declared (base, tp) —
+      the venue knows where, the spec knows what — and acceptance rosters the
+      tenancy EAGERLY, because a roster written when the background task
+      first ticks lets two adopts in one breath both pass check_solo.
+      `spec_from_json` (canonical_json's typed inverse, dispatch over the
+      closed class table) lives with the WIRE CODECS in runner/remote.py, not
+      in canonical.py — the architecture test refused the first placement,
+      correctly: spec modules are pure values, and only the wire decodes.
+    - **`FleetService` — placement as a service, and the fleet journal's ONE
+      WRITER.** The Trainer/ledger pattern applied to the fleet plane: the
+      desk holds LISTINGS (descriptions of standing hosts — regimes, address,
+      solo — deploy-registered at boot, journaled, rebuilt by `from_journal`
+      after any kill), matches the join rung over them, and `submit` ends in
+      an adopt at the learner's listing with every other pool's address
+      threaded as routes. A placement nothing serves returns BOOT
+      INSTRUCTIONS: the standing carve is a venue action (boot a container
+      wearing the regimes, list it), because the desk is a CPU process and
+      the factories live beside metal it does not have. `delist` and a
+      placement-time liveness probe complete it: a dead container is skipped,
+      never offered. Single-writer is also the multi-user answer: concurrent
+      campaigns serialize through one desk instead of double-reading one
+      residual. NOTHING IN rlstack/ SAYS THE VENUE'S NAME — the desk knows
+      `connect: address -> RemoteHost`, a campaign is
+      `RemoteFleet(transport).submit(spec)`, and the Modal cls transport is
+      ~10 lines in the deploy file.
+    - **`SiteWrapper` — mixed adapter FAMILIES at one site path nest, not
+      collide.** Found by the sweep, not by review: 40 tenants (28 plora, 12
+      lora) on ONE shared learner all died in minutes — plora rows routed
+      through a lora tenant's wrapper met lora math (`state.b` on a
+      PloraState, 20 arms), lora rows through a plora wrapper were asked for
+      recorded latents they never drew (12 arms). The hole is as old as #44:
+      every site wrapper assumed all state at its path was its own family,
+      and no prior tenancy ever mixed families at a path (the stress matrix
+      is single-family per site). The fix is a shared chain in replay.py:
+      SiteWrapper owns the roster and the nesting — `join_site` finds a
+      family's wrapper anywhere in the chain or wraps the head; `leave_site`
+      splices it out wherever it sits — and each family's forward applies
+      ONLY rows whose routed state is its own, passing the rest through to
+      `inner` (the other family's wrapper, or the bare Linear). Pinned by
+      tests/test_mixed_families.py: a tenant beside a foreign family is
+      BIT-IDENTICAL to the same tenant alone, in both install orders.
+    - **The venue lesson, paid for once:** `modal run`'s ephemeral app dies
+      with its entrypoint and takes spawned work with it — 32 seeded arms,
+      killed at seed time. The standing container is DEPLOYED and every door
+      looks it up by name, which is not a workaround but the model itself:
+      sweep, via_desk and progress are three processes knocking on one
+      standing host.
+    - **Proven on metal (deploy/sweep_a100.py):** 40 experiments — plora
+      k x prior_std x latent against lora r x lr, two seeds — as tenants of
+      ONE shared engine and ONE shared learner on two fractional partitions
+      of a single A100, 32 arms through the in-process door and 8 arriving
+      from a SEPARATE process as one RemoteFleet frame each, all forty on one
+      roster, all forty committing. The observation door queues behind
+      training forwards on a saturated loop (progress took minutes at
+      40-tenant width) — a stated cost; the store-side read is the observer's
+      answer, as everywhere.
+
+67. **FILING: runs spawn into subdirs, and the tree reaches the UI.** The
+    store's runs/ was flat and organization leaned entirely on tags; now a
+    submission may INDICATE a subdir and the run's directory spawns at
+    runs/<subdir>/<run_id>. Three rulings hold it together:
+    - **Filing is never identity.** The subdir rides submit/adopt/desk frames
+      as a parameter beside the spec — it does not hash, so the same spec
+      filed differently is the SAME run (pinned: identical run_id and
+      byte-identical ledger at runs/sweeps/arith/<id> and runs/<id>). It
+      could not live in the spec without violating I3's "identity is
+      content".
+    - **One home, for life.** open_run resolves a run by its manifest
+      wherever it lives (`run_prefix`, the one seam every peek and every
+      handle key routes through, cached because runs never move); a
+      different subdir asked at attach is ignored — resubmission is resume,
+      not a move. I10's "for life" now includes the address.
+    - **Segments are attested** (check_subdir: [A-Za-z0-9._-]+ per segment,
+      never "." or ".."), for the host-name reason: a stray separator would
+      file a run where no reader looks.
+    The observer says where each run lives (runs_data rows carry `subdir`;
+    the web index nests a collapsible block per subdir INSIDE each #58
+    folder block; the CLI prints `dir <subdir>/` headers). The two axes are
+    deliberately distinct and both rendered: a FOLDER is which store (#58, a
+    root chosen at birth), a SUBDIR is filing inside one store. Key helpers
+    (wave_key and kin) now take the run DIRECTORY, not the id — the one
+    signature change, caught by one test.
+
+68. **THE METAL PLANE AND THE REAPER: the desk deduces, the metal enforces,
+    and silence gets a janitor.** Until now the standing carve was a human's
+    errand (boot instructions in the submit refusal) and a host that died
+    without saying delist left a stale listing forever. Samarth's ruling
+    closed both, with one invariant named first: **a carve accepted is a
+    fraction promised** — space must be booked from the ack, not from the
+    build's completion, or two carves in the build window double-book.
+    - **MetalService** (runner/fleet.py) is the metal-side end: the
+      container that owns a device wears it BY DEFAULT beside its
+      HostService routing. It holds ONE registered Metal's books — built
+      partitions (hand-built standing hosts enter via `adopt_born`, refused
+      without a partition) plus PENDING bookings — and serves `carve`
+      (books synchronously before the build's first await; factories run in
+      a worker thread because an engine boot is minutes; a failed build
+      releases its booking), `decarve` (the venue's `release` unmakes what
+      the factories made, the fraction returns to residual), and
+      `residual`/`describe` on the ask path. It writes NOTHING to the fleet
+      journal: the desk stays that journal's one writer.
+    - **The desk commands carves** (the bare provision CALLABLE is
+      superseded): metal registration now carries an ADDRESS (`metal` verb —
+      the container phones home its own existence beside its host listings;
+      journaled; from_journal redials via `connect_metal`), and
+      provision_unit asks each registered metal's residual (the DEDUCTION)
+      then commands the first that fits (RemoteMetal.carve). A stale
+      deduction costs a refusal at the metal's door, never a double-book;
+      what no metal holds is still a boot instruction — the standing
+      acquire stays a human's. A unit carved for a placement whose later
+      unit missed STAYS listed (metal born is metal listed).
+    - **Listings carry the capacity VIEW** (partition row + metal name,
+      journaled, rebuilt): the desk can deduce, plan, and render — and the
+      row is exactly what enforcement must not rely on, because a view
+      cannot see in-flight bookings or unilateral deaths. Both of Samarth's
+      options landed, with the authority split stated.
+    - **reap(probes, wait)**: every listing probed; the silent RETRIED
+      (Samarth's "somehow restart" — on Modal the knock itself boots a
+      stopped-but-deployed container, so a probe that queues until bring_up
+      answers reads recovered, and only a torn-down deployment stays
+      silent); the still-silent DECARVED at their metal (a living container
+      frees the fraction; a dead one already did, physically) and DELISTED
+      with reason="reaped" journaled, so the rebuilt desk agrees.
+      fleet_a100 runs it on a modal.Period(15m) schedule and as a manual
+      door. Verdicts: alive | recovered | reaped.
+    Wire growth: fleet verbs `metal`/`reap`, metal verbs
+    `carve`/`decarve`/`residual`/`describe`, RemoteMetal beside RemoteHost/
+    RemoteFleet, list frames carry partition/metal, delist carries reason.
+    fleet_a100's Metal container books its two standing hosts (residual
+    honestly ~0.08) and mints carve addresses; the booking race, the failed
+    build, the reaped-carve-frees-metal circle, and the recover-vs-reap
+    verdicts are all pinned on fakes (test_fleet_service, 26 tests).
+
+69. **THE BLIND DESK: the desk allocates Demands; specs meet the fleet in
+    the campaign layer; Fleet-the-class is gone.** Samarth's ruling, arrived
+    at from the side evaluator (pair_eval.py hand-rolled find_listing and a
+    third copy of the venue transports because the desk's only door demanded
+    an ExperimentSpec with a learner): the desk should not know what an
+    experiment IS — its fundamental job is to accept any Demand and try
+    allocating it; the host owns what a workload means.
+    THE BOUNDARY: rlstack/runner/desk.py imports no spec class (the acid
+    test, pinned: a gibberish frame is placed and relayed untouched, the
+    HOST refuses it, the desk's reply carries the host's error). The desk's
+    vocabulary is Demand rows (demand_rows/demands_from, the wire codec;
+    Demand grows `anchor` — where a delivered frame lands), listings, metal,
+    addresses. Two doors: `place(demands)` answers addresses (the PURE
+    CLIENT's door — an evaluator joins a pool and is thereafter just
+    admitted traffic; journaled delivered=False), and `submit(demands,
+    frame)` places then DELIVERS the opaque frame to the anchor demand's
+    host with routes threaded — routes are derivable from the demand rows
+    alone, which is what makes the blind relay possible. One frame keeps
+    placement+delivery atomic (no leases, the #43 ruling stands).
+    THE CAMPAIGN LAYER (runner/campaign.py) is the only place specs become
+    demands: demands_of marks the learner demand anchor (the learner is
+    never remote lives HERE now, client-side, where the spec is), frame_for
+    carries the canonical row + code claim, and Campaigns is the desk's
+    spec-aware sidecar — it owns migrate/sliced_plans (they read stores AND
+    specs, so they ride beside the desk in its container, one Transport
+    door: Campaigns.serve handles migrate, delegates the rest). RemoteDesk
+    .submit(spec) keeps its signature — shaping moved client-side —
+    and .resolve(demands) is the pure client's verb (pair_eval's
+    serving_pool, deleted).
+    THE RENAME (a #55-style vocabulary arc, identity-free — machinery names
+    are not hashed): FleetService → Desk, RemoteFleet → RemoteDesk, fleet.py
+    → desk.py, the deploy verbs fleet/fleet_ask → desk/desk_ask.
+    Fleet-the-class (the in-process ladder) is DELETED, and with it
+    Join/Carve/Acquire/Plan-as-data: its unique value was the ladder over
+    live hosts, which Desk + MetalService with local factories already are —
+    the duplicated join rule (Fleet._covers vs _covers_regimes, a listed
+    finding) collapses to ONE `covers()`. "The fleet" survives as the
+    collective noun for the plane (the journal key fleet/log.jsonl and
+    read_fleet_log/append_fleet_event keep it; renaming bytes on disk
+    orphans history). Host/Partition stay two words for two planes (1:1
+    stated in ARCHITECTURE.md). Tests: test_fleet_service → test_desk (+
+    place/blindness/anchor claims), test_fleet → test_placement (the pure
+    vocabulary: demands_of + anchor, placement_units, fraction_for_gb,
+    covers). NOT REDEPLOYED with the pair mid-flight: the wire verbs rename,
+    and a redeploy would strand the running metal generation and let the
+    reaper decarve the live pair's listings — the deploy waits for the
+    natural break (the migrate move is the natural break).
+
+70. **MEASUREMENT LEAVES THE RUN: EvalSpec retired, the Evaluator daemon
+    dissolved, observation is its own thing.** Samarth's ruling, forced by a
+    live incident: the pair's in-run eval was pinned by identity to a
+    floor-scoring task set for all 400 updates, and the sanctioned fix (the
+    side evaluator) worked precisely BECAUSE eval was firewalled and every
+    adapter version restorable — at which point the in-run Evaluator was
+    revealed as an identity liability with no compensating power.
+    THE CUT: EvalSpec is deleted, ExperimentSpec.eval and Plans.eval are
+    gone, the Evaluator daemon and its wiring are gone, validate's eval
+    rules are gone, code_hashes no longer reaches eval.post, and migrate's
+    eval-slicing deletes itself. A run's identity is its TRAINING loop.
+    Old stores are readable history: a pre-#70 canonical row's eval keys
+    are extra fields the decoder never touches (pinned by test), and the
+    observer still renders legacy eval/ summaries beside the new shape.
+    THE REPLACEMENT (runner/measure.py): a Measurement is an observation OF
+    a run — name, env, held-out task ids, samples, cadence, post pipeline,
+    its own seed — written to measurements/<run_id>/<name>/ (write-once
+    manifest + append-only points; ModalVolumeStore persists each point).
+    `measure_run` is one idempotent pass any process can run against a
+    pool: backfills every missing EVERY-th version from restored bundles
+    (KeepRestorable is what licenses reaching into the past), reduces in
+    WAVE order (#53's rule carried over, scrambler-pinned), and follows
+    the ledger on any cadence. It peeks, never attaches; the run dir gains
+    not one byte (pinned). Swapping what a run is measured on mid-run is
+    a NON-EVENT: stop one measurer, start another under a NEW name —
+    supersede, never rewrite (open_measurement refuses a changed manifest).
+    THE EDGES: measurements/ is the store's ONE deletable tree, so the
+    observer cache believes its absences instead of blink-guarding them
+    (the deliberate carve-out); the UI renders every named measurement as
+    its own dashed series beside legacy eval; pair_eval.py's tick is now a
+    thin venue wrapper over measure_run writing measurements/<rid>/heldout
+    (UI-visible). Vocabulary: RESIDENT vs DAEMON named in ARCHITECTURE.md
+    (an Engine/Learner lives on a partition; a Generator/Trainer/Scorer
+    watches the store and pokes one) — colocation is transport choice, and
+    only the Trainer's is forced (the autograd arc and the seal cannot
+    cross a wire).
+
+71. **DECOMMISSION: carve's inverse, client-asked.** The shutdown of the
+    gated pair proved the hole: delist is bookkeeping-only (the engine kept
+    serving after it), decarve existed only metal-side, and reap composes
+    them only for SILENT hosts — so retiring a LIVING host meant killing
+    containers by hand. New desk verb `decommission(host, force)`: decarve
+    at the listing's metal (release -> engine shutdown, fraction back to
+    residual) + delist(reason="decommissioned"), one frame, RemoteDesk
+    method included. THE GUARD IS DEPENDENTS, not occupancy: a serve host's
+    roster is empty (tenancies live at their anchor), so the desk joins the
+    journaled placements' pools against the live rosters' running runs and
+    refuses BY NAME; force proceeds. Hand-listed hosts (no metal on the
+    listing) only delist; a silent metal delists too (reap's reasoning on
+    demand). Reallocation is no new machinery: residual grew, the next
+    carve may land there — pinned by the carve-after-decommission test.
+    Closes the "no decommission rung" finding. Venue lessons from the same
+    shutdown, recorded for the deploy notes: stopping a Modal CONTAINER
+    does not stop a SPAWNED call (the serve() input reschedules onto a
+    fresh container — the standing shift's kill-switch is the app or the
+    call id), and desk-side probes of dead listings each knock-boot the
+    metal by name, so delist/decommission BEFORE the container kill.
+
+72. **REROUTE: restart-is-redial.** Taking a host down must not take its
+    tenants with it, and no state needs to move to guarantee that — the
+    store is the run (resume-equivalence) and adoption is resume, so a
+    "reroute" is stop + place + redeliver, nothing copied. Three pieces.
+    (1) `Host.stop(run_id)`: the per-tenancy kill, adopt's inverse —
+    cancel the adoption task and AWAIT it (daemons unwind structurally
+    under the TaskGroup; submit's except path rosters failed + journals
+    detach; a pre-try cancellation is normalized by stop itself), so the
+    reply means the death is complete and the run_id is free to adopt
+    again anywhere. HostService verb + RemoteHost method; stopping
+    mid-update costs one redone update, nothing else. (2) THE ARCHIVE:
+    `Desk.deliver` (submit's delivery half, now one copy) journals the
+    demand ROWS and the opaque FRAME inside the delivered place event —
+    still unread, so the desk stays blind — and `Desk.placements()`
+    promotes the journal archaeology to a read: latest binding per
+    run_id, rows and frame included, `dependents` joins against it.
+    (3) `Desk.reroute(run_id, avoiding, park)`: replay the archived
+    delivery — place the rows again with `avoiding` off the table
+    (find_listing/place_listings grew an `avoid` set; a carve never
+    lands there because a carve is a new name), stop the old tenancy at
+    whichever listing's roster carries it (`stop_anchored` probes — at
+    most one answers), deliver the archived frame to the new placement.
+    PLACE-FIRST: a healthy run is never stopped with nowhere to go;
+    `park` (decommission's mode — the host dies regardless) stops it
+    anyway and journals `parked` with the boot instructions, the run
+    waiting whole in the store until a human adds metal and RESUBMITS —
+    the revival is the ordinary campaign submit, same run_id.
+    `decommission(host, reroute=True)` moves every dependent first and
+    tears down after. Pre-archive deliveries refuse the replay with the
+    cure named (campaign resubmit). Solo self-rejoin is a known
+    non-feature: place-first sees the still-running tenancy occupying
+    its own solo host. Pinned by StopTest + RerouteTest (moved run
+    finishes on the fresh carve under the same run_id; refused move
+    leaves the run running to done; park + revive; unarchived refusal).
+
+73. **THE DSL CAMPAIGN: invented tool languages, the spectrum arms, and the
+    reflect loop.** Samarth's thesis under test: tiny trainable surfaces
+    (<100k params) leveraging what the model already holds, and language
+    itself as the credit channel. The pieces, all on branch dsl-campaign:
+    (1) TWO INVENTED DSLs — the Stamp Office (protocol: grab/fold/ink/seal/
+    file, invented colors, a color->drawer table) and the Glyph Exchange
+    (routing: four units on a one-way ring) — rulebook-in-prompt, verbs
+    absent from pretraining, dense milestone ladders (the DAPO
+    all-or-nothing lesson), 2 train requests vs a sweeping eval (mol never
+    trains; ring directions eval wider than they train). Task builders in
+    data/tasks/, graders IN the registered post classes (code_hashes reads
+    class source only). (2) SPECTRAL (SVF): one gain per singular direction
+    of each matched weight, top-k by |sigma*delta| served through plain
+    punica, straight-through backward so all directions compete; dense
+    gains ride the payload for resume, materialized peft pair for the
+    engine; NO factors artifact (the trainer recomputes the full SVD at
+    install). spectral_latent is its plora-style twin — gains GENERATED
+    from a latent (posterior + trunk + zero-init per-site heads), served as
+    members+mean materialized adapters, recording slatent_eps/member — the
+    "does the latent help" ablation. The latent-KL provided channel is
+    RENAMED plora_kl -> latent_kl so grpo_latent_kl(_gated) price either
+    adapter. plora grew basis="random" (scale-matched random orthonormal
+    frame, its own algo id) — the does-the-SVD-frame-matter control.
+    (3) THE REFLECT LOOP (iterative SDPO): Derive is the THIRD leaf
+    (mint-then-make: a registered TaskMaker turns a sealed trajectory into
+    a new task; source refs speak Replay's grammar; generator order
+    guarantees the source is sealed), MAKERS is a new registry declared in
+    GenSpec.makers and hashed by code_hashes (a NEW SPEC FIELD — canonical
+    bytes of every spec change, old rows decode), the reflect maker
+    re-serves the WHOLE transcript plus "what went wrong" (chat delimiters
+    ride in task meta["chat"]), reflect_retry is the two-turn env
+    (critique, injected retry ask, retry), and sdpo is FINAL-TURN behavior
+    cloning read off segment_ids — no reward in the loss; the graders ride
+    for the observer. Generator pacing gained the intermediate rule: an
+    un-referenced rollout is due when the first LATER referenced one is
+    (loop plans train only wave 3k). SCoRe's sandbagging caveat stands;
+    the Measurement (plain env, iteration-0 behavior) is the honest metric.
+    (4) REVERSE PPO IS DEAD: v1's suffix critic provably collapses (causal
+    hiddens make every window fully informed -> constant track -> credit
+    spikes at EOS); the v2 prefix/RUDDER rewrite was built, then Samarth
+    cut the arm — the loss is deleted; value_head KEEPS its new compute
+    half (boundary tap + mask hook + zero-init probe, provides "values")
+    with no consumer in the zoo. deploy/dsl_a100.py: 2xA100 (one metal
+    container, devices=2), desk-carved serve+learn hosts, twelve tenants
+    (6 arms x 2 DSLs: grpo / svd / nosvd / spectral / slatent / sdpo), a
+    10-minute measurement cron sweeping every run's eval set (phrasing 0)
+    under the PLAIN env, roster at measurements/dsl/runs.json.
+
+74. **A RESIDENT IS A PROCESS (ADR 0002): engines and learners as supervised
+    children of the metal, pinned and capped by their partition; the
+    learner's install is a typed Parameterization.** Samarth's prompt: move
+    vLLM to its own process ("live monitorability of which pools are living"),
+    and is there a parallel for torch learners. The root, named in the ADR:
+    every substrate knob for WHERE (CUDA_VISIBLE_DEVICES) and HOW MUCH
+    (torch's per-process allocator cap, vLLM's gpu_memory_utilization) is
+    process-granular, and a partition was smaller than a process — so
+    `partition.devices` reached nobody who could act on it (ADR 0001 Q4) and
+    `set_per_process_memory_fraction` lived in one docstring. The answers,
+    all in session: both kinds (Q1); loss bound at install because the
+    moments belong to one loss (Q2); emitted bytes on the wire, with NCCL
+    between two residents named as the NEXT mode and kept open (Q3);
+    building is UNIVERSAL, not a venue's (Q4 — Samarth's correction of the
+    draft); a restart goes through resubmit + recarve so metal, desk and
+    observer agree (Q7); a learner CAN sleep — the draft mistook an absence
+    for an inability (Q8, Q8a: fsdp=1 lands); JSON frames (Q10).
+    - **runner/residents.py** (new): `Resident.spawn(birth)` — a spawn-context
+      child (never fork; NOT daemonic, a learner has a chorus) that pins
+      CUDA_VISIBLE_DEVICES to the partition's devices before torch loads,
+      caps a learner's allocator at partition.memory, builds by rlstack's
+      universal builders, reports a `hello` (kind, base, tp/fsdp, sleeps,
+      devices_seen, pid — the metal refuses a measured device count that is
+      not the partition's) and serves frames; `Resident.in_process(birth,
+      obj)` is the same door around an already-built object (the fakes
+      suite's path, and what makes the two paths one). Frames are JSON-safe
+      dicts, request-id multiplexed over one pipe (`PipeTransport`, one
+      reader thread): an engine child dispatches `call`s concurrently on its
+      own loop so sampling keeps batching (Q5); `ask`s run inline and blocking,
+      exactly today's semantics (Q6, revisit later). Door verbs on no
+      protocol: hello, sleep/wake, stop. The teardown ladder
+      (Teardown/escalate/join_survivors, #53) moved here; ranks.py imports it
+      (Q9).
+    - **BUILDING IS UNIVERSAL.** `build_engine`/`build_learner` own class,
+      base, width, device (`cuda:0` IS the partition's first device once
+      pinned; shape n leads a chorus, every follower capped on its own
+      device) and fraction. A venue declares `Builds(engine=EngineBuild(...),
+      learner=LearnerBuild(...))` — the capacity knobs a partition cannot
+      tell you — and nothing else; `FakeEngineBuild`/`FakeLearnerBuild` put
+      the fakes in a real process. The recipe lives on the metal, is
+      RE-DECLARED at every bring-up from the deploy's constants, and is
+      journaled on the `metal` registration row and every `host-up` (Q4a:
+      runs stay auto-restartable through resubmit + recarve, and the record of
+      HOW is durable). A child reopens the store from a `StoreAddress`
+      (`Store.address()` on both backends; `open_store` in
+      data/stores/address.py — a mount-only view for a volume store, because
+      a resident reads cas blobs and writes nothing).
+    - **THE LEARNER'S BOUNDARY.** `Learner.install(tenant, Parameterization)`:
+      base, loss BY REGISTRY KEY, entries (adapter type by key, init with the
+      per-entry seed already derived, trainable, resolved sites),
+      OptimSettings — built by `loop.parameterization_of`, THE place a spec
+      becomes an install (`init_seed` moved to loop.py; the derivation is
+      byte-identical). `runner/learners/` imports no spec class, pinned in
+      test_architecture (#69's acid test, one region over). The chorus
+      broadcasts the Parameterization instead of the spec. `RemoteLearner`/
+      `LearnerService` are the wire (codecs for TokenBatch / TrainStats /
+      Emitted / Parameterization, bytes as base64 in ONE codec, so the NCCL
+      carriage later replaces the codec and leaves the verbs alone).
+      `EngineService` is the engine-verb half of HostService; HostService
+      admits, then forwards through the proxy. `RemotePool` is now also the
+      Host's proxy to its own engine child; `attach_residents` treats a
+      RemotePool the host attached at birth as local (a remote pool is one
+      nobody attached).
+    - **THE HOST STAYS THE DOOR.** Arbiter, roster, runner, journal in the
+      metal process; `Host(residents=...)`; `_attach_regimes` wires
+      evict/wake hooks to the door of every resident whose hello says
+      `sleeps` — engine AND learner (Q8): `TorchLearner.sleep`/`wake` move
+      the base, every tenant's params and moments to host RAM and empty the
+      allocator's cache (fsdp=1; a chorus reports sleeps=false, DTensor
+      offload is its own proof). This un-orphans the sleep seam on this
+      branch, where nothing wired it. `status()` and `describe()` carry
+      `residents` rows; `host-up` carries label + pid; the observer's hosts
+      view and the UI's hosts page show them.
+    - **A DEAD RESIDENT IS A DEAD HOST (Q7).** The watcher waits on the
+      child's SENTINEL — never join(): two threads reaping one child made
+      the loser read ECHILD as "alive" through the whole ladder, observed on
+      fakes — and `MetalService.resident_exited` decarves the host: siblings
+      down the ladder, booking freed, address gone, the death on
+      `service.deaths`; the desk's next probe reaps the listing. Nothing
+      restarts in place. MetalService takes `builds` + `spawn` instead of
+      engine_factory/learner_factory/release; `decarve` is the ladder;
+      `shutdown()` is what @modal.exit calls. Four venues converted
+      (gsm/dsl/gsm_sweep/fleet a100): typed recipes, `register_metal(...,
+      builds=)`, bring_down through the ladder.
+    - Tests: 868 (+13). test_residents: codecs; RemoteLearner over
+      LocalTransport byte-identical; the in-process door (hooks for both
+      kinds, refusal without `sleeps`, status/host-up rows, the pin
+      asserted); REAL children — a run through process residents
+      byte-identical to in-process with sleep/wake frames crossing to real
+      pids, a SIGKILLed resident decarves its host, a birth failing inside
+      the child reported through the hello and released, the ladder's rungs
+      on stubs (no torch needed now). test_desk's fixture spawns in-process
+      residents. Suite ~7 s.
+    - UNPROVEN ON METAL, all of it real: the pin on a 2+-device metal, the
+      torch cap, learner sleep's move set (adapter tensors outside
+      `parameters()` are a stated gap), the follower cap, `open_store` on a
+      Modal mount, teardown inside Modal's 30 s grace, and the round-trip
+      cost of a TokenBatch frame and of `tokenize` per trajectory (the local
+      tokenizer beside RemotePool is now due). Two deviations from the ADR,
+      stated: `observe/locate.store_for` is untouched (the address is derived
+      from the Store object, not parsed from a locator), and the pipe
+      transport lives in residents.py beside the door it serves rather than
+      in remote.py. ADR 0001's Q4 is answered here (branch b); its
+      alternation sizing (Q7 there) now rests on Q8a's learner sleep.
+
+75. **THE PARTITION SPEAKS GB, ONE HOSTSPEC IS ONE HOST, AND THE DESK
+    SUPERVISES ITS METALS (ADR 0001).** Samarth's prompt: one host wearing
+    both the learner and the engine contradicted the vision (a host is ONE
+    partition; two clearly separate uses are two hosts), the GpuSet/GpuGroup
+    primitives were misaligned with Host/Partition, and "the system should
+    speak GB — 0.625 on an L4 is much different than 0.625 on an H100".
+    Four defects, one root, named in the ADR: `sharing="concurrent"` claimed
+    a colocation the Host could not model (the fused gsm host booked
+    max(0.45, 0.40) and OOMed the second carve); a member's declared memory
+    was collapsed by `max()` and enforced by nobody; a fraction is a
+    provider fact in a demand's clothes (and hashed into run_id, so the same
+    experiment sized for two fleets was two ids — what I5 forbids); GpuSet
+    was inert (placement read none of it). Answers: alternate (Q1), accept
+    the identity break and delete the Modal store (Q2), total across shards
+    (Q3), Q4 closed by ADR 0002, delete check_fractions_fit (Q7), and — the
+    widening — the desk supervises its metals (Q5, Q5a–Q5d delegated and
+    resolved as recommended), measure not declare (Q6), PoolMember.n gone
+    (Q8), GpuGroup → HostSpec / groups → hosts (Q9), None = a whole device
+    per shard (Q10).
+    - **THE SPEC.** `GpuSet` and `PoolMember.n` deleted; `GpuGroup` →
+      `HostSpec(members)`, `GpuConfig.hosts`; `fraction` → `vram_gb: float |
+      None` on both members, TOTAL across the tp/fsdp shards (per device =
+      vram_gb / shape, invariant under re-sharding), None a whole device per
+      shard. `sharing` survives as ARITY: a multi-member HostSpec ALTERNATES
+      its members on one partition (the host's own exclusive arbiter group);
+      one member is a dedicated host; side by side is two HostSpecs, two
+      carves, two honest bookings. "Sleep" survives only as vLLM's build
+      fact (`enable_sleep_mode`). The gate: `check_hosts_exist` (no-hosts),
+      `check_alternation_implies_zero_lag` (alternation-lag-conflict — keyed
+      on a LEARNER alternating with an engine; two pools alternating on a
+      host of their own bind nothing, the one refinement of the ADR's "keyed
+      on member count", because they do not serialize generation against
+      training), `check_post_pools_can_coreside` keyed on multi-member
+      hosts; `check_sleep_groups_have_one_learner` (arity says it) and
+      `check_fractions_fit` (the gate holds no metal) deleted. The canonical
+      bytes changed for every spec — the break is accepted, the literal
+      regenerated, nothing else hardcodes a run_id, test_resume untouched.
+    - **THE DESK IN GB.** `Demand.vram_gb` (total; `per_device_gb()`),
+      `Demand.sharing` gone, `group` is the HostSpec index; `placement_units`
+      is one unit per HostSpec; `unit_gb(unit, metal)` sizes a unit by its
+      LARGEST alternating member's per-device GB, a whole device per card;
+      `provision_unit` deduces against `residual()` in GB per device and the
+      carve request carries `vram_gb` (per device, None = whole) and the
+      desk's `builds` row. `MetalService` books in GB (`residual`,
+      `choose_devices`, `pending`; `gb_of(partition, metal)` reads a built
+      fraction back); `fraction_for_gb` is THE ONE CROSSING, called once in
+      `MetalService.build` against the card the metal measured, raising the
+      acquire rung by name past one device; `per_device_gb(request)` resolves
+      None to the metal's own card. `MetalService.measure(name)` reads the
+      card off the device (torch lazily; refused by name where no CUDA device
+      is); `Metal` stays a plain record. `Host.check_fit` is custody (a
+      learner member finds a learner), never memory arithmetic — `capacity`
+      is gone; `attach_residents` takes exclusive groups from multi-member
+      HostSpecs and attaches a remote pool free whatever HostSpec it came
+      from (alternation is the SERVING host's business; the "remote pool in
+      a sleep group is refused" rule is gone with the one-learner check that
+      made it necessary). Partition.memory's docstring states it is DERIVED
+      from GB at the metal and is the substrate's unit.
+    - **THE SUPERVISION LOOP (Q5–Q5d): reap → knock → re-register → reroute.**
+      `register_metal` of a known name at the SAME address is the container
+      generation turning over: the row takes the measured facts and, if
+      carried, the new recipe (a redeploy is a human's act), journals a fresh
+      `metal` event (last-write-wins on replay), and `reconcile_metal` reaps
+      that metal's listings by probe with zero retries ("metal
+      re-registered", no decarve) and STRANDS their runs. A known name at
+      another address is a collision, refused. `boot_for(name)` joins
+      `host_for`/`metal_for` (venue-supplied; default knock = `describe()`
+      through the plane, which on Modal boots). `reap` concludes the silent
+      (decarve where the metal answers, delist "reaped"), `strand`s every
+      UNFINISHED run whose latest placement touched a reaped host —
+      journaled `parked` BEFORE any move, so the crash-midway state is on
+      the record — knocks each metal that lost listings (off the loop, so the
+      reborn container's own registration can reach the desk meanwhile), and
+      `retry_parked()`: `reroute(run_id, avoiding, park=True)` per queued run
+      — re-placed onto whatever fits, the reborn metal included, and
+      redelivered, which is resume. `parked()` is THE QUEUE, read off the
+      journal (latest disposition per run; a delivered accepted placement
+      supersedes); EVERY `metal` registration event retries it, under one
+      per-loop lock so a reap's retry and a registration's retry in the same
+      breath never adopt a run twice. `finished(run_id)` (ledger vs the
+      train plan's wave count, via store peeks) keeps finished runs out of
+      the queue — a refinement of the ADR's "every run whose latest placement
+      was on a reaped host": a 40-arm sweep's finished tenants would
+      otherwise be re-adopted (install + add_bundle each) on every preempt.
+      Verdicts: `reap` → {listings: alive|recovered|reaped, knocked: {metal:
+      answered}, runs: rerouted|parked}; the `metal` verb → {registered,
+      reaped, retried}. The desk's recipe row is CANON (Q5c): it rides every
+      carve, `MetalService.build` builds from it (`adopt_recipe`), and
+      `describe()` reports what it last built from. A host dying alone stays
+      a human's resubmit, as ruled.
+    - **THE VENUES** (UNPROVEN on metal, all of it): every gpu_config is two
+      HostSpecs in GB (gsm/gsm-sweep 18 + 16 — the fused shape that parked
+      the venue is gone; dsl 34 + 34 on two metals; fleet 16.8 + 20; sweep
+      33.6 + 40; plora_l4 7.2 / 4.8 / 9.6; dapo whole devices); every
+      `OwnedMetal(name, "A100-40GB", 1, 40.0)` is `MetalService.measure(name)`
+      (the hand-built venues derive their partitions' fractions with
+      `fraction_for_gb`); registration is `announce` inside `metal_duties`,
+      a task started from an ASYNC `@modal.enter` (Q5a — a task, never a
+      blocking wait: the desk's reply may carve on this very container),
+      followed by the per-host stats tasks and the commit tick (Q5b); the
+      "not re-registered" catch is gone; `serve` is the keepalive alone (an
+      input in flight holds the container open and reschedules after a
+      preempt); `up` spawns it as the knock and waits for the registration.
+    - **THE OPERATOR STEP, not run by any agent (Q2):** delete the Modal
+      store volume — run dirs and cas blobs, the desks' fleet journals
+      (fleet/*.jsonl; listings vanish, metals re-register at boot), and the
+      once-fetched dataset rows cache (measurements/gsm/rows-main.json) —
+      because every pre-#75 run_id is unreachable under the new canonical
+      bytes.
+    - Tests: 876 (from 868; test_placement/test_specs/test_validate/
+      test_examples recoded; +10 in test_desk: re-registration updates the
+      row and replays, a collision refused, the recipe on the carve, a double
+      `up` vs a rebirth, reap → knock → reroute lands the run, the describe
+      knock on a dead plane parks, a parked run retried on registration,
+      crash midway finishes from the journal without a double adoption, a
+      decommission park retried, measure() without a card; MetalService: the
+      acquire rung by name, a whole device is the whole of this card).
+      test_resume.py untouched and green. UNPROVEN on metal: measure() on a
+      real card (GiB from total_memory), a real Modal preempt through the
+      whole loop, async enter + the announce task, teardown of a stranded
+      run's zombie tasks (a real preempt takes the process; fakes cancel),
+      the split gsm shape (two carves, the anchor over the wire into its own
+      container), and the per-rank overhead that total / shape does not
+      divide. ADR 0001 is Implemented; ADR 0003 (idle release) extends
+      register_metal / reap from here.
 
 ## Open threads (do NOT treat as settled; flag when your answer touches them)
 

@@ -33,7 +33,9 @@ from rlstack.policy.adapters import plora_factors
 from rlstack.policy.adapters.plora import (
     EPS_RECORD, KL_PROVIDED, SIGMA_PROVIDED,
 )
-from rlstack.policy.adapters.replay import ReplayRows, RowPlan, leaf_module, row_plan
+from rlstack.policy.adapters.replay import (
+    ReplayRows, SiteWrapper, join_site, leaf_module, leave_site,
+)
 from rlstack.policy.siteschema import SiteMeta
 from rlstack.runner.seeds import derive
 
@@ -117,6 +119,8 @@ class PloraState:
     log_std: torch.nn.Parameter             # [latent]
     trunk: Hypernet
     heads: dict[str, torch.nn.Parameter]    # path -> [k*k, hidden], zero-init
+    basis: str = "svd"                      # "svd" | "random": the frozen
+    basis_seed: int = 0                     # directions' recipe + its seed
     u: dict[str, torch.Tensor] = field(default_factory=dict)   # path -> [out, k]
     a: dict[str, torch.Tensor] = field(default_factory=dict)   # path -> [k, in]
     version: int = 0
@@ -157,6 +161,8 @@ def build(sites: tuple[SiteMeta, ...], init: dict) -> PloraState:
     return PloraState(
         k=k, latent=latent, members=members, prior_std=prior_std, hidden=hidden,
         factors=str(init["factors"]), seed=seed,
+        basis=str(init.get("basis", "svd")),
+        basis_seed=int(init.get("basis_seed", 0)),
         paths=tuple(meta.path for meta in sites),
         mu=torch.nn.Parameter(torch.zeros(latent, dtype=torch.float32)),
         log_std=torch.nn.Parameter(
@@ -244,45 +250,25 @@ def param_groups(state: PloraState) -> dict[str, list]:
 # the row-aware site
 # ---------------------------------------------------------------------------
 
-class PloraSite(torch.nn.Module):
+class PloraSite(SiteWrapper):
     """inner(x) + ((x A^T) C^T) U^T with the core generated from the ROW's own
-    recorded latent — the module that replaces a matched Linear.
+    recorded latent — this FAMILY's link in the chain at a matched Linear.
 
-    LoraSite's structure exactly: one wrapper per site serving every installed
-    state, `installed` the roster that makes install additive and tells
-    uninstall when the Linear returns, and a transparent case for a row whose
-    slot has no plora here. The one thing added is that a row's delta depends on
-    a FACT as well as a slot, so the fast path needs both to be uniform.
+    LoraSite's structure exactly: chain mechanics are SiteWrapper's, the math
+    and the FAMILY FILTER are this class's — a row whose routed state at this
+    path is not a PloraState (none, or another family's) passes through to
+    `inner`, where its own wrapper or the base Linear is waiting. The one
+    thing plora adds is that a row's delta depends on a FACT as well as a
+    slot, so the fast path needs both to be uniform.
     """
-
-    def __init__(self, inner: torch.nn.Module, path: str, plan: RowPlan) -> None:
-        super().__init__()
-        self.inner = inner
-        self.path = path
-        self.plan = plan
-        self.installed: list[PloraState] = []
-
-    def add(self, state: PloraState) -> None:
-        """Additive install: this state's delta becomes routable here."""
-        if any(present is state for present in self.installed):
-            raise RuntimeError(f"install at {self.path}: this state is already "
-                               f"installed — install/uninstall out of balance")
-        self.installed.append(state)
-
-    def drop(self, state: PloraState) -> None:
-        """install's inverse at one site; the caller unwraps when empty."""
-        kept = [present for present in self.installed if present is not state]
-        if len(kept) == len(self.installed):
-            raise RuntimeError(f"uninstall at {self.path}: this state was never "
-                               f"installed — install/uninstall out of balance")
-        self.installed = kept
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """A row's delta is generated from its slot's hypernet and its own
-        recorded noise — and a slot that carries no plora here gets the base."""
+        recorded noise — and a slot carrying no PLORA here gets the inner
+        module untouched."""
         rows = self.plan.rows
         one = rows.uniform()
-        if one is not None and self.path not in one:
+        if one is not None and not isinstance(one.get(self.path), PloraState):
             return self.inner(x)              # the transparent case
         return self.inner(x) + self._delta(x, rows).to(x.dtype)
 
@@ -310,7 +296,8 @@ def _states_at(rows: ReplayRows, path: str) -> list[PloraState]:
     transparent case is uniform-only, because zero-padding one row's delta is
     the coalescer's admission rule and not a silent fallback here.
     """
-    missing = [i for i, slot in enumerate(rows.slots) if path not in slot]
+    missing = [i for i, slot in enumerate(rows.slots)
+               if not isinstance(slot.get(path), PloraState)]
     if missing:
         raise ValueError(
             f"site {path}: slots {missing} carry no delta here, so a mixed "
@@ -430,28 +417,30 @@ def install(model: torch.nn.Module, state: PloraState) -> None:
 
     The factors are recomputed here from the base's own weight rather than read
     from the artifact, and that is deliberate: the trainer is already holding
-    the checkpoint, `top_svd_factors` is a pinned pure function of (weight, k),
-    and the artifact exists precisely for the side that ISN'T holding it — the
-    engine, whose copy lives inside vLLM. ALGO_ID is what makes the two agree;
-    an artifact built by another recipe is refused where it is read.
+    the checkpoint, both recipes are pinned pure functions (`top_svd_factors`
+    of (weight, k); `random_factors` of (weight, k, basis_seed, path)), and
+    the artifact exists precisely for the side that ISN'T holding it — the
+    engine, whose copy lives inside vLLM. The algo ids are what make the two
+    agree; an artifact built by another recipe is refused where it is read.
 
     Installation is additive (I8): a second tenant at the same site joins the
     PloraSite it finds. Placement happens here — the posterior, the hypernet and
     the frozen directions all move to the device the site's weight lives on.
     """
-    plan = row_plan(model)
     for path in state.paths:
         parent, leaf = leaf_module(model, path)
-        site = getattr(parent, leaf)
-        if not isinstance(site, PloraSite):
-            site = PloraSite(site, path, plan)
-            setattr(parent, leaf, site)
-        weight = _site_weight(site.inner, path)
-        u, a = plora_factors.top_svd_factors(weight, state.k)
+        node = getattr(parent, leaf)
+        while isinstance(node, SiteWrapper):
+            node = node.inner                 # the base module, under any chain
+        weight = _site_weight(node, path)
+        u, a = (plora_factors.top_svd_factors(weight, state.k)
+                if state.basis == "svd"
+                else plora_factors.random_factors(weight, state.k,
+                                                  state.basis_seed, path))
         state.u[path] = u.to(weight.device)
         state.a[path] = a.to(weight.device)
         _place(state, weight.device)
-        site.add(state)
+        join_site(model, path, PloraSite, state)
 
 
 def _site_weight(inner: torch.nn.Module, path: str) -> torch.Tensor:
@@ -477,15 +466,7 @@ def uninstall(model: torch.nn.Module, state: PloraState) -> None:
     survives untouched — its tensors are held by reference — so re-install
     restores identical numerics."""
     for path in state.paths:
-        parent, leaf = leaf_module(model, path)
-        site = getattr(parent, leaf)
-        if not isinstance(site, PloraSite):
-            raise RuntimeError(
-                f"uninstall at {path}: expected PloraSite, found "
-                f"{type(site).__name__} — install/uninstall out of balance")
-        site.drop(state)
-        if not site.installed:
-            setattr(parent, leaf, site.inner)
+        leave_site(model, path, PloraSite, state)
 
 
 # ---------------------------------------------------------------------------

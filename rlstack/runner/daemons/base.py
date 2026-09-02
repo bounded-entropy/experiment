@@ -12,12 +12,12 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 
 from rlstack.data.stores.base import RunHandle
-from rlstack.runner.arbiter import GpuArbiter
+from rlstack.runner.arbiter import Arbiter
 from rlstack.runner.signals import RunSignals
 
 
 class Daemon(ABC):
-    def __init__(self, signals: RunSignals, arbiter: GpuArbiter,
+    def __init__(self, signals: RunSignals, arbiter: Arbiter,
                  run: RunHandle) -> None:
         self.signals = signals
         self.arbiter = arbiter

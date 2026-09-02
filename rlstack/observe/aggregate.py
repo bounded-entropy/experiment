@@ -55,7 +55,8 @@ def traffic_channels(events: Sequence[dict]) -> dict[str, list]:
 # ---------------------------------------------------------------------------
 
 def fleet_throughput(stores: Sequence[Store],
-                     buckets: int = FLEET_BUCKETS) -> dict:
+                     buckets: int = FLEET_BUCKETS,
+                     since: float | None = None) -> dict:
     """What the fleet is producing, summed across partitions: inference
     tokens/s and requests/s over every serving host, training updates/s over
     every run. One window, one bucket width, so the two charts read against
@@ -67,6 +68,8 @@ def fleet_throughput(stores: Sequence[Store],
             for event in store.read_host_log(host):
                 when = event.get("t")
                 if not isinstance(when, (int, float)):
+                    continue
+                if since is not None and float(when) < since:
                     continue
                 if event.get("event") == "traffic":
                     traffic.append((float(when), host, event))

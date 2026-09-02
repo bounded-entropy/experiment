@@ -1,10 +1,10 @@
-"""Adoption: the submission door (Host.adopt, spec_from_json, dial).
+"""Adoption: the submission door (Host.adopt, spec_from_json, transport_for).
 
 The claims under test: canonical JSON decodes back to the SAME spec value (one
 identity on both ends of the wire); an adopted run is byte-identical to a
 submitted one (the door adds transport, never semantics); re-adoption is
 resume; the wire path (HostService + LocalTransport + RemoteHost) carries all
-of it JSON-safely; and every refusal — no schema_for, no dial, an unbindable
+of it JSON-safely; and every refusal — no schema_for, no transport_for, an unbindable
 pool — comes back in the reply instead of detonating in a background task.
 """
 
@@ -17,8 +17,8 @@ import unittest
 
 from common import arith_spec, arith_store
 from rlstack import (
-    FakeEngine, FakeLearner, GpuConfig, GpuGroup, Host, fake_qwen_schema,
-    gpus, learner, plora, pool,
+    FakeEngine, FakeLearner, Topology, HostSpec, Host, fake_qwen_schema,
+    learner, plora, pool,
 )
 from rlstack.runner.remote import (
     HostService, LocalTransport, RemoteHost, spec_from_json,
@@ -65,8 +65,8 @@ class SpecRoundtripTest(unittest.TestCase):
         decoded = spec_from_json(row_of(spec))
         self.assertEqual(decoded, spec)
         self.assertIsInstance(decoded.gen.envs, tuple)
-        self.assertIsInstance(decoded.gpu_config.groups, tuple)
-        self.assertIsInstance(decoded.gpu_config.groups[0].members, tuple)
+        self.assertIsInstance(decoded.topology.hosts, tuple)
+        self.assertIsInstance(decoded.topology.hosts[0].members, tuple)
 
     def test_an_unknown_tag_is_refused(self) -> None:
         with self.assertRaises(TypeError):
@@ -147,27 +147,29 @@ class AdoptTest(unittest.TestCase):
         status = remote.status()
         self.assertEqual(status["tenants"][reply["run_id"]]["status"], "done")
 
-    def test_routes_are_dialed_into_engines(self) -> None:
+    def test_routes_are_resolved_into_engines(self) -> None:
         """A demanded pool this host does not serve arrives as an ADDRESS and
-        leaves as a live engine — dial, once, at the door."""
-        dialed: list[str] = []
+        leaves as a live engine — resolved, once, at the door."""
+        resolved: list[str] = []
+        aux = Host("aux-host", engines=(FakeEngine(),), learner=None,
+                   store=self.store)
 
-        def dial(address: str) -> FakeEngine:
-            dialed.append(address)
-            return FakeEngine()
+        def transport_for(address: str) -> LocalTransport:
+            resolved.append(address)
+            return LocalTransport(HostService(aux))
 
-        host = self.host(dial=dial)
-        spec = arith_spec(self.train, gpu_config=GpuConfig(groups=(
-            GpuGroup(gpus(n=1), (pool("main"), learner())),
-            GpuGroup(gpus(n=1), (pool("aux"),)))))
+        host = self.host(transport_for=transport_for)
+        spec = arith_spec(self.train, topology=Topology(hosts=(
+            HostSpec((pool("main"),)), HostSpec((learner(),)),
+            HostSpec((pool("aux"),)))))
         reply = self.adopt_and_finish(host, spec, routes={"aux": "fleet://aux"})
         self.assertTrue(reply["accepted"], reply)
-        self.assertEqual(dialed, ["fleet://aux"])
+        self.assertEqual(resolved, ["fleet://aux"])
         self.assertEqual(host.status()["tenants"][reply["run_id"]]["status"],
                          "done")
 
     def test_refusals_come_back_in_the_reply(self) -> None:
-        """No schema_for, no dial, an unbindable pool: each is a refusal at
+        """No schema_for, no transport_for, an unbindable pool: each is a refusal at
         the door, never a background detonation."""
         spec = arith_spec(self.train)
 
@@ -176,13 +178,13 @@ class AdoptTest(unittest.TestCase):
         self.assertFalse(reply["accepted"])
         self.assertIn("schema_for", reply["error"])
 
-        undialed = self.host()
-        reply = go(undialed.adopt(row_of(spec), {"aux": "fleet://aux"}))
+        unresolved = self.host()
+        reply = go(unresolved.adopt(row_of(spec), {"aux": "fleet://aux"}))
         self.assertFalse(reply["accepted"])
-        self.assertIn("dial", reply["error"])
+        self.assertIn("transport_for", reply["error"])
 
-        wide = arith_spec(self.train, gpu_config=GpuConfig(groups=(
-            GpuGroup(gpus(n=1), (pool("main", tp=2), learner())),)))
+        wide = arith_spec(self.train, topology=Topology(hosts=(
+            HostSpec((pool("main", tp=2),)), HostSpec((learner(),)))))
         reply = go(self.host().adopt(row_of(wide)))
         self.assertFalse(reply["accepted"])
         self.assertIn("tp=2", reply["error"])

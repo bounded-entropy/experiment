@@ -71,12 +71,14 @@ GROUP_SIZE = 8          # completions per baseline
 MAX_TOKENS = 1024
 EVAL_EVERY = 5
 
-# The partition treaty on one L4 (24 GiB): sampling, eval, training. They sum
-# under 1.0 because vLLM budgets gpu_memory_utilization against the DEVICE
-# total, so fractions of one device compose additively (#51).
-MAIN_FRACTION = 0.30
-EVAL_FRACTION = 0.20
-LEARNER_FRACTION = 0.40
+# The partition treaty on one L4 (24 GiB), in GB (ADR 0001): sampling, eval,
+# training. They sum under the card because vLLM budgets its reservation
+# against the DEVICE total, so partitions of one device compose additively
+# (#51); the fractions the substrates take are derived against the MEASURED
+# card at bring-up (fraction_for_gb, the one crossing).
+MAIN_GB = 7.2
+EVAL_GB = 4.8
+LEARNER_GB = 9.6
 
 
 # ---------------------------------------------------------------------------
@@ -135,30 +137,16 @@ def train_plan(updates):
                          for u in range(1, updates + 1)))
 
 
-def eval_plan(task_id, held_out, updates):
-    """ONE WAVE PER EVAL POINT (#61): the trained problem, plus a handful of
-    held-out ones. The trained task is in here on purpose — this is test-time
-    training, so "did it learn THIS problem" is the measurement, and the
-    held-out ids are the control that says whether it also broke everything
-    else."""
-    from rlstack import GroupPlan, RunPlan, Sample, WavePlan
-    measured = WavePlan(tuple(
-        GroupPlan(task, (Sample(task, "dapo_math"),))
-        for task in (task_id, *held_out)))
-    return RunPlan((measured,) * (updates // EVAL_EVERY))
-
-
 def spec_for(store, task_id, held_out, updates, master):
     """The experiment as one value."""
-    from rlstack import (AlgoSpec, EvalSpec, ExperimentSpec, GenSpec, GpuConfig,
-                         GpuGroup, GpuSet, LearnerMember, OptimSpec, Plans,
+    from rlstack import (AlgoSpec, ExperimentSpec, GenSpec, Topology,
+                         HostSpec, LearnerMember, OptimSpec, Plans,
                          PolicySpec, PoolMember, SamplingSpec, Schedule, Seeds,
                          encode, plora)
 
     plans = Plans(
         train=store.cas_put(encode(train_plan(updates))),
-        rollout=store.cas_put(encode(rollout_plan(task_id, updates))),
-        eval=store.cas_put(encode(eval_plan(task_id, held_out, updates))))
+        rollout=store.cas_put(encode(rollout_plan(task_id, updates))))
     return ExperimentSpec(
         policy=PolicySpec(base=BASE, bank={"pi": plora(
             SITE, k=K, latent=LATENT, members=MEMBERS, prior_std=PRIOR_STD,
@@ -167,7 +155,11 @@ def spec_for(store, task_id, held_out, updates, master):
                     sampling=SamplingSpec(temperature=1.0, max_tokens=MAX_TOKENS)),
         plans=plans,
         algo=AlgoSpec(
-            loss="grpo_latent_kl", post=("final_answer", "grpo_advantage"),
+            # accuracy first, then the KL: the prior's pull is gated on the
+            # group solving the problem, so early updates are pure GRPO and a
+            # solved group hands its share of the update to the prior
+            loss="grpo_latent_kl_gated",
+            post=("final_answer", "group_accuracy", "grpo_advantage"),
             # THE OVERRIDE IS THE POINT of the dotted grammar: the hypernet is
             # an ordinary network and may be decayed; the posterior is a
             # distribution's parameters, where decay would be a second,
@@ -182,14 +174,10 @@ def spec_for(store, task_id, held_out, updates, master):
             # rule that the knob must bite still holds — completions here are
             # up to ~1300 tokens.
             schedule=Schedule(microbatch_tokens=512, max_policy_lag=1)),
-        eval=EvalSpec(every=EVAL_EVERY, post=("final_answer",), pool="eval"),
-        gpu_config=GpuConfig(groups=(
-            GpuGroup(gpus=GpuSet(n=1), members=(
-                PoolMember("main", tp=1, fraction=MAIN_FRACTION),)),
-            GpuGroup(gpus=GpuSet(n=1), members=(
-                PoolMember("eval", tp=1, fraction=EVAL_FRACTION),)),
-            GpuGroup(gpus=GpuSet(n=1), members=(
-                LearnerMember(fsdp=1, fraction=LEARNER_FRACTION),)))),
+        topology=Topology(hosts=(
+            HostSpec((PoolMember("main", tp=1, vram_gb=MAIN_GB),)),
+            HostSpec((PoolMember("eval", tp=1, vram_gb=EVAL_GB),)),
+            HostSpec((LearnerMember(fsdp=1, vram_gb=LEARNER_GB),)))),
         seeds=Seeds(master=master))
 
 
@@ -197,9 +185,10 @@ def spec_for(store, task_id, held_out, updates, master):
 # the venue: three hosts, one device, one process
 # ---------------------------------------------------------------------------
 
-def serving_host(name: str, store, fraction: float, cas_get):
+def serving_host(name: str, store, gb: float, metal, cas_get):
     """One sampling partition: its own engine, its own arbiter, its own
-    journal, born onto its share of device 0.
+    journal, born onto its share of device 0 — `gb` of the MEASURED card,
+    converted once here (fraction_for_gb).
 
     `max_members` is what plora spends: a resident bundle is MEMBERS + 1 punica
     adapters, so the slot budget is counted in members here and the lowering's
@@ -207,15 +196,17 @@ def serving_host(name: str, store, fraction: float, cas_get):
     the frozen factors travel by address, and a build with no way to resolve one
     refuses the adapter type at construction.
     """
+    from rlstack.runner.desk import fraction_for_gb
     from rlstack.runner.engines.vllm_engine import VllmEngine
     from rlstack.runner.host import Host, Partition, Regime
 
+    fraction = fraction_for_gb(gb, metal)
     engine = VllmEngine(BASE, tp=1, gpu_memory_utilization=fraction,
                         max_model_len=2048, max_bundles=2, max_rank=K,
                         max_members=MEMBERS, cas_get=cas_get,
                         serves=("plora",))
     return Host(name, engines=(engine,), learner=None, store=store,
-                partition=Partition("modal-l4", (0,), fraction, "L4"),
+                partition=Partition(metal.name, (0,), fraction, metal.gpu),
                 regimes=(Regime(f"serve-{name}", "inference", BASE, 1),))
 
 
@@ -228,22 +219,25 @@ def _run(task_id: str, held_out: list[str], updates: int, master: int,
 
     from rlstack import ModalVolumeStore
     from rlstack.policy.siteschema import hf_schema
+    from rlstack.runner.desk import MetalService, fraction_for_gb
     from rlstack.runner.host import Host, Partition, Regime
     from rlstack.runner.learners.torch_learner import TorchLearner
     from rlstack.runner.remote import HostService, LocalTransport, RemotePool
 
     store = ModalVolumeStore("/store", volume=store_volume, locator=STORE)
     spec = spec_for(store, task_id, held_out, updates, master)
+    metal = MetalService.measure("modal-l4")        # the card, read, not typed
 
     pools = {}
-    for name, fraction in (("main", MAIN_FRACTION), ("eval", EVAL_FRACTION)):
-        host = serving_host(f"plora-{name}", store, fraction, store.cas_get)
+    for name, gb in (("main", MAIN_GB), ("eval", EVAL_GB)):
+        host = serving_host(f"plora-{name}", store, gb, metal, store.cas_get)
         pools[name] = RemotePool(LocalTransport(HostService(host)),
                                  base=BASE, tp=1)
 
     learner = TorchLearner()
     host = Host("plora-learner", engines=(), learner=learner, store=store,
-                partition=Partition("modal-l4", (0,), LEARNER_FRACTION, "L4"),
+                partition=Partition(metal.name, (0,),
+                                    fraction_for_gb(LEARNER_GB, metal), metal.gpu),
                 regimes=(Regime("train-fsdp1", "training", BASE, 1),),
                 # one problem, one policy, one tenant: this partition's purpose
                 # is this experiment, and a second tenant would only take

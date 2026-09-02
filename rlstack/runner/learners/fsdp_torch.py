@@ -23,7 +23,7 @@ stand in the collectives and their answers are discarded, which is safe only
 while the five verbs stay deterministic functions of their arguments — a verb
 consulting rank-local state the ranks do not share would desynchronize them.
 
-Out of scope, deliberately: sleep-sharing (an alternation would have to swing
+Out of scope, deliberately: alternation (a sleep would have to swing
 every rank in step), so an FSDP host is dedicated or concurrent.
 """
 
@@ -36,11 +36,10 @@ from collections.abc import Mapping
 import torch
 
 from rlstack.data.flatten import TokenBatch
-from rlstack.policy.siteschema import SiteMeta
-from rlstack.runner.interfaces import Emitted, TrainStats
+from rlstack.runner.interfaces import Emitted, Parameterization, TrainStats
 from rlstack.runner.learners.ranks import STOP, RankCommand, RankGroup
 from rlstack.runner.learners.torch_learner import TorchLearner
-from rlstack.spec.specs import ExperimentSpec
+from rlstack.runner.residents import cap_memory
 
 
 class FsdpTorchLearner(TorchLearner):
@@ -48,20 +47,27 @@ class FsdpTorchLearner(TorchLearner):
 
     def __init__(self, ranks: RankGroup, *,
                  dtype: torch.dtype = torch.bfloat16,
-                 grad_clip: float = 1.0) -> None:
+                 grad_clip: float = 1.0,
+                 checkpoint_activations: bool = True) -> None:
         super().__init__(device=ranks.device_str, dtype=dtype,
-                         grad_clip=grad_clip)
+                         grad_clip=grad_clip,
+                         checkpoint_activations=checkpoint_activations)
         self.fsdp = ranks.width      # build fact: the attested width
         self.ranks = ranks
+        # a sharded base is DTensors across a chorus; its offload is its own
+        # proof (ADR 0002, non-promises), so a real chorus reports it cannot
+        # sleep and an alternating host keeps today's co-resident footprint
+        self.sleeps = ranks.width == 1
 
     # ---- the verbs, each announced before it runs ---------------------------
 
-    def install(self, tenant: str, spec: ExperimentSpec,
-                resolved_sites: Mapping[str, tuple[SiteMeta, ...]]) -> None:
+    def install(self, tenant: str, parameterization: Parameterization) -> None:
         """Announced: it loads and shards the base (a collective build), and
-        every rank needs this tenant's params to run its half of a forward."""
-        self.announce("install", (tenant, spec, dict(resolved_sites)))
-        super().install(tenant, spec, resolved_sites)
+        every rank needs this tenant's params to run its half of a forward.
+        What crosses to the followers is the Parameterization and nothing
+        more — the chorus narrows with the protocol (ADR 0002, Q2)."""
+        self.announce("install", (tenant, parameterization))
+        super().install(tenant, parameterization)
 
     def forward_backward(self, tenant: str, batch: TokenBatch) -> TrainStats:
         """Announced: the forward all-gathers the base and the backward
@@ -279,6 +285,11 @@ class FsdpTorchLearner(TorchLearner):
         crashed and a run that finished both leave children holding GPUs."""
         self.ranks.stop()
 
+    def shutdown(self) -> None:
+        """A resident's last verb: end the chorus (the ladder inside the
+        resident's own ladder — ADR 0002, Q9)."""
+        self.stop()
+
     # ---- the one override that shards ---------------------------------------
 
     def _ensure_base(self, base: str) -> None:
@@ -326,30 +337,42 @@ class FsdpTorchLearner(TorchLearner):
 
 
 def lead_fsdp_learner(width: int, *, dtype: torch.dtype = torch.bfloat16,
-                      grad_clip: float = 1.0) -> FsdpTorchLearner:
+                      grad_clip: float = 1.0,
+                      checkpoint_activations: bool = True,
+                      memory_fraction: float | None = None) -> FsdpTorchLearner:
     """Rank 0's constructor: start the chorus, then the learner in front of it.
 
-    This is what a deploy hands to a Host — the learner looks exactly like a
-    TorchLearner from the outside, reports `fsdp=width` as its build fact, and
-    the host's regimes attest that against the partition it was born on."""
-    follower = functools.partial(_follow_rank, dtype=dtype, grad_clip=grad_clip)
+    What a learner resident builds when its regime is sharded (residents.py,
+    build_learner) — the learner looks exactly like a TorchLearner from the
+    outside, reports `fsdp=width` as its build fact, and the host's regimes
+    attest that against the partition it was born on. `memory_fraction` is
+    the partition's: rank 0's own cap is the resident's to set before this
+    runs, and every follower caps ITS device to the same number here."""
+    follower = functools.partial(_follow_rank, dtype=dtype, grad_clip=grad_clip,
+                                 checkpoint_activations=checkpoint_activations,
+                                 memory_fraction=memory_fraction)
     ranks = RankGroup.lead(width, follower)
-    return FsdpTorchLearner(ranks, dtype=dtype, grad_clip=grad_clip)
+    return FsdpTorchLearner(ranks, dtype=dtype, grad_clip=grad_clip,
+                            checkpoint_activations=checkpoint_activations)
 
 
 def _follow_rank(rank: int, width: int, port: int, *, dtype: torch.dtype,
-                 grad_clip: float) -> None:
+                 grad_clip: float, checkpoint_activations: bool = True,
+                 memory_fraction: float | None = None) -> None:
     """A non-zero rank's whole life, and the entry point of its process.
 
-    Spawned (so this module is imported fresh here): join the group, build
-    the same learner over this rank's own device, run what rank 0 announces,
-    exit when it says stop. A failure is printed and ends the process — rank
-    0 then fails at its next collective rather than waiting out the
-    rendezvous timeout in silence."""
+    Spawned (so this module is imported fresh here): join the group, cap this
+    rank's device at the partition's fraction, build the same learner over
+    it, run what rank 0 announces, exit when it says stop. A failure is
+    printed and ends the process — rank 0 then fails at its next collective
+    rather than waiting out the rendezvous timeout in silence."""
     group = RankGroup.join(rank, width, port)
+    if memory_fraction is not None:
+        cap_memory(memory_fraction, devices=(rank,))
     try:
-        FsdpTorchLearner(group, dtype=dtype,
-                         grad_clip=grad_clip).follow_until_stopped()
+        FsdpTorchLearner(group, dtype=dtype, grad_clip=grad_clip,
+                         checkpoint_activations=checkpoint_activations
+                         ).follow_until_stopped()
     except BaseException:
         traceback.print_exc()
         raise

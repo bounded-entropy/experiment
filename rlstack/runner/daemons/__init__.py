@@ -19,4 +19,3 @@ from rlstack.runner.daemons.base import Daemon
 from rlstack.runner.daemons.generator import Generator
 from rlstack.runner.daemons.scorer import SCORER, Scorer
 from rlstack.runner.daemons.trainer import Trainer
-from rlstack.runner.daemons.evaluator import Evaluator

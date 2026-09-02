@@ -32,9 +32,9 @@ from typing import Any
 from common import arith_spec, arith_store, sealed
 from test_resume import CrashingStore, SimulatedCrash
 from rlstack import (
-    Bundle, FakeEngine, FakeLearner, GpuArbiter, GpuConfig, GpuGroup, Group,
+    Bundle, FakeEngine, FakeLearner, Arbiter, Topology, HostSpec, Group,
     LocalStore, Message, PostProcessor, Role, Rollout, RunSignals, Scorer, Task,
-    Trajectory, Turn, Wave, fake_qwen_schema, gpus, learner, pool, postprocessor,
+    Trajectory, Turn, Wave, fake_qwen_schema, learner, pool, postprocessor,
     run_experiment, validate,
 )
 from rlstack.data.plan import RunPlan
@@ -73,9 +73,9 @@ def judged_spec(train_uri: str, heldout_uri: str | None = None):
     return replace(
         base,
         algo=replace(base.algo, post=("llm_judge", "grpo_advantage")),
-        eval=None,
-        gpu_config=GpuConfig(groups=(
-            GpuGroup(gpus(n=1), (pool("main"), pool("judge"), learner())),)))
+        topology=Topology(hosts=(
+            HostSpec((pool("main"),)), HostSpec((pool("judge"),)),
+            HostSpec((learner(),)))))
 
 
 def selfscored_spec(train_uri: str):
@@ -192,9 +192,9 @@ class SplitOrderGateTest(unittest.TestCase):
         base = arith_spec(self.train)
         spec = replace(
             base, algo=replace(base.algo, post=pipeline),
-            eval=None,
-            gpu_config=GpuConfig(groups=(GpuGroup(
-                gpus(n=1), (pool("main"), pool("judge"), learner())),)))
+            topology=Topology(hosts=(
+                HostSpec((pool("main"),)), HostSpec((pool("judge"),)),
+                HostSpec((learner(),)))))
         return [issue.code for issue in validate(spec, SCHEMA)]
 
     def test_pooled_consuming_inline_is_refused(self) -> None:
@@ -215,9 +215,9 @@ class SplitOrderGateTest(unittest.TestCase):
         spec = replace(
             base, algo=replace(base.algo, post=(
                 "verifier", "scorer_test_pooled_consumer", "grpo_advantage")),
-            eval=None,
-            gpu_config=GpuConfig(groups=(GpuGroup(
-                gpus(n=1), (pool("main"), pool("judge"), learner())),)))
+            topology=Topology(hosts=(
+                HostSpec((pool("main"),)), HostSpec((pool("judge"),)),
+                HostSpec((learner(),)))))
         issue = next(i for i in validate(spec, SCHEMA)
                      if i.code == "post-split-order")
         self.assertEqual(issue.path, "algo.post[1]")
@@ -248,10 +248,10 @@ class PostdataPartTest(unittest.TestCase):
 
     def test_a_part_lives_beside_the_merged_file(self) -> None:
         self.run.write_postdata_part(3, SCORER, {"x": [1.0]})
-        self.assertEqual(postdata_part_key("rid", 3, SCORER),
+        self.assertEqual(postdata_part_key("runs/rid", 3, SCORER),
                          "runs/rid/postdata/000003.scorer.json")
         self.assertTrue(self.store.path_of(
-            postdata_part_key("rid", 3, SCORER)).exists())
+            postdata_part_key("runs/rid", 3, SCORER)).exists())
 
     def test_the_merged_file_is_still_the_one_reader_sees(self) -> None:
         self.run.write_postdata_part(1, SCORER, {"teacher": [1.0]})
@@ -303,7 +303,7 @@ class VersionPinningTest(unittest.TestCase):
         self.initial = Bundle(bundle_id="bundle:initial", policy_version={"pi": 0})
 
     def scorer_for(self, spec) -> Scorer:
-        return Scorer(RunSignals(), GpuArbiter(), self.run,
+        return Scorer(RunSignals(), Arbiter(), self.run,
                       spec=spec, plan=RunPlan(()),
                       refs=RefReader(self.store, self.run), residents=(),
                       routes_at=lambda bundle: {}, initial_bundle=self.initial)
@@ -335,9 +335,10 @@ class VersionPinningTest(unittest.TestCase):
         base = arith_spec(self.train)
         teacher = replace(base, algo=replace(
             base.algo, loss="opd", post=("verifier", "teacher_logprobs")),
-            gpu_config=GpuConfig(groups=(GpuGroup(gpus(n=1), (
-                pool("main"), pool("teacher", base=TEACHER_BASE),
-                learner())),)))
+            topology=Topology(hosts=(
+                HostSpec((pool("main"),)),
+                HostSpec((pool("teacher", base=TEACHER_BASE),)),
+                HostSpec((learner(),)))))
         scorer = self.scorer_for(teacher)
         self.assertEqual(scorer.pools, ["teacher"])
         self.assertIs(scorer.pinned_bundle(4, self.wave_at("bundle:old", {})),
@@ -489,7 +490,7 @@ class ScorerConditionTest(unittest.TestCase):
         self.run = self.store.open_run("rid", manifest={"run_id": "rid"})
 
     def scorer(self) -> Scorer:
-        return Scorer(RunSignals(), GpuArbiter(), self.run,
+        return Scorer(RunSignals(), Arbiter(), self.run,
                       spec=selfscored_spec(self.train), plan=RunPlan(()),
                       refs=RefReader(self.store, self.run), residents=(),
                       routes_at=lambda bundle: {},

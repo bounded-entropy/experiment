@@ -9,12 +9,13 @@ import {poll} from "./dom.js";
 import {nav, route} from "./nav.js";
 import {drawFleet} from "./fleet.js";
 import {drawHost} from "./host.js";
+import {drawCharts} from "./metrics.js";
 import {drawIndex} from "./runs.js";
 import {drawRun} from "./run.js";
 import {drawWave} from "./wave.js";
 
 const PAGES = {runs: drawIndex, run: drawRun, fleet: drawFleet,
-               host: drawHost, wave: drawWave};
+               host: drawHost, wave: drawWave, charts: drawCharts};
 const REFRESH_MS = 3000;
 
 const draw = PAGES[route.page];

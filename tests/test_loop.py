@@ -9,7 +9,7 @@ from dataclasses import replace
 
 from common import arith_spec, arith_store
 from rlstack import (
-    GpuConfig, GpuGroup, gpus, learner, pool, run_experiment,
+    Topology, HostSpec, learner, pool, run_experiment,
     Seeds,
     FakeEngine, FakeLearner, PolicySpec, WarmStart, flatten, lora,
     fake_qwen_schema, run_experiment, trajectory_from_row,
@@ -92,18 +92,6 @@ class LoopTest(unittest.TestCase):
         column = flat.token_extras["adapter_draw"]
         self.assertEqual(len(column), flat.doc_len)
         self.assertIn(None, column)               # injected prompt positions
-
-    def test_eval_fires_on_schedule(self) -> None:
-        spec = arith_spec(self.train, self.heldout)
-        report, _ = self.run_spec(spec)
-        run = self.store.open_run(report.run_id)
-        for update in (2, 4):
-            summary = json.loads(run.read_eval(update, "summary.json"))
-            self.assertEqual(summary["update"], update)
-            self.assertEqual(summary["episodes"], 8 * 2)  # tasks × n_samples
-            self.assertIn("reward", summary["means"])
-        eval_1 = self.store.path_of(f"runs/{report.run_id}/eval/1")
-        self.assertFalse(eval_1.exists())
 
     def test_resubmit_attaches_and_no_ops(self) -> None:
         spec = arith_spec(self.train)
@@ -235,9 +223,9 @@ class JudgePoolTest(unittest.TestCase):
         return replace(
             base,
             algo=replace(base.algo, post=("llm_judge", "grpo_advantage")),
-            gpu_config=GpuConfig(groups=(
-                GpuGroup(gpus(n=1), (pool("main"), pool("judge"),
-                                     learner())),)))
+            topology=Topology(hosts=(
+                HostSpec((pool("main"),)), HostSpec((pool("judge"),)),
+                HostSpec((learner(),)))))
 
     def test_unmapped_judge_pool_is_refused_at_submit(self) -> None:
         with self.assertRaises(ValueError) as caught:

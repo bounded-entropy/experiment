@@ -32,8 +32,18 @@ def run_series(store: Store, run_id: str,
         "train": dict(entry.get("train", {})),
     } for entry in entries]
 
+    # held-out means, two eras under one shape: PRE-#70 runs measured inside
+    # the run dir (eval summaries); everything since is a MEASUREMENT outside
+    # it — each named observation becomes its own dashed series
     evals = [{"update": int(s["update"]), "means": dict(s.get("means", {}))}
              for s in store.peek_eval_summaries(run_id) if "update" in s]
+    measurements = [
+        {"name": name,
+         "manifest": told["manifest"],
+         "points": [{"update": int(p["update"]),
+                     "means": dict(p.get("means", {}))}
+                    for p in told["points"] if "update" in p]}
+        for name, told in sorted(store.read_measurements(run_id).items())]
 
     dictionary = store.peek_dictionary(run_id)
     return {
@@ -41,6 +51,7 @@ def run_series(store: Store, run_id: str,
         "dictionary": dictionary,
         "updates": updates,
         "eval": evals,
+        "measurements": measurements,
         "derived": derived_series(
             panels if panels is not None else store.read_panels(),
             dictionary, updates, evals),

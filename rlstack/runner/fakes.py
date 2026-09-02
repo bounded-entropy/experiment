@@ -23,11 +23,13 @@ from rlstack.policy.adapters.base import Mechanism
 from rlstack.policy.compile import Bundle
 from rlstack.policy.siteschema import SiteMeta
 from rlstack.registry import ADAPTER_TYPES
-from rlstack.runner.interfaces import Emitted, FinishEvent, TokenEvent, TrainStats
+from rlstack.runner.interfaces import (
+    Emitted, FinishEvent, Parameterization, TokenEvent, TrainStats,
+)
 from rlstack.runner.meters import TrafficMeter
 from rlstack.runner.seeds import derive
 from rlstack.spec.canonical import content_hash
-from rlstack.spec.specs import ExperimentSpec, SamplingSpec
+from rlstack.spec.specs import SamplingSpec
 
 _ARITH = re.compile(r"(\d+)\s*\+\s*(\d+)")
 
@@ -49,9 +51,17 @@ class FakeEngine:
     def __init__(self, p_correct: float = 0.5, record_draws: bool = False,
                  record_latent: bool = False,
                  plugins: frozenset[Mechanism] = frozenset(),
-                 base: str | None = None, tp: int = 1) -> None:
+                 base: str | None = None, tp: int = 1,
+                 sleeps: bool = False) -> None:
         self.base = base            # None: fake metal serves any base
         self.tp = tp                # build fact: a fake TP-2 engine is tp=2
+        # build fact, as on the real engine: can this build hand the device
+        # back? A resident's hello reports it and the host wires the
+        # alternation hooks only when it says yes. `naps` records the calls,
+        # so a test can prove the hooks crossed the door.
+        self.sleeps = sleeps
+        self.naps: list[str] = []
+        self.down = False
         self.p_correct = p_correct
         self.record_draws = record_draws
         self.record_latent = record_latent
@@ -63,6 +73,19 @@ class FakeEngine:
         # function of the inputs; only the TTFT gap is wall clock, and it
         # reaches the host journal alone — never a run directory.
         self.meter = TrafficMeter()
+
+    # ---- the sleep seam (a door verb, not an Engine verb) --------------------
+
+    async def sleep(self) -> None:
+        self.naps.append("sleep")
+
+    async def wake(self) -> None:
+        self.naps.append("wake")
+
+    def shutdown(self) -> None:
+        """A resident's last verb; nothing to release on a fake, but the fact
+        that it was said is what a teardown test reads."""
+        self.down = True
 
     # ---- Engine protocol ----------------------------------------------------
 
@@ -203,9 +226,22 @@ class FakeLearner:
     invariant, testable). Frozen deltas emit a constant init-derived payload.
     """
 
-    def __init__(self, fsdp: int = 1) -> None:
+    def __init__(self, fsdp: int = 1, sleeps: bool = False) -> None:
         self.fsdp = fsdp            # build fact: a fake 2-shard learner is fsdp=2
+        self.sleeps = sleeps        # build fact: see FakeEngine.sleeps
+        self.naps: list[str] = []
+        self.down = False
         self._tenants: dict[str, _FakeTenant] = {}
+
+    async def sleep(self) -> None:
+        self.naps.append("sleep")
+
+    async def wake(self) -> None:
+        self.naps.append("wake")
+
+    def shutdown(self) -> None:
+        """A resident's last verb; see FakeEngine.shutdown."""
+        self.down = True
 
     def _tenant(self, tenant: str) -> _FakeTenant:
         if tenant not in self._tenants:
@@ -214,22 +250,24 @@ class FakeLearner:
 
     # ---- Learner protocol ---------------------------------------------------
 
-    def install(self, tenant: str, spec: ExperimentSpec,
-                resolved_sites: Mapping[str, tuple[SiteMeta, ...]]) -> None:
-        all_names = sorted(spec.policy.bank)
+    def install(self, tenant: str, parameterization: Parameterization) -> None:
+        entries = {entry.name: entry for entry in parameterization.entries}
+        all_names = sorted(entries)
+        # the init digest folds the DERIVED per-entry seeds: a different
+        # master seed is a different init, exactly as before, and the master
+        # itself never reaches a learner (ADR 0002, Q2)
         init = content_hash({
-            "master": spec.seeds.master,
-            "bank": {name: spec.policy.bank[name].adapter_type for name in all_names},
-            "sites": {name: [m.name for m in resolved_sites[name]]
+            "seeds": {name: entries[name].init.get("seed") for name in all_names},
+            "bank": {name: entries[name].adapter_type for name in all_names},
+            "sites": {name: [m.name for m in entries[name].sites]
                       for name in all_names},
         })
         self._tenants[tenant] = _FakeTenant(
-            trainable=sorted(name for name, a in spec.policy.bank.items()
-                             if a.trainable),
+            trainable=sorted(name for name, e in entries.items() if e.trainable),
             all_names=all_names,
             provides=sorted({
-                name for a in spec.policy.bank.values()
-                for name in ADAPTER_TYPES.get(a.adapter_type).instance.provides}),
+                name for e in entries.values()
+                for name in ADAPTER_TYPES.get(e.adapter_type).instance.provides}),
             init=init, state=init)
 
     def forward_backward(self, tenant: str, batch: TokenBatch) -> TrainStats:

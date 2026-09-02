@@ -42,8 +42,8 @@ the commit bit, and daemons synchronize through it and nothing else.
 **Spec** — a frozen dataclass of declarative values. A spec never does setup
 and never touches a GPU; it *is* identity (I3). `ExperimentSpec` is the whole
 experiment as one value, composed of `PolicySpec` / `GenSpec` /
-`TrajectorySource` / `AlgoSpec` / `GpuConfig` / `Seeds` / `EvalSpec` /
-`WarmStart`.
+`TrajectorySource` / `AlgoSpec` / `Topology` / `Seeds` / `WarmStart`.
+A run's identity is its TRAINING loop: measurement is not in the spec (#70).
 `rlstack/spec/specs.py`
 
 **Experiment** — one spec, resolved and run. Also the unit of identity, of
@@ -150,8 +150,36 @@ delta is `U_k C_s A` — a rank-k LoRA served through punica. The latent carries
 a posterior against a prior, so the run learns a DISTRIBUTION over adapters;
 the engine serves one version as an ensemble of drawn members plus the mean,
 records the noise it drew, and replay reparameterizes it against the current
-posterior.
+posterior. `basis="random"` is the frame control: the same top-k singular
+VALUES steering seeded random orthonormal directions — the arms differ in the
+basis and nothing else.
 `rlstack/policy/adapters/{plora,plora_torch,plora_vllm,plora_factors}.py`
+
+**spectral / spectral_latent** — SVF: one trainable gain per singular
+direction of each matched weight, `W' = U diag(σ·(1+δ)) Vᵀ` — no frame is
+chosen, no direction invented, and the whole spectrum can move. The served
+delta is the top-k directions by |σ·δ| (a rank-k punica adapter whose frame
+CHANGES as learning does), with a straight-through backward so unselected
+directions keep competing; the dense gains ride the payload for resume, and
+no factors artifact exists — the trainer recomputes the full SVD from the
+weight it holds at install. `spectral_latent` is the plora-style twin (gains
+GENERATED from a latent; posterior, KL, recorded draw, member ensemble) —
+the "does the latent help" ablation. Both provide `latent_kl`'s family:
+plora and spectral_latent share that channel name, which is what lets
+`grpo_latent_kl_gated` price either.
+`rlstack/policy/adapters/{spectral,spectral_torch,spectral_vllm,spectral_latent,spectral_latent_torch,spectral_latent_vllm}.py`
+
+**TaskMaker / Derive** — mint-then-make, the third leaf: a plan may name an
+episode whose task does not exist yet — `Derive(source, maker, env)` resolves
+`source` (Replay's ref grammar) to a sealed trajectory and a registered
+`@task_maker` derives the new task, PURELY, so resume re-mints to the byte.
+Declared in `GenSpec.makers`, hashed like an environment. The reflect loop is
+its first use: the maker re-serves the whole transcript plus "what went
+wrong", the `reflect_retry` env samples the critique and the retry, and the
+`sdpo` loss clones each document's final turn (read off `segment_ids` — no
+new masking primitive). An un-referenced rollout is due when the first later
+referenced one is — the generator's intermediate-wave pacing rule.
+`rlstack/data/plan.py`, `rlstack/inference/makers/`, `rlstack/inference/environments/reflect_retry.py`, `rlstack/training/losses/sdpo.py`
 
 **Site** — a canonical attachment point named by the checkpoint's own module
 path, resolved at Phase 0 against `site_space` = the schema ∪ every bank
@@ -202,6 +230,15 @@ banks compile to identical ids everywhere. `Bundle.pin(id, versions)` is the
 payload-less address a request carries. The bundle is the ONLY data channel
 from the training world back to the inference world (I2).
 `rlstack/policy/compile.py`
+
+**SiteWrapper / the chain** — the shared half of every module-replacing
+replay site: one wrapper per (family, path), and NESTING when different
+adapter families claim one path on a shared learner — each family's forward
+applies only rows whose routed state is its own and passes the rest through
+to `inner` (`join_site` / `leave_site` find and splice a family's wrapper
+anywhere in the chain). A tenant beside a foreign family is bit-identical to
+the same tenant alone.
+`rlstack/policy/adapters/replay.py`
 
 **Slot / row plan** — the trainer's routing unit. A **slot** is one tenant's
 installed deltas at a set of sites; a **RowPlan** says which slot each row of
@@ -302,21 +339,48 @@ the bf16 kernel difference, and GROWTH above that floor is the signal.
 
 ### The metal
 
-**Metal** — registered owned hardware the fleet may carve: a name, a GPU kind, a
-device count, and one device's VRAM. Registering Metal *is* the acquire rung
-executed.
-`rlstack/runner/fleet.py`
+**Fleet** — the AGGREGATE of every standing host currently listed with the desk,
+across all metal. Not a class and not a process: a collective noun for what the
+fleet journal describes (`read_fleet_log` / `append_fleet_event`), which the Desk
+is the one writer of. The *service* is the **Desk**, the *record* is the journal,
+the *members* are Listings — "fleet" names none of those three on its own.
+`rlstack/runner/desk.py` (the journal), `rlstack/observe/host_series.py` (the view)
 
-**GpuSet** — pure device demand inside a spec (`n`, `nodes`, optional literal
-ids). Demand, never a provider name — the spec says what, placement says where
-(I5).
+**Metal** — registered owned hardware the fleet may carve: a name, a GPU kind, a
+device count, and one device's VRAM in GB. Registering Metal *is* the acquire
+rung executed. On a real venue the row is **measured** — `MetalService.measure`
+reads the card off the device at bring-up, never typed (ADR 0001, Q6) — and a
+`Metal` stays a plain record so tests construct one without torch.
+`rlstack/runner/desk.py`
+
+**HostSpec** — ONE HOST, declared: a tuple of members and nothing else. One
+HostSpec is one placement unit, one Partition, one Host (ADR 0001). A single
+member is a dedicated host; several members **alternate** on its partition —
+one resident live at a time, on the host's own exclusive arbiter group — so a
+learner alternating with an engine serializes generation and training and
+implies `max_policy_lag == 0`. Two workloads that should run side by side are
+two HostSpecs, two carves, two honest bookings. No device set, no sharing word:
+the spec says what, placement says where (I5).
 `rlstack/spec/specs.py`
 
+**vram_gb** — a member's memory, in GB, TOTAL across its `tp` / `fsdp` shards
+(the per-device need is `vram_gb / shape`, so the number is invariant under
+re-sharding); `None` means a whole device per shard, resolved at the metal
+that knows its card. GB, never a fraction: 0.625 of an L4 is 15 GB and of an
+H100 is 50 GB, and the same experiment must hash identically on both fleets.
+`rlstack/spec/specs.py` (`PoolMember`, `LearnerMember`)
+
 **Partition** — the irreducible carved share of metal a host is born onto:
-`metal` (the registered Metal's NAME it was carved from — never a GpuSet, which
-is demand), the GPU kind, the device indices, and the memory fraction owned on
-each. Memory partitions honestly; SMs still time-share across partition
-boundaries, which is a stated cost, not a hidden one.
+`metal` (the registered Metal's NAME it was carved from — a provider fact; the
+spec names no metal), the GPU kind, the device indices, and the memory
+FRACTION owned on each. The fraction is the SUBSTRATE'S unit, DERIVED once at
+the metal's build from a GB demand (`fraction_for_gb` against the measured
+card — the one crossing) and never stored anywhere the spec can see. Enforced
+PER RESIDENT PROCESS (ADR 0002): the devices become that process's
+CUDA_VISIBLE_DEVICES, the fraction is vLLM's reservation for an engine and
+torch's allocator cap for a learner. Memory partitions honestly; SMs still
+time-share across partition boundaries, which is a stated cost, not a hidden
+one.
 `rlstack/runner/host.py`
 
 **Regime** — one `capability` a host can wear: inference (an engine built at
@@ -325,26 +389,119 @@ matches joins against regimes; the host attests its metal against them at birth.
 `rlstack/runner/host.py`
 
 **Host** — an ATOMIC PURPOSED PARTITION: a Partition plus its Regimes, attested
-at construction and never grown or reshaped (I12). It owns its engines, at most
-ONE multi-tenant learner, its arbiter, and its journal store. One regime =
+at construction and never grown or reshaped (I12). Host and Partition are 1:1
+and deliberately two words: the Partition is the RESOURCE fact (what share of
+what metal), the Host is the SERVICE wearing it (arbiter, engines/learner,
+roster) — the fleet plane speaks partitions, the workload plane speaks hosts.
+It owns its engines, at most
+ONE multi-tenant learner, its arbiter, and its journal store — and since ADR
+0002 those engines and that learner are PROCESSES (residents) it holds as
+proxies (`RemotePool`, `RemoteLearner`); the Host itself is the DOOR — arbiter,
+roster, runner, journal — in the metal process. One regime =
 dedicated; several = it ALTERNATES them on its own arbiter group, one host
 wearing masks rather than two hosts coordinating. `solo` is one more birth
 fact: this partition serves ONE experiment at a time — I8 promises tenants
 cannot disturb each other's RESULTS, never their THROUGHPUT.
 `rlstack/runner/host.py`
 
-**Residual** — capacity no partition owns. A carve draws from residual only,
-which is what makes carving automatic: it can never shrink or reshape a living
-host.
-`rlstack/runner/fleet.py`
+**Residual** — capacity no partition owns, in GB free per device. A carve draws
+from residual only, which is what makes carving automatic: it can never shrink
+or reshape a living host.
+`rlstack/runner/desk.py`
 
-**Fleet** — the inventory of Metal and hosts, and the placement ladder over
-them. It reads capability **demands** off a spec's `gpu_config` (what, never
-where) and returns a `Plan` of `Join` / `Carve` / `Acquire` steps.
-`rlstack/runner/fleet.py`
+**Demand** — one member's capability need as a value: capability, base, shard
+shape, `vram_gb` as the carve size (total across shards, None a whole device),
+the HostSpec it came from (`group` — members sharing one alternate on one
+host), and the **anchor** flag (where a delivered frame lands). The desk's
+whole input vocabulary; `demand_rows`/`demands_from` are its wire codec. A spec
+becomes demands in the CAMPAIGN layer, never at the desk, and GB passes through
+as declared.
+`rlstack/runner/desk.py` (`Demand`), `rlstack/runner/campaign.py` (`demands_of`)
+
+**Subdir / filing** — where a run's directory spawns
+(runs/<subdir>/<run_id>), indicated at submit and fixed for life. Filing,
+never identity: it does not hash, attach finds the run wherever it lives, and
+the observer renders the tree (a FOLDER is which store; a SUBDIR is filing
+inside one).
+`rlstack/data/stores/base.py` (`run_prefix`, `check_subdir`)
+
+**Desk** — placement as a service and the fleet journal's one writer (the
+Trainer/ledger pattern on the fleet plane). WORKLOAD-BLIND: its vocabulary is
+Demands, listings, metal and addresses; it imports no spec class. It holds
+**Listings** — descriptions of standing hosts (regimes, address, solo, and
+the capacity VIEW: partition row + metal name), journaled and rebuilt by
+`from_journal`. Two doors: `place(demands)` answers addresses (the PURE
+CLIENT's door — an evaluator joins a pool and is thereafter just admitted
+traffic), and `submit(demands, frame)` additionally DELIVERS the opaque frame
+to the anchor demand's host with every other pool's address threaded as
+routes — routes come off the demand rows, which is what makes the blind relay
+possible. A placement no listing serves becomes a desk-issued CARVE on a
+registered metal (deduce by residual in GB, command by RemoteMetal.carve —
+the request carries the desk's recipe row); only what no metal holds returns
+boot instructions — the standing acquire, a human's. THE DESK SUPERVISES ITS
+METALS (ADR 0001, Q5): the one automatic restart is a metal's, and the loop
+is **reap → knock → re-register → reroute**. `reap` probes every listing,
+retries the silent, concludes what stays silent (decarve + delist "reaped"),
+STRANDS the unfinished runs those hosts carried (journaled `parked` first —
+the queue), KNOCKS each metal that lost listings (`boot_for(name)` where the
+venue has one, else `describe()` through the plane address — on Modal the
+knock IS the boot), and retries the queue. `register_metal` of a known name
+at the SAME address is the container generation turning over: the row takes
+the measured facts (and a new recipe, if carried), its corpses are reaped by
+probe with zero retries ("metal re-registered"), and every registration event
+retries the parked queue — `reroute(park=True)`, which is resume. A known
+name at another address is a collision, refused. A host dying alone stays a
+human's resubmit.
+`rlstack/runner/desk.py` (`Desk`, `Listing`), `rlstack/runner/remote.py` (`RemoteDesk`)
+
+**Campaign layer** — where SPECS meet the fleet, the only such place:
+`demands_of(spec)` (anchor on the learner — the learner is never remote, said
+once, here), `frame_for(spec)` (canonical row + the client's code claim), and
+`Campaigns` — the desk's spec-aware sidecar serving the passes that need both
+a store and spec knowledge (today `migrate`, the code-refresh warm-fork) over
+the desk's own Transport contract. A campaign's whole surface is
+`RemoteDesk(transport).submit(spec)` (shaping happens client-side) or
+`.resolve(demands)` for a pure client; no venue word appears in any of it.
+`rlstack/runner/campaign.py`
+
+**MetalService / the metal plane** — the metal-side end of the standing
+carve: the container that owns a device wears it by default. One MEASURED
+Metal's BOOKS IN GB (built partitions — hand-built hosts enter via
+`adopt_born` — plus pending bookings), and the verbs that create and free
+hosts: `carve` (BOOKS its GB synchronously before the build's first await, so
+carves never double-promise; a failed build releases), `decarve` (every
+resident down the ladder, the GB returns to residual), `residual` / `describe`
+(the desk's deduction feed). `build` is where THE ONE CROSSING happens:
+`fraction_for_gb` turns the per-device GB into the partition's fraction
+against the card this metal measured, and a slice larger than one device
+raises the acquire rung by name, never clamps. It holds a RECIPE (**Builds**)
+— the desk's row when the carve request carries one — and a carve spawns one
+resident process per regime from it; a resident's unbidden exit decarves its
+host. The desk DEDUCES, the metal ENFORCES; the metal writes nothing to the
+fleet journal.
+`rlstack/runner/desk.py` (`MetalService`), `rlstack/runner/remote.py` (`RemoteMetal`)
+
+**Builds / EngineBuild / LearnerBuild** — a metal's recipe: the capacity knobs
+a partition cannot tell you (an engine's context length, bundle count, rank,
+ensemble width, served adapter types, sleep mode; a learner's dtype, clip,
+activation checkpointing). Everything ELSE about a resident — class, base,
+width, device, fraction — follows from (regime, partition) in `build_engine` /
+`build_learner`, so building is rlstack's, not a venue's. Declared at bring-up
+from the deploy's constants — the metal's FIRST declaration — and journaled on
+the `metal` registration and every `host-up`; the desk's journaled row is the
+CANON (ADR 0001, Q5c): it rides every carve request, the metal builds from it
+(`adopt_recipe`), and a re-registration carrying a different recipe updates
+it. `FakeEngineBuild` / `FakeLearnerBuild` put the fakes in a real process.
+`rlstack/runner/residents.py`
+
+**StoreAddress / open_store** — a store as a value a child process can reopen
+it from: backend by name, root, locator. `Store.address()` on every backend;
+`open_store` is the one place backends are spelled. A volume store reopens as a
+mount-only view — a resident reads cas blobs and writes nothing.
+`rlstack/data/stores/base.py`, `rlstack/data/stores/address.py`
 
 **Pool** — a NAME traffic routes to, with two lives: declared capacity
-(`PoolMember` in a `GpuConfig`) and a runtime routing entry (`Routes`: pool name
+(`PoolMember` in a `Topology`) and a runtime routing entry (`Routes`: pool name
 → engine + pinned bundle). The name↔metal relation is many-to-many — one engine
 may back many pool names, one pool may fan over several engines.
 `rlstack/spec/specs.py` (`PoolMember`), `rlstack/runner/traffic.py`
@@ -357,32 +514,51 @@ facts, speaks TOKENS, and pins each request's bundle at submission.
 **Learner** — training metal: differentiable forward/backward plus the
 optimizer, multi-tenant by additive install (`TorchLearner`,
 `FsdpTorchLearner`, `FakeLearner`). `fsdp` is a BUILD fact. The learner is
-never remote — the runner goes to it.
+never remote ACROSS HOSTS — the runner goes to it — and since ADR 0002 it is a
+process INSIDE its host, reached through `RemoteLearner` over its door. Its
+`install` takes a **Parameterization** and its package imports no spec class.
 `rlstack/runner/interfaces.py`, `rlstack/runner/learners/`
 
+**Parameterization** — what `install` builds, projected off the spec BY THE
+RUNNER (`loop.parameterization_of`, the one place a spec becomes an install):
+the base, the loss by REGISTRY KEY (bound at install — the moments belong to
+one loss), the bank entries in install order (adapter type by key, init with
+the per-entry seed already derived, trainable, resolved sites), and the
+optimizer settings. The whole of what a learner may know about an experiment.
+`rlstack/runner/interfaces.py`
+
 **Rank chorus** — the extra processes a sharded learner build needs and no
-more. Rank 0 runs the runner and answers; ranks 1..width-1 exist only to stand
-in the collectives, and rank 0's copy is the truth.
+more. Rank 0 IS the learner resident and answers its door; ranks 1..width-1
+exist only to stand in the collectives, and rank 0's copy is the truth. The
+resident's pin makes "rank r on cuda:r" true by construction, and every
+follower caps its own device. The teardown ladder is `residents.py`'s.
 `rlstack/runner/learners/ranks.py`
 
-**Arbiter** — the physical half of the blackboard: a `GpuArbiter` constructed by
+**Arbiter** — the physical half of the blackboard: an `Arbiter` constructed by
 whoever owns the metal (a Host makes its own unless handed one) and shared by
 every experiment admitted to it. It governs its owner's partition, not the
 device — several sub-GPU hosts on one device each admit independently.
 Scheduling policy lives here and is deliberately outside run identity (I5).
 `rlstack/runner/arbiter.py`
 
-**Resident** — something that occupies evictable GPU memory (an engine object,
-a learner object), keyed by OBJECT IDENTITY: ten pools backed by one engine are
-ONE resident.
-`rlstack/runner/arbiter.py`
+**Resident** — something that occupies evictable GPU memory (an engine, a
+learner), keyed by OBJECT IDENTITY: ten pools backed by one engine are ONE
+resident. Since ADR 0002 a resident IS A PROCESS: a supervised child of the
+metal, born pinned to its partition's devices and capped at its fraction,
+built by rlstack's universal builders from the metal's recipe, answering
+JSON frames at a DOOR (`hello`, `sleep`/`wake`, `stop`, plus its Engine or
+Learner verbs). The Host holds it as a proxy, and the proxy is the object the
+arbiter keys. A resident that exits unbidden is a dead host.
+`rlstack/runner/arbiter.py`, `rlstack/runner/residents.py`
 
-**Exclusive group / admission** — an arbiter group (from `GpuGroup.sharing =
-"sleep"`, or a host's own group) inside which exactly one resident is live at a
-time; **admission** is entering `admit(resident)`, which guarantees residency,
-waking and evicting per policy. Everything outside a group co-resides and
-admission is a plain counter. Alternation is about memory, never mutual
-exclusion on work.
+**Exclusive group / admission / alternate** — an arbiter group (from a
+multi-member HostSpec, or a host's own group) inside which exactly one
+resident is live at a time — its members ALTERNATE; **admission** is entering
+`admit(resident)`, which guarantees residency, waking and evicting per policy.
+Everything outside a group co-resides and admission is a plain counter.
+Alternation is about memory, never mutual exclusion on work; "sleep" names
+only vLLM's mechanism for handing the device back (`enable_sleep_mode`, a
+build fact), never a property of a spec.
 `rlstack/runner/arbiter.py`
 
 **Wire** — pool traffic to a host that is not this process. `HostService` is
@@ -434,7 +610,7 @@ observability. Placement, boots, tenancies, gpu samples, traffic windows,
 update timings and carves land here, deliberately outside run manifests so
 placement stays out of identity. Correctness never reads a journal; torn tails
 are tolerated.
-`rlstack/data/stores/base.py`, `rlstack/runner/host.py`, `rlstack/runner/fleet.py`
+`rlstack/data/stores/base.py`, `rlstack/runner/host.py`, `rlstack/runner/desk.py`
 
 **Emission plane** — the measurement side of observability: a `TrafficMeter`
 the host's engines and arbiter count into (prefill and decode tokens, time to
@@ -469,10 +645,30 @@ residents its work occupies, do the work, write the store and notify. The
 **Generator** samples waves at the newest committed bundle within the lag
 buffer; the **Scorer** runs the pooled half of the post pipeline beside the
 pools it addresses and writes it as a postdata part; the **Trainer** runs the
-inline half + gradient + commit and is the ledger's only writer; the
-**Evaluator** does firewalled measurement on the eval modulus. Each condition
-method is a named, overridable seam.
+inline half + gradient + commit and is the ledger's only writer. Each
+condition method is a named, overridable seam. (The Evaluator retired in #70:
+measurement left the run.)
 `rlstack/runner/daemons/`
+
+**Resident / daemon** — the two kinds of runtime thing, named: a RESIDENT is
+the heavy object living on a partition (an Engine, a Learner — nouns of
+capability), a DAEMON is the thin loop that watches the store and pokes a
+resident (Generator, Trainer, Scorer — agent nouns). Daemons synchronize
+through the store ONLY, so colocation with their resident is a transport
+choice, not architecture. The Trainer sits beside its Learner because the
+runner goes to the learner's HOST; inside that host the Learner is a process
+behind five verbs (ADR 0002) — the autograd arc is the Learner's, the seal is
+the Trainer's, and neither crosses a wire: the verbs' bytes do.
+
+**Measurement** — observation OUTSIDE the run (#70): a value naming held-out
+task ids, samples, a cadence, a scoring pipeline and its own seed, written as
+measurements/<run_id>/<name>/ (write-once manifest + append-only points) by
+`measure_run` — one idempotent pass any process can run against a pool, backfilling
+every missing point (retention keeps every adapter version restorable) and
+following the ledger's future. Never the run dir, never identity, never
+resume-equivalence; deletable, though a changed observation is a NEW name.
+Swapping what a run is measured on, mid-run, is a non-event.
+`rlstack/runner/measure.py`, `rlstack/data/stores/base.py` (measurements)
 
 **The split rule** — a postprocessor declaring `pools` is SCORER-RUN, a
 pool-less one is TRAINER-INLINE: sending traffic is what makes a processor
@@ -553,34 +749,82 @@ The declaration half is class attributes (`serving`, `engine_plugin`,
 - **rollout_lowering** — build this adapter type's serving half for one engine
   build; `install_replay`'s twin.
 
-### The fleet ladder (`rlstack/runner/fleet.py`)
+### The fleet ladder (`rlstack/runner/desk.py`)
 
 One currency and one decider per rung (I12):
 
-- **join** — a host already serves the demanded capability; automatic, and the
-  target host's own arbiter is the decider. Declared fractions are ignored: the
+- **join** — a listing already serves the demanded capability (`covers`: the
+  ONE coverage rule — capability, base, shape equality); automatic, and the
+  target host's own arbiter is the decider. Declared sizes are ignored: the
   weights already live there.
-- **carve** — nothing serves it but residual metal fits, so partition a new
-  host into existence. Automatic *because* journaled; residual-only, never
-  reshaping an existing host; the declared fraction sizes the new partition.
-- **acquire** — nothing fits. New metal costs money, so a human registers
-  Metal; `place()` names what to buy and `submit()` refuses to run it.
-- **place** — read demands off the spec and return the `Plan`.
-- **apply** — execute the automatic rungs of a plan, journaling every carve.
+- **carve** — nothing serves it but a registered metal's residual (GB per
+  device) fits the unit's largest alternating member, so the desk commands the
+  metal to partition a new host into existence, the desk's recipe row riding
+  the request. The metal BOOKS the GB before it builds (MetalService), so
+  carves never double-promise, and converts to a fraction once at build;
+  journaled and listed at the desk, the single writer.
+- **acquire / boot** — nothing fits. New metal costs money, so the desk
+  answers with boot instructions and a human executes them.
+- **decommission** — carve's inverse, client-asked: decarve at the host's
+  metal (engine down, its GB back to residual) plus delist, one desk verb.
+  Refused with the running work NAMED when anything lives on or routes
+  through the host (the guard is DEPENDENTS off the journaled placements —
+  a serve host's roster is empty, so occupancy alone would lie); `force`
+  tears down anyway, and `reroute` MOVES the dependents first. Delist alone
+  stays bookkeeping-only; `reap` is the same composition applied to hosts
+  that stopped answering.
+- **reroute** — a move is a restart: every delivery is ARCHIVED (demand rows +
+  opaque frame ride the journaled placement, still unread), so moving a
+  workload is replaying the desk's own delivery onto a fresh placement with
+  one listing off the table — stop the old tenancy at its anchor, deliver
+  the archived frame to the new one; the store is the run, so nothing is
+  copied and the move costs at most one uncommitted update. PLACE-FIRST: a
+  run with nowhere to go is refused a move, not stopped — unless `park`
+  (decommission's mode: the host dies regardless), which stops it and
+  journals it PARKED with the boot instructions; the ordinary campaign
+  resubmit revives it, same run_id. `placements()` is the archive as a
+  read: the latest binding per run_id.
+- **reap / recontinue** — the supervisor's tick (ADR 0001, Q5–Q5d): probe
+  every listing; retry the silent; conclude what stays silent (decarve where
+  the metal answers, delist "reaped"); STRAND the unfinished runs the reaped
+  hosts carried — journaled `parked` BEFORE any move, so a desk that dies
+  midway leaves the intent on the record; KNOCK each metal that lost listings
+  (`boot_for`, or `describe()` through the plane — on Modal the knock boots);
+  then retry the queue. `parked()` is the queue read off the journal (the
+  latest disposition per run; a delivered placement supersedes), retried under
+  one lock on every reap that reaped and every `metal` registration event.
+  A run whose ledger reached its plan is not work and is left alone.
+- **register (metal)** — the acquire rung recorded, and the re-registration
+  rule: a known name at the same address updates the row (measured facts,
+  recipe) and reaps that metal's corpses by probe; at another address it is
+  refused as a collision.
 
 ### The host (`rlstack/runner/host.py`)
 
 - **submit** — how an experiment reaches metal: **bind** each declared pool onto
-  an owned engine serving that base at that shape, **fit** (refuse past
-  capacity), **attest** (roster in memory, journal to `hosts/<name>/log.jsonl`),
-  **run** under the host's shared arbiter against the experiment's own store.
+  an owned engine serving that base at that shape, **fit** (custody: a learner
+  member finds an owned learner here — memory is not arithmetic at the door,
+  the metal's build converted it and the residents enforce it), **attest**
+  (roster in memory, journal to `hosts/<name>/log.jsonl`), **run** under the
+  host's shared arbiter against the experiment's own store.
 - **attach / detach** — a resident's registration with the arbiter, and a
   tenancy's entry in the roster and the journal.
+- **stop** — adopt's per-run inverse: the adoption task cancelled and
+  AWAITED (the daemons run under one TaskGroup, so cancellation is
+  structural), the detach journaled, the run_id free to adopt again — here
+  or elsewhere. Safe mid-update by resume-equivalence.
 - **admit** — the one verb work wraps itself in; entering it guarantees the
   resident is resident.
 - **sleep / wake** — a build fact of `VllmEngine` (and the learner's offload),
   deliberately NOT on the Engine protocol: the seam an alternating host's
   arbiter hooks call to make a partition really hand the device back.
+- **adopt** — submit, without the submitter in-process: decode the frame's
+  canonical spec, derive the schema HERE (`schema_for`), resolve the routes into
+  RemotePools (`transport_for` turns an address into a transport; the pool's declared
+  base/tp wrap it), run the custody checks fail-fast, roster the tenancy
+  EAGERLY, and run it as a background task on this host's own loop. The reply
+  is acceptance, never completion — the ledger is the result channel.
+  Re-adoption is resume.
 
 ### Pool traffic (`rlstack/runner/traffic.py`, `rlstack/runner/remote.py`)
 
@@ -652,14 +896,14 @@ referenced by number throughout the code. In short, by subject:
 | I2 | policy is the only bridge | adapter type, lowering, bundle, parity |
 | I3 | identity is computed | run_id, spec, registry code hashes |
 | I4 | registered things declare, then compute | registry, flow graph, submit gate |
-| I5 | GPU topology is semantics-neutral | GpuSet, pool, traffic, arbiter policy |
+| I5 | GPU topology is semantics-neutral | HostSpec, vram_gb, pool, traffic, arbiter policy |
 | I6 | record loss-independently at the seal | Turn, Trajectory, postdata |
 | I7 | the substrate is certified, not assumed | mechanism probe, parity certificate |
 | I8 | multi-tenancy on both sides | tenant, additive install, row plan, add_bundle |
 | I9 | the loss is pure math | loss, postprocessor, token_level |
 | I10 | one experiment, one store | run store, peek, observer |
 | I11 | runs self-describe | dictionary.json, flow graph |
-| I12 | a host is an atomic purposed partition | host, partition, regime, fleet ladder |
+| I12 | a host is an atomic purposed partition | host, partition, regime, desk ladder |
 
 Deltas agreed after the last spec fold-in live in `agent-context/CONTEXT.md`;
 later entries supersede earlier ones, and the code plus the latest entry win.

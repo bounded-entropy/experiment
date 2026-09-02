@@ -16,8 +16,14 @@ every transport implements against:
 
 Costs, stated: sample replies are non-streamed (one reply carries the whole
 event list), add_bundle ships payload bytes as base64, and the learner is never
-remote. LocalTransport round-trips every frame through json in both directions,
-so anything that works over it works over a real transport.
+remote ACROSS HOSTS — the runner goes to it. Since ADR 0002 the learner IS
+behind a wire INSIDE its host: every resident (engine or learner) is a child
+process of the metal, so `EngineService`/`LearnerService` are the resident's
+end of that door and `RemoteLearner` is the Host's end for its learner
+(`RemotePool` already was for an engine). `HostService` keeps admission and
+forwards through the proxy, so the two hops are: admission at the host, then
+the resident. LocalTransport round-trips every frame through json in both
+directions, so anything that works over it works over a real transport.
 """
 
 from __future__ import annotations
@@ -27,11 +33,15 @@ import json
 from collections.abc import AsyncIterator, Mapping, Sequence
 from typing import TYPE_CHECKING, Protocol
 
+from rlstack.data.flatten import TokenBatch
 from rlstack.data.trajectory import Message, Role
 from rlstack.policy.adapters.base import Mechanism
 from rlstack.policy.compile import Bundle
 from rlstack.policy.siteschema import SiteMeta
-from rlstack.runner.interfaces import Engine, FinishEvent, TokenEvent
+from rlstack.runner.interfaces import (
+    Emitted, Engine, EntryInstall, FinishEvent, Learner, OptimSettings,
+    Parameterization, TokenEvent, TrainStats,
+)
 from rlstack.runner.meters import TrafficMeter
 from rlstack.spec.canonical import TYPE_KEY
 from rlstack.spec.specs import SamplingSpec
@@ -125,10 +135,10 @@ def _spec_classes() -> dict[str, type]:
     from rlstack.spec import specs
 
     classes = (
-        specs.SamplingSpec, specs.GenSpec, specs.EvalSpec, specs.AdapterSpec,
+        specs.SamplingSpec, specs.GenSpec, specs.AdapterSpec,
         specs.PolicySpec, specs.Plans, specs.OptimSpec, specs.Schedule,
-        specs.AlgoSpec, specs.GpuSet, specs.PoolMember, specs.LearnerMember,
-        specs.GpuGroup, specs.GpuConfig, specs.Seeds, specs.WarmStart,
+        specs.AlgoSpec, specs.PoolMember, specs.LearnerMember,
+        specs.HostSpec, specs.Topology, specs.Seeds, specs.WarmStart,
         specs.ExperimentSpec,
     )
     return {cls.__name__: cls for cls in classes}
@@ -206,9 +216,116 @@ def decode_sites(rows: Sequence[dict]) -> tuple[SiteMeta, ...]:
                  is_boundary=r["is_boundary"]) for r in rows)
 
 
+def encode_token_batch(batch: TokenBatch) -> dict:
+    """Tuples become lists; floats ride as Python's repr, which JSON keeps
+    exact; extras must already be JSON-safe — the membrane's own rule at
+    seal time (waves/<update>.jsonl.gz), so the wire adds none."""
+    return {"token_ids": list(batch.token_ids),
+            "loss_mask": list(batch.loss_mask),
+            "behavior_logprobs": list(batch.behavior_logprobs),
+            "segment_ids": list(batch.segment_ids),
+            "doc_starts": list(batch.doc_starts),
+            "postdata": {k: list(v) for k, v in batch.postdata.items()},
+            "token_extras": {k: list(v) for k, v in batch.token_extras.items()},
+            "doc_turn_extras": [[dict(m) for m in doc]
+                                for doc in batch.doc_turn_extras],
+            "microbatches_in_update": batch.microbatches_in_update}
+
+
+def decode_token_batch(row: Mapping) -> TokenBatch:
+    return TokenBatch(
+        token_ids=tuple(row["token_ids"]), loss_mask=tuple(row["loss_mask"]),
+        behavior_logprobs=tuple(row["behavior_logprobs"]),
+        segment_ids=tuple(row["segment_ids"]),
+        doc_starts=tuple(row["doc_starts"]),
+        postdata={k: tuple(v) for k, v in row["postdata"].items()},
+        token_extras={k: tuple(v) for k, v in row["token_extras"].items()},
+        doc_turn_extras=tuple(tuple(doc) for doc in row["doc_turn_extras"]),
+        microbatches_in_update=int(row["microbatches_in_update"]))
+
+
+def encode_train_stats(stats: TrainStats) -> dict:
+    return {"loss": stats.loss, "mean_ratio": stats.mean_ratio,
+            "logprob_gap": stats.logprob_gap, "grad_norm": stats.grad_norm,
+            "tokens": stats.tokens, "provided": dict(stats.provided)}
+
+
+def decode_train_stats(row: Mapping) -> TrainStats:
+    return TrainStats(loss=row["loss"], mean_ratio=row["mean_ratio"],
+                      logprob_gap=row["logprob_gap"], grad_norm=row["grad_norm"],
+                      tokens=int(row["tokens"]), provided=dict(row["provided"]))
+
+
+def encode_emitted(emitted: Emitted) -> dict:
+    """Bytes as base64, the way bundles already cross. ONE codec on purpose:
+    a by-reference carriage later (payloads moving resident-to-resident over
+    NCCL, ADR 0002 Q3) replaces this function and leaves every verb alone."""
+    return {"adapters": {k: _b64(v) for k, v in emitted.adapters.items()},
+            "optim": {k: _b64(v) for k, v in emitted.optim.items()}}
+
+
+def decode_emitted(row: Mapping) -> Emitted:
+    return Emitted(adapters={k: _unb64(v) for k, v in row["adapters"].items()},
+                   optim={k: _unb64(v) for k, v in row["optim"].items()})
+
+
+def encode_payloads(payloads: Mapping[str, bytes] | None) -> dict | None:
+    return None if payloads is None else {k: _b64(v) for k, v in payloads.items()}
+
+
+def decode_payloads(row: Mapping | None) -> dict[str, bytes] | None:
+    return None if row is None else {k: _unb64(v) for k, v in row.items()}
+
+
+def encode_parameterization(p: Parameterization) -> dict:
+    return {"base": p.base, "loss": p.loss,
+            "entries": [{"name": e.name, "adapter_type": e.adapter_type,
+                         "init": dict(e.init), "trainable": e.trainable,
+                         "sites": encode_sites(e.sites)} for e in p.entries],
+            "optim": {"name": p.optim.name, "lr": p.optim.lr,
+                      "betas": list(p.optim.betas),
+                      "weight_decay": p.optim.weight_decay,
+                      "overrides": {k: dict(v)
+                                    for k, v in p.optim.overrides.items()}}}
+
+
+def decode_parameterization(row: Mapping) -> Parameterization:
+    optim = row["optim"]
+    return Parameterization(
+        base=row["base"], loss=row["loss"],
+        entries=tuple(EntryInstall(
+            name=e["name"], adapter_type=e["adapter_type"], init=dict(e["init"]),
+            trainable=bool(e["trainable"]), sites=decode_sites(e["sites"]))
+            for e in row["entries"]),
+        optim=OptimSettings(name=optim["name"], lr=optim["lr"],
+                            betas=tuple(optim["betas"]),
+                            weight_decay=optim["weight_decay"],
+                            overrides={k: dict(v)
+                                       for k, v in optim["overrides"].items()}))
+
+
 # ---------------------------------------------------------------------------
 # the transport
 # ---------------------------------------------------------------------------
+
+class Undeclared:
+    """The absence of a declaration, as a value.
+
+    A metal registration's `idle_s` is THREE-VALUED (ADR 0003): a number is
+    that metal's own idle limit, None PINS it (never released, however long
+    it sits), and DESK_DEFAULT — the argument not given, the key absent from
+    the frame — leaves the desk's own default to decide. None cannot mean
+    both "pinned" and "unsaid", so the third value is named. It lives in the
+    wire module because the fact is a wire fact (the `metal` frame either
+    carries the key or does not) and because desk.py imports this module,
+    never the reverse."""
+
+    def __repr__(self) -> str:
+        return "DESK_DEFAULT"
+
+
+DESK_DEFAULT = Undeclared()
+
 
 class Transport(Protocol):
     """Carries dict frames to one host's service. Frames are JSON-safe by
@@ -256,15 +373,19 @@ class HostService:
         """One admitted verb, admission included: enter the owning host's
         arbiter, run, leave. A regime-host's engines are attached at birth; a
         bare host's attach here on first remote use, at zero footprint — a
-        joiner never re-counts a fraction the partition already owns.
+        joiner never re-counts a size the partition already owns.
 
-        `adopt` rides this async path but is NOT admitted: it registers a
-        tenancy whose daemons admit their own work, so the door itself
-        occupies nothing — and it is host-addressed, so it resolves no
-        engine."""
+        `adopt` and `stop` ride this async path but are NOT admitted: adopt
+        registers a tenancy whose daemons admit their own work, stop cancels
+        one, so neither door occupies anything — and both are host-addressed,
+        so they resolve no engine."""
         if verb == "adopt":
             return await self.host.adopt(payload["spec"],
-                                         payload.get("routes", {}))
+                                         payload.get("routes", {}),
+                                         payload.get("code"),
+                                         payload.get("subdir"))
+        if verb == "stop":
+            return await self.host.stop(payload["run_id"])
         engine = self._engine(payload["base"], payload["tp"])
         if not self.host.arbiter.is_attached(engine):
             self.host.arbiter.attach(
@@ -272,17 +393,7 @@ class HostService:
         if verb not in ("sample_tokens", "score_tokens"):
             raise ValueError(f"unknown admitted verb {verb!r}")
         async with self.host.arbiter.admit(engine):
-            if verb == "sample_tokens":
-                events = [event async for event in engine.sample_tokens(
-                    decode_messages(payload["messages"]),
-                    decode_sampling(payload["sampling"]),
-                    tuple(payload["stop"]), payload["bundle_id"],
-                    payload["seed"])]
-                return {"events": encode_events(events)}
-            scores = await engine.score_tokens(
-                decode_messages(payload["messages"]),
-                tuple(payload["token_ids"]), payload["bundle_id"])
-            return {"logprobs": list(scores)}
+            return await EngineService(engine).serve(verb, payload)
 
     def answer(self, verb: str, payload: dict) -> dict:
         """One admission-free verb: additive registration (add_bundle never
@@ -293,23 +404,93 @@ class HostService:
         if verb == "status":
             return self.host.status()
         engine = self._engine(payload["base"], payload["tp"])
+        return EngineService(engine).answer(verb, payload)
+
+
+class EngineService:
+    """ONE engine's verbs, admission-free: the resident's end of its door.
+
+    HostService admits and resolves, then forwards here — so this is the
+    engine-verb half of the host wire with the admission left behind, and
+    the whole of what an engine resident (runner/residents.py) serves. A
+    frame reaching this class has already been admitted by the host that
+    owns the partition, or came from that host's own runner."""
+
+    def __init__(self, engine: Engine) -> None:
+        self.engine = engine
+
+    async def serve(self, verb: str, payload: dict) -> dict:
+        if verb == "sample_tokens":
+            events = [event async for event in self.engine.sample_tokens(
+                decode_messages(payload["messages"]),
+                decode_sampling(payload["sampling"]),
+                tuple(payload["stop"]), payload["bundle_id"],
+                payload["seed"])]
+            return {"events": encode_events(events)}
+        if verb == "score_tokens":
+            scores = await self.engine.score_tokens(
+                decode_messages(payload["messages"]),
+                tuple(payload["token_ids"]), payload["bundle_id"])
+            return {"logprobs": list(scores)}
+        raise ValueError(f"unknown engine verb {verb!r}")
+
+    def answer(self, verb: str, payload: dict) -> dict:
         if verb == "add_bundle":
-            engine.add_bundle(decode_bundle(payload["bundle"]))
+            self.engine.add_bundle(decode_bundle(payload["bundle"]))
             return {}
         if verb == "knows_bundle":
-            return {"known": engine.knows_bundle(payload["bundle_id"])}
+            return {"known": self.engine.knows_bundle(payload["bundle_id"])}
         if verb == "reachability":
-            reach = engine.reachability(decode_sites(payload["sites"]))
+            reach = self.engine.reachability(decode_sites(payload["sites"]))
             return {"mechanisms": {name: mech.name
                                    for name, mech in reach.items()}}
         if verb == "tokenize":
-            return {"token_ids": list(engine.tokenize(payload["text"]))}
+            return {"token_ids": list(self.engine.tokenize(payload["text"]))}
         raise ValueError(f"unknown admission-free verb {verb!r}")
 
 
-def _json_roundtrip(frame: dict) -> dict:
+class LearnerService:
+    """ONE learner's five verbs as frames: the learner resident's end of its
+    door. Every verb is synchronous and pins a tenant (I8), so all five ride
+    the `ask` path and arrive in the order the Trainer issued them; nothing
+    here admits — the Trainer admitted itself at its host's arbiter before
+    the first frame."""
+
+    def __init__(self, learner: Learner) -> None:
+        self.learner = learner
+
+    async def serve(self, verb: str, payload: dict) -> dict:
+        raise ValueError(
+            f"{verb!r}: a learner's verbs are synchronous — they ride ask, "
+            f"never call")
+
+    def answer(self, verb: str, payload: dict) -> dict:
+        tenant = payload["tenant"]
+        if verb == "install":
+            self.learner.install(
+                tenant, decode_parameterization(payload["parameterization"]))
+            return {}
+        if verb == "forward_backward":
+            return encode_train_stats(self.learner.forward_backward(
+                tenant, decode_token_batch(payload["batch"])))
+        if verb == "optim_step":
+            self.learner.optim_step(tenant)
+            return {}
+        if verb == "emit":
+            return encode_emitted(self.learner.emit(tenant))
+        if verb == "load":
+            self.learner.load(tenant, decode_payloads(payload["adapters"]) or {},
+                              decode_payloads(payload["optim"]))
+            return {}
+        raise ValueError(f"unknown learner verb {verb!r}")
+
+
+def json_roundtrip(frame: dict) -> dict:
     """The honesty gate: a frame that survives this survives any real wire."""
     return json.loads(json.dumps(frame))
+
+
+_json_roundtrip = json_roundtrip
 
 
 class LocalTransport:
@@ -317,7 +498,8 @@ class LocalTransport:
     (json round-trip both ways), so a fleet whose hosts share one process is
     indistinguishable, from above, from one whose hosts do not."""
 
-    def __init__(self, service: HostService) -> None:
+    def __init__(self, service: "HostService | EngineService | LearnerService"
+                 ) -> None:
         self.service = service
 
     async def call(self, verb: str, payload: dict) -> dict:
@@ -398,6 +580,43 @@ class RemotePool:
         return tuple(reply["token_ids"])
 
 
+class RemoteLearner:
+    """A Learner served by a resident, reached through a Transport — the
+    Host's end of its learner's door, and RemotePool's twin.
+
+    Implements the whole Learner protocol; `fsdp` is the build fact the
+    resident reported in its hello, which the host attests against its
+    training regime exactly as it did against an in-process learner. Every
+    verb is one `ask` frame, synchronous and blocking like the in-process
+    call it replaces (ADR 0002, Q6): the wire adds custody, never
+    scheduling."""
+
+    def __init__(self, transport: Transport, *, fsdp: int = 1) -> None:
+        self.fsdp = fsdp
+        self._transport = transport
+
+    def install(self, tenant: str, parameterization: Parameterization) -> None:
+        self._transport.ask("install", {
+            "tenant": tenant,
+            "parameterization": encode_parameterization(parameterization)})
+
+    def forward_backward(self, tenant: str, batch: TokenBatch) -> TrainStats:
+        return decode_train_stats(self._transport.ask("forward_backward", {
+            "tenant": tenant, "batch": encode_token_batch(batch)}))
+
+    def optim_step(self, tenant: str) -> None:
+        self._transport.ask("optim_step", {"tenant": tenant})
+
+    def emit(self, tenant: str) -> Emitted:
+        return decode_emitted(self._transport.ask("emit", {"tenant": tenant}))
+
+    def load(self, tenant: str, adapters: Mapping[str, bytes],
+             optim: Mapping[str, bytes] | None) -> None:
+        self._transport.ask("load", {
+            "tenant": tenant, "adapters": encode_payloads(adapters),
+            "optim": encode_payloads(optim)})
+
+
 class RemoteHost:
     """The client end of ADOPTION: hand a standing host an experiment.
 
@@ -411,12 +630,214 @@ class RemoteHost:
         self._transport = transport
 
     async def adopt(self, spec: object,
-                    routes: Mapping[str, str] | None = None) -> dict:
+                    routes: Mapping[str, str] | None = None,
+                    code: Mapping[str, str] | None = None,
+                    subdir: str | None = None) -> dict:
+        """`spec` may be a live ExperimentSpec (encoded here, hashes computed
+        here) or an already-canonical row (forwarded as-is — the DESK's case,
+        relaying a client's frame with the CLIENT's claimed hashes)."""
         from rlstack.spec.canonical import canonical_json
 
+        if isinstance(spec, Mapping):
+            row = dict(spec)
+        else:
+            row = json.loads(canonical_json(spec))
+            if code is None:
+                from rlstack.registry import code_hashes
+                code = code_hashes(spec)
         return await self._transport.call("adopt", {
-            "spec": json.loads(canonical_json(spec)),
-            "routes": dict(routes or {})})
+            "spec": row, "routes": dict(routes or {}),
+            "code": dict(code or {}), "subdir": subdir})
+
+    async def stop(self, run_id: str) -> dict:
+        """Tell the host to stop a tenancy — cancellation awaited host-side,
+        so the reply means the death is complete and the run_id is free to
+        adopt again, here or elsewhere (a reroute's first half)."""
+        return await self._transport.call("stop", {"run_id": run_id})
 
     def status(self) -> dict:
         return self._transport.ask("status", {})
+
+
+class RemoteMetal:
+    """The desk's end of the METAL PLANE: deduce, then command.
+
+    `residual` is the deduction feed — per-device free GB from the
+    container that owns the device, counting built partitions AND in-flight
+    bookings. `carve` is the command: the metal books synchronously at its
+    own door, so a deduction gone stale between the ask and the command
+    costs a refusal, never a double-book. `decarve` frees a host's GB on a
+    still-living container — the reaper's second half. `release` is the
+    wholesale one: every host down and the shift ended, so the venue takes
+    the container back (ADR 0003)."""
+
+    def __init__(self, transport: Transport) -> None:
+        self._transport = transport
+
+    def residual(self) -> list[float]:
+        return list(self._transport.ask("residual", {})["residual"])
+
+    def describe(self) -> dict:
+        return self._transport.ask("describe", {})
+
+    async def carve(self, request: Mapping) -> dict:
+        return await self._transport.call("carve", dict(request))
+
+    async def decarve(self, name: str) -> dict:
+        return await self._transport.call("decarve", {"host": name})
+
+    async def release(self) -> dict:
+        """The acquire rung inverted at the metal (ADR 0003): every resident
+        down the ladder, the books emptied, and the SHIFT ENDED so the venue
+        reclaims the container. Idempotent — a bare or already-released
+        metal answers released just the same, so a desk unsure whether its
+        release landed may simply say it again."""
+        return await self._transport.call("release", {})
+
+
+class RemoteDesk:
+    """The client end of the standing fleet: a campaign's whole surface.
+
+    The desk is workload-blind, so the SHAPING happens here, client-side:
+    `submit` turns a spec into demand rows (anchor on the learner) plus an
+    opaque frame via the campaign layer, and one frame carries both to the
+    desk — which places, delivers to the anchor, and answers with where
+    everything landed (or what to boot). `resolve` is the pure client's
+    verb: demands in, addresses out, no delivery. After either, a client
+    watches the store — the desk holds no results, exactly as no host does."""
+
+    def __init__(self, transport: Transport) -> None:
+        self._transport = transport
+
+    async def submit(self, spec: object,
+                     subdir: str | None = None) -> dict:
+        from rlstack.runner.campaign import demands_of, frame_for
+        from rlstack.runner.desk import demand_rows
+
+        return await self._transport.call("submit", {
+            "demands": demand_rows(demands_of(spec)),
+            "frame": frame_for(spec, subdir)})
+
+    async def resolve(self, demands: Sequence) -> dict:
+        """Demands in, addresses out — placement without a workload: the
+        door for an evaluator, a scorer, any client that wants a pool."""
+        from rlstack.runner.desk import demand_rows
+
+        return await self._transport.call("place",
+                                          {"demands": demand_rows(demands)})
+
+    def status(self) -> dict:
+        return self._transport.ask("status", {})
+
+    def liveness(self) -> dict:
+        """{host: alive} for every listing, probed by the desk just now."""
+        return self._transport.ask("liveness", {})
+
+    async def list_host(self, name: str, regimes: Sequence,
+                        address: str, solo: bool = False,
+                        partition: Mapping | None = None,
+                        metal: str = "") -> dict:
+        """A booted host enters the standing fleet over the wire — the
+        phone-home half of the deploy contract: the container that stood the
+        host tells the desk what it wears, where it answers, and (the
+        capacity view) the partition row it was born onto and the metal it
+        lives on."""
+        return await self._transport.call("list", {
+            "host": name, "address": address, "solo": solo,
+            "partition": dict(partition) if partition else None,
+            "metal": metal,
+            "regimes": [{"name": r.name, "capability": r.capability,
+                         "base": r.base, "shape": r.shape} for r in regimes]})
+
+    async def delist(self, name: str, reason: str = "") -> dict:
+        """The listing's retirement, over the same wire it entered by —
+        bookkeeping only, the metal untouched. For teardown, decommission."""
+        return await self._transport.call("delist", {"host": name,
+                                                     "reason": reason})
+
+    async def decommission(self, name: str, force: bool = False,
+                           reroute: bool = False) -> dict:
+        """Carve's inverse at the desk, one frame: decarve at the host's
+        metal (engine down, its GB back to residual) plus delist. Refused
+        with the running work NAMED when anything lives on or routes through
+        the host; `force` tears it down anyway. `reroute` MOVES the running
+        work first — each dependent replayed onto a fresh placement with
+        this host off the table, or parked (stopped, journaled, waiting in
+        the store) when nothing else covers it."""
+        return await self._transport.call("decommission",
+                                          {"host": name, "force": force,
+                                           "reroute": reroute})
+
+    async def reroute(self, run_id: str, avoiding: str = "",
+                      park: bool = False) -> dict:
+        """Move a delivered workload: the desk replays its archived delivery
+        onto a fresh placement (skipping `avoiding`), stopping the old
+        tenancy only once there is somewhere to go. `park` stops it
+        regardless and journals the run parked — decommission's mode, when
+        the host is dying either way."""
+        return await self._transport.call("reroute", {
+            "run_id": run_id, "avoiding": avoiding, "park": park})
+
+    def placements(self) -> dict:
+        """The desk's current-binding table: the latest delivered placement
+        per run_id — pools to listings, plus the archived demand rows and
+        frame where the delivery carried them."""
+        return self._transport.ask("placements", {})["placements"]
+
+    async def register_metal(self, name: str, gpu: str, devices: int,
+                             vram_gb: float, address: str,
+                             builds: Mapping | None = None,
+                             idle_s: float | None | Undeclared = DESK_DEFAULT,
+                             ) -> dict:
+        """A metal container phones home its OWN existence — the other half
+        of the deploy contract: after this the desk can deduce (residual)
+        and command (carve/decarve) against it at `address`. The facts are
+        MEASURED (MetalService.measure). `builds` is the metal's recipe row
+        (Builds.row()), the desk's canon from here on, journaled so the
+        record of HOW a host was built is durable (ADR 0002, Q4a). A known
+        name at the same address is a re-registration — the container
+        generation turned over: the desk updates the row, reaps that metal's
+        corpses and retries the parked queue (ADR 0001, Q5); the reply says
+        what it reaped and retried. A registration also RE-ACQUIRES a metal
+        the desk had released (ADR 0003) — the row goes back on the
+        carve-able set. `idle_s` is this metal's own idle limit: unsaid, the
+        desk's default decides; None PINS it, never released."""
+        payload = {"name": name, "gpu": gpu, "devices": devices,
+                   "vram_gb": vram_gb, "address": address,
+                   "builds": dict(builds) if builds else None}
+        if not isinstance(idle_s, Undeclared):
+            payload["idle_s"] = idle_s
+        return await self._transport.call("metal", payload)
+
+    async def release(self, name: str, reason: str = "released") -> dict:
+        """Hand a metal back BY HAND — the acquire rung inverted at the desk
+        (ADR 0003): its listings delisted, its residents down the ladder,
+        its shift ended so the venue reclaims the container, and the row
+        kept as inventory the next placement may knock awake. The desk's
+        idle sweep issues this same verb on its own clock; this is the door
+        for an operator who knows the metal is done sooner."""
+        return await self._transport.call("release", {"metal": name,
+                                                      "reason": reason})
+
+    async def reap(self, probes: int = 3, wait: float = 0.0) -> dict:
+        """The janitor's sweep, run by the desk now: probe every listing,
+        retry the silent (on a lazy venue the knock is the restart), reap
+        what stays silent — decarve at its metal, delist with the reason
+        journaled — then RECONTINUE: strand the reaped hosts' runs, knock
+        their metals, retry the parked queue (ADR 0001, Q5d) — and, FIRST,
+        sweep for idle metal: observe every carve-able metal and release
+        what has sat past its limit (ADR 0003). Returns
+        {"listings": {host: alive | recovered | reaped}, "knocked":
+        {metal: answered}, "runs": {run_id: rerouted | parked},
+        "released": [metal, ...]}."""
+        return await self._transport.call("reap", {"probes": probes,
+                                                   "wait": wait})
+
+    async def migrate(self, run_ids: Sequence[str], *, optim: str = "load",
+                      remaining_only: bool = False) -> dict:
+        """Warm-fork each run onto the current code from its ledger tail —
+        the code-refresh pass, one frame. The desk does everything; the reply
+        maps parent run_id -> its child's acceptance (or refusal)."""
+        return await self._transport.call("migrate", {
+            "run_ids": list(run_ids), "optim": optim,
+            "remaining_only": remaining_only})

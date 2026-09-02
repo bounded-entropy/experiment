@@ -37,7 +37,7 @@ EPS_RECORD = "plora_eps"          # the noise vector this request's member used
 MEMBER_RECORD = "plora_member"    # which ensemble member served it
 
 # The provided tensors, by name — recomputed by every training forward.
-KL_PROVIDED = "plora_kl"                  # KL(q||p), what a latent-KL loss prices
+KL_PROVIDED = "latent_kl"                  # KL(q||p), what a latent-KL loss prices
 SIGMA_PROVIDED = "plora_sigma_mean"       # mean posterior scale: nothing consumes
 #                                           it; it is here to be WATCHED
 

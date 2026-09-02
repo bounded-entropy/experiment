@@ -95,6 +95,13 @@ class PipelineTest(unittest.TestCase):
         self.assertEqual(columns["reward"], [1.0, 0.0, 0.0, 0.0])
         self.assertEqual(columns["advantage"], [1.0, -1.0, 0.0, 0.0])
 
+    def test_group_accuracy_is_the_groups_mean_broadcast(self) -> None:
+        """Each row carries ITS group's accuracy: the column is the gate
+        grpo_latent_kl_gated reads, so a half-right group must not look
+        solved from any of its rows."""
+        columns = self.run_pipe(("verifier", "group_accuracy"))
+        self.assertEqual(columns["accuracy"], [0.5, 0.5, 0.0, 0.0])
+
     def test_columns_align_to_wave_order(self) -> None:
         columns = self.run_pipe(("verifier",))
         self.assertEqual(len(columns["reward"]), 4)
@@ -127,6 +134,9 @@ class RegistrationTest(unittest.TestCase):
         grpo = POST.get("grpo_advantage")
         self.assertEqual(grpo.consumes, ("reward",))
         self.assertEqual(grpo.produces, ("advantage",))
+        accuracy = POST.get("group_accuracy")
+        self.assertEqual(accuracy.consumes, ("reward",))
+        self.assertEqual(accuracy.produces, ("accuracy",))
 
 
 if __name__ == "__main__":
@@ -370,7 +380,7 @@ class TeacherDistillationTest(unittest.TestCase):
 
         from common import arith_spec, arith_store
         from rlstack import (
-            FakeLearner, GpuConfig, GpuGroup, fake_qwen_schema, gpus, learner,
+            FakeLearner, Topology, HostSpec, fake_qwen_schema, learner,
             pool, run_experiment,
         )
 
@@ -384,11 +394,10 @@ class TeacherDistillationTest(unittest.TestCase):
                          post=("verifier", "teacher_logprobs")),
             # the teacher is a DECLARED pool on another base — placement then
             # decides it lives on other metal; the spec never says where (#43)
-            gpu_config=GpuConfig(groups=(
-                GpuGroup(gpus(n=1), (pool("main", fraction=0.3),
-                                     pool("teacher", base=TEACHER_BASE,
-                                          fraction=0.4),
-                                     learner(fraction=0.3))),)))
+            topology=Topology(hosts=(
+                HostSpec((pool("main", vram_gb=8),)),
+                HostSpec((pool("teacher", base=TEACHER_BASE, vram_gb=10),)),
+                HostSpec((learner(vram_gb=8),)))))
 
         report = run_experiment(
             spec, fake_qwen_schema(4, base="Qwen/Qwen3-0.6B"), store,

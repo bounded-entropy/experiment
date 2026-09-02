@@ -46,7 +46,7 @@ from rlstack.data.trajectory import wave_from_rows
 from rlstack.policy.compile import Bundle, compile_bundle
 from rlstack.registry import ADAPTER_TYPES
 from rlstack.runner.traffic import Routes
-from rlstack.runner.arbiter import GpuArbiter
+from rlstack.runner.arbiter import Arbiter
 from rlstack.runner.interfaces import Engine, Learner, TrainStats
 from rlstack.runner.meters import HostJournal, UpdateClock
 from rlstack.runner.post import run_pipeline
@@ -58,7 +58,7 @@ from rlstack.spec.specs import ExperimentSpec, SamplingSpec
 
 
 class Trainer(Daemon):
-    def __init__(self, signals: RunSignals, arbiter: GpuArbiter, run: RunHandle, *,
+    def __init__(self, signals: RunSignals, arbiter: Arbiter, run: RunHandle, *,
                  spec: ExperimentSpec, plan: RunPlan, refs: RefReader,
                  engine: Engine,
                  learner: Learner, tenant: str,

@@ -21,7 +21,6 @@ its floor.
 
 from __future__ import annotations
 
-import hashlib
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any
@@ -32,14 +31,8 @@ from rlstack.data.flatten import TokenBatch
 from rlstack.policy.adapters.replay import ReplayRows, row_plan
 from rlstack.policy.siteschema import SiteMeta
 from rlstack.registry import ADAPTER_TYPES, LOSSES
-from rlstack.runner.interfaces import Emitted, TrainStats
-from rlstack.spec.specs import ExperimentSpec
+from rlstack.runner.interfaces import Emitted, Parameterization, TrainStats
 from rlstack.training.losses import PolicyOutputs
-
-
-def _init_seed(master: int, entry: str) -> int:
-    digest = hashlib.sha256(f"{master}:init:{entry}".encode()).digest()
-    return int.from_bytes(digest[:8], "big")
 
 
 @dataclass
@@ -66,6 +59,11 @@ class TorchLearner:
         self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
         self.dtype = dtype
         self.grad_clip = grad_clip
+        # build fact, mirrored from VllmEngine.sleeps: an unsharded learner can
+        # hand its device back (sleep/wake below). A resident's hello reports
+        # it and the host wires the alternation hooks only when it says so.
+        self.sleeps = True
+        self._asleep = False
         self.checkpoint_activations = checkpoint_activations
         self.fsdp = 1               # build fact: this build is unsharded
         self._base: str | None = None
@@ -74,31 +72,32 @@ class TorchLearner:
 
     # ---- Learner protocol ---------------------------------------------------
 
-    def install(self, tenant: str, spec: ExperimentSpec,
-                resolved_sites: Mapping[str, tuple[SiteMeta, ...]]) -> None:
-        self._ensure_base(spec.policy.base)
+    def install(self, tenant: str, parameterization: Parameterization) -> None:
+        """The record is everything this learner may know of the experiment:
+        the loss and every adapter type are resolved BY KEY against this
+        process's own registries, the seeds arrive derived, and the sites
+        arrive resolved (ADR 0002, Q2)."""
+        self._ensure_base(parameterization.base)
         if tenant in self._tenants:            # Phase 1 re-runs on attach
             self._remove(tenant)
 
         state = _Tenant(
-            loss_fn=LOSSES.get(spec.algo.loss).fn,
-            trainable=sorted(n for n, a in spec.policy.bank.items()
-                             if a.trainable),
-            entries=list(spec.policy.bank),
+            loss_fn=LOSSES.get(parameterization.loss).fn,
+            trainable=sorted(e.name for e in parameterization.entries
+                             if e.trainable),
+            entries=[e.name for e in parameterization.entries],
         )
-        for entry, adapter_spec in spec.policy.bank.items():
-            adapter_type = ADAPTER_TYPES.get(adapter_spec.adapter_type).instance
-            init = dict(adapter_spec.init)
-            init.setdefault("seed", _init_seed(spec.seeds.master, entry))
-            params = adapter_type.params(resolved_sites[entry], init)
-            state.params[entry] = params
-            state.adapter_types[entry] = adapter_type
-            state.sites[entry] = resolved_sites[entry]
-            adapter_type.install_replay(self._model, params, resolved_sites[entry])
-            self._claim_slot(state, resolved_sites[entry], params)
-            if entry in state.trainable:
-                state.optimizers[entry] = self._optimizer_for(
-                    entry, params, adapter_type, spec.algo.optim)
+        for entry in parameterization.entries:
+            adapter_type = ADAPTER_TYPES.get(entry.adapter_type).instance
+            params = adapter_type.params(entry.sites, dict(entry.init))
+            state.params[entry.name] = params
+            state.adapter_types[entry.name] = adapter_type
+            state.sites[entry.name] = entry.sites
+            adapter_type.install_replay(self._model, params, entry.sites)
+            self._claim_slot(state, entry.sites, params)
+            if entry.name in state.trainable:
+                state.optimizers[entry.name] = self._optimizer_for(
+                    entry.name, params, adapter_type, parameterization.optim)
         self._tenants[tenant] = state
 
     def _optimizer_for(self, entry: str, params: object, adapter_type: object,
@@ -204,6 +203,51 @@ class TorchLearner:
         else:
             for optimizer in state.optimizers.values():
                 optimizer.state.clear()
+
+    # ---- the sleep seam: a door verb, the learner's half of alternation -----
+
+    async def sleep(self) -> None:
+        """Hand the device back: the frozen base, every tenant's params and
+        moments go to host RAM and the allocator's cache is returned — the
+        learner's twin of vLLM's level-1 sleep (ADR 0002, Q8a). On an
+        alternating host this is what keeps ONE base copy resident at a time.
+        Idempotent, and quiet on a learner that holds no base yet.
+
+        Best-effort on what it moves: the module tree (which every installed
+        replay half is wired into), each params object's `parameters()`, and
+        each optimizer's state tensors. An adapter type holding device tensors
+        outside those three is a stated gap, proven only on metal."""
+        if self._model is None or self._asleep:
+            return
+        self._move_everything("cpu")
+        torch.cuda.empty_cache()
+        self._asleep = True
+
+    async def wake(self) -> None:
+        """The inverse. The arbiter switches only at zero in-flight work, so
+        no forward meets a half-woken learner."""
+        if self._model is None or not self._asleep:
+            return
+        self._move_everything(self.device)
+        self._asleep = False
+
+    def shutdown(self) -> None:
+        """A resident's last verb. An unsharded learner holds no process of
+        its own, so there is nothing to end; the sharded build overrides."""
+
+    def _move_everything(self, device: str) -> None:
+        self._model.to(device)
+        for state in self._tenants.values():
+            for params in state.params.values():
+                for parameter in params.parameters():
+                    parameter.data = parameter.data.to(device)
+                    if parameter.grad is not None:
+                        parameter.grad = parameter.grad.to(device)
+            for optimizer in state.optimizers.values():
+                for slot in optimizer.state.values():
+                    for key, value in list(slot.items()):
+                        if torch.is_tensor(value):
+                            slot[key] = value.to(device)
 
     # ---- tenancy ------------------------------------------------------------
 

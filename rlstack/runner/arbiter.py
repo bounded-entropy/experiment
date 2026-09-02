@@ -1,4 +1,4 @@
-"""GpuArbiter: the physical resource owns admission; experiments only request.
+"""Arbiter: the physical resource owns admission; experiments only request.
 
 An arbiter is constructed by whoever owns the metal — a Host makes its own
 unless handed one — and is shared by every experiment admitted to it, which is
@@ -6,7 +6,7 @@ why per-experiment mutexes died: two tenants' private locks coordinate nothing.
 It governs the partition that owns it, not the device: several sub-GPU hosts on
 one device each admit independently. Alternation exists only inside an
 exclusive group
-(GpuGroup.sharing="sleep", or a host's own group); everything else co-resides
+(a multi-member HostSpec, or a host's own group); everything else co-resides
 and admit() is a plain counter — and even inside a group, alternation is about
 memory, never mutual exclusion on work: any amount of work overlaps on the
 resident that is live. Scheduling policy is sticky drain-until-blocked and
@@ -47,7 +47,7 @@ class _Group:
     handoff_to: object | None = None        # aging: stop feeding the resident
 
 
-class GpuArbiter:
+class Arbiter:
     def __init__(self, *, quantum: float = 0.0, max_wait: float | None = None,
                  clock: Callable[[], float] = time.monotonic,
                  meter: TrafficMeter | None = None) -> None:
@@ -66,6 +66,9 @@ class GpuArbiter:
         self.clock = clock
         self.meter = meter or TrafficMeter()
         self.switches: list[str] = []       # residency history, labels
+        # every admission since this door was born, monotone: the desk's
+        # idleness test compares it ACROSS ticks (ADR 0003, Q1)
+        self.admissions = 0
         self._residents: dict[int, _Resident] = {}
         self._objects: dict[int, object] = {}   # keep attached objects alive
         self._groups: dict[str, _Group] = {}
@@ -126,9 +129,25 @@ class GpuArbiter:
         entry = self._residents.get(id(obj))
         return entry.group if entry is not None else None
 
+    def in_flight(self) -> int:
+        """Work admitted at this door and not yet left, summed over every
+        resident — "is anything running here right now", the half of the
+        desk's idleness test that a counter cannot see (a single long
+        admission moves no counter across two ticks; ADR 0003, Q1)."""
+        return sum(entry.in_flight for entry in self._residents.values())
+
+    def admitted(self) -> int:
+        """Admissions since this door was born, monotone. The desk compares
+        it ACROSS ticks: a counter that moved means work passed here since
+        the last observation even though nothing was in flight at either
+        instant — which is what keeps a PURE CLIENT's host (a measurement
+        cron, an evaluator: admitted traffic, no tenancy) from being
+        released out from under its own sampling (ADR 0003, Q1)."""
+        return self.admissions
+
     def residency(self) -> dict[str, str | None]:
         """Per exclusive group: the resident's label (None: nothing yet).
-        The GpuSet's STATE, as the host's status reports it."""
+        The partition's STATE, as the host's status reports it."""
         return {name: (self._entry(group.resident).label
                        if group.resident is not None else None)
                 for name, group in sorted(self._groups.items())}
@@ -147,6 +166,7 @@ class GpuArbiter:
         entry = self._entry(obj)
         if entry.group is None:
             entry.in_flight += 1
+            self.admissions += 1
             self.meter.admitted(0.0)
             try:
                 yield
@@ -168,6 +188,7 @@ class GpuArbiter:
             if group.resident is not obj:
                 await self._switch(group, obj, entry)
             entry.in_flight += 1
+            self.admissions += 1
             # this request's own wait, not the resident's oldest: two callers
             # of one resident queue independently
             self.meter.admitted(self.clock() - queued)

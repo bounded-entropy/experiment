@@ -54,11 +54,16 @@ def store_for(locator: str) -> Store:
         raise NotImplementedError(
             f"{locator}: no S3 store backend yet (the Store ABC's byte verbs "
             f"are where it lands — data/stores/, one file per backend)")
-    if locator.startswith("modal://"):
+    scheme, sep, _ = locator.partition("://")
+    if sep:
+        # any remote scheme — a venue's own locator vocabulary. The observer
+        # never learns venue names: a remote store is read where it is
+        # mounted, by an observer the venue deploys beside it.
         raise NotImplementedError(
-            f"{locator} does not resolve outside a container. Run the reader "
-            f"beside the volume: `modal run deploy/modal_app.py::hosts`, or "
-            f"an observer deployed with the volume mounted.")
+            f"{locator} does not resolve on this machine: {scheme}:// names a "
+            f"store that lives with its venue. Run the observer where that "
+            f"store is mounted (a deployed UI beside it, or the venue's own "
+            f"reader entrypoint).")
     return LocalStore(locator)
 
 

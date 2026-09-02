@@ -5,7 +5,8 @@
 // user's own panels, the measurements, and the tail of sealed waves.
 "use strict";
 
-import {C, brief, el, esc, getJSON, note, section} from "./dom.js";
+import {C, brief, drawnOnce, el, esc, getAnswer, getJSON, lostTick, note,
+        okTick, section} from "./dom.js";
 import {card, emptyCard, stackedCard} from "./charts.js";
 import {apiRun, ctx, drawAmbiguity, hostPath, legend, route, syncSwitcher,
         wavePath} from "./nav.js";
@@ -18,13 +19,22 @@ const PHASES = [{name: "collect", color: C.feed},
 
 export async function drawRun() {
   const runId = route.runId, folder = route.folder;
-  const [data, runs, timing, waves] = await Promise.all([
-    getJSON(apiRun(runId, "", folder)),
-    getJSON("/api/runs"),
+  const [answer, runs, timing, waves] = await Promise.all([
+    getAnswer(apiRun(runId, "", folder)),
+    getJSON("/api/runs").then(d => (d && d.runs) || []),
     getJSON(apiRun(runId, "/timing", folder)),
     getJSON(apiRun(runId, "/waves", folder)),
   ]);
-  if (!data) { document.getElementById("page").textContent = "unknown run"; return; }
+  const data = answer.data;
+  if (!data) {
+    // the freshness contract: a drawn page outranks a failed poll — even a
+    // POSITIVE 404 after a good render reads as transient (a volume reload
+    // can hide a run dir for one scan), never as the run vanishing
+    if (drawnOnce()) { lostTick(); return; }
+    document.getElementById("page").textContent =
+        answer.missing ? "unknown run" : "observer unreachable — retrying";
+    return;
+  }
   if (data.ambiguous) { drawAmbiguity(runId, data.ambiguous); return; }
   syncSwitcher(runs || []);
   const mine = (runs || []).find(r => r.run_id === runId
@@ -56,9 +66,17 @@ export async function drawRun() {
       .map(u => [u.update, u[sec][name]]);
   const evalOf = name => data.eval.filter(e => e.means[name] !== undefined)
       .map(e => [e.update, e.means[name]]);
+  // held-out overlays, both eras: the legacy in-run eval plus every NAMED
+  // measurement (#70) carrying this metric — one dashed series each
+  const measured = name => (data.measurements || []).map(m => ({
+      label: m.name, color: C.eval, dash: true,
+      points: m.points.filter(p => p.means[name] !== undefined)
+                      .map(p => [p.update, p.means[name]])}))
+      .filter(s => s.points.length);
   const pair = (name, color) => [
     {label: name, color: color, points: trainOf("post", name)},
-    {label: "eval", color: C.eval, dash: true, points: evalOf(name)}];
+    {label: "eval", color: C.eval, dash: true, points: evalOf(name)},
+    ...measured(name)];
 
   if (feeding.length) {
     const grid = section("feeds the loss", "walkback from " + (dict.loss ?? "?"));
@@ -121,6 +139,7 @@ export async function drawRun() {
     + " · hover any chart for the raw values · refreshes every 3s"
     + " · panels & priority from the run's own dictionary.json"
     + " · a sealed wave is read from the store, never from a live run");
+  okTick();
 }
 
 // ---- parity: the alarm that is not about the objective --------------------

@@ -5,8 +5,8 @@
 // width, viewBox == css pixels, so nothing is letterboxed at any card width.
 "use strict";
 
-import {C, STATUS_COLOR, brief, clock, dur, el, esc, extent, fmt, hideTip, poll,
-        raw, showTip} from "./dom.js";
+import {C, STATUS_COLOR, ago, brief, clock, dur, el, esc, extent, fmt, hideTip,
+        poll, raw, showTip} from "./dom.js";
 
 export function measured(build) {
   const box = el("div", {class: "plot"});
@@ -150,8 +150,22 @@ export function card(title, who, series, opts) {
   node.append(plot(series, opts));
   const primary = (series || []).find(s => s.points && s.points.length);
   const last = primary ? primary.points[primary.points.length - 1] : null;
-  node.append(el("div", {class: "now"}, last === null
-      ? "no data yet" : "now " + brief(last[1]) + ((opts && opts.unit) || "")));
+  // "now" is a claim about the present: on a time axis it holds only while
+  // the last point is fresh against the server clock (opts.asOf); a stale
+  // tail reads "last … Xh ago", and NOTHING recent reads as the truth it is
+  let label = "no data yet";
+  if (last !== null) {
+    const value = brief(last[1]) + ((opts && opts.unit) || "");
+    if (opts && opts.asOf) {
+      const age = opts.asOf - last[0];
+      const fresh = age < Math.max(120, (opts.freshS || 0) * 3);
+      label = fresh ? "now " + value
+                    : "last " + value + " · " + ago(last[0], opts.asOf);
+    } else {
+      label = "now " + value;
+    }
+  }
+  node.append(el("div", {class: "now"}, label));
   return node;
 }
 

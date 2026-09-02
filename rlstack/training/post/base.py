@@ -2,7 +2,7 @@
 
 The sealed record holds what the policy did; a postprocessor computes what to
 make of it — rewards, judge scores, advantages, teacher logprobs — as one
-ORDERED pipeline (AlgoSpec.post / EvalSpec.post) running after the seal and
+ORDERED pipeline (AlgoSpec.post, or a Measurement's post) running after the seal and
 before the loss, one class per file under this folder. `process` sees ONE group
 (the scope of a partial loss contribution), the columns earlier processors
 produced for it, and a PoolClient; anything that needs a GPU is a
@@ -34,7 +34,7 @@ class PostProcessor(ABC):
     `pools` declares EVERY pool this processor sends traffic to, whether via
     `client.pool(name)` or the default main-pinned client. Phase 0 holds it
     against the spec's declared pools ("main" exempt — the runner requires it
-    unconditionally) and against sleep-sharing: the trainer admits exactly
+    unconditionally) and against alternation: the trainer admits exactly
     these residents around the pipeline, so an undeclared pool is sampled
     UNADMITTED, which under sleep colocation means a sleeping engine.
     `sampling` overrides the run's generation sampling for this processor's

@@ -21,7 +21,7 @@ from safetensors.torch import load as st_load
 from safetensors.torch import save as st_save
 
 from rlstack.policy.adapters.replay import (
-    ReplayRows, RowPlan, leaf_module, row_plan,
+    ReplayRows, SiteWrapper, join_site, leaf_module, leave_site,
 )
 from rlstack.policy.siteschema import SiteMeta
 
@@ -40,57 +40,30 @@ class LoraState:
         return [*self.a.values(), *self.b.values()]
 
 
-class LoraSite(torch.nn.Module):
-    """inner(x) + x A^T B^T with (A, B) chosen PER ROW — the module that
-    replaces a matched Linear.
+class LoraSite(SiteWrapper):
+    """inner(x) + x A^T B^T with (A, B) chosen PER ROW — this FAMILY's link
+    in the chain at a matched Linear.
 
-    One wrapper serves every state installed at this site, and whose delta a row
-    gets is a property of the batch (the row plan), not of the module tree.
-    `installed` is that roster: it is what makes install additive and what tells
-    uninstall when the last tenant has left and the Linear returns.
-
-    The per-tenant deltas deliberately do NOT register as parameters of the
-    base: the base is shared and frozen, a delta is one tenant's state, and the
-    learner owns it through `params.parameters()`.
+    One wrapper serves every LoraState installed at this site; whose delta a
+    row gets is a property of the batch (the row plan), not of the module
+    tree. Chain mechanics (roster, nesting with other families) are
+    SiteWrapper's; what is THIS family's is the math and the FAMILY FILTER: a
+    row whose routed state at this path is not a LoraState — none, or another
+    family's — passes through to `inner`, where its own wrapper (or the base
+    Linear) is waiting. The per-tenant deltas deliberately do NOT register as
+    parameters of the base: the learner owns them through
+    `params.parameters()`.
     """
-
-    def __init__(self, inner: torch.nn.Module, path: str, plan: RowPlan) -> None:
-        super().__init__()
-        self.inner = inner
-        self.path = path
-        self.plan = plan
-        self.installed: list[LoraState] = []
-
-    def add(self, state: LoraState) -> None:
-        """Additive install: this state's delta becomes routable here."""
-        if any(present is state for present in self.installed):
-            raise RuntimeError(f"install at {self.path}: this state is already "
-                               f"installed — install/uninstall out of balance")
-        self.installed.append(state)
-
-    def drop(self, state: LoraState) -> None:
-        """install's inverse at one site; the caller unwraps when empty."""
-        kept = [present for present in self.installed if present is not state]
-        if len(kept) == len(self.installed):
-            raise RuntimeError(f"uninstall at {self.path}: this state was never "
-                               f"installed — install/uninstall out of balance")
-        self.installed = kept
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """A row's delta is the one its slot carries HERE — and a slot that
-        carries none here gets the base.
-
-        The site is wrapped because SOME installed tenant has a delta at it;
-        a tenant whose bank never mentions this path (a soft-prompt-only
-        tenant sharing the learner, say) must see the module it would have
-        seen alone. That is the transparent case, not a missing-delta bug.
-        """
+        carries none of THIS family here gets the inner module untouched."""
         rows = self.plan.rows
         one = rows.uniform()
         if one is not None:
             state = one.get(self.path)
-            if state is None:
-                return self.inner(x)
+            if not isinstance(state, LoraState):
+                return self.inner(x)          # the transparent case
             delta = _whole_batch_delta(x, state, self.path)
         else:
             delta = _per_row_delta(x, rows, self.path)
@@ -116,7 +89,8 @@ def _per_row_delta(x: torch.Tensor, rows: ReplayRows,
     because zero-padding one row's delta is the coalescer's admission rule, not
     a silent fallback here.
     """
-    missing = [i for i, slot in enumerate(rows.slots) if path not in slot]
+    missing = [i for i, slot in enumerate(rows.slots)
+               if not isinstance(slot.get(path), LoraState)]
     if missing:
         raise ValueError(
             f"site {path}: slots {missing} carry no delta here, so a mixed "
@@ -162,41 +136,25 @@ def build(sites: tuple[SiteMeta, ...], init: dict) -> LoraState:
 
 
 def install(model: torch.nn.Module, state: LoraState) -> None:
-    """Wrap the Linear once at each path, then ADD this state to the site.
-
-    Installation is additive (I8): a second tenant at the same site joins the
-    LoraSite it finds instead of replacing it, which is exactly what lets one
-    forward route its rows to either. Placement happens here — the delta moves
-    to the device its site's weight lives on.
-    """
-    plan = row_plan(model)
+    """ADD this state to its family's wrapper at each path — joining the one
+    that stands, or entering the chain (I8: additive, and nesting-safe beside
+    another family's wrapper). Placement happens here — the delta moves to
+    the device its site's weight lives on."""
     for path in state.a:
         parent, leaf = leaf_module(model, path)
-        site = getattr(parent, leaf)
-        if not isinstance(site, LoraSite):
-            site = LoraSite(site, path, plan)
-            setattr(parent, leaf, site)
-        device = next(site.inner.parameters()).device
+        device = next(getattr(parent, leaf).parameters()).device
         state.a[path].data = state.a[path].data.to(device)
         state.b[path].data = state.b[path].data.to(device)
-        site.add(state)
+        join_site(model, path, LoraSite, state)
 
 
 def uninstall(model: torch.nn.Module, state: LoraState) -> None:
-    """install's exact inverse: drop this state from each site, and unwrap the
-    LoraSite back to its Linear when the last state leaves. The params object
-    survives untouched (its tensors are held by reference, not copied), so
-    re-install restores identical numerics."""
+    """install's exact inverse: drop this state, splicing this family's
+    wrapper out of the chain when its last state leaves. The params object
+    survives untouched (its tensors are held by reference), so re-install
+    restores identical numerics."""
     for path in state.a:
-        parent, leaf = leaf_module(model, path)
-        site = getattr(parent, leaf)
-        if not isinstance(site, LoraSite):
-            raise RuntimeError(
-                f"uninstall at {path}: expected LoraSite, found "
-                f"{type(site).__name__} — install/uninstall out of balance")
-        site.drop(state)
-        if not site.installed:
-            setattr(parent, leaf, site.inner)
+        leave_site(model, path, LoraSite, state)
 
 
 def emit(state: LoraState) -> bytes:

@@ -234,7 +234,7 @@ class _ToyLM(torch.nn.Module if torch is not None else object):
                                                 bias=False)
         self.head = torch.nn.Linear(width, vocab, bias=False)
 
-    def forward(self, input_ids, attention_mask=None):
+    def forward(self, input_ids, attention_mask=None, use_cache=None):
         h = self.embed(input_ids)
         causal = torch.triu(torch.ones(h.shape[1], h.shape[1],
                                        dtype=torch.bool), diagonal=1)

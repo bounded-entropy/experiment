@@ -27,9 +27,32 @@ function parse(pathname, search) {
     return {page: "wave", runId: parts[1], update: parseInt(parts[3], 10),
             folder: folder};
   if (parts[0] === "hosts") return {page: "fleet", folder: folder};
+  if (parts[0] === "charts") return {page: "charts", folder: folder};
   if (parts[0] === "host" && parts.length === 2)
     return {page: "host", host: parts[1], folder: folder};
   return {page: "runs", folder: folder};
+}
+
+// The fleet pages read a TIME WINDOW (?hours=N; absent means one day, 0
+// means everything). The picker writes it into the address, withHours carries
+// it onto the API calls, and run pages never window — a curve is its whole
+// story.
+export function withHours(url) {
+  const h = new URLSearchParams(location.search).get("hours") ?? "24";
+  if (h === "0") return url;
+  return url + (url.includes("?") ? "&" : "?") + "hours=" + encodeURIComponent(h);
+}
+
+function rangeLinks() {
+  const current = new URLSearchParams(location.search).get("hours") ?? "24";
+  const mk = (hours, label) => {
+    const params = new URLSearchParams(location.search);
+    params.set("hours", hours);
+    return `<a class="nav${current === hours ? " on" : ""}"` +
+           ` href="${location.pathname}?${params.toString()}">${label}</a>`;
+  };
+  return `<span class="win">` + mk("1", "hour") + mk("24", "day")
+       + mk("0", "all") + `</span>`;
 }
 
 export function query(folder) {
@@ -50,12 +73,21 @@ export function apiRun(runId, tail, folder) {
   return "/api/run/" + encodeURIComponent(runId) + (tail || "") + query(folder);
 }
 
+export function keepHours(path) {
+  // the window choice follows the reader across pages
+  const h = new URLSearchParams(location.search).get("hours");
+  return h === null ? path : path + "?hours=" + encodeURIComponent(h);
+}
+
 export function nav() {
   const runs = route.page === "runs" || route.page === "run" || route.page === "wave";
   const hdr = document.getElementById("hdr");
-  hdr.innerHTML = `<a href="/">rlstack</a>`
-    + `<a class="nav${runs ? " on" : ""}" href="/">runs</a>`
-    + `<a class="nav${runs ? "" : " on"}" href="/hosts">hosts</a>`
+  const fleetish = route.page === "fleet" || route.page === "host";
+  hdr.innerHTML = `<a href="${keepHours("/")}">rlstack</a>`
+    + `<a class="nav${runs ? " on" : ""}" href="${keepHours("/")}">runs</a>`
+    + `<a class="nav${runs ? "" : " on"}${route.page === "charts" ? "" : ""}" href="${keepHours("/hosts")}">hosts</a>`
+    + `<a class="nav${route.page === "charts" ? " on" : ""}" href="${keepHours("/charts")}">charts</a>`
+    + (fleetish ? rangeLinks() : "")
     + `<span id="ctx"></span>`;
   if (route.runId) {
     const sel = el("select", {id: "switch", title: "switch experiment"});
@@ -75,6 +107,15 @@ export function ctx(html) {
 }
 
 let switcherSignature = null;
+
+export async function runsIndex() {
+  // /api/runs answers {now, runs}; every consumer reads it through here.
+  // null means the POLL failed — a page keeps its last render and says so,
+  // instead of mistaking a dead wire for an empty index
+  const {getJSON} = await import("./dom.js");
+  const data = await getJSON("/api/runs");
+  return data ? {now: data.now, runs: data.runs || []} : null;
+}
 
 export function syncSwitcher(runs) {
   // rebuilt only when the run list itself changes — a poll must not close an

@@ -5,10 +5,10 @@
 // memory curve that falls off a cliff is only explained by the moment next to it.
 "use strict";
 
-import {C, WHEEL, brief, clock, el, esc, getJSON, gib, note, section, when}
-  from "./dom.js";
+import {C, WHEEL, ago, brief, clock, drawnOnce, el, esc, getAnswer, gib,
+        lostTick, note, okTick, pulseDot, section, when} from "./dom.js";
 import {card, plot, residencyTip, timeline} from "./charts.js";
-import {ctx, legend, query, route, runPath} from "./nav.js";
+import {ctx, legend, query, route, runPath, withHours} from "./nav.js";
 
 const MOMENT_COLOR = {"host-up": C.teal, attach: C.rail, detach: C.feed,
                       sleep: C.derived, wake: C.eval};
@@ -17,13 +17,21 @@ const MOMENT_COLOR = {"host-up": C.teal, attach: C.rail, detach: C.feed,
 const CLAIMED_EVENTS = ["traffic.", "update."];
 
 export async function drawHost() {
-  const host = await getJSON("/api/host/" + encodeURIComponent(route.host)
-                             + query(route.folder));
+  const answer = await getAnswer(withHours("/api/host/"
+      + encodeURIComponent(route.host) + query(route.folder)));
+  const host = answer.data;
   const holder = document.getElementById("page");
-  if (!host) { holder.textContent = "unknown host"; return; }
+  if (!host) {                         // the freshness contract (dom.js)
+    if (drawnOnce()) { lostTick(); return; }
+    holder.textContent = answer.missing ? "unknown host"
+                                        : "observer unreachable — retrying";
+    return;
+  }
   holder.innerHTML = "";
   const resident = host.tenancy.filter(t => t.detached === null).length;
-  ctx(`<span>${esc(host.host)}</span>`
+  ctx(pulseDot(host.pulse, host.now) + `<span>${esc(host.host)}</span>`
+    + (host.pulse && host.pulse.last
+        ? `<span class="k">last event ${esc(ago(host.pulse.last, host.now))}</span>` : "")
     + (host.folders.some(f => f)
         ? `<span class="k">${esc(host.folders.filter(f => f).join(" "))}</span>` : "")
     + `<span class="meta">engines ${esc(host.engines.join(", ") || "?")}`
@@ -38,6 +46,7 @@ export async function drawHost() {
   drawSlot(host);
   legend("this page is one file: hosts/" + esc(route.host) + "/log.jsonl · hover any"
     + " bar, point or ▲ moment for its raw values · refreshes every 3s");
+  okTick();
 }
 
 // ---- birth: what a host IS (I12) ------------------------------------------
@@ -54,9 +63,13 @@ function drawBirth(host) {
     ? host.regimes.map(r =>
         esc(`${r.name} = ${r.capability ?? r.kind} × ${r.base ?? "*"} × ${r.shape}`)).join("<br>")
     : "<span class='k'>not journaled (a host older than #43's regimes)</span>";
+  const residents = (host.residents || []).length
+    ? host.residents.map(r => esc(`${r.label} · pid ${r.pid}`)).join("<br>")
+    : "<span class='k'>in-process (a hand-built host, or older than ADR 0002)</span>";
   holder.append(el("table", {},
     `<tr><th>partition</th><td>${partition}</td></tr>`
     + `<tr><th>regimes</th><td>${regimes}</td></tr>`
+    + `<tr><th>residents</th><td>${residents}</td></tr>`
     + `<tr><th>engines</th><td>${esc(host.engines.join(", ") || "?")}</td></tr>`
     + `<tr><th>seen</th><td>${esc(when(host.first_seen))} → ${esc(when(host.last_seen))}`
     + ` <span class="k">(${esc(span(host))})</span></td></tr>`));

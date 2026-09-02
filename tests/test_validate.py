@@ -12,9 +12,9 @@ from rlstack.registry import loss
 from rlstack.runner.fakes import FakeEngine
 from rlstack.training.post.base import PostProcessor, postprocessor
 from rlstack.spec.specs import (
-    AdapterSpec, AlgoSpec, EvalSpec, ExperimentSpec, GenSpec, GpuConfig, GpuGroup,
+    AdapterSpec, AlgoSpec, ExperimentSpec, GenSpec, Topology, HostSpec,
     OptimSpec, PolicySpec, Plans, Schedule, Seeds, WarmStart,
-    gpus, learner, lora, pool,
+    learner, lora, pool,
 )
 from rlstack.spec.validate import (
     SpecError, ValidationIssue, check_sites_reachable_on, site_space, traffic_pools,
@@ -89,8 +89,8 @@ def clean_spec(**overrides: Any) -> ExperimentSpec:
         algo=AlgoSpec(loss="grpo", post=("verifier", "grpo_advantage"),
                       optim=OptimSpec("adamw", lr=1e-5),
                       schedule=Schedule()),
-        gpu_config=GpuConfig(groups=(
-            GpuGroup(gpus(n=2), (pool("main"), learner())),)),
+        topology=Topology(hosts=(HostSpec((pool("main"),)),
+                                    HostSpec((learner(),)))),
         seeds=Seeds(master=0),
     )
     fields.update(overrides)
@@ -144,16 +144,6 @@ class TestUnknownNames(unittest.TestCase):
     def test_unknown_env(self) -> None:
         spec = clean_spec(gen=replace(clean_spec().gen, envs=("nope",)))
         self.assertIn("unknown-env", codes(spec))
-
-    def test_eval_without_a_plan(self) -> None:
-        # eval's SHAPE is its plan (#59): declaring eval without one measures
-        # nothing, and silence would read as a passing run
-        spec = clean_spec(eval=EvalSpec(), plans=Plans(train="cas://p/t"))
-        self.assertIn("eval-without-plan", codes(spec))
-
-    def test_unknown_eval_post(self) -> None:
-        spec = clean_spec(eval=EvalSpec(post=("nope",)))
-        self.assertIn("unknown-post", codes(spec))
 
     def test_unknown_adapter_type(self) -> None:
         spec = clean_spec(policy=PolicySpec(
@@ -211,16 +201,6 @@ class TestDeclarationWiring(unittest.TestCase):
             clean_spec().algo,
             post=("verifier", "val_also_reward", "grpo_advantage")))
         self.assertEqual(codes(spec), {"post-collision"})
-
-    def test_eval_pipeline_is_checked_independently(self) -> None:
-        # the same processors reused in eval are fine; a broken EVAL pipeline
-        # is flagged even when algo.post is clean
-        clean = clean_spec(eval=EvalSpec(post=("verifier",)),
-                           plans=Plans(train="cas://p/t", eval="cas://p/e"))
-        self.assertEqual(validate(clean, SCHEMA), [])
-        broken = clean_spec(eval=EvalSpec(post=("grpo_advantage",)),
-                            plans=Plans(train="cas://p/t", eval="cas://p/e"))
-        self.assertEqual(codes(broken), {"post-unwired"})
 
 
 class TestSites(unittest.TestCase):
@@ -317,67 +297,59 @@ class TestReachability(unittest.TestCase):
 
 
 class TestTopology(unittest.TestCase):
-    def test_no_groups(self) -> None:
-        spec = clean_spec(gpu_config=GpuConfig(groups=()))
-        self.assertIn("no-groups", codes(spec))
+    def test_no_hosts(self) -> None:
+        spec = clean_spec(topology=Topology(hosts=()))
+        self.assertIn("no-hosts", codes(spec))
 
     def test_duplicate_pool(self) -> None:
-        spec = clean_spec(gpu_config=GpuConfig(groups=(
-            GpuGroup(gpus(n=1), (pool("main"), learner())),
-            GpuGroup(gpus(n=1), (pool("main"),)),
+        spec = clean_spec(topology=Topology(hosts=(
+            HostSpec((pool("main"), learner())),
+            HostSpec((pool("main"),)),
         )))
         self.assertEqual(codes(spec), {"duplicate-pool"})
 
-    def test_bad_sleep_group_no_learner(self) -> None:
-        spec = clean_spec(gpu_config=GpuConfig(groups=(
-            GpuGroup(gpus(n=1), (pool("main"),), sharing="sleep"),)))
-        self.assertEqual(codes(spec), {"bad-sleep-group"})
-
-    def test_bad_sleep_group_two_learners(self) -> None:
-        spec = clean_spec(gpu_config=GpuConfig(groups=(
-            GpuGroup(gpus(n=1), (pool("main"), learner(), learner()),
-                  sharing="sleep"),)))
-        self.assertEqual(codes(spec), {"bad-sleep-group"})
-
-    def test_sleep_lag_conflict(self) -> None:
-        sleepy = GpuConfig(groups=(
-            GpuGroup(gpus(n=1), (pool("main"), learner()), sharing="sleep"),))
+    def test_a_learner_alternating_with_an_engine_binds_the_lag(self) -> None:
+        """One HostSpec, learner and engine: they ALTERNATE, generation and
+        training take turns, so a lag buffer contradicts the topology."""
+        alternating = Topology(hosts=(HostSpec((pool("main"), learner())),))
         laggy = replace(clean_spec().algo,
                         schedule=Schedule(max_policy_lag=1))
-        spec = clean_spec(gpu_config=sleepy, algo=laggy)
-        self.assertEqual(codes(spec), {"sleep-lag-conflict"})
+        spec = clean_spec(topology=alternating, algo=laggy)
+        self.assertEqual(codes(spec), {"alternation-lag-conflict"})
 
-    def test_sleep_group_with_lag_zero_is_fine(self) -> None:
-        spec = clean_spec(gpu_config=GpuConfig(groups=(
-            GpuGroup(gpus(n=1), (pool("main"), learner()), sharing="sleep"),)))
+    def test_an_alternating_host_with_lag_zero_is_fine(self) -> None:
+        spec = clean_spec(topology=Topology(hosts=(
+            HostSpec((pool("main"), learner())),)))
         self.assertEqual(validate(spec, SCHEMA), [])
 
-    def test_fraction_overflow(self) -> None:
-        spec = clean_spec(gpu_config=GpuConfig(groups=(
-            GpuGroup(gpus(n=1), (pool("main", fraction=0.7),
-                              learner(fraction=0.5))),)))
-        self.assertEqual(codes(spec), {"fraction-overflow"})
-
-    def test_fractions_summing_to_one_are_fine(self) -> None:
-        spec = clean_spec(gpu_config=GpuConfig(groups=(
-            GpuGroup(gpus(n=1), (pool("main", fraction=0.75),
-                              learner(fraction=0.25))),)))
+    def test_two_pools_alternating_without_the_learner_bind_nothing(self) -> None:
+        """main and a judge taking turns on their own host leave the learner
+        training elsewhere: generation is not serialized against training,
+        so the lag buffer stays the spec's to choose."""
+        pools_only = Topology(hosts=(
+            HostSpec((pool("main"), pool("judge"))), HostSpec((learner(),))))
+        laggy = replace(clean_spec().algo,
+                        schedule=Schedule(max_policy_lag=2))
+        spec = clean_spec(topology=pools_only, algo=laggy)
         self.assertEqual(validate(spec, SCHEMA), [])
 
-    def test_partial_fractions_are_not_summed(self) -> None:
-        spec = clean_spec(gpu_config=GpuConfig(groups=(
-            GpuGroup(gpus(n=1), (pool("main", fraction=0.9), learner())),)))
-        self.assertEqual(validate(spec, SCHEMA), [])
+    def test_sizes_are_never_summed_at_the_gate(self) -> None:
+        """Q7: the gate holds no metal, so it cannot say what fits. Two
+        alternating members may each want most of a card (they take turns),
+        and whether two dedicated hosts fit one metal is placement's
+        question, answered against a real residual."""
+        generous = clean_spec(topology=Topology(hosts=(
+            HostSpec((pool("main", vram_gb=70), learner(vram_gb=70))),)))
+        self.assertEqual(validate(generous, SCHEMA), [])
+        two = clean_spec(topology=Topology(hosts=(
+            HostSpec((pool("main", vram_gb=70),)),
+            HostSpec((learner(vram_gb=70),)))))
+        self.assertEqual(validate(two, SCHEMA), [])
 
     def test_main_pool_missing(self) -> None:
-        spec = clean_spec(gpu_config=GpuConfig(groups=(
-            GpuGroup(gpus(n=1), (pool("rollout"), learner())),)))
+        spec = clean_spec(topology=Topology(hosts=(
+            HostSpec((pool("rollout"),)), HostSpec((learner(),)))))
         self.assertEqual(codes(spec), {"main-pool-missing"})
-
-    def test_eval_pool_missing(self) -> None:
-        spec = clean_spec(eval=EvalSpec(pool="evalpool"),
-                          plans=Plans(train="cas://p/t", eval="cas://p/e"))
-        self.assertEqual(codes(spec), {"eval-pool-missing"})
 
 
 class TestCoherence(unittest.TestCase):
@@ -421,13 +393,13 @@ class TestSpecError(unittest.TestCase):
             algo=AlgoSpec(loss="nope", post=("also_nope",),
                           optim=OptimSpec("adamw", lr=1e-5),
                           schedule=Schedule(microbatch_tokens=0)),
-            gpu_config=GpuConfig(groups=()),
+            topology=Topology(hosts=()),
         )
         with self.assertRaises(SpecError) as caught:
             validate_or_raise(broken, SCHEMA)
         found = {issue.code for issue in caught.exception.issues}
         self.assertLessEqual(
-            {"unknown-loss", "unknown-post", "bad-schedule", "no-groups",
+            {"unknown-loss", "unknown-post", "bad-schedule", "no-hosts",
              "main-pool-missing"},
             found)
         self.assertIn("unknown-loss", str(caught.exception))
@@ -456,58 +428,39 @@ class TestPostPools(unittest.TestCase):
     def test_judge_with_declared_pool_is_clean(self) -> None:
         spec = clean_spec(
             algo=self.judge_algo(),
-            gpu_config=GpuConfig(groups=(
-                GpuGroup(gpus(n=2), (pool("main"), pool("judge"),
-                                     learner())),)))
+            topology=Topology(hosts=(
+                HostSpec((pool("main"),)), HostSpec((pool("judge"),)),
+                HostSpec((learner(),)))))
         self.assertEqual(validate(spec, SCHEMA), [])
 
-    def test_eval_pipeline_pools_are_checked_too(self) -> None:
-        spec = clean_spec(eval=EvalSpec(post=("llm_judge",)))
-        self.assertIn("post-pool-missing", codes(spec))
-
     def test_traffic_pools_collects_every_route(self) -> None:
-        spec = clean_spec(
-            algo=self.judge_algo(),
-            eval=EvalSpec(pool="scorer"))
-        self.assertEqual(traffic_pools(spec), {"main", "judge", "scorer"})
+        spec = clean_spec(algo=self.judge_algo())
+        self.assertEqual(traffic_pools(spec), {"main", "judge"})
 
 
 class TestPostPoolCoresidency(unittest.TestCase):
-    """A pipeline cannot need two pools of one sleep group co-resident."""
+    """A pipeline cannot need two pools of one alternating host co-resident."""
 
     def judge_algo(self):
         base = clean_spec().algo
         return replace(base, post=("llm_judge", "grpo_advantage"))
 
-    def sleep_both(self):
-        return GpuConfig(groups=(
-            GpuGroup(gpus(n=1), (pool("main"), pool("judge"), learner()),
-                     sharing="sleep"),))
+    def alternate_all(self):
+        return Topology(hosts=(
+            HostSpec((pool("main"), pool("judge"), learner())),))
 
-    def test_eval_pipeline_conflicts_with_its_serving_pool(self) -> None:
-        """The evaluator holds eval.pool AND its pipeline's pools under one
-        admission — main+judge alternating in one sleep group cannot serve it."""
-        spec = clean_spec(
-            gpu_config=self.sleep_both(),
-            eval=EvalSpec(pool="main",
-                          post=("llm_judge",)))
-        self.assertIn("post-pools-conflict", codes(spec))
-
-    def test_algo_judge_alone_coexists_with_sleeping_main(self) -> None:
+    def test_algo_judge_alone_coexists_with_alternating_main(self) -> None:
         """The trainer admits only the pipeline's declared pools around post,
         so a judge-only pipeline is FINE even when its pool alternates with
         main — three-way alternation, one resident at a time."""
         spec = clean_spec(algo=self.judge_algo(),
-                          gpu_config=self.sleep_both())
+                          topology=self.alternate_all())
         self.assertNotIn("post-pools-conflict", codes(spec))
 
-    def test_judge_in_its_own_group_is_clean(self) -> None:
+    def test_judge_on_its_own_host_is_clean(self) -> None:
         spec = clean_spec(
             algo=self.judge_algo(),
-            gpu_config=GpuConfig(groups=(
-                GpuGroup(gpus(n=1), (pool("main"), learner()),
-                         sharing="sleep"),
-                GpuGroup(gpus(n=1), (pool("judge"),)),)),
-            eval=EvalSpec(pool="main",
-                          post=("verifier",)))
+            topology=Topology(hosts=(
+                HostSpec((pool("main"), learner())),
+                HostSpec((pool("judge"),)),)))
         self.assertNotIn("post-pools-conflict", codes(spec))

@@ -18,9 +18,10 @@ import unittest
 
 from common import arith_spec, arith_store
 from rlstack import (
-    Bundle, FakeEngine, FakeLearner, GpuConfig, GpuGroup, Host, HostService,
+    Bundle, FakeEngine, FakeLearner, Arbiter, Topology, HostSpec, Host,
+    HostService,
     LocalTransport, Mechanism, Message, Regime, RemotePool, Role,
-    SamplingSpec, SiteMeta, fake_qwen_schema, gpus, learner, pool,
+    SamplingSpec, SiteMeta, fake_qwen_schema, learner, pool,
     run_experiment,
 )
 
@@ -58,18 +59,29 @@ class RemoteRunTest(unittest.TestCase):
                 store_b.path_of(f"runs/{result.run_id}/{key}").read_bytes(),
                 key)
 
-    def test_a_remote_pool_in_a_sleep_group_is_refused(self) -> None:
+    def test_a_remote_pool_alternates_at_its_serving_host_only(self) -> None:
+        """Alternation is an intra-partition fact of the host that OWNS the
+        pool: a pool served over the wire attaches here as a free resident
+        whatever HostSpec it came from (ADR 0001 — two pools may alternate
+        on a host of their own), and the serving host's arbiter does the
+        switching. The run commits, and the local arbiter holds the remote
+        in no exclusive group."""
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
         store, train, _ = arith_store(tmp.name)
         serving = Host("srv", engines=(FakeEngine(),), learner=FakeLearner(),
                        store=store)
-        remote = RemotePool(LocalTransport(HostService(serving)))
-        spec = arith_spec(train, gpu_config=GpuConfig(groups=(
-            GpuGroup(gpus(n=1), (pool("main"), learner()), sharing="sleep"),)))
-        with self.assertRaises(ValueError) as caught:
-            run_experiment(spec, SCHEMA, store, remote, FakeLearner())
-        self.assertIn("one host", str(caught.exception))
+        door = HostService(serving)
+        main, aux = (RemotePool(LocalTransport(door)),
+                     RemotePool(LocalTransport(door)))
+        spec = arith_spec(train, topology=Topology(hosts=(
+            HostSpec((pool("main"), pool("aux"))), HostSpec((learner(),)))))
+        arbiter = Arbiter()
+        report = run_experiment(spec, SCHEMA, store, {"main": main, "aux": aux},
+                                FakeLearner(), arbiter=arbiter)
+        self.assertEqual(report.updates_completed, 4)
+        self.assertIsNone(arbiter.attached_group(main))
+        self.assertIsNone(arbiter.attached_group(aux))
 
 
 class WireTest(unittest.TestCase):

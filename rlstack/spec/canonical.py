@@ -52,7 +52,7 @@ def _canonicalize(obj: object) -> JSONValue:
         return float(obj)
 
     # Dataclass INSTANCES (not the classes themselves) carry their class name, so a
-    # GenSpec and a structurally identical EvalSpec never collide.
+    # two structurally identical spec classes never collide.
     if dataclasses.is_dataclass(obj) and not isinstance(obj, type):
         out: dict[str, JSONValue] = {_TYPE_KEY: type(obj).__name__}
         for f in sorted(dataclasses.fields(obj), key=lambda f: f.name):

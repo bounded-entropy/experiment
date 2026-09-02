@@ -9,8 +9,8 @@ import tempfile
 import unittest
 
 from rlstack import (
-    AlgoSpec, GpuConfig, GpuGroup, OptimSpec, Plans, Schedule,
-    fake_qwen_schema, gpus, learner, pool, validate,
+    AlgoSpec, Topology, HostSpec, OptimSpec, Plans, Schedule,
+    fake_qwen_schema, learner, pool, validate,
 )
 from tests.common import arith_spec, arith_store
 
@@ -51,10 +51,10 @@ class LossZooTest(unittest.TestCase):
             overrides["gen"] = None
             overrides["plans"] = Plans(train="cas://plan/replay")
         if loss in TEACHER:
-            overrides["gpu_config"] = GpuConfig(groups=(
-                GpuGroup(gpus(n=1), (pool("main"),
-                                     pool("teacher", base="Qwen/Qwen3-32B"),
-                                     learner())),))
+            overrides["topology"] = Topology(hosts=(
+                HostSpec((pool("main"),)),
+                HostSpec((pool("teacher", base="Qwen/Qwen3-32B"),)),
+                HostSpec((learner(),))))
         return arith_spec(self.train, **overrides)
 
     def test_every_zoo_pairing_validates(self) -> None:

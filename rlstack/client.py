@@ -3,7 +3,7 @@
 A consumer-defined Protocol, like registry.py: environments (inference world)
 sample during rollouts and postprocessors (training world) sample or score
 after the seal, neither world importing the other. Nothing is limited to the
-policy pool — `pool(name)` reaches any pool the experiment's GpuConfig
+policy pool — `pool(name)` reaches any pool the experiment's Topology
 declares, so judges, teachers and hinting pipelines address the whole
 inference side. Every client for one episode shares one seed sequence, which
 is what keeps multi-pool traffic deterministic. EnginePoolClient

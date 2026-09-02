@@ -25,6 +25,7 @@ from rlstack.registry import (
     ADAPTER_TYPES,
     ENVS,
     LOSSES,
+    MAKERS,
     POST,
 )
 from rlstack.spec.specs import PoolMember, ExperimentSpec, LearnerMember
@@ -65,10 +66,10 @@ def _issue(code: str, path: str, message: str) -> ValidationIssue:
 def _declared_pools(spec: ExperimentSpec) -> dict[str, str]:
     """Engine pool name -> the spec path that declares it."""
     pools: dict[str, str] = {}
-    for gi, group in enumerate(spec.gpu_config.groups):
-        for mi, member in enumerate(group.members):
+    for hi, host in enumerate(spec.topology.hosts):
+        for mi, member in enumerate(host.members):
             if isinstance(member, PoolMember) and member.name not in pools:
-                pools[member.name] = f"gpu_config.groups[{gi}].members[{mi}]"
+                pools[member.name] = f"topology.hosts[{hi}].members[{mi}]"
     return pools
 
 
@@ -98,9 +99,8 @@ def check_names_are_registered(spec: ExperimentSpec, schema: SiteSchema) -> list
     if spec.gen is not None:
         for index, name in enumerate(spec.gen.envs):
             look(ENVS, name, "unknown-env", f"gen.envs[{index}]")
-    if spec.eval is not None:
-        for i, name in enumerate(spec.eval.post):
-            look(POST, name, "unknown-post", f"eval.post[{i}]")
+        for index, name in enumerate(spec.gen.makers):
+            look(MAKERS, name, "unknown-maker", f"gen.makers[{index}]")
     for entry_name, adapter in spec.policy.bank.items():
         look(ADAPTER_TYPES, adapter.adapter_type, "unknown-adapter",
              f"policy.bank.{entry_name}.adapter_type")
@@ -133,8 +133,6 @@ def check_post_pipelines_are_wired(spec: ExperimentSpec, schema: SiteSchema) -> 
     phases = []
     if spec.algo is not None:
         phases.append(("algo.post", "post"))
-    if spec.eval is not None:
-        phases.append(("eval.post", "eval"))
     for path, phase in phases:
         for i, name, want, produced in graph.missing_consumes(phase):
             issues.append(_issue(
@@ -342,22 +340,22 @@ def check_sites_reachable_on(
     return issues
 
 
-def check_groups_exist(spec: ExperimentSpec, schema: SiteSchema) -> list[ValidationIssue]:
-    """The topology declares at least one group."""
-    if spec.gpu_config.groups:
+def check_hosts_exist(spec: ExperimentSpec, schema: SiteSchema) -> list[ValidationIssue]:
+    """The topology declares at least one host."""
+    if spec.topology.hosts:
         return []
-    return [_issue("no-groups", "gpu_config", "gpu_config declares no groups")]
+    return [_issue("no-hosts", "topology", "topology declares no hosts")]
 
 
 def check_pool_names_are_unique(spec: ExperimentSpec, schema: SiteSchema) -> list[ValidationIssue]:
-    """Each engine pool name appears in exactly one group."""
+    """Each engine pool name appears on exactly one host."""
     issues = []
     first: dict[str, str] = {}
-    for gi, group in enumerate(spec.gpu_config.groups):
-        for mi, member in enumerate(group.members):
+    for hi, host in enumerate(spec.topology.hosts):
+        for mi, member in enumerate(host.members):
             if not isinstance(member, PoolMember):
                 continue
-            path = f"gpu_config.groups[{gi}].members[{mi}]"
+            path = f"topology.hosts[{hi}].members[{mi}]"
             if member.name in first:
                 issues.append(_issue(
                     "duplicate-pool", path,
@@ -367,50 +365,33 @@ def check_pool_names_are_unique(spec: ExperimentSpec, schema: SiteSchema) -> lis
     return issues
 
 
-def check_sleep_groups_have_one_learner(spec: ExperimentSpec, schema: SiteSchema) -> list[ValidationIssue]:
-    """sharing='sleep' makes an exclusive group in which the learner alternates
-    with the engines — so exactly one learner."""
-    issues = []
-    for gi, group in enumerate(spec.gpu_config.groups):
-        if group.sharing != "sleep":
-            continue
-        n_learners = sum(1 for m in group.members if isinstance(m, LearnerMember))
-        if n_learners != 1:
-            issues.append(_issue(
-                "bad-sleep-group", f"gpu_config.groups[{gi}]",
-                f"sharing='sleep' alternates one learner with the engines, "
-                f"but this group has {n_learners} learner member(s)"))
-    return issues
+def alternates_the_learner(host) -> bool:
+    """Does this HostSpec make the learner ALTERNATE with an engine? A
+    multi-member host is one partition with one resident live at a time
+    (ADR 0001, Q1: "alternate" — the word "sleep" survives only as vLLM's
+    build fact); when the learner is one of those members, generation and
+    training take turns on the same memory."""
+    return (len(host.members) > 1
+            and any(isinstance(m, LearnerMember) for m in host.members)
+            and any(isinstance(m, PoolMember) for m in host.members))
 
 
-def check_sleep_implies_zero_lag(spec: ExperimentSpec, schema: SiteSchema) -> list[ValidationIssue]:
-    """Sleep serializes generation and training, so sampled waves are never stale."""
-    has_sleep = any(g.sharing == "sleep" for g in spec.gpu_config.groups)
-    if not has_sleep or spec.algo is None:
+def check_alternation_implies_zero_lag(spec: ExperimentSpec, schema: SiteSchema) -> list[ValidationIssue]:
+    """A learner alternating with an engine serializes generation and
+    training, so sampled waves are never stale and a lag buffer is a
+    contradiction. Two pools alternating on a host of their own bind
+    nothing here: the learner elsewhere keeps training while they switch."""
+    if spec.algo is None:
+        return []
+    if not any(alternates_the_learner(h) for h in spec.topology.hosts):
         return []
     lag = spec.algo.schedule.max_policy_lag
     if lag == 0:
         return []
     return [_issue(
-        "sleep-lag-conflict", "algo.schedule.max_policy_lag",
-        f"sharing='sleep' implies lag 0, but max_policy_lag={lag}")]
-
-
-def check_fractions_fit(spec: ExperimentSpec, schema: SiteSchema) -> list[ValidationIssue]:
-    """When every member of a group states its memory fraction, they must fit
-    in 1.0. A group with any unstated fraction is left to Phase-1 memory
-    probing."""
-    issues = []
-    for gi, group in enumerate(spec.gpu_config.groups):
-        fractions = [m.fraction for m in group.members]
-        if not fractions or any(f is None for f in fractions):
-            continue
-        total = sum(fractions)
-        if total > 1.0 + 1e-9:
-            issues.append(_issue(
-                "fraction-overflow", f"gpu_config.groups[{gi}]",
-                f"member fractions sum to {total:.3f} > 1.0"))
-    return issues
+        "alternation-lag-conflict", "algo.schedule.max_policy_lag",
+        f"a learner alternating with an engine on one host implies lag 0, "
+        f"but max_policy_lag={lag}")]
 
 
 def check_traffic_routes_to_declared_pools(spec: ExperimentSpec, schema: SiteSchema) -> list[ValidationIssue]:
@@ -419,14 +400,9 @@ def check_traffic_routes_to_declared_pools(spec: ExperimentSpec, schema: SiteSch
     issues = []
     if spec.gen is not None and "main" not in pools:
         issues.append(_issue(
-            "main-pool-missing", "gpu_config",
-            f"gen traffic routes to the pool named 'main', which no group declares; "
+            "main-pool-missing", "topology",
+            f"gen traffic routes to the pool named 'main', which no host declares; "
             f"pools: {', '.join(sorted(pools)) or '(none)'}"))
-    if spec.eval is not None and spec.eval.pool not in pools:
-        issues.append(_issue(
-            "eval-pool-missing", "eval.pool",
-            f"eval traffic routes to pool {spec.eval.pool!r}, which no group "
-            f"declares; pools: {', '.join(sorted(pools)) or '(none)'}"))
     return issues
 
 
@@ -437,8 +413,8 @@ def check_pools_serve_their_base(spec: ExperimentSpec, engine_map) -> list[Valid
     None — fakes standing in for metal — serve anything. Outside CHECKS
     because it consults live engine objects, so the loop runs it at submit."""
     declared_base: dict[str, str] = {}
-    for group in spec.gpu_config.groups:
-        for member in group.members:
+    for host in spec.topology.hosts:
+        for member in host.members:
             if isinstance(member, PoolMember):
                 declared_base[member.name] = member.base or spec.policy.base
     issues = []
@@ -447,7 +423,7 @@ def check_pools_serve_their_base(spec: ExperimentSpec, engine_map) -> list[Valid
         served = getattr(engine, "base", None)
         if expected is not None and served is not None and served != expected:
             issues.append(_issue(
-                "pool-base-mismatch", f"gpu_config({name})",
+                "pool-base-mismatch", f"topology({name})",
                 f"pool {name!r} declares base {expected!r} but the engine "
                 f"handed for it serves {served!r}"))
     return issues
@@ -462,8 +438,8 @@ def check_members_match_their_shape(spec: ExperimentSpec, engine_map,
     check_pools_serve_their_base, this consults live metal, so the loop runs
     it at submit."""
     declared_tp: dict[str, int] = {}
-    for group in spec.gpu_config.groups:
-        for member in group.members:
+    for host in spec.topology.hosts:
+        for member in host.members:
             if isinstance(member, PoolMember):
                 declared_tp[member.name] = member.tp
     issues = []
@@ -471,14 +447,14 @@ def check_members_match_their_shape(spec: ExperimentSpec, engine_map,
         expected = declared_tp.get(name)
         if expected is not None and engine.tp != expected:
             issues.append(_issue(
-                "pool-shape-mismatch", f"gpu_config({name})",
+                "pool-shape-mismatch", f"topology({name})",
                 f"pool {name!r} declares tp={expected} but the engine handed "
                 f"for it is built tp={engine.tp}"))
-    for group in spec.gpu_config.groups:
-        for member in group.members:
+    for host in spec.topology.hosts:
+        for member in host.members:
             if isinstance(member, LearnerMember) and learner.fsdp != member.fsdp:
                 issues.append(_issue(
-                    "learner-shape-mismatch", "gpu_config(learner)",
+                    "learner-shape-mismatch", "topology(learner)",
                     f"the spec declares fsdp={member.fsdp} but the learner "
                     f"handed is built fsdp={learner.fsdp}"))
     return issues
@@ -493,8 +469,6 @@ def check_post_pools_are_declared(spec: ExperimentSpec, schema: SiteSchema) -> l
     pipelines = []
     if spec.algo is not None:
         pipelines.append(("algo.post", spec.algo.post))
-    if spec.eval is not None:
-        pipelines.append(("eval.post", spec.eval.post))
     issues = []
     for field, pipeline in pipelines:
         for i, name in enumerate(pipeline):
@@ -505,21 +479,17 @@ def check_post_pools_are_declared(spec: ExperimentSpec, schema: SiteSchema) -> l
                     issues.append(_issue(
                         "post-pool-missing", f"{field}[{i}]",
                         f"postprocessor {name!r} samples from pool {pool!r}, "
-                        f"which no group declares; pools: "
+                        f"which no host declares; pools: "
                         f"{', '.join(sorted(pools)) or '(none)'}"))
     return issues
 
 
 def traffic_pools(spec: ExperimentSpec) -> set[str]:
     """Every pool this spec's traffic can address at run time: "main" (gen and
-    the pipelines' default client), eval.pool, and each pipeline processor's
-    declared pools. The loop holds the engine map it was handed against this
-    set before any daemon starts."""
+    the pipelines' default client) and each pipeline processor's declared
+    pools. The loop holds the engine map it was handed against this set
+    before any daemon starts."""
     pools = {"main"}
-    if spec.eval is not None:
-        pools.add(spec.eval.pool)
-        pools.update(p for name in spec.eval.post if name in POST
-                     for p in POST.get(name).pools)
     if spec.algo is not None:
         pools.update(p for name in spec.algo.post if name in POST
                      for p in POST.get(name).pools)
@@ -528,43 +498,39 @@ def traffic_pools(spec: ExperimentSpec) -> set[str]:
 
 def check_post_pools_can_coreside(spec: ExperimentSpec, schema: SiteSchema) -> list[ValidationIssue]:
     """A pipeline holds every pool it addresses CO-RESIDENT for its whole run —
-    but two pools in one exclusive group alternate on the same memory by
+    but two pools on one multi-member host ALTERNATE on the same memory by
     declaration, so no admission order can satisfy that pipeline. Refused at
     submit; the arbiter would raise at runtime, later and louder. The algo
     pipeline's set is its processors' declared pools (the Scorer admits exactly
-    those — they are its whole half by the split rule); the eval pipeline
-    additionally holds eval.pool, since the evaluator runs episodes and scoring
-    under one admission."""
-    sleep_group: dict[str, int] = {}
-    for gi, group in enumerate(spec.gpu_config.groups):
-        if group.sharing != "sleep":
+    those — they are its whole half by the split rule)."""
+    alternating_host: dict[str, int] = {}
+    for hi, host in enumerate(spec.topology.hosts):
+        if len(host.members) < 2:
             continue
-        for member in group.members:
+        for member in host.members:
             if isinstance(member, PoolMember):
-                sleep_group[member.name] = gi
-    if not sleep_group:
+                alternating_host[member.name] = hi
+    if not alternating_host:
         return []
 
     pipelines = []
     if spec.algo is not None:
         pipelines.append(("algo.post", spec.algo.post, ()))
-    if spec.eval is not None:
-        pipelines.append(("eval.post", spec.eval.post, (spec.eval.pool,)))
     issues = []
     for field, pipeline, held in pipelines:
         sampled = set(held) | {pool for name in pipeline if name in POST
                                for pool in POST.get(name).pools}
-        by_group: dict[int, list[str]] = {}
+        by_host: dict[int, list[str]] = {}
         for pool in sorted(sampled):
-            if pool in sleep_group:
-                by_group.setdefault(sleep_group[pool], []).append(pool)
-        for gi, members in sorted(by_group.items()):
+            if pool in alternating_host:
+                by_host.setdefault(alternating_host[pool], []).append(pool)
+        for hi, members in sorted(by_host.items()):
             if len(members) > 1:
                 issues.append(_issue(
                     "post-pools-conflict", field,
                     f"pipeline needs pools {members} co-resident, but they "
-                    f"alternate in sleep group gpu_config.groups[{gi}] — an "
-                    f"alternation set cannot serve one pipeline"))
+                    f"alternate on topology.hosts[{hi}] — an alternating "
+                    f"host cannot serve one pipeline"))
     return issues
 
 
@@ -577,30 +543,6 @@ def check_a_rollout_plan_has_gen(spec: ExperimentSpec, schema: SiteSchema) -> li
             "a rollout plan samples, but gen is None: nothing declares which "
             "environments may run or which task sets they may draw from")]
     return []
-
-
-def check_eval_has_a_plan(spec: ExperimentSpec, schema: SiteSchema) -> list[ValidationIssue]:
-    """Eval's SHAPE is its plan (#59): declaring eval without one measures
-    nothing, and the silence would look like a passing run."""
-    if spec.eval is not None and spec.plans.eval is None:
-        return [_issue(
-            "eval-without-plan", "plans.eval",
-            "eval is declared but plans.eval is None: what eval samples is a "
-            "plan, one wave per eval point")]
-    return []
-
-
-def check_eval_tasks_are_held_out(spec: ExperimentSpec, schema: SiteSchema) -> list[ValidationIssue]:
-    """Eval is firewalled measurement; measuring on trained-on tasks is not.
-
-    Held-out is now a property of the PLANS rather than of two task files: the
-    same set may hold both, so what matters is that no task an eval wave
-    samples is one a rollout wave sampled. The gate resolves both plans to
-    answer it — the one check that reads a plan's contents rather than its
-    shape.""" 
-    if spec.eval is None or spec.plans.eval is None or spec.plans.rollout is None:
-        return []
-    return []          # resolved by check_plans_are_realizable, which has the bytes
 
 
 def check_schedule_is_sane(spec: ExperimentSpec, schema: SiteSchema) -> list[ValidationIssue]:
@@ -646,17 +588,13 @@ CHECKS = (
     check_adapter_types_accept_their_sites,
     check_plora_entries_name_their_factors,
     check_plora_shapes_are_positive,
-    check_groups_exist,
+    check_hosts_exist,
     check_pool_names_are_unique,
-    check_sleep_groups_have_one_learner,
-    check_sleep_implies_zero_lag,
-    check_fractions_fit,
+    check_alternation_implies_zero_lag,
     check_traffic_routes_to_declared_pools,
     check_post_pools_are_declared,
     check_post_pools_can_coreside,
     check_a_rollout_plan_has_gen,
-    check_eval_has_a_plan,
-    check_eval_tasks_are_held_out,
     check_schedule_is_sane,
     check_warm_start_map_targets_this_bank,
 )

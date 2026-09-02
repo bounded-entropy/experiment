@@ -91,7 +91,8 @@ class _ToyLM(torch.nn.Module if torch is not None else object):
         return torch.where(causal[:, None], 0.0,
                            torch.finfo(dtype).min).to(dtype)
 
-    def forward(self, input_ids=None, attention_mask=None, inputs_embeds=None):
+    def forward(self, input_ids=None, attention_mask=None, inputs_embeds=None,
+                use_cache=None):
         h = self.embed(input_ids) if inputs_embeds is None else inputs_embeds
         h = h + self.positions(torch.arange(h.shape[1]))[None]
         h = self.block.proj(h)

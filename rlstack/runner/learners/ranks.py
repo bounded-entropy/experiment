@@ -37,20 +37,12 @@ from typing import Any
 import torch
 import torch.distributed as dist
 
+from rlstack.runner.residents import (  # noqa: F401 — Teardown is re-exported
+    GRACE_S, SIGNAL_GRACE_S, Teardown, escalate, join_survivors, living,
+)
+
 STOP = "stop"
 """The one command that is not a Learner verb: leave the loop, exit."""
-
-GRACE_S = 10.0
-"""How long a child gets to hear STOP and leave on its own, and how long rank
-0 waits for its own farewell to go out. Generous for a broadcast, short
-because the whole teardown has to fit inside the venue's shutdown grace —
-Modal's is 30 seconds, and what does not finish inside it is killed with its
-stdout unflushed (#53)."""
-
-SIGNAL_GRACE_S = 5.0
-"""How long a signalled child gets to die before the next rung of the ladder.
-A process that will die at all dies immediately here; the wait is for the
-kernel, not for the process."""
 
 
 @dataclass(frozen=True)
@@ -73,42 +65,6 @@ def free_port() -> int:
     with socket.socket() as probe:
         probe.bind(("127.0.0.1", 0))
         return int(probe.getsockname()[1])
-
-
-@dataclass(frozen=True)
-class Teardown:
-    """What ending the chorus actually cost: one field per rung of the ladder.
-
-    Returned by `RankGroup.stop` and, when it is not `graceful`, printed as
-    one line. A rank that had to be killed is a fact about the run, and the
-    silence that hid it is exactly what made the first wedge (#53) look like
-    a container that died for no reason.
-    """
-
-    heard_the_farewell: bool = True
-    deaf: tuple[int, ...] = ()      # still there after STOP → SIGTERM
-    wedged: tuple[int, ...] = ()    # still there after SIGTERM → SIGKILL
-    lost: tuple[int, ...] = ()      # still there after SIGKILL
-
-    @property
-    def graceful(self) -> bool:
-        """Every rank heard STOP and left by itself — the only ending that
-        leaves the process group intact enough to be destroyed."""
-        return (self.heard_the_farewell
-                and not (self.deaf or self.wedged or self.lost))
-
-    def line(self) -> str:
-        """The one honest line, in escalation order."""
-        parts = []
-        if not self.heard_the_farewell:
-            parts.append("STOP never went out (the chorus was past hearing)")
-        if self.deaf:
-            parts.append(f"ranks {list(self.deaf)} ignored STOP → SIGTERM")
-        if self.wedged:
-            parts.append(f"ranks {list(self.wedged)} survived SIGTERM → SIGKILL")
-        if self.lost:
-            parts.append(f"ranks {list(self.lost)} SURVIVED SIGKILL")
-        return "[chorus] teardown: " + "; ".join(parts)
 
 
 @dataclass
@@ -292,44 +248,22 @@ class RankGroup:
         return replace(teardown, heard_the_farewell=heard)
 
     def escalate(self, *, grace_s: float, signal_grace_s: float) -> Teardown:
-        """The ladder, in the order a shutdown should try it: left on its own,
-        SIGTERM, SIGKILL — and a record of which rung each rank needed.
-
-        A rank blocked inside a collective is not a rank that will notice a
-        polite signal: NCCL is down in a driver call, the interpreter runs no
-        bytecode until it returns, and SIGTERM waits for a handler that never
-        gets a turn. So SIGTERM is the request and SIGKILL is the answer —
-        each rung JOINS what it signalled, because a teardown that signals and
-        walks away is precisely what left #53's child alive — and a rank that
-        survives even the kill is reported rather than pretended away."""
-        deaf = self.join_survivors(grace_s)
-        for _, child in deaf:
-            child.terminate()
-        wedged = self.join_survivors(signal_grace_s) if deaf else ()
-        for _, child in wedged:
-            child.kill()
-        lost = self.join_survivors(signal_grace_s) if wedged else ()
-        return Teardown(deaf=tuple(rank for rank, _ in deaf),
-                        wedged=tuple(rank for rank, _ in wedged),
-                        lost=tuple(rank for rank, _ in lost))
+        """The ladder — left on its own, SIGTERM, SIGKILL, each rung joining
+        what it signalled — is every GPU-holding child's, so it lives in
+        runner/residents.py (ADR 0002, Q9) and the chorus applies it to its
+        ranks. A rank blocked inside a collective is not a rank that will
+        notice a polite signal: NCCL is down in a driver call, so SIGTERM is
+        the request and SIGKILL is the answer. Position IS rank: children
+        are spawned in rank order."""
+        return escalate(self.children, grace_s=grace_s,
+                        signal_grace_s=signal_grace_s)
 
     def living(self) -> tuple[tuple[int, torch.multiprocessing.Process], ...]:
-        """The children still running, each with its rank. Children are
-        spawned in rank order, so position IS rank."""
-        return tuple((rank, child)
-                     for rank, child in enumerate(self.children, start=1)
-                     if child.is_alive())
+        return living(self.children)
 
     def join_survivors(self, timeout_s: float) -> tuple[
             tuple[int, torch.multiprocessing.Process], ...]:
-        """Wait out ONE shared deadline for every child, then say who is left.
-
-        Shared, not per-child: the teardown budget is a wall-clock promise,
-        and a width-8 chorus must not multiply it by eight."""
-        deadline = time.monotonic() + timeout_s
-        for _, child in self.living():
-            child.join(timeout=max(0.0, deadline - time.monotonic()))
-        return self.living()
+        return join_survivors(self.children, timeout_s)
 
     def leave(self) -> None:
         """A follower's own teardown, after it hears STOP."""

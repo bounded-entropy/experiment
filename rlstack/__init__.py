@@ -24,13 +24,14 @@ __version__ = "0.0.1"
 from rlstack.spec.canonical import canonical_json, content_hash, run_id
 from rlstack.spec.flow import FlowGraph, FlowNode, flow_graph
 from rlstack.data.plan import (
-    GroupPlan, Replay, RunPlan, Sample, WavePlan, WaveRef, decode, encode,
+    Derive, GroupPlan, Replay, RunPlan, Sample, WavePlan, WaveRef, decode,
+    encode,
 )
 from rlstack.spec.specs import (
-    AdapterSpec, AlgoSpec, BackendProfile, PoolMember, EvalSpec, ExperimentSpec,
-    GenSpec, GpuConfig, GpuSet, GpuGroup, LearnerMember, OptimSpec, PolicySpec,
+    AdapterSpec, AlgoSpec, BackendProfile, PoolMember, ExperimentSpec,
+    GenSpec, Topology, HostSpec, LearnerMember, OptimSpec, PolicySpec,
     Plans, SamplingSpec, Schedule, Seeds, WarmStart,
-    attn_bias, gpus, learner, lora, plora, pool, soft_prompt,
+    attn_bias, learner, lora, plora, pool, soft_prompt,
 )
 from rlstack.registry import (
     ADAPTER_TYPES, ENVS, LOSSES, POST,
@@ -41,6 +42,7 @@ from rlstack.client import PoolClient
 from rlstack.policy.siteschema import SiteMeta, SiteSchema, fake_qwen_schema, resolve
 from rlstack.policy.adapters import AdapterType, AdapterTypeDef, Mechanism, adapter_type
 from rlstack.inference.rollout import Rollout
+from rlstack.inference import makers as _makers   # registers task makers
 from rlstack.inference.environments import (
     Environment, EnvironmentDef, environment,       # registers builtin envs
 )
@@ -62,13 +64,14 @@ from rlstack.data.tasks import load_tasks, split_tasks, write_tasks
 from rlstack.data.stores import (
     DEFAULT_RETENTION, KeepRestorable, LedgerError, LocalStore,
     ManifestMismatch, ModalVolumeStore, RetentionPolicy, RunHandle, Store,
-    StoreError, Swept, bump,
+    StoreAddress, StoreError, Swept, bump, open_store,
 )
 from rlstack.policy.compile import (
     Bundle, compile_bundle, group_by_adapter_type, group_by_mechanism,
 )
 from rlstack.runner.interfaces import (
-    Emitted, Engine, FinishEvent, Learner, TokenEvent, TrainStats,
+    Emitted, Engine, EntryInstall, FinishEvent, Learner, OptimSettings,
+    Parameterization, TokenEvent, TrainStats,
 )
 from rlstack.runner.seeds import derive
 from rlstack.runner.traffic import EnginePoolClient, Routes, load_task_sets
@@ -76,19 +79,27 @@ from rlstack.runner.assemble import realize, rollouts_needed, sample_wave
 from rlstack.runner.refs import RefReader
 from rlstack.runner.post import run_pipeline
 from rlstack.runner.signals import RunSignals
-from rlstack.runner.arbiter import GpuArbiter
-from rlstack.runner.daemons import Daemon, Evaluator, Generator, Scorer, Trainer
+from rlstack.runner.arbiter import Arbiter
+from rlstack.runner.daemons import Daemon, Generator, Scorer, Trainer
 from rlstack.runner.host import (
     Host, HostError, Partition, Regime, Tenancy,
 )
 from rlstack.runner.remote import (
-    HostService, LocalTransport, RemotePool, Transport,
+    EngineService, HostService, LearnerService, LocalTransport, RemoteLearner,
+    RemotePool, Transport,
 )
-from rlstack.runner.fleet import (
-    Acquire, Carve, Demand, Fleet, FleetError, Join, Metal, Plan, demands_of,
+from rlstack.runner.residents import (
+    Builds, EngineBuild, FakeEngineBuild, FakeLearnerBuild, LearnerBuild,
+    Resident, ResidentBirth, ResidentError, Teardown,
+)
+from rlstack.runner.campaign import Campaigns, demands_of
+from rlstack.runner.desk import (
+    Demand, Desk, DeskError, Metal, demand_rows, demands_from,
     fraction_for_gb,
 )
+from rlstack.runner.measure import Measurement, measure_run
 from rlstack.runner.loop import (
-    RunReport, experiment_identity, plan_daemons, run_experiment,
+    RunReport, experiment_identity, parameterization_of, plan_daemons,
+    run_experiment,
 )
 from rlstack.runner.fakes import FakeEngine, FakeLearner

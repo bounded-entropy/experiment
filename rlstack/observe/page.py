@@ -6,11 +6,12 @@ the browser loads itself. Every PAGE route returns index.html (the modules route
 on location.pathname, so all six pages are the same document); /web/<file>
 returns one asset.
 
-The files are PACKAGE DATA read through importlib.resources, so both venues
-serve the same bytes: `python -m rlstack ui <store>` off the source tree, and
-the deploy image, where they arrive by an explicit mount — add_local_python_source
-ships .py files only, and deploy/modal_app.py carries the add_local_dir that
-fixes that.
+The files are PACKAGE DATA read through importlib.resources, so every venue
+serves the same bytes: `python -m rlstack ui <store>` off the source tree, and
+any deployed image — whose build must ship web/ beside the .py sources
+explicitly, because source-only packaging drops non-.py files (measured: the
+page 200s with an empty body when web/ is missing; deploy/ui.py shows the
+shape).
 """
 
 from __future__ import annotations

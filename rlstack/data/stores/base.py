@@ -16,7 +16,11 @@ the reference):
                                                file above at the commit
                   adapters/<name>@<v>.bin      delta payloads
                   optim/<name>@<v>.bin         optimizer moments (lockstep)
-                  eval/<update>/...            firewalled measurement output
+                  eval/<update>/...            PRE-#70 in-run eval (legacy read)
+    measurements/<run_id>/<name>/manifest.json observation OUTSIDE the run
+                                 points.jsonl  (#70): not identity, not
+                                               resume-equivalence, deletable —
+                                               supersede by NAME
     cas/<sha256>/blob                          content-addressed objects
     hosts/<name>/log.jsonl                     the host and fleet journals:
     fleet/log.jsonl                            observability only (correctness
@@ -43,6 +47,7 @@ import gzip
 import hashlib
 import io
 import json
+import re
 import time
 from abc import ABC, abstractmethod
 from collections.abc import Iterable, Mapping, Sequence
@@ -86,34 +91,52 @@ def _gzip_jsonl(rows: list[dict[str, Any]]) -> bytes:
     return buffer.getvalue()
 
 
-def wave_key(run_id: str, update: int) -> str:
-    """Where one update's sealed wave lives. One tree: the handle writes it
-    and the observer's peek reads it through the same name."""
-    return f"runs/{run_id}/waves/{update:06d}.jsonl.gz"
+def check_subdir(subdir: str) -> str:
+    """A run's filing path, validated: "/"-joined name segments, each of
+    [A-Za-z0-9._-]+ and never "." or "..". The subdir is WHERE a run's
+    directory spawns (runs/<subdir>/<run_id>) — organization, not identity:
+    it never hashes, and the same spec filed differently is the same run."""
+    segments = [seg for seg in str(subdir).strip("/").split("/") if seg]
+    if not segments:
+        raise StoreError(f"subdir {subdir!r} names no path segment")
+    for seg in segments:
+        if seg in (".", "..") or not re.fullmatch(r"[A-Za-z0-9._-]+", seg):
+            raise StoreError(
+                f"subdir segment {seg!r} is not a plain name segment "
+                f"([A-Za-z0-9._-]+, never '.' or '..')")
+    return "/".join(segments)
 
 
-def rollout_key(run_id: str, index: int) -> str:
+def wave_key(run_dir: str, update: int) -> str:
+    """Where one update's sealed wave lives, under the run's DIRECTORY key
+    (runs/<run_id>, or runs/<subdir>/<run_id> where the run was filed). One
+    tree: the handle writes it and the observer's peek reads it through the
+    same name."""
+    return f"{run_dir}/waves/{update:06d}.jsonl.gz"
+
+
+def rollout_key(run_dir: str, index: int) -> str:
     """Where one GENERATED wave lives, before any update consumes it.
 
     Separate from waves/ because the generator's output and the trainer's input
     stopped being the same thing (#59): a plan may train on rollout 7 at update
     9, on two rollouts at once, or on none at all."""
-    return f"runs/{run_id}/rollouts/{index:06d}.jsonl.gz"
+    return f"{run_dir}/rollouts/{index:06d}.jsonl.gz"
 
 
-def plan_key(run_id: str, kind: str) -> str:
+def plan_key(run_dir: str, kind: str) -> str:
     """Where a run's copy of one plan lives. The spec pins the plan by cas uri;
     this copy is what makes the run self-describing (I11) and what an observer
     reads without resolving anything."""
-    return f"runs/{run_id}/plans/{kind}.jsonl"
+    return f"{run_dir}/plans/{kind}.jsonl"
 
 
-def postdata_key(run_id: str, update: int) -> str:
+def postdata_key(run_dir: str, update: int) -> str:
     """Where one update's postprocessor columns live, beside its wave."""
-    return f"runs/{run_id}/postdata/{update:06d}.json"
+    return f"{run_dir}/postdata/{update:06d}.json"
 
 
-def postdata_part_key(run_id: str, update: int, producer: str) -> str:
+def postdata_part_key(run_dir: str, update: int, producer: str) -> str:
     """Where ONE producer's postdata columns live: beside the merged file,
     named by who wrote them.
 
@@ -124,7 +147,31 @@ def postdata_part_key(run_id: str, update: int, producer: str) -> str:
     """
     assert "/" not in producer and "." not in producer, (
         f"postdata producer {producer!r} must be one dot-free name segment")
-    return f"runs/{run_id}/postdata/{update:06d}.{producer}.json"
+    return f"{run_dir}/postdata/{update:06d}.{producer}.json"
+
+
+@dataclass(frozen=True)
+class StoreAddress:
+    """Where a store IS, as a value: which backend, which root, which locator.
+
+    A resident (runner/residents.py) is a child process of the metal and must
+    open the store the metal opened without being handed a live object —
+    nothing live crosses a spawn. This is the JSON-safe handle it opens from;
+    `open_store` (address.py) is the one place backends are known by name.
+    """
+
+    backend: str                # "local" | "modal_volume" — one file per backend
+    root: str                   # the directory or mount
+    locator: str                # how the store describes itself to outsiders
+
+    def row(self) -> dict[str, str]:
+        return {"backend": self.backend, "root": self.root,
+                "locator": self.locator}
+
+    @classmethod
+    def from_row(cls, row: Mapping[str, Any]) -> "StoreAddress":
+        return cls(backend=str(row["backend"]), root=str(row["root"]),
+                   locator=str(row["locator"]))
 
 
 class Store(ABC):
@@ -175,33 +222,74 @@ class Store(ABC):
 
     # ---- runs ---------------------------------------------------------------
 
-    def open_run(self, run_id: str, manifest: dict[str, Any] | None = None) -> "RunHandle":
-        """Attach-or-create: create runs/<run_id>/ (manifest required) or attach
-        to it (the manifest must match — identity is computed, I3).
+    def run_prefix(self, run_id: str) -> str:
+        """The key of this run's DIRECTORY: runs/<run_id> at the top, or
+        runs/<subdir>/<run_id> wherever open_run filed it at birth. One run,
+        one home, found by its manifest and cached; a run that exists nowhere
+        resolves to the top spelling, so absence still reads as absence. The
+        cache never goes stale because a run NEVER MOVES — its home is fixed
+        the moment the manifest is written."""
+        homes = self.__dict__.setdefault("_run_homes", {})
+        cached = homes.get(run_id)
+        if cached is not None:
+            return cached
+        suffix = f"/{run_id}/manifest.json"
+        for key in self._list("runs/"):
+            if key.endswith(suffix):
+                homes[run_id] = key[: -len("/manifest.json")]
+                return homes[run_id]
+        return f"runs/{run_id}"
+
+    def run_subdirs(self) -> dict[str, str]:
+        """{run_id: subdir} for every run in the store ("" at the top) — the
+        observer's one question about filing."""
+        out: dict[str, str] = {}
+        for key in self._list("runs/"):
+            if not key.endswith("/manifest.json"):
+                continue
+            parts = key.split("/")
+            out[parts[-2]] = "/".join(parts[1:-2])
+        return out
+
+    def open_run(self, run_id: str, manifest: dict[str, Any] | None = None,
+                 subdir: str | None = None) -> "RunHandle":
+        """Attach-or-create: create the run's directory (manifest required) or
+        attach to it (the manifest must match — identity is computed, I3).
+
+        `subdir` says WHERE a NEW run's directory spawns
+        (runs/<subdir>/<run_id>); it is filing, never identity. A run's home
+        is fixed at birth: attaching finds the run wherever it lives, and a
+        different subdir asked later is ignored — resubmission is resume, not
+        a move (I10's "for life" includes the address).
 
         Attaching discards unsealed work: per-update artifacts and blob versions
         no ledger line committed. Observers must peek instead (I10).
         """
-        manifest_key = f"runs/{run_id}/manifest.json"
+        home = self.run_prefix(run_id)
+        manifest_key = f"{home}/manifest.json"
         if not self._exists(manifest_key):
             if manifest is None:
                 raise StoreError(
                     f"run {run_id!r} does not exist; a manifest is required to create it")
+            if subdir is not None:
+                home = f"runs/{check_subdir(subdir)}/{run_id}"
+                manifest_key = f"{home}/manifest.json"
             self._write(manifest_key, _canonical(manifest).encode("utf-8"))
-            self._append_line(f"runs/{run_id}/ledger.jsonl", "")
-            return RunHandle(self, run_id, _canonical(manifest))
+            self._append_line(f"{home}/ledger.jsonl", "")
+            self.__dict__.setdefault("_run_homes", {})[run_id] = home
+            return RunHandle(self, run_id, _canonical(manifest), home)
 
         stored = self._read(manifest_key).decode("utf-8")
         if manifest is not None and _canonical(manifest) != _canonical(json.loads(stored)):
             raise ManifestMismatch(
                 f"run {run_id!r} exists with a different manifest (identity is computed, I3)")
-        handle = RunHandle(self, run_id, stored)
+        handle = RunHandle(self, run_id, stored, home)
         handle._discard_unsealed()
         return handle
 
     def list_runs(self) -> list[str]:
-        """Run ids present in the store."""
-        return sorted({key.split("/")[1] for key in self._list("runs/")
+        """Run ids present in the store, wherever they are filed."""
+        return sorted({key.split("/")[-2] for key in self._list("runs/")
                        if key.endswith("/manifest.json")})
 
     # ---- content-addressed storage ------------------------------------------
@@ -219,19 +307,33 @@ class Store(ABC):
         return f"cas://{digest}"
 
     def cas_get(self, uri: str) -> bytes:
-        """Read back a cas://<sha>[/label] object (the label is cosmetic)."""
+        """Read back a cas://<sha>[/label] object (the label is cosmetic).
+
+        Reads THROUGH `_read`, never an existence pre-check: a backend's
+        miss fall-through (ModalVolumeStore answers a mount miss from the
+        volume's committed view) must serve cas blobs too — an `_exists`
+        gate on the mount alone killed forty adoptions whose plans another
+        container had committed moments earlier (observed live)."""
         if not uri.startswith("cas://"):
             raise ValueError(f"not a cas uri: {uri!r}")
         digest = uri[len("cas://"):].strip("/").split("/")[0]
-        key = f"cas/{digest}/blob"
-        if not self._exists(key):
-            raise FileNotFoundError(f"cas object not found: {uri}")
-        return self._read(key)
+        try:
+            return self._read(f"cas/{digest}/blob")
+        except FileNotFoundError:
+            raise FileNotFoundError(f"cas object not found: {uri}") from None
 
     def describe(self) -> str:
         """Where this store's data lives, for journals and CLIs — a path,
         a bucket, a mount. Backends override; the class name is the floor."""
         return type(self).__name__
+
+    def address(self) -> StoreAddress:
+        """This store as a value a child process can reopen it from. Each
+        backend answers with its own name; the base refuses, so a backend that
+        forgot cannot be reopened by accident."""
+        raise NotImplementedError(
+            f"{type(self).__name__} has no StoreAddress: a backend a resident "
+            f"may reopen must say how (data/stores/address.py)")
 
     # ---- read-only peeks (for observers: never attach, never mutate) --------
 
@@ -240,7 +342,8 @@ class Store(ABC):
         what its store contains and why — a UI renders from this."""
         try:
             return json.loads(
-                self._read(f"runs/{run_id}/dictionary.json").decode("utf-8"))
+                self._read(f"{self.run_prefix(run_id)}/dictionary.json")
+                .decode("utf-8"))
         except FileNotFoundError:
             return None
 
@@ -249,7 +352,8 @@ class Store(ABC):
         work — an observer must never do that to a live run)."""
         try:
             return json.loads(
-                self._read(f"runs/{run_id}/manifest.json").decode("utf-8"))
+                self._read(f"{self.run_prefix(run_id)}/manifest.json")
+                .decode("utf-8"))
         except FileNotFoundError:
             return None
 
@@ -257,7 +361,8 @@ class Store(ABC):
         """A run's committed entries WITHOUT attaching; torn or corrupt
         lines are skipped, not repaired — peeking never writes."""
         try:
-            text = self._read(f"runs/{run_id}/ledger.jsonl").decode("utf-8")
+            text = self._read(
+                f"{self.run_prefix(run_id)}/ledger.jsonl").decode("utf-8")
         except FileNotFoundError:
             return []
         out = []
@@ -275,7 +380,8 @@ class Store(ABC):
         update the ledger committed can never be rewritten, so reading it is
         as safe as reading the ledger. None when that update has no wave."""
         try:
-            raw = gzip.decompress(self._read(wave_key(run_id, update)))
+            raw = gzip.decompress(
+                self._read(wave_key(self.run_prefix(run_id), update)))
         except FileNotFoundError:
             return None
         return [json.loads(line) for line in raw.decode("utf-8").split("\n") if line]
@@ -285,7 +391,8 @@ class Store(ABC):
         attaching. None when that update has no postdata."""
         try:
             payload = json.loads(
-                self._read(postdata_key(run_id, update)).decode("utf-8"))
+                self._read(postdata_key(self.run_prefix(run_id),
+                                        update)).decode("utf-8"))
         except FileNotFoundError:
             return None
         return payload["columns"]
@@ -298,15 +405,16 @@ class Store(ABC):
         committed updates are counting up to. None when the run declared no
         plan of that kind."""
         try:
-            return self._read(plan_key(run_id, kind))
+            return self._read(plan_key(self.run_prefix(run_id), kind))
         except FileNotFoundError:
             return None
 
     def peek_eval_summaries(self, run_id: str) -> list[dict[str, Any]]:
-        """Every completed eval summary for a run, WITHOUT attaching —
-        the observer's held-out series. Unparseable files are skipped."""
+        """Every completed eval summary for a PRE-#70 run, WITHOUT attaching —
+        the legacy in-run eval's held-out series. New runs measure OUTSIDE the
+        run dir (measurements/); this stays so history renders."""
         out = []
-        for key in self._list(f"runs/{run_id}/eval"):
+        for key in self._list(f"{self.run_prefix(run_id)}/eval"):
             if not key.endswith("/summary.json"):
                 continue
             try:
@@ -314,6 +422,62 @@ class Store(ABC):
             except (FileNotFoundError, json.JSONDecodeError):
                 pass
         return sorted(out, key=lambda s: s.get("update", 0))
+
+    # ---- measurements: observation OUTSIDE the run (#70) ---------------------
+    #
+    # measurements/<run_id>/<name>/manifest.json + points.jsonl. Not identity,
+    # not the run dir, not resume-equivalence: a Measurement is an observation
+    # OF a run, configured by its own manifest, appended point by point, and
+    # deletable — supersede by NAME rather than rewriting one. One writer per
+    # (run_id, name); the observer reads them beside the legacy eval/.
+
+    def open_measurement(self, run_id: str, name: str,
+                         manifest: Mapping[str, Any]) -> None:
+        """Write-once config: a second open with the SAME manifest is a no-op
+        (the measurer's restart), a different one is refused — a changed
+        observation is a NEW name, so no points file ever mixes configs."""
+        key = f"measurements/{run_id}/{name}/manifest.json"
+        stated = _canonical(dict(manifest))
+        if self._exists(key):
+            if self._read(key).decode("utf-8") != stated:
+                raise StoreError(
+                    f"measurement {name!r} of {run_id!r} exists with a "
+                    f"different manifest — a changed observation is a new "
+                    f"name, never a rewrite")
+            return
+        self._write(key, stated.encode("utf-8"))
+
+    def append_measurement_point(self, run_id: str, name: str,
+                                 row: Mapping[str, Any]) -> None:
+        self._append_line(
+            f"measurements/{run_id}/{name}/points.jsonl",
+            json.dumps(dict(row), sort_keys=True, separators=(",", ":")))
+
+    def measured_updates(self, run_id: str, name: str) -> set[int]:
+        """The updates this measurement already holds — the idempotence key
+        a measuring pass skips by."""
+        return {int(row["update"])
+                for row in self._read_log(
+                    f"measurements/{run_id}/{name}/points.jsonl")
+                if "update" in row}
+
+    def read_measurements(self, run_id: str) -> dict[str, dict[str, Any]]:
+        """{name: {"manifest": ..., "points": [...]}} for one run — the
+        observer's read, beside the legacy eval summaries."""
+        out: dict[str, dict[str, Any]] = {}
+        for key in self._list(f"measurements/{run_id}/"):
+            if not key.endswith("/manifest.json"):
+                continue
+            name = key.split("/")[-2]
+            try:
+                manifest = json.loads(self._read(key).decode("utf-8"))
+            except (FileNotFoundError, json.JSONDecodeError):
+                continue
+            points = sorted(
+                self._read_log(f"measurements/{run_id}/{name}/points.jsonl"),
+                key=lambda r: r.get("update", 0))
+            out[name] = {"manifest": manifest, "points": points}
+        return out
 
     def read_panels(self) -> list[dict[str, Any]]:
         """User-defined derived-graph declarations (panels.json at the store
@@ -434,14 +598,16 @@ class Store(ABC):
 
 @dataclass
 class RunHandle:
-    """Handle on runs/<run_id>/ — backend-agnostic; all IO via the store's verbs."""
+    """Handle on the run's directory (runs/<run_id>, or runs/<subdir>/<run_id>
+    where it was filed) — backend-agnostic; all IO via the store's verbs."""
 
     store: Store
     run_id: str
     _manifest_json: str
+    run_dir: str = ""
 
     def _key(self, *parts: str) -> str:
-        return "/".join(("runs", self.run_id, *parts))
+        return "/".join((self.run_dir or f"runs/{self.run_id}", *parts))
 
     @property
     def manifest(self) -> dict[str, Any]:
@@ -522,7 +688,7 @@ class RunHandle:
     # ---- per-update artifacts: waves + postdata --------------------------
 
     def _wave_key(self, update: int) -> str:
-        return wave_key(self.run_id, update)
+        return wave_key(self._key(), update)
 
     def write_wave(self, update: int, rows: list[dict[str, Any]]) -> None:
         """Write one sealed wave's rows atomically (gzip of canonical jsonl)."""
@@ -537,7 +703,7 @@ class RunHandle:
         return [json.loads(line) for line in raw.split("\n") if line]
 
     def _rollout_key(self, index: int) -> str:
-        return rollout_key(self.run_id, index)
+        return rollout_key(self._key(), index)
 
     def write_rollout(self, index: int, rows: list[dict[str, Any]]) -> None:
         """Seal one generated wave. Never refused against the ledger: a rollout
@@ -555,16 +721,16 @@ class RunHandle:
     def write_plan(self, kind: str, data: bytes) -> None:
         """Copy one plan into the run, verbatim: the bytes the spec's cas uri
         addresses, so the run holds the shape it actually ran."""
-        self.store._write(plan_key(self.run_id, kind), data)
+        self.store._write(plan_key(self._key(), kind), data)
 
     def read_plan(self, kind: str) -> bytes:
-        key = plan_key(self.run_id, kind)
+        key = plan_key(self._key(), kind)
         if not self.store._exists(key):
             raise FileNotFoundError(f"no {kind} plan: {key}")
         return self.store._read(key)
 
     def _postdata_key(self, update: int) -> str:
-        return postdata_key(self.run_id, update)
+        return postdata_key(self._key(), update)
 
     def write_postdata(self, update: int, columns: Mapping[str, list[float]]) -> None:
         """The postprocessor pipeline's columns for one wave, in wave order —
@@ -591,7 +757,7 @@ class RunHandle:
         keep reading exactly one file per update.
         """
         self._refuse_committed_overwrite(update, "postdata")
-        self.store._write(postdata_part_key(self.run_id, update, producer),
+        self.store._write(postdata_part_key(self._key(), update, producer),
                           _canonical({"columns": dict(columns)}).encode("utf-8"))
 
     def read_postdata_part(self, update: int,
@@ -603,7 +769,7 @@ class RunHandle:
         waiting on a store predicate should be reading a value, not catching an
         exception.
         """
-        key = postdata_part_key(self.run_id, update, producer)
+        key = postdata_part_key(self._key(), update, producer)
         if not self.store._exists(key):
             return None
         return json.loads(self.store._read(key).decode("utf-8"))["columns"]
@@ -702,16 +868,8 @@ class RunHandle:
 
     # ---- eval ---------------------------------------------------------------
 
-    def write_eval(self, update: int, filename: str, text: str) -> None:
-        """Firewalled measurement output; never consulted by crash recovery."""
-        self.store._write(self._key("eval", str(update), filename),
-                          text.encode("utf-8"))
-
-    def has_eval(self, update: int, filename: str = "summary.json") -> bool:
-        """Whether `update`'s eval completed (the summary is written last)."""
-        return self.store._exists(self._key("eval", str(update), filename))
-
     def read_eval(self, update: int, filename: str) -> str:
+        """A PRE-#70 run's in-run eval output — legacy read, nothing writes."""
         return self.store._read(self._key("eval", str(update), filename)).decode("utf-8")
 
     # ---- crash recovery (runs on every attach) ------------------------------

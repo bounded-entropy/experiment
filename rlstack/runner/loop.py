@@ -2,8 +2,8 @@
 
 Phase 2 is a blackboard, not a choreography: plan_daemons derives one daemon
 per GPU responsibility from the spec — a Generator iff trajectories are live, a
-Scorer iff the post pipeline addresses a pool, the Trainer always, an Evaluator
-iff eval is declared — and they run concurrently, synchronized ONLY through the
+Scorer iff the post pipeline addresses a pool, the Trainer always
+— and they run concurrently, synchronized ONLY through the
 store (signals.py) and admitted onto shared metal by the arbiter. Nobody calls
 anybody: the ledger is the commit bus, waves/ the data bus, and postdata parts
 the scoring bus.
@@ -15,6 +15,7 @@ committed, and the daemons pick up from the ledger tail.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 from collections.abc import Mapping
 from dataclasses import dataclass
 
@@ -22,9 +23,11 @@ from rlstack.data.stores.base import RunHandle, Store
 from rlstack.policy.compile import Bundle, compile_bundle
 from rlstack.policy.siteschema import SiteSchema, resolve
 from rlstack.registry import ADAPTER_TYPES, POST, code_hashes
-from rlstack.runner.daemons import Daemon, Evaluator, Generator, Scorer, Trainer
-from rlstack.runner.interfaces import Engine, Learner
-from rlstack.runner.arbiter import GpuArbiter
+from rlstack.runner.daemons import Daemon, Generator, Scorer, Trainer
+from rlstack.runner.interfaces import (
+    Engine, EntryInstall, Learner, OptimSettings, Parameterization,
+)
+from rlstack.runner.arbiter import Arbiter
 from rlstack.runner.meters import HostJournal
 from rlstack.data.plan import RunPlan, decode
 from rlstack.runner.assemble import rollouts_needed
@@ -54,7 +57,8 @@ class RunReport:
 def run_experiment(spec: ExperimentSpec, schema: SiteSchema, store: Store,
                    engines: Engine | Mapping[str, Engine], learner: Learner,
                    max_inflight: int = 64,
-                   arbiter: GpuArbiter | None = None) -> RunReport:
+                   arbiter: Arbiter | None = None,
+                   subdir: str | None = None) -> RunReport:
     """Submit and drive one experiment to completion. Safe to call again on the
     same spec: identical identity attaches and continues (or no-ops if done).
 
@@ -72,7 +76,7 @@ def data_fingerprint(spec: ExperimentSpec) -> str:
     their contents: a plan that draws different tasks, or a task file whose
     rows changed, is a different experiment without anyone saying so (I3).
     """
-    parts = [spec.plans.train, spec.plans.rollout or "-", spec.plans.eval or "-"]
+    parts = [spec.plans.train, spec.plans.rollout or "-"]
     if spec.gen is not None:
         parts.extend(spec.gen.tasks)
     return "|".join(parts)
@@ -91,8 +95,9 @@ async def run_experiment_async(
         spec: ExperimentSpec, schema: SiteSchema, store: Store,
         engines: Engine | Mapping[str, Engine], learner: Learner,
         max_inflight: int = 64,
-        arbiter: GpuArbiter | None = None,
-        journal: HostJournal | None = None) -> RunReport:
+        arbiter: Arbiter | None = None,
+        journal: HostJournal | None = None,
+        subdir: str | None = None) -> RunReport:
     """The async form of run_experiment — the multi-tenant entry.
 
     The multi-tenancy invariant (I8) is only expressible when several
@@ -121,7 +126,7 @@ async def run_experiment_async(
     # ---- Phase 0: identity — computed, never typed (I3) ----------------------
     validate_or_raise(spec, schema)
     # the engine map must cover every pool the spec's traffic can route to
-    # (gen, eval, and each pipeline processor's declared judge/teacher pools)
+    # (gen, and each pipeline processor's declared judge/teacher pools)
     unmapped = sorted(traffic_pools(spec) - set(engine_map))
     if unmapped:
         raise ValueError(
@@ -140,7 +145,9 @@ async def run_experiment_async(
     hashes = code_hashes(spec)
     fingerprint = data_fingerprint(spec)
     rid = run_id(spec, hashes, fingerprint)
-    run = store.open_run(rid, manifest={
+    # `subdir` is FILING, never identity: where a new run's directory spawns
+    # (open_run ignores it for a run that already lives — resume, not a move)
+    run = store.open_run(rid, subdir=subdir, manifest={
         "run_id": rid,
         "spec": canonical_json(spec),
         "code": hashes,
@@ -163,9 +170,9 @@ async def run_experiment_async(
                       if ADAPTER_TYPES.get(a.adapter_type).instance.serving is not None)
     adapter_types = {name: bank[name].adapter_type for name in servable}
     resolved = {name: resolve(space, a.site) for name, a in bank.items()}
-    learner.install(rid, spec, resolved)
+    learner.install(rid, parameterization_of(spec, resolved))
     if arbiter is None:
-        arbiter = GpuArbiter()
+        arbiter = Arbiter()
     attach_residents(spec, engine_map, learner, arbiter)
 
     policy_version = {name: 0 for name in bank}
@@ -223,11 +230,43 @@ async def run_experiment_async(
                      resumed_from=resumed_from)
 
 
+def parameterization_of(spec: ExperimentSpec,
+                        resolved: Mapping[str, tuple]) -> Parameterization:
+    """THE place a spec becomes an install (ADR 0002, Q2): the base, the loss
+    by registry key, every bank entry in bank order with its adapter type BY
+    KEY, its init carrying the per-entry seed already derived, and the
+    optimizer settings. The master seed never crosses — the derivation lives
+    here so the learner receives a seed and not the tree it came from."""
+    entries = []
+    for name, adapter in spec.policy.bank.items():
+        init = dict(adapter.init)
+        init.setdefault("seed", init_seed(spec.seeds.master, name))
+        entries.append(EntryInstall(
+            name=name, adapter_type=adapter.adapter_type, init=init,
+            trainable=adapter.trainable, sites=tuple(resolved[name])))
+    optim = spec.algo.optim
+    return Parameterization(
+        base=spec.policy.base, loss=spec.algo.loss, entries=tuple(entries),
+        optim=OptimSettings(name=optim.name, lr=optim.lr,
+                            betas=tuple(optim.betas),
+                            weight_decay=optim.weight_decay,
+                            overrides={k: dict(v)
+                                       for k, v in optim.overrides.items()}))
+
+
+def init_seed(master: int, entry: str) -> int:
+    """One bank entry's init seed off the master: sha256("<master>:init:
+    <entry>")'s first eight bytes. Bytes-stable — every existing run's
+    deltas were initialized from exactly this number."""
+    digest = hashlib.sha256(f"{master}:init:{entry}".encode()).digest()
+    return int.from_bytes(digest[:8], "big")
+
+
 def load_plans(declared: Plans, store: Store) -> dict[str, RunPlan]:
     """Resolve the declared plan uris. `train` is mandatory — it is the run's
     length; the other two are absent when the run makes or measures nothing."""
     out = {"train": decode(store.cas_get(declared.train))}
-    for kind in ("rollout", "eval"):
+    for kind in ("rollout",):
         uri = getattr(declared, kind)
         if uri is not None:
             out[kind] = decode(store.cas_get(uri))
@@ -259,18 +298,17 @@ def plan_daemons(spec: ExperimentSpec, *, run, store, engine_map, learner,
     """The spec already declares the daemons; this reads them off.
 
     a rollout plan → a Generator makes its waves; a post pipeline with a POOLED
-    half → a Scorer runs it; an eval plan → an Evaluator watches the commit
-    bus; the Trainer always. Each daemon admits the RESIDENTS its work
-    occupies: the scorer the engines of its processors' declared pools, the
-    trainer's train phase the learner, the generator and evaluator their
-    serving pool's engine (plus the eval pipeline's).
+    half → a Scorer runs it; the Trainer always. Each daemon admits the
+    RESIDENTS its work occupies: the scorer the engines of its processors'
+    declared pools, the trainer's train phase the learner, the generator its
+    serving pool's engine. Measurement is NOT a daemon here: it is not part
+    of the run (a Measurement follows the ledger from outside — runner/
+    measure.py — and writes its own area, never the run dir).
 
     ONE Scorer owns the WHOLE pooled half of the TRAIN pipeline, in this
-    process, beside whatever engines the routes map holds. Two v1 limits stated
-    rather than hidden: the eval pipeline keeps its single inline path (the
-    Evaluator is firewalled measurement, and its cadence is a modulus, not a
-    critical path), and a scorer standing on its own host is placement work
-    that belongs with host adoption, not here.
+    process, beside whatever engines the routes map holds. One v1 limit
+    stated rather than hidden: a scorer standing on its own host is placement
+    work that belongs with host adoption, not here.
 
     Only the Trainer takes the host journal: an update is the unit of progress
     the other daemons orbit, so its phase timings are the run's own clock.
@@ -301,14 +339,8 @@ def plan_daemons(spec: ExperimentSpec, *, run, store, engine_map, learner,
             spec=spec, plan=plans["rollout"],
             due_at=rollouts_needed(plans["train"].waves), tasks=tasks,
             engine=engine_map["main"], routes_at=routes_at,
-            initial_bundle=initial_bundle, max_inflight=max_inflight))
-    if spec.eval is not None:
-        daemons.append(Evaluator(
-            signals, arbiter, run,
-            spec=spec, plan=plans["eval"], tasks=tasks,
-            engine=engine_map[spec.eval.pool],
-            post_residents=pipeline_residents(spec.eval.post, engine_map),
-            routes_at=routes_at, max_inflight=max_inflight))
+            initial_bundle=initial_bundle, max_inflight=max_inflight,
+            refs=RefReader(store, run)))
     return daemons
 
 
@@ -322,63 +354,61 @@ def pipeline_residents(pipeline, engine_map) -> tuple[Engine, ...]:
 
 
 def attach_residents(spec: ExperimentSpec, engine_map, learner,
-                     arbiter: GpuArbiter) -> None:
+                     arbiter: Arbiter) -> None:
     """Register this experiment's metal with the (possibly shared) arbiter.
 
     Object-keyed and idempotent: two pools backed by one engine are ONE
     resident; a second experiment attaching the same engine is a no-op.
-    Exclusive groups come from GpuGroup.sharing="sleep" — alternation exists
-    only there. Declared fractions are reported into the arbiter's load, which
-    the host's fit check refuses against; nothing polices the metal itself.
+    Exclusive groups come from a multi-member HostSpec — its members
+    ALTERNATE on one partition, and alternation exists only there (ADR 0001).
+    Nothing about memory is declared here: a spec's `vram_gb` is a carve
+    size the metal converts at build, and the arbiter's declared load is the
+    host's own.
 
     A REMOTE pool attaches as a zero-footprint free resident: its metal is
     another host's partition, so local admission is bookkeeping — the real
-    admission happens host-side, in HostService, at the serving partition —
-    and its declared fraction is a carve hint that never counts here. A remote
-    pool in a sleep group is refused: alternation is an intra-partition fact,
-    so a sleep group's members must all live on one host.
+    admission, alternation included, happens host-side at the serving
+    partition's own arbiter, whatever HostSpec the pool came from.
 
-    A sleep demand on metal the host ALREADY holds in an alternation group
-    (a multi-regime host attached it at birth) is satisfied, not conflicting:
-    the demand defers to the metal's own group. Only a sleep demand on
-    always-resident metal still raises — that metal cannot alternate.
+    An alternation demand on metal the host ALREADY holds in an alternation
+    group (a multi-regime host attached it at birth) is satisfied, not
+    conflicting: the demand defers to the metal's own group. Only an
+    alternation demand on always-resident metal still raises — that metal
+    cannot alternate.
     """
     pool_group: dict[str, str | None] = {}
-    pool_fraction: dict[str, float | None] = {}
     learner_group: str | None = None
-    learner_fraction: float | None = None
-    for gi, gpu_group in enumerate(spec.gpu_config.groups):
-        sleeping = gpu_group.sharing == "sleep"
-        for member in gpu_group.members:
+    for hi, host in enumerate(spec.topology.hosts):
+        alternating = len(host.members) > 1
+        for member in host.members:
             if isinstance(member, PoolMember):
-                pool_group[member.name] = f"sleep:{gi}" if sleeping else None
-                pool_fraction[member.name] = member.fraction
+                pool_group[member.name] = f"alternate:{hi}" if alternating else None
             else:
-                learner_group = f"sleep:{gi}" if sleeping else None
-                learner_fraction = member.fraction
+                learner_group = f"alternate:{hi}" if alternating else None
 
     def deferred(obj: object, group: str | None) -> str | None:
-        """The metal's own alternation group satisfies (and overrides) a
-        sleep demand — the physical owner declared it at birth."""
+        """The metal's own alternation group satisfies (and overrides) an
+        alternation demand — the physical owner declared it at birth."""
         if arbiter.is_attached(obj) and arbiter.attached_group(obj) is not None:
             return None
         return group
 
+    # A RemotePool the host attached AT BIRTH is its own resident's door
+    # (ADR 0002: every engine is a process behind a proxy) and takes the
+    # local path below; one nobody attached is served by ANOTHER host.
+    # Decided for every pool BEFORE any attach, so two names over one remote
+    # do not read the first's attachment as the metal's own.
+    remote_pools = {name for name, engine in engine_map.items()
+                    if isinstance(engine, RemotePool)
+                    and not arbiter.is_attached(engine)}
     for name in sorted(engine_map):
-        if isinstance(engine_map[name], RemotePool):
-            if pool_group.get(name) is not None:
-                raise ValueError(
-                    f"pool {name!r} is served by another host but declared "
-                    f"in a sleep group — alternation is an intra-partition "
-                    f"fact; a sleep group's members must all live on one host")
+        if name in remote_pools:
             arbiter.attach(engine_map[name], label=f"remote:{name}")
             continue
         arbiter.attach(engine_map[name], label=f"engine:{name}",
-                       group=deferred(engine_map[name], pool_group.get(name)),
-                       fraction=pool_fraction.get(name))
+                       group=deferred(engine_map[name], pool_group.get(name)))
     arbiter.attach(learner, label="learner",
-                   group=deferred(learner, learner_group),
-                   fraction=learner_fraction)
+                   group=deferred(learner, learner_group))
 
 
 def _warm_start(init: WarmStart, *, tenant: str, bank_names: set[str],

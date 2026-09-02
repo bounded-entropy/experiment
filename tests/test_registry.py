@@ -20,8 +20,8 @@ from rlstack.registry import (
     source_hash,
 )
 from rlstack.spec.specs import (
-    AlgoSpec, EvalSpec, ExperimentSpec, GenSpec, GpuConfig, GpuGroup, OptimSpec,
-    PolicySpec, Plans, Schedule, Seeds, gpus, learner, lora, pool,
+    AlgoSpec, ExperimentSpec, GenSpec, Topology, HostSpec, OptimSpec,
+    PolicySpec, Plans, Schedule, Seeds, learner, lora, pool,
 )
 
 
@@ -213,8 +213,8 @@ def minimal_spec(**overrides: Any) -> ExperimentSpec:
         algo=AlgoSpec(loss="grpo", post=("verifier", "grpo_advantage"),
                       optim=OptimSpec("adamw", lr=1e-5),
                       schedule=Schedule()),
-        gpu_config=GpuConfig(groups=(
-            GpuGroup(gpus(n=1), (pool("main"), learner())),)),
+        topology=Topology(hosts=(HostSpec((pool("main"),)),
+                                    HostSpec((learner(),)))),
         seeds=Seeds(master=0),
     )
     fields.update(overrides)
@@ -238,12 +238,11 @@ class TestCodeHashes(unittest.TestCase):
                             plans=Plans(train="cas://plan/train"))
         self.assertEqual(set(code_hashes(spec)), {"adapter_type:lora"})
 
-    def test_eval_names_are_covered(self) -> None:
-        spec = minimal_spec(eval=EvalSpec(post=("constant",)),
-                             plans=Plans(train="cas://p/t", eval="cas://p/e"))
-        hashes = code_hashes(spec)
-        self.assertIn("environment:noop_env", hashes)
-        self.assertIn("postprocessor:constant", hashes)
+    def test_measurement_names_are_not_identity(self) -> None:
+        """#70: a measurement's post pipeline is an observation's config,
+        never the run's — nothing eval-shaped reaches the code hashes."""
+        spec = minimal_spec(plans=Plans(train="cas://p/t"))
+        self.assertNotIn("postprocessor:constant", code_hashes(spec))
 
     def test_unknown_name_raises_helpful_keyerror(self) -> None:
         spec = minimal_spec(algo=AlgoSpec(
