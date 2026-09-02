@@ -3500,6 +3500,132 @@ specs; backends (local/modal/skypilot) and GPU topology are semantics-neutral.
       in remote.py. ADR 0001's Q4 is answered here (branch b); its
       alternation sizing (Q7 there) now rests on Q8a's learner sleep.
 
+75. **THE PARTITION SPEAKS GB, ONE HOSTSPEC IS ONE HOST, AND THE DESK
+    SUPERVISES ITS METALS (ADR 0001).** Samarth's prompt: one host wearing
+    both the learner and the engine contradicted the vision (a host is ONE
+    partition; two clearly separate uses are two hosts), the GpuSet/GpuGroup
+    primitives were misaligned with Host/Partition, and "the system should
+    speak GB — 0.625 on an L4 is much different than 0.625 on an H100".
+    Four defects, one root, named in the ADR: `sharing="concurrent"` claimed
+    a colocation the Host could not model (the fused gsm host booked
+    max(0.45, 0.40) and OOMed the second carve); a member's declared memory
+    was collapsed by `max()` and enforced by nobody; a fraction is a
+    provider fact in a demand's clothes (and hashed into run_id, so the same
+    experiment sized for two fleets was two ids — what I5 forbids); GpuSet
+    was inert (placement read none of it). Answers: alternate (Q1), accept
+    the identity break and delete the Modal store (Q2), total across shards
+    (Q3), Q4 closed by ADR 0002, delete check_fractions_fit (Q7), and — the
+    widening — the desk supervises its metals (Q5, Q5a–Q5d delegated and
+    resolved as recommended), measure not declare (Q6), PoolMember.n gone
+    (Q8), GpuGroup → HostSpec / groups → hosts (Q9), None = a whole device
+    per shard (Q10).
+    - **THE SPEC.** `GpuSet` and `PoolMember.n` deleted; `GpuGroup` →
+      `HostSpec(members)`, `GpuConfig.hosts`; `fraction` → `vram_gb: float |
+      None` on both members, TOTAL across the tp/fsdp shards (per device =
+      vram_gb / shape, invariant under re-sharding), None a whole device per
+      shard. `sharing` survives as ARITY: a multi-member HostSpec ALTERNATES
+      its members on one partition (the host's own exclusive arbiter group);
+      one member is a dedicated host; side by side is two HostSpecs, two
+      carves, two honest bookings. "Sleep" survives only as vLLM's build
+      fact (`enable_sleep_mode`). The gate: `check_hosts_exist` (no-hosts),
+      `check_alternation_implies_zero_lag` (alternation-lag-conflict — keyed
+      on a LEARNER alternating with an engine; two pools alternating on a
+      host of their own bind nothing, the one refinement of the ADR's "keyed
+      on member count", because they do not serialize generation against
+      training), `check_post_pools_can_coreside` keyed on multi-member
+      hosts; `check_sleep_groups_have_one_learner` (arity says it) and
+      `check_fractions_fit` (the gate holds no metal) deleted. The canonical
+      bytes changed for every spec — the break is accepted, the literal
+      regenerated, nothing else hardcodes a run_id, test_resume untouched.
+    - **THE DESK IN GB.** `Demand.vram_gb` (total; `per_device_gb()`),
+      `Demand.sharing` gone, `group` is the HostSpec index; `placement_units`
+      is one unit per HostSpec; `unit_gb(unit, metal)` sizes a unit by its
+      LARGEST alternating member's per-device GB, a whole device per card;
+      `provision_unit` deduces against `residual()` in GB per device and the
+      carve request carries `vram_gb` (per device, None = whole) and the
+      desk's `builds` row. `MetalService` books in GB (`residual`,
+      `choose_devices`, `pending`; `gb_of(partition, metal)` reads a built
+      fraction back); `fraction_for_gb` is THE ONE CROSSING, called once in
+      `MetalService.build` against the card the metal measured, raising the
+      acquire rung by name past one device; `per_device_gb(request)` resolves
+      None to the metal's own card. `MetalService.measure(name)` reads the
+      card off the device (torch lazily; refused by name where no CUDA device
+      is); `Metal` stays a plain record. `Host.check_fit` is custody (a
+      learner member finds a learner), never memory arithmetic — `capacity`
+      is gone; `attach_residents` takes exclusive groups from multi-member
+      HostSpecs and attaches a remote pool free whatever HostSpec it came
+      from (alternation is the SERVING host's business; the "remote pool in
+      a sleep group is refused" rule is gone with the one-learner check that
+      made it necessary). Partition.memory's docstring states it is DERIVED
+      from GB at the metal and is the substrate's unit.
+    - **THE SUPERVISION LOOP (Q5–Q5d): reap → knock → re-register → reroute.**
+      `register_metal` of a known name at the SAME address is the container
+      generation turning over: the row takes the measured facts and, if
+      carried, the new recipe (a redeploy is a human's act), journals a fresh
+      `metal` event (last-write-wins on replay), and `reconcile_metal` reaps
+      that metal's listings by probe with zero retries ("metal
+      re-registered", no decarve) and STRANDS their runs. A known name at
+      another address is a collision, refused. `boot_for(name)` joins
+      `host_for`/`metal_for` (venue-supplied; default knock = `describe()`
+      through the plane, which on Modal boots). `reap` concludes the silent
+      (decarve where the metal answers, delist "reaped"), `strand`s every
+      UNFINISHED run whose latest placement touched a reaped host —
+      journaled `parked` BEFORE any move, so the crash-midway state is on
+      the record — knocks each metal that lost listings (off the loop, so the
+      reborn container's own registration can reach the desk meanwhile), and
+      `retry_parked()`: `reroute(run_id, avoiding, park=True)` per queued run
+      — re-placed onto whatever fits, the reborn metal included, and
+      redelivered, which is resume. `parked()` is THE QUEUE, read off the
+      journal (latest disposition per run; a delivered accepted placement
+      supersedes); EVERY `metal` registration event retries it, under one
+      per-loop lock so a reap's retry and a registration's retry in the same
+      breath never adopt a run twice. `finished(run_id)` (ledger vs the
+      train plan's wave count, via store peeks) keeps finished runs out of
+      the queue — a refinement of the ADR's "every run whose latest placement
+      was on a reaped host": a 40-arm sweep's finished tenants would
+      otherwise be re-adopted (install + add_bundle each) on every preempt.
+      Verdicts: `reap` → {listings: alive|recovered|reaped, knocked: {metal:
+      answered}, runs: rerouted|parked}; the `metal` verb → {registered,
+      reaped, retried}. The desk's recipe row is CANON (Q5c): it rides every
+      carve, `MetalService.build` builds from it (`adopt_recipe`), and
+      `describe()` reports what it last built from. A host dying alone stays
+      a human's resubmit, as ruled.
+    - **THE VENUES** (UNPROVEN on metal, all of it): every gpu_config is two
+      HostSpecs in GB (gsm/gsm-sweep 18 + 16 — the fused shape that parked
+      the venue is gone; dsl 34 + 34 on two metals; fleet 16.8 + 20; sweep
+      33.6 + 40; plora_l4 7.2 / 4.8 / 9.6; dapo whole devices); every
+      `OwnedMetal(name, "A100-40GB", 1, 40.0)` is `MetalService.measure(name)`
+      (the hand-built venues derive their partitions' fractions with
+      `fraction_for_gb`); registration is `announce` inside `metal_duties`,
+      a task started from an ASYNC `@modal.enter` (Q5a — a task, never a
+      blocking wait: the desk's reply may carve on this very container),
+      followed by the per-host stats tasks and the commit tick (Q5b); the
+      "not re-registered" catch is gone; `serve` is the keepalive alone (an
+      input in flight holds the container open and reschedules after a
+      preempt); `up` spawns it as the knock and waits for the registration.
+    - **THE OPERATOR STEP, not run by any agent (Q2):** delete the Modal
+      store volume — run dirs and cas blobs, the desks' fleet journals
+      (fleet/*.jsonl; listings vanish, metals re-register at boot), and the
+      once-fetched dataset rows cache (measurements/gsm/rows-main.json) —
+      because every pre-#75 run_id is unreachable under the new canonical
+      bytes.
+    - Tests: 876 (from 868; test_placement/test_specs/test_validate/
+      test_examples recoded; +10 in test_desk: re-registration updates the
+      row and replays, a collision refused, the recipe on the carve, a double
+      `up` vs a rebirth, reap → knock → reroute lands the run, the describe
+      knock on a dead plane parks, a parked run retried on registration,
+      crash midway finishes from the journal without a double adoption, a
+      decommission park retried, measure() without a card; MetalService: the
+      acquire rung by name, a whole device is the whole of this card).
+      test_resume.py untouched and green. UNPROVEN on metal: measure() on a
+      real card (GiB from total_memory), a real Modal preempt through the
+      whole loop, async enter + the announce task, teardown of a stranded
+      run's zombie tasks (a real preempt takes the process; fakes cancel),
+      the split gsm shape (two carves, the anchor over the wire into its own
+      container), and the per-rank overhead that total / shape does not
+      divide. ADR 0001 is Implemented; ADR 0003 (idle release) extends
+      register_metal / reap from here.
+
 ## Open threads (do NOT treat as settled; flag when your answer touches them)
 
 - TODO (Samarth, settled intent — future, nothing now): BUNDLE LRU EVICTION

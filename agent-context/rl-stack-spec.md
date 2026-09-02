@@ -65,16 +65,20 @@ All wiring validates at submit, before any GPU is touched, as **queries on the
 flow graph** (spec/flow.py) — the one canonical walk over these declarations,
 which each run also serializes as its own `dictionary.json` (see I11).
 
-**I5 — GPU topology is semantics-neutral.** GpuGroups colocate members; the
-member vocabulary is closed at two workload kinds — **pools**
-(`pool(name, base, tp, n, fraction)`) and **learners** (`learner(fsdp,
-fraction)`) — and everything else (rollout, eval, judges, teachers) is traffic
-routed to pool *names*. Any two GpuConfigs execute the same experiment;
-placement changes wall-clock, never results. Scheduling (the arbiter's policy,
-the host chosen, `max_inflight`) is likewise outside identity. A gpu_config
-may declare demands no single host can satisfy — several hosts answering one
-experiment is the normal case, not a special one (#47: teacher, student
-inference, and learner on three containers is the proven shape).
+**I5 — GPU topology is semantics-neutral.** One HostSpec is one host (ADR
+0001): a single member is a dedicated host, several members ALTERNATE on one
+partition; the member vocabulary is closed at two workload kinds — **pools**
+(`pool(name, base, tp, vram_gb)`) and **learners** (`learner(fsdp, vram_gb)`)
+— and everything else (rollout, eval, judges, teachers) is traffic routed to
+pool *names*. Memory is declared in GB, TOTAL across shards (never a fraction
+of a card the spec does not know), so the same experiment hashes identically
+on an L4 fleet and an H100 fleet. Any two GpuConfigs execute the same
+experiment; placement changes wall-clock, never results. Scheduling (the
+arbiter's policy, the host chosen, `max_inflight`) is likewise outside
+identity. A gpu_config may declare demands no single host can satisfy —
+several hosts answering one experiment is the normal case, not a special one
+(#47: teacher, student inference, and learner on three containers is the
+proven shape).
 
 **I6 — Record loss-independently at the seal.** Token ids (the engine's, never
 re-tokenized), behavior logprobs, bundle id + policy versions, seeds, finish
@@ -132,12 +136,15 @@ metal at construction and never grown or reshaped after. Sharding (Engine.tp,
 Learner.fsdp) is a build fact the submit gate attests, like reachability.
 Placement climbs a ladder with one currency and one decider per rung: JOIN
 (capability exists; automatic; the target host's own arbiter admits — declared
-fractions are carve hints, ignored once the weights live), CARVE (from
-RESIDUAL only — capacity no partition owns — automatic because journaled;
-births a new host, never reshapes one), ACQUIRE (new metal = money = a
-human). A multi-regime host ALTERNATES its regimes on its own arbiter group —
-one host wearing masks, never two hosts coordinating — so a sleep group
-places onto exactly one host. The learner is never remote: the runner goes to
+sizes are carve hints, ignored once the weights live), CARVE (from RESIDUAL
+only — capacity no partition owns, booked in GB and converted to the
+partition's fraction once, at the metal that measured its card — automatic
+because journaled; births a new host, never reshapes one), ACQUIRE (new
+metal = money = a human; a metal that dies and comes back is the desk's to
+re-register and recontinue, ADR 0001). A multi-regime host ALTERNATES its
+regimes on its own arbiter group — one host wearing masks, never two hosts
+coordinating — so a multi-member HostSpec places onto exactly one host. The
+learner is never remote: the runner goes to
 the learner's host and reaches every other partition through RemotePools
 (Engine protocol over a transport; admission host-side, where the metal is).
 
@@ -237,21 +244,23 @@ class AlgoSpec:
                                      #   max_policy_lag (estimator policy: the lag
                                      #   BUFFER; 0 = strict alternation)
 
-# ---------- topology (semantics-neutral, I5) ----------
+# ---------- topology (semantics-neutral, I5; ADR 0001) ----------
 # member vocabulary — CLOSED at two; all else is traffic to pool NAMES:
-#   pool(name, base=POLICY, tp=1, n=1, fraction=None)   # serves sample traffic
-#   learner(fsdp=1, fraction=None)                      # differentiable fwd/bwd
+#   pool(name, base=POLICY, tp=1, vram_gb=None)   # serves sample traffic
+#   learner(fsdp=1, vram_gb=None)                 # differentiable fwd/bwd
+# vram_gb: GB, TOTAL across the shards (per device = vram_gb / shape);
+#   None = a whole device per shard, resolved at the metal that knows its card
 @dataclass(frozen=True)
-class GpuGroup:                      # THE unit of colocation (the bare word Group
-    gpus: GpuSet                     #   is the DATA primitive, #22)
-    members: tuple[Member, ...]      # co-resident; fractions = memory treaty
-    sharing: Literal["concurrent", "sleep"] = "concurrent"
-                                     # sleep: an exclusive arbiter group — one
-                                     #   resident at a time (implies lag 0)
+class HostSpec:                      # ONE HOST: one placement unit, one
+    members: tuple[Member, ...]      #   Partition. One member = dedicated;
+                                     #   several ALTERNATE on one partition —
+                                     #   the host's own exclusive arbiter group,
+                                     #   one resident live at a time (a learner
+                                     #   alternating with an engine implies lag 0)
 
 @dataclass(frozen=True)
 class GpuConfig:
-    groups: tuple[GpuGroup, ...]
+    hosts: tuple[HostSpec, ...]
 
 @dataclass(frozen=True)
 class Seeds:
@@ -360,7 +369,8 @@ class Learner(Protocol):             # training metal (TorchLearner / FakeLearne
     def load(tenant, adapters, optim): ...
 
 # THE HOST is an atomic purposed partition (I12): born with a Partition
-# (gpuset, devices, memory fraction) and Regimes it attests its metal against
+# (metal name, devices, memory fraction — derived from GB at the metal) and
+# Regimes it attests its metal against
 # (engines by (base, tp); the learner by fsdp); >1 regime alternates on the
 # host's own arbiter group. It owns engines, at most ONE learner, the
 # arbiter, its journal store — and submission is how an experiment reaches it:
@@ -373,10 +383,10 @@ class Learner(Protocol):             # training metal (TorchLearner / FakeLearne
 #     run     run_experiment_async under the host's shared arbiter
 # run_experiment(spec, schema, store, engines, learner) remains the direct form.
 
-# THE FLEET (runner/fleet.py) holds Metal + hosts and climbs the I12 ladder:
-# demands_of(spec) reads (kind, base, shape, memory-hint) off gpu_config;
-# sleep groups place as ONE unit (one multi-regime host), concurrent members
-# per member (per-capability hosts). place() -> Plan(Join|Carve|Acquire);
+# THE FLEET (runner/desk.py) holds Metal + listings and climbs the I12 ladder:
+# demands_of(spec) reads (capability, base, shape, vram_gb) off gpu_config;
+# one HostSpec places as ONE unit (a multi-member one is a multi-regime host
+# whose members alternate). place() -> Plan(Join|Carve|Acquire);
 # apply() executes the automatic rungs (carves journaled in fleet/log.jsonl);
 # submit() runs beside the learner's host with RemotePools to the rest.
 
@@ -387,7 +397,7 @@ class Learner(Protocol):             # training metal (TorchLearner / FakeLearne
 # Engine protocol over it — a remote main pool is byte-identical to local.
 
 # THE ARBITER is the physical half: object-keyed RESIDENTS (an engine, a
-# learner) attach with an exclusive group (from sharing="sleep") or none;
+# learner) attach with an exclusive group (from a multi-member HostSpec) or none;
 # admit(resident) is the one verb work wraps itself in. Policy: sticky
 # drain-until-blocked, with quantum (anti-thrash hysteresis) and max_wait
 # (starvation handoff) knobs. Same-resident work OVERLAPS (alternation is
@@ -466,7 +476,7 @@ Observer (rlstack/observe/):  read-only derivations over stores + journals —
 ```python
 from rlstack import (ExperimentSpec, PolicySpec, GenSpec, TrajectorySource,
                      AlgoSpec, EvalSpec, Seeds, OptimSpec, Schedule, GpuConfig,
-                     GpuGroup, gpus, pool, learner, lora)
+                     HostSpec, pool, learner, lora)
 
 exp = ExperimentSpec(
     policy=PolicySpec(base="Qwen/Qwen3-0.6B",
@@ -481,9 +491,8 @@ exp = ExperimentSpec(
                                     max_policy_lag=0)),
     eval=EvalSpec(tasks="cas://8c31.../heldout.jsonl", every=5, n_samples=2,
                   post=("verifier",)),
-    gpu_config=GpuConfig(groups=(
-        GpuGroup(gpus(n=1), (pool("main", fraction=0.45),
-                             learner(fraction=0.40))),)),
+    gpu_config=GpuConfig(hosts=(HostSpec((pool("main", vram_gb=18),)),
+                                HostSpec((learner(vram_gb=16),)))),
     seeds=Seeds(master=17),
 )
 
@@ -585,13 +594,13 @@ seals; envs never do.
 ### Example 5 — Multi-GPU demand (unchanged shape, current names)
 
 ```python
-gpu_config = GpuConfig(groups=(
-    GpuGroup(gpus(n=16, nodes=2), (pool("main", tp=2, n=8),)),
-    GpuGroup(gpus(n=8, nodes=1),  (learner(fsdp=8),)),
+gpu_config = GpuConfig(hosts=(
+    HostSpec((pool("main", tp=2, vram_gb=120),)),   # 60 GB per shard
+    HostSpec((learner(fsdp=8, vram_gb=400),)),      # 50 GB per shard
 ))
 ```
 
-Pure demand; no provider names. `max_policy_lag=1` lets generation run a wave
+Pure demand; no provider names, no card names — GB total across shards. `max_policy_lag=1` lets generation run a wave
 ahead — which version served each turn is opportunistic within the buffer and
 recorded (never prescribed). *(FSDP > 1 and multi-node are declared surface,
 not yet exercised; the fakes and one-L4 paths are.)*

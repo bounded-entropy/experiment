@@ -866,6 +866,11 @@ update, `tokenize` per trajectory (the local tokenizer beside RemotePool is
 now due). Learner sleep at `fsdp > 1` is not built; a chorus reports
 `sleeps: false`.
 
+**Since landed.** ADR 0001 (CONTEXT #75) made the desk's journaled recipe row
+the CANON that rides every carve request (`MetalService.adopt_recipe`); the
+deploy's constants re-declared at bring-up are the metal's FIRST declaration,
+and a re-registration carrying a different recipe updates the desk's row.
+
 **Deviations, stated.** `observe/locate.store_for` was not moved: the child's
 address is derived from the Store object (`Store.address()`), not parsed from
 a locator, so the observer's resolver had nothing to gain. The pipe transport

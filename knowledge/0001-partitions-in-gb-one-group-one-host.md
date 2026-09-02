@@ -3,11 +3,11 @@
 | | |
 |---|---|
 | **Date** | 2026-09-01 |
-| **Status** | Accepted (2026-09-01) — every question answered; Q5b–Q5d and the Q6/Q8–Q10 defaults resolved by the agent at Samarth's delegation |
+| **Status** | Implemented (2026-09-01; CONTEXT #75) — every question answered; Q5b–Q5d and the Q6/Q8–Q10 defaults resolved by the agent at Samarth's delegation |
 | **Author** | Claude Opus 5 (session: gsm-campaign review) |
 | **Touches** | `spec/`, `runner/` (desk, host, campaign), `deploy/`, `tests/` |
 | **Invariants** | I3 (identity is computed), I5 (topology is semantics-neutral), I12 (a host is atomic and never reshaped) |
-| **CONTEXT** | extends #43 (the fleet), #55 (the vocabulary rename), #68 (the metal plane); the entry number lands at implementation |
+| **CONTEXT** | extends #43 (the fleet), #55 (the vocabulary rename), #68 (the metal plane); recorded as **#75** |
 
 ## Original prompt
 
@@ -555,4 +555,66 @@ validate — more honest, and it means no spec runs until it has been sized.
 
 ## Outcome
 
-Filled at implementation.
+Landed 2026-09-01 on gsm-campaign in four commits, recorded as CONTEXT #75.
+
+**What landed.** `spec/specs.py`: `GpuSet` and `PoolMember.n` deleted,
+`GpuGroup` → `HostSpec(members)`, `GpuConfig.hosts`, `fraction` → `vram_gb`
+(total across shards, None a whole device per shard), `sharing` gone — arity
+alternates. `spec/validate.py`: `check_hosts_exist`,
+`check_alternation_implies_zero_lag`, `check_post_pools_can_coreside` on
+multi-member hosts; `check_sleep_groups_have_one_learner` and
+`check_fractions_fit` deleted. `runner/desk.py`: `Demand.vram_gb` +
+`per_device_gb`, one unit per HostSpec, `unit_gb`, `carve_request` with the
+desk's `builds` row, `MetalService` books in GB (`gb_of` reads back),
+`fraction_for_gb` called once in `build`, `per_device_gb(request)`,
+`adopt_recipe`, `MetalService.measure`; the supervision loop —
+`register_metal` update-in-place + `reconcile_metal`, `boot_for`, `reap` →
+`recovers` / `conclude` / `strand` / `knock` / `retry_parked`, `parked()` the
+queue, `finished()`, the per-loop `recontinue_lock`; `status()` carries the
+metal's address. `runner/campaign.py`: `demands_of` passes GB through.
+`runner/host.py`: the Partition docstring, `check_fit` as custody, `capacity`
+gone. `runner/loop.py`: `attach_residents` groups by multi-member HostSpec,
+remote pools free. `remote.py`'s class table, `rlstack/__init__` exports,
+seven venues, the canonical literal.
+
+**What the answers changed.** Q1 put "alternate" in every docstring and
+retired "sleep" to vLLM's build fact. Q2's accepted break regenerated one
+literal and touched no other test. Q3's "total" put `per_device_gb` on the
+Demand and `unit_gb` at the desk. Q5's widening turned a write-once
+registration into the re-register step of a loop the desk runs, and Q5d's
+park-then-retry made the journal the queue — the crash-midway state is
+journaled BEFORE any move. Q5c made the desk's recipe row canon on the carve.
+Q6 kept `Metal` a plain record with `measure` beside it. Q7's deletion
+removed the last memory arithmetic from the gate and, by the same reasoning,
+from `Host.check_fit`. Q9/Q10 as recommended.
+
+**Refinements, stated.** (1) The lag rule keys on a LEARNER alternating with
+an engine, not on member count alone: two pools alternating on a host of
+their own leave the learner training elsewhere, so a lag buffer is theirs to
+choose. (2) `reap` strands only UNFINISHED runs (`finished`: ledger vs the
+train plan's wave count, via store peeks) — the ADR's "every run whose latest
+placement was on a reaped host" would re-adopt a 40-arm sweep's finished
+tenants (an install and an add_bundle each) on every preempt. (3) The
+"remote pool in a sleep group is refused" rule went with the one-learner
+check that made it coherent: a remote pool attaches free, and alternation is
+the serving host's own. (4) `reap`'s reply is three tables (`listings`,
+`knocked`, `runs`) rather than one flat dict.
+
+**Tests.** 876 green on fakes (from 868; +10 in `tests/test_desk.py`, the
+gate and placement suites recoded), 110 torch-gated skips, ~7 s.
+`tests/test_resume.py` untouched and green.
+
+**Unproven on metal.** `MetalService.measure` on a real card (GiB from
+`total_memory`); a real Modal preempt through reap → knock → re-register →
+reroute; an async `@modal.enter` starting the announce task and the duties;
+whether a spawned keepalive reschedules onto the reborn container; the split
+gsm shape (two carves, the anchor over the wire into its own container —
+exactly what parked before); the per-rank overhead `total / shape` does not
+divide; the zombie adoption tasks a fake "container death" cancels but a
+real one takes with the process.
+
+**The operator step (Q2), never run by an agent.** Delete the Modal store
+volume: run dirs and cas blobs, the desks' fleet journals (`fleet/*.jsonl` —
+listings vanish and every metal re-registers itself at boot), and the
+dataset rows cache (`measurements/gsm/rows-main.json`). Every pre-#75 run_id
+is unreachable under the new canonical bytes.
