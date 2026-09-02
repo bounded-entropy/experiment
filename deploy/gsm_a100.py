@@ -15,10 +15,12 @@ it (ADR 0001) — so one engine and one learner share the card and the four
 tenants share both. The metal MEASURES its card and REGISTERS ITSELF at
 bring-up; a preempted container comes back, re-registers at the same plane
 address, and the desk reaps its corpses and reroutes their runs (the
-supervision loop, ADR 0001 Q5) — `serve` is only the keepalive input that
-holds the container open. Its desk is this app's own, with its OWN fleet
-journal (fleet/gsm.jsonl): the volume is shared with the DSL venue and two
-desks must not replay each other's listings.
+supervision loop, ADR 0001 Q5) — `serve` is only the SHIFT: the input that
+holds the container open, which returns when the desk RELEASES this metal
+(ADR 0003: nothing has run here for IDLE_S, so hand the card back). Its
+desk is this app's own, with its OWN fleet journal (fleet/gsm.jsonl): the
+volume is shared with the DSL venue and two desks must not replay each
+other's listings.
 
 THE SCREEN, then THE EXPERIMENT. `screen` samples the BASE model over every
 GSM-Symbolic template (a template = a task family: one procedure, 50
@@ -112,6 +114,13 @@ LEARN_GB = 16.0
 GPUS = ["A100-40GB", "L40S", "A100-80GB", "H100"]
 
 METALS = {"gsm-a": {"cls": "MetalG", "scheme": "gsma"}}
+
+# THE DESK DECIDES, THE VENUE FOLLOWS (ADR 0003, Q3): metal nothing has run on
+# for IDLE_S is RELEASED by the desk — residents down, listings delisted, the
+# shift ended — and every metal container's own `scaledown_window` is set to
+# the same number, never shorter, so the venue's timer is the BACKSTOP and can
+# never reclaim a container before the desk has decided to.
+IDLE_S = 1800
 
 
 # ---------------------------------------------------------------------------
@@ -242,7 +251,8 @@ class Desk:
             GsmDeskStore("/store", volume=store_volume, locator=STORE),
             host_for=lambda address: RemoteHost(MetalTransport(address)),
             metal_for=lambda address: RemoteMetal(
-                MetalPlaneTransport(address)))
+                MetalPlaneTransport(address)),
+            idle_s=IDLE_S)
         self.door = Campaigns(self.desk)
         print(f"[desk] rebuilt from journal: {sorted(self.desk.listings)} "
               f"/ metal plane: {sorted(self.desk.metal_remotes)}")
@@ -322,7 +332,9 @@ async def metal_duties(name: str, service) -> None:
     stats: dict[str, asyncio.Task] = {}
     tick = 0
     try:
-        while True:
+        # the duties stand only while the shift does (ADR 0003): a released
+        # metal has no hosts to follow and no reason to hold the volume open
+        while not service.released.is_set():
             for host_service in list(service.services.values()):
                 host = host_service.host
                 if host.name not in stats:
@@ -350,7 +362,7 @@ def roster_of(store, service) -> dict:
 
 @app.cls(image=gpu_image, gpu=GPUS,
          volumes={"/store": store_volume, "/hf": hf_cache},
-         timeout=86400, scaledown_window=900, max_containers=1)
+         timeout=86400, scaledown_window=IDLE_S, max_containers=1)
 @modal.concurrent(max_inputs=64)
 class MetalG:
     @modal.enter()
@@ -393,14 +405,13 @@ class MetalG:
 
     @modal.method()
     async def serve(self) -> None:
-        """The KEEPALIVE, and nothing else: an input in flight is what keeps
-        a Modal container from scaling down while its hosts carry work, and
-        a spawned input reschedules onto a fresh container after a preempt —
-        where bring_up has already registered and started the duties."""
-        import asyncio
-
-        while True:
-            await asyncio.sleep(60)
+        """THE SHIFT: an input in flight is what keeps a Modal container
+        from scaling down while its hosts carry work, and a spawned input
+        reschedules onto a fresh container after a preempt — where bring_up
+        has already registered and started the duties. It returns when the
+        DESK releases this metal (ADR 0003, Q3), so the venue reclaims the
+        container as a consequence of the desk's decision."""
+        await self.metal_service.until_released()
 
     @modal.exit()
     def bring_down(self) -> None:

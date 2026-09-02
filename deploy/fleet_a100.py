@@ -84,6 +84,13 @@ LEARN_GB = 20.0
 METAL_NAME = "modal-a100"
 METAL_ADDRESS = "a100://metal"       # the metal PLANE: carve/decarve/residual
 
+# THE DESK DECIDES, THE VENUE FOLLOWS (ADR 0003, Q3): metal nothing has run on
+# for IDLE_S is RELEASED by the desk — residents down, listings delisted, the
+# shift ended — and every metal container's own `scaledown_window` is set to
+# the same number, never shorter, so the venue's timer is the BACKSTOP and can
+# never reclaim a container before the desk has decided to.
+IDLE_S = 1800
+
 
 # ---------------------------------------------------------------------------
 # the venue's transports (I5): desk-by-name, host-by-address
@@ -189,7 +196,8 @@ class Desk:
             DeskStore("/store", volume=store_volume, locator=STORE),
             host_for=lambda address: RemoteHost(MetalTransport(address)),
             metal_for=lambda address: RemoteMetal(
-                MetalPlaneTransport(address)))
+                MetalPlaneTransport(address)),
+            idle_s=IDLE_S)
         # the composed door: the blind desk plus its spec-aware sidecar
         # (campaign.py) — one Transport surface, migrate included
         from rlstack.runner.campaign import Campaigns
@@ -213,7 +221,7 @@ class Desk:
 
 @app.cls(image=gpu_image, gpu="A100-40GB",
          volumes={"/store": store_volume, "/hf": hf_cache},
-         timeout=86400, scaledown_window=900, max_containers=1)
+         timeout=86400, scaledown_window=IDLE_S, max_containers=1)
 @modal.concurrent(max_inputs=32)
 class Metal:
     @modal.enter()
@@ -282,7 +290,9 @@ class Metal:
         stats: dict[str, asyncio.Task] = {}
         tick = 0
         try:
-            while True:
+            # the duties stand only while the shift does (ADR 0003): a
+            # released metal has no hosts to follow and no volume to hold
+            while not self.metal_service.released.is_set():
                 for service in list(self.metal_service.services.values()):
                     host = service.host
                     if host.name not in stats:
@@ -345,15 +355,13 @@ class Metal:
 
     @modal.method()
     async def serve(self) -> None:
-        """The KEEPALIVE only: an input in flight holds the container open
-        while its hosts carry work, and a spawned input reschedules onto a
-        fresh container after a preempt — where bring_up has already
-        registered and started the duties. Stopping THIS call releases the
-        metal."""
-        import asyncio
-
-        while True:
-            await asyncio.sleep(60)
+        """THE SHIFT: an input in flight holds the container open while its
+        hosts carry work, and a spawned input reschedules onto a fresh
+        container after a preempt — where bring_up has already registered
+        and started the duties. It returns when the DESK releases this metal
+        (ADR 0003, Q3) — and cancelling the call by hand is the operator's
+        same door."""
+        await self.metal_service.until_released()
 
     @modal.exit()
     def bring_down(self) -> None:

@@ -197,9 +197,13 @@ class SweepMetal:
             transport_for=lambda address: transports[address])
         transports[LEARN_ADDRESS] = LocalTransport(HostService(self.learn_host))
 
+        # idle_s=None PINS this venue (ADR 0003): the desk and its two
+        # hand-built hosts share ONE container, so there is no metal plane to
+        # release — and releasing would be the desk ending its own shift
         self.desk = Desk(
             self.store,
-            host_for=lambda address: RemoteHost(transports[address]))
+            host_for=lambda address: RemoteHost(transports[address]),
+            idle_s=None)
         self.desk.list_host("sweep-serve", self.serve_host.regimes,
                             SERVE_ADDRESS)
         self.desk.list_host("sweep-train", self.learn_host.regimes,
