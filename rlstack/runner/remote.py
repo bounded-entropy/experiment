@@ -308,6 +308,25 @@ def decode_parameterization(row: Mapping) -> Parameterization:
 # the transport
 # ---------------------------------------------------------------------------
 
+class Undeclared:
+    """The absence of a declaration, as a value.
+
+    A metal registration's `idle_s` is THREE-VALUED (ADR 0003): a number is
+    that metal's own idle limit, None PINS it (never released, however long
+    it sits), and DESK_DEFAULT — the argument not given, the key absent from
+    the frame — leaves the desk's own default to decide. None cannot mean
+    both "pinned" and "unsaid", so the third value is named. It lives in the
+    wire module because the fact is a wire fact (the `metal` frame either
+    carries the key or does not) and because desk.py imports this module,
+    never the reverse."""
+
+    def __repr__(self) -> str:
+        return "DESK_DEFAULT"
+
+
+DESK_DEFAULT = Undeclared()
+
+
 class Transport(Protocol):
     """Carries dict frames to one host's service. Frames are JSON-safe by
     contract; LocalTransport enforces it, real transports inherit it free."""
@@ -767,7 +786,9 @@ class RemoteDesk:
 
     async def register_metal(self, name: str, gpu: str, devices: int,
                              vram_gb: float, address: str,
-                             builds: Mapping | None = None) -> dict:
+                             builds: Mapping | None = None,
+                             idle_s: float | None | Undeclared = DESK_DEFAULT,
+                             ) -> dict:
         """A metal container phones home its OWN existence — the other half
         of the deploy contract: after this the desk can deduce (residual)
         and command (carve/decarve) against it at `address`. The facts are
@@ -777,21 +798,38 @@ class RemoteDesk:
         name at the same address is a re-registration — the container
         generation turned over: the desk updates the row, reaps that metal's
         corpses and retries the parked queue (ADR 0001, Q5); the reply says
-        what it reaped and retried. A known name at another address is
-        refused."""
-        return await self._transport.call("metal", {
-            "name": name, "gpu": gpu, "devices": devices,
-            "vram_gb": vram_gb, "address": address,
-            "builds": dict(builds) if builds else None})
+        what it reaped and retried. A registration also RE-ACQUIRES a metal
+        the desk had released (ADR 0003) — the row goes back on the
+        carve-able set. `idle_s` is this metal's own idle limit: unsaid, the
+        desk's default decides; None PINS it, never released."""
+        payload = {"name": name, "gpu": gpu, "devices": devices,
+                   "vram_gb": vram_gb, "address": address,
+                   "builds": dict(builds) if builds else None}
+        if not isinstance(idle_s, Undeclared):
+            payload["idle_s"] = idle_s
+        return await self._transport.call("metal", payload)
+
+    async def release(self, name: str, reason: str = "released") -> dict:
+        """Hand a metal back BY HAND — the acquire rung inverted at the desk
+        (ADR 0003): its listings delisted, its residents down the ladder,
+        its shift ended so the venue reclaims the container, and the row
+        kept as inventory the next placement may knock awake. The desk's
+        idle sweep issues this same verb on its own clock; this is the door
+        for an operator who knows the metal is done sooner."""
+        return await self._transport.call("release", {"metal": name,
+                                                      "reason": reason})
 
     async def reap(self, probes: int = 3, wait: float = 0.0) -> dict:
         """The janitor's sweep, run by the desk now: probe every listing,
         retry the silent (on a lazy venue the knock is the restart), reap
         what stays silent — decarve at its metal, delist with the reason
         journaled — then RECONTINUE: strand the reaped hosts' runs, knock
-        their metals, retry the parked queue (ADR 0001, Q5d). Returns
+        their metals, retry the parked queue (ADR 0001, Q5d) — and, FIRST,
+        sweep for idle metal: observe every carve-able metal and release
+        what has sat past its limit (ADR 0003). Returns
         {"listings": {host: alive | recovered | reaped}, "knocked":
-        {metal: answered}, "runs": {run_id: rerouted | parked}}."""
+        {metal: answered}, "runs": {run_id: rerouted | parked},
+        "released": [metal, ...]}."""
         return await self._transport.call("reap", {"probes": probes,
                                                    "wait": wait})
 

@@ -20,17 +20,19 @@ import json
 
 from common import arith_spec, arith_store
 from rlstack import (
-    FakeEngine, FakeLearner, Topology, Host, HostSpec, Metal, Regime, Seeds,
-    fake_qwen_schema, learner, pool,
+    Bundle, FakeEngine, FakeLearner, Topology, Host, HostSpec, Message, Metal,
+    Regime, RemotePool, Role, SamplingSpec, Seeds, fake_qwen_schema, learner,
+    pool,
 )
 from rlstack.runner.host import Partition
 from rlstack.spec.canonical import canonical_json
 from rlstack.runner.campaign import Campaigns, demands_of
 from rlstack.runner.desk import (
-    Demand, Desk, DeskError, Listing, MetalService, demand_rows,
+    IDLE_S, Demand, Desk, DeskError, Listing, MetalService, demand_rows,
 )
 from rlstack.runner.remote import (
-    HostService, LocalTransport, RemoteDesk, RemoteHost, RemoteMetal,
+    DESK_DEFAULT, HostService, LocalTransport, RemoteDesk, RemoteHost,
+    RemoteMetal,
 )
 from rlstack.runner.residents import Builds, Resident, ResidentBirth
 
@@ -160,20 +162,33 @@ class DeskFixture(unittest.TestCase):
         def ask(self, verb: str, payload: dict) -> dict:
             return self.fixture.metal_transports[self.address].ask(verb, payload)
 
-    def desk(self, boot_for=None) -> Desk:
+    def desk(self, boot_for=None, idle_s: float | None = IDLE_S) -> Desk:
         return Desk(
             self.store,
             host_for=lambda addr: RemoteHost(self.LazyTransport(self, addr)),
             metal_for=lambda addr: RemoteMetal(self.LazyPlane(self, addr)),
-            boot_for=boot_for)
+            boot_for=boot_for, idle_s=idle_s)
 
-    def desk_with_metal(self, *names, boot_for=None) -> Desk:
-        """A desk with the named metal services registered, plane and all."""
-        desk = self.desk(boot_for)
+    def rebuilt_desk(self, idle_s: float | None = IDLE_S) -> Desk:
+        """The same desk after a kill -9: its journal, read back."""
+        return Desk.from_journal(
+            self.store,
+            host_for=lambda addr: RemoteHost(self.LazyTransport(self, addr)),
+            metal_for=lambda addr: RemoteMetal(self.LazyPlane(self, addr)),
+            idle_s=idle_s)
+
+    def desk_with_metal(self, *names, boot_for=None,
+                        idle_s: float | None = IDLE_S,
+                        declares=DESK_DEFAULT) -> Desk:
+        """A desk with the named metal services registered, plane and all.
+        `idle_s` is the DESK's own limit; `declares` is the per-metal idle
+        limit as a registration declares it (ADR 0003)."""
+        desk = self.desk(boot_for, idle_s)
         for name in names:
             desk.register_metal(self.metal_services[name].metal,
                                 address=f"metal://{name}",
-                                builds=self.metal_services[name].builds.row())
+                                builds=self.metal_services[name].builds.row(),
+                                idle_s=declares)
         return desk
 
     async def container_dies(self, service: MetalService) -> None:
@@ -1407,6 +1422,253 @@ class SuperviseTest(DeskFixture):
         self.assertTrue(verdict["rerouted"][rid]["parked"], verdict)
         self.assertEqual(told["retried"], {rid: "rerouted"})
         self.assertEqual(service.hosts[landed].roster[rid].status, "done")
+
+
+class IdleReleaseTest(DeskFixture):
+    """ADR 0003: metal nothing has run on for `idle_s` is RELEASED — the
+    acquire rung inverted, and automatic because the metal is already owned.
+    The evidence is each listing's own status (no running tenancy, nothing in
+    flight, an `admitted` counter that did not move since the previous tick),
+    the clock is the desk's memory, and the door back is a knock."""
+
+    def carved_and_finished(self, desk: Desk, service: MetalService) -> dict:
+        """One submit through the desk: two hosts carved on the metal and the
+        run finished — the state an idle sweep meets."""
+        async def drive():
+            reply = await Campaigns(desk).submit(self.split_spec())
+            await service.hosts[reply["host"]]._adoptions[reply["run_id"]]
+            return reply
+        reply = go(drive())
+        self.assertTrue(reply["accepted"], reply)
+        return reply
+
+    def test_idle_metal_is_released_once_the_limit_passes(self) -> None:
+        """The whole rule on a fake clock: the first observation only takes a
+        reading, the second starts the clock, and the metal comes due one
+        limit later — listings delisted, residents down, the row kept as
+        inventory that says released."""
+        service = self.metal_service(devices=2)
+        desk = self.desk_with_metal("fake-metal", idle_s=600.0)
+        self.carved_and_finished(desk, service)
+
+        async def sweep():
+            desk.observe_idle(1000.0)        # first sight: nothing to compare
+            unread = dict(desk.idle_since)
+            desk.observe_idle(1060.0)        # quiet through a whole tick
+            started = dict(desk.idle_since)
+            early = await desk.release_idle(1600.0)      # 540 s < 600
+            late = await desk.release_idle(1661.0)       # 601 s >= 600
+            return unread, started, early, late
+        unread, started, early, late = go(sweep())
+        self.assertEqual(unread, {})
+        self.assertEqual(started, {"fake-metal": 1060.0})
+        self.assertEqual(early, [])
+        self.assertEqual(late, ["fake-metal"])
+        self.assertEqual(desk.listings, {})
+        self.assertEqual(desk.metal_remotes, {})
+        self.assertIn("fake-metal", desk.metal)          # inventory, still
+        self.assertTrue(desk.status()["metal"]["fake-metal"]["released"])
+        self.assertEqual(desk.status()["metal"]["fake-metal"]["idle_s"], 600.0)
+        # the metal obeyed: residents down, books empty, shift over
+        self.assertEqual(service.hosts, {})
+        self.assertTrue(service.released.is_set())
+
+    def test_a_release_is_journaled_and_a_rebuilt_desk_agrees(self) -> None:
+        """The departure is on the record — the intent first, then each
+        delist — so a desk rebuilt from the journal knows the metal is
+        inventory it may not carve. Saying it twice changes nothing."""
+        service = self.metal_service(devices=2)
+        desk = self.desk_with_metal("fake-metal")
+        self.carved_and_finished(desk, service)
+        hosts = sorted(desk.listings)
+
+        told = go(desk.release("fake-metal", reason="released: idle"))
+        self.assertEqual((told["listings"], told["told"]), (hosts, True))
+        event = [e for e in self.store.read_fleet_log()
+                 if e["event"] == "release"][-1]
+        self.assertEqual((event["metal"], event["listings"], event["idle_s"]),
+                         ("fake-metal", hosts, IDLE_S))
+        self.assertEqual([e["reason"] for e in self.store.read_fleet_log()
+                          if e["event"] == "delist"],
+                         ["released: idle"] * len(hosts))
+        again = go(desk.release("fake-metal"))           # idempotent
+        self.assertEqual((again["listings"], again["told"]), ([], False))
+
+        reborn = self.rebuilt_desk()
+        self.assertEqual(reborn.listings, {})
+        self.assertEqual(reborn.released, {"fake-metal"})
+        self.assertEqual(reborn.metal_remotes, {})
+        self.assertIn("fake-metal", reborn.metal)
+
+    def test_a_pinned_metal_is_never_released(self) -> None:
+        """`idle_s=None` at registration PINS the metal: the clock still runs
+        (the desk observes everything) and nothing ever comes due — and the
+        declaration survives the journal."""
+        service = self.metal_service(devices=2)
+        desk = self.desk_with_metal("fake-metal", idle_s=1.0, declares=None)
+        self.carved_and_finished(desk, service)
+
+        async def sweep():
+            desk.observe_idle(10.0)
+            desk.observe_idle(20.0)
+            return await desk.release_idle(1e9)
+        self.assertEqual(go(sweep()), [])
+        self.assertEqual(desk.idle_since, {"fake-metal": 20.0})
+        self.assertIsNone(desk.idle_limit("fake-metal"))
+        self.assertEqual(desk.released, set())
+        self.assertEqual(sorted(desk.listings), sorted(service.hosts))
+        self.assertIsNone(self.rebuilt_desk().idle_limit("fake-metal"))
+
+    def test_a_pure_clients_traffic_keeps_its_metal_alive(self) -> None:
+        """A measurement cron holds NO tenancy: its host's roster is empty at
+        every tick, so occupancy alone would release the metal out from under
+        its own sampling. The `admitted` counter is what says work passed."""
+        service = self.metal_service(devices=1)
+        desk = self.desk_with_metal("fake-metal", idle_s=60.0)
+        demand = Demand(pool="main", capability="inference", base=BASE,
+                        shape=1, vram_gb=14.4, group=0)
+
+        async def drive():
+            placed = await desk.place([demand])
+            pool = RemotePool(self.LazyTransport(self, placed["pools"]["main"]),
+                              base=BASE, tp=1)
+            pool.add_bundle(Bundle("bundle:x", {"pi": 0}))
+            desk.observe_idle(100.0)         # first sight: a reading, no clock
+            desk.observe_idle(200.0)         # quiet: the clock starts
+            started = dict(desk.idle_since)
+            async for _ in pool.sample_tokens((Message(Role.USER, "2+2?"),),
+                                              SamplingSpec(), (), "bundle:x",
+                                              seed=7):
+                pass
+            desk.observe_idle(300.0)         # the counter moved: not idle
+            return placed, started, dict(desk.idle_since), \
+                await desk.release_idle(1e9)
+        placed, started, after, released = go(drive())
+        self.assertTrue(placed["placed"], placed)
+        self.assertEqual(sorted(started), ["fake-metal"])
+        self.assertEqual(after, {})
+        self.assertEqual(released, [])
+        self.assertEqual(sorted(desk.listings), sorted(service.hosts))
+        # ... and the roster was empty throughout: no tenancy, pure traffic
+        carved = next(iter(service.hosts.values()))
+        self.assertEqual(carved.status()["tenants"], {})
+        self.assertGreater(carved.status()["admitted"], 0)
+
+    def test_the_reapers_tick_sweeps_for_idle_metal(self) -> None:
+        """The sweep rides the reaper's own schedule, first: at a limit of
+        zero the first tick takes the reading and the second releases —
+        before the probing, so the reaper never chases a listing the desk
+        has just taken down."""
+        service = self.metal_service(devices=2)
+        desk = self.desk_with_metal("fake-metal", idle_s=0.0)
+        self.carved_and_finished(desk, service)
+
+        first = go(desk.reap(probes=1))
+        second = go(desk.reap(probes=1))
+        self.assertEqual(first["released"], [])
+        self.assertEqual(set(first["listings"].values()), {"alive"})
+        self.assertEqual(second["released"], ["fake-metal"])
+        self.assertEqual(second["listings"], {})
+        self.assertEqual(second["knocked"], {})
+        self.assertEqual(desk.listings, {})
+        self.assertEqual(service.hosts, {})
+
+    def test_the_reaper_leaves_a_released_metal_parked(self) -> None:
+        """A released metal is PARKED, not silent. A host that listed itself
+        just as the release landed is reaped like any other silent listing —
+        but its metal is NOT knocked back to life behind the desk's own
+        decision."""
+        service = self.metal_service(devices=1)
+        living = self.stand_up("well", "fleet://well", serves_pool=True,
+                               trains=True)
+        desk = self.desk_with_metal("fake-metal")
+        remote = RemoteDesk(LocalTransport(Campaigns(desk)))
+        self.assertTrue(go(remote.release("fake-metal", reason="by hand")))
+        self.transports["fleet://ghost"] = ReapTest.Dead()
+        desk.list_host("ghost", living.regimes, "fleet://ghost",
+                       metal="fake-metal")
+
+        verdicts = go(desk.reap(probes=1))
+        self.assertEqual(verdicts["listings"], {"ghost": "reaped"})
+        self.assertEqual(verdicts["knocked"], {})
+        self.assertEqual(verdicts["released"], [])
+        self.assertEqual(desk.released, {"fake-metal"})
+
+    def test_a_registration_re_acquires_released_metal(self) -> None:
+        """The reborn container's own announce is one door back: the row is
+        carve-able again and the release is superseded on replay."""
+        self.metal_service(devices=1)
+        desk = self.desk_with_metal("fake-metal")
+        remote = RemoteDesk(LocalTransport(Campaigns(desk)))
+        go(remote.release("fake-metal", reason="by hand"))
+        self.assertEqual(desk.released, {"fake-metal"})
+
+        told = go(remote.register_metal("fake-metal", "L4", 1, 24.0,
+                                        "metal://fake-metal"))
+        self.assertEqual(told["registered"], "fake-metal")
+        self.assertEqual(desk.released, set())
+        self.assertIn("fake-metal", desk.metal_remotes)
+        reborn = self.rebuilt_desk()
+        self.assertEqual(reborn.released, set())
+        self.assertIn("fake-metal", reborn.metal_remotes)
+
+    def test_a_placement_knocks_a_released_metal_awake(self) -> None:
+        """Q4, the other door: nothing carve-able holds the unit but the
+        fleet OWNS metal it released, so the desk KNOCKS — the venue boots a
+        bare container, the desk puts the row back itself where the
+        container's own announce has not landed yet, and the carve proceeds
+        in the same breath. No human anywhere."""
+        service = self.metal_service(devices=2)
+        booted: list[str] = []
+
+        def boot(name: str) -> None:
+            """The venue's boot: a fresh container, bare, answering again."""
+            booted.append(name)
+            service.released.clear()
+            self.metal_transports[f"metal://{name}"] = LocalTransport(service)
+
+        desk = self.desk_with_metal("fake-metal", boot_for=boot)
+        go(desk.release("fake-metal", reason="by hand"))
+        self.metal_transports["metal://fake-metal"] = ReapTest.Dead()
+
+        reply = self.carved_and_finished(desk, service)
+        self.assertEqual(booted, ["fake-metal"])
+        self.assertEqual(desk.released, set())
+        self.assertIn("fake-metal", desk.metal_remotes)
+        self.assertEqual(sorted(desk.listings), sorted(service.hosts))
+        self.assertEqual(service.hosts[reply["host"]].roster[
+            reply["run_id"]].status, "done")
+
+    def test_the_default_knock_wakes_a_released_metal_through_its_plane(self) -> None:
+        """No `boot_for`: the knock is a `describe()` through the plane
+        ADDRESS the release never forgot — on Modal that call is the boot.
+        The desk re-registers the row itself, because the reborn container's
+        own announce need not have landed for the carve to proceed."""
+        service = self.metal_service(devices=2)
+        desk = self.desk_with_metal("fake-metal")
+        go(desk.release("fake-metal", reason="by hand"))
+        service.released.clear()                  # the container comes back
+        self.assertEqual(desk.metal_remotes, {})
+
+        reply = self.carved_and_finished(desk, service)
+        self.assertEqual(desk.released, set())
+        self.assertIn("fake-metal", desk.metal_remotes)
+        self.assertEqual(sorted(desk.listings), sorted(service.hosts))
+        self.assertEqual(service.hosts[reply["host"]].roster[
+            reply["run_id"]].status, "done")
+
+    def test_what_no_metal_can_hold_stays_a_boot_instruction(self) -> None:
+        """The knock is for metal that could hold the unit: one whose
+        recorded facts cannot is left released, and the standing acquire
+        stays a human's."""
+        service = self.metal_service(devices=1)
+        desk = self.desk_with_metal("fake-metal")
+        go(desk.release("fake-metal", reason="by hand"))
+        unit = (Demand(pool="main", capability="inference", base=BASE,
+                       shape=4, vram_gb=None, group=0),)
+        self.assertFalse(desk.could_hold(unit, service.metal))
+        self.assertFalse(go(desk.knock_released(unit)))
+        self.assertEqual(desk.released, {"fake-metal"})
 
 
 class MeasureTest(unittest.TestCase):

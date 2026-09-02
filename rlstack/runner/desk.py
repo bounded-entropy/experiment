@@ -55,9 +55,15 @@ from rlstack.runner.residents import (
     GRACE_S, SIGNAL_GRACE_S, Builds, Resident, ResidentBirth, Teardown,
 )
 from rlstack.runner.remote import (
-    RemoteLearner, RemotePool,
-    HostService, LocalTransport, RemoteHost, RemotePool, Transport,
+    DESK_DEFAULT, RemoteLearner, RemotePool,
+    HostService, LocalTransport, RemoteHost, RemotePool, Transport, Undeclared,
 )
+
+# The desk's default idle limit, in seconds (ADR 0003): metal that nothing has
+# run on for half an hour is RELEASED — the acquire rung inverted, automatic,
+# because the metal is already owned. A venue overrides it per desk
+# (`Desk(idle_s=)`) and a registration overrides it per metal.
+IDLE_S = 1800.0
 
 
 class DeskError(RuntimeError):
@@ -262,6 +268,7 @@ class Desk:
                  host_for: Callable[[str], "RemoteHost"],
                  metal_for: Callable[[str], "RemoteMetal"] | None = None,
                  boot_for: Callable[[str], None] | None = None,
+                 *, idle_s: float | None = IDLE_S,
                  ) -> None:
         self.store = store
         # address -> RemoteHost: how the desk reaches a listed host
@@ -286,6 +293,25 @@ class Desk:
         # constants are only its first declaration), journaled so the record
         # of HOW a host was built survives the desk. The desk never builds.
         self.metal_builds: dict[str, dict] = {}
+        # THE IDLE POLICY (ADR 0003). `idle_s` is this desk's default limit in
+        # seconds; `metal_idle_s` holds the metals whose registration declared
+        # their own (None there PINS that metal — never released), and a name
+        # absent from it takes the desk's. None here is a desk that releases
+        # nothing.
+        self.idle_s = idle_s
+        self.metal_idle_s: dict[str, float | None] = {}
+        # name -> when this metal was FIRST observed idle. The clock lives in
+        # MEMORY (Q2): a desk restart forgets it and costs at most one tick,
+        # where journaling every observation would be noise in the fleet log
+        # for a timer whose only reader is the next tick.
+        self.idle_since: dict[str, float] = {}
+        # host name -> its `admitted` counter at the previous observation —
+        # what makes "nothing has run here since the last tick" decidable
+        self.admitted_at: dict[str, int] = {}
+        # metal this desk RELEASED: still INVENTORY (self.metal — what the
+        # fleet owns) and no longer carve-able (out of metal_remotes — what
+        # the fleet may carve). A knock brings it back (Q4).
+        self.released: set[str] = set()
         self.listings: dict[str, Listing] = {}
         self._recontinue: asyncio.Lock | None = None
         self._recontinue_loop: asyncio.AbstractEventLoop | None = None
@@ -295,14 +321,20 @@ class Desk:
                      host_for: Callable[[str], "RemoteHost"],
                      metal_for: Callable[[str], "RemoteMetal"] | None = None,
                      boot_for: Callable[[str], None] | None = None,
+                     *, idle_s: float | None = IDLE_S,
                      ) -> "Desk":
         """The desk, rebuilt from its own record: every `list` event resolves
         its address again, and so does every addressed `metal` event — the
         latest `metal` event per name wins, so a re-registration's measured
-        facts and recipe replay exactly as they landed. Kill -9 the desk and
-        nothing was lost but a process — the same recovery shape as attach,
-        on the fleet plane."""
-        desk = cls(store, host_for, metal_for, boot_for)
+        facts, recipe and idle declaration replay exactly as they landed. A
+        `release` event takes its metal off the carve-able set and leaves the
+        row as inventory; a LATER `metal` event for the same name clears the
+        release, because registering is what re-acquires (ADR 0003). Kill -9
+        the desk and nothing was lost but a process — the same recovery shape
+        as attach, on the fleet plane. The idle CLOCK is not replayed: it
+        lives in memory by ruling (Q2), so a rebuilt desk starts every
+        metal's clock again."""
+        desk = cls(store, host_for, metal_for, boot_for, idle_s=idle_s)
         for event in store.read_fleet_log():
             if event.get("event") == "list":
                 desk.listings[event["host"]] = _listing_from(event, host_for)
@@ -319,10 +351,19 @@ class Desk:
                     desk.metal_remotes[event["name"]] = metal_for(address)
                 if event.get("builds"):
                     desk.metal_builds[event["name"]] = dict(event["builds"])
+                desk.declare_idle(
+                    event["name"],
+                    event["idle_s"] if "idle_s" in event else DESK_DEFAULT)
+                desk.released.discard(event["name"])
+            elif event.get("event") == "release":
+                desk.released.add(event["metal"])
+                desk.metal_remotes.pop(event["metal"], None)
         return desk
 
     def register_metal(self, metal: Metal, address: str | None = None,
-                       builds: Mapping | None = None) -> list[str]:
+                       builds: Mapping | None = None,
+                       idle_s: float | None | Undeclared = DESK_DEFAULT,
+                       ) -> list[str]:
         """The acquire rung, recorded at the desk: what the fleet OWNS and may
         carve against. Journaled like a listing, so a rebuilt desk knows its
         inventory too. `address` is where that metal's own container answers
@@ -340,7 +381,14 @@ class Desk:
         said it is up and bare, so a silent host on it is a corpse. The
         corpses' runs are stranded; the caller retries them (retry_parked).
         Returns the corpses reaped. A known name at a DIFFERENT address is two
-        deploys colliding on a name, not a restart: refused loudly."""
+        deploys colliding on a name, not a restart: refused loudly.
+
+        REGISTERING IS RE-ACQUIRING (ADR 0003, Q4): a metal this desk had
+        RELEASED comes back carve-able here, its release superseded by the
+        fresh row on replay, and its idle clock starts again — a container
+        that just announced itself has run nothing yet, but it has not been
+        watched either. `idle_s` is this metal's own limit: unsaid, the
+        desk's default decides; None PINS it."""
         known = metal.name in self.metal
         if known and self.metal_addresses.get(metal.name) != address:
             raise DeskError(
@@ -354,12 +402,29 @@ class Desk:
             self.metal_remotes[metal.name] = self.metal_for(address)
         if builds:
             self.metal_builds[metal.name] = dict(builds)
-        self.store.append_fleet_event({
-            "event": "metal", "t": time.time(), "name": metal.name,
-            "gpu": metal.gpu, "devices": metal.devices,
-            "vram_gb": metal.vram_gb, "address": address,
-            "builds": self.metal_builds.get(metal.name)})
+        self.declare_idle(metal.name, idle_s)
+        self.released.discard(metal.name)
+        self.idle_since.pop(metal.name, None)
+        row = {"event": "metal", "t": time.time(), "name": metal.name,
+               "gpu": metal.gpu, "devices": metal.devices,
+               "vram_gb": metal.vram_gb, "address": address,
+               "builds": self.metal_builds.get(metal.name)}
+        if not isinstance(idle_s, Undeclared):
+            row["idle_s"] = idle_s          # absent = the desk's own default
+        self.store.append_fleet_event(row)
         return self.reconcile_metal(metal.name) if known else []
+
+    def declare_idle(self, name: str, idle_s: float | None | Undeclared) -> None:
+        """One metal's own idle limit, exactly as its registration declared
+        it: a number is that metal's limit in seconds, None PINS it (never
+        released, however long it sits), and DESK_DEFAULT — nothing declared
+        — leaves the desk's default to decide. A re-registration re-declares,
+        so the table and the journal row always say what the venue last
+        said."""
+        if isinstance(idle_s, Undeclared):
+            self.metal_idle_s.pop(name, None)
+        else:
+            self.metal_idle_s[name] = idle_s
 
     def reconcile_metal(self, name: str) -> list[str]:
         """The reaper's conclusion scoped to ONE metal, with zero retries: a
@@ -475,6 +540,42 @@ class Desk:
         return placement, boot
 
     async def provision_unit(self, unit: tuple[Demand, ...]) -> Listing | None:
+        """Rung two, in two attempts: CARVE on the carve-able metal, and — if
+        nothing there holds the unit — KNOCK a metal the desk RELEASED whose
+        recorded facts could, then carve again (ADR 0003, Q4). Re-acquiring
+        metal the fleet already owns needs no human: the human act was the
+        deploy. What no metal, released or live, can hold is still a boot
+        instruction — the standing acquire, which stays a human's."""
+        listing = await self.carve_unit(unit)
+        if listing is not None:
+            return listing
+        if not await self.knock_released(unit):
+            return None
+        return await self.carve_unit(unit)
+
+    def could_hold(self, unit: tuple[Demand, ...], metal: Metal) -> bool:
+        """Could this metal hold the unit IF IT WERE BARE? Its recorded
+        facts — devices against the unit's widest shard shape, one device's
+        VRAM against the unit's per-device need — because a released
+        container answers no residual. A deduction from the registration,
+        which the metal itself refuses if it comes back and cannot in fact
+        hold it."""
+        return (metal.devices >= max(demand.shape for demand in unit)
+                and metal.vram_gb >= unit_gb(unit, metal) - 1e-9)
+
+    async def knock_released(self, unit: tuple[Demand, ...]) -> bool:
+        """The first RELEASED metal (by name — the order provision_unit
+        already places in) that could hold the unit, knocked back to life.
+        A knock that boots nothing leaves the metal released and the
+        placement falls through to the boot instructions."""
+        for name in sorted(self.released):
+            if not self.could_hold(unit, self.metal[name]):
+                continue
+            if await self.reacquire(name):
+                return True
+        return False
+
+    async def carve_unit(self, unit: tuple[Demand, ...]) -> Listing | None:
         """The standing CARVE, desk-issued: nothing listed serves this unit,
         so the desk asks each registered metal whether it can hold it (the
         residual, in GB per device — the DEDUCTION) and COMMANDS the first
@@ -797,9 +898,18 @@ class Desk:
         `recovered` is that verdict. A listing silent through every retry is
         concluded: DECARVED at its metal when the metal still answers (a
         living container frees its GB back to residual; a dead one already
-        did, physically), then DELISTED with the reason journaled. Verdicts:
-        per listing alive | recovered | reaped; per knocked metal whether it
-        answered; per stranded or parked run rerouted | parked."""
+        did, physically), then DELISTED with the reason journaled.
+
+        THE TICK ALSO SWEEPS FOR IDLE METAL (ADR 0003), first: observe every
+        carve-able metal, release what has been idle past its limit — so the
+        probing below never chases a listing this desk has just taken down —
+        and a RELEASED metal is skipped by the knock, because it is parked,
+        not silent. Verdicts: per listing alive | recovered | reaped; per
+        knocked metal whether it answered; per stranded or parked run
+        rerouted | parked; plus the metal released."""
+        now = time.time()
+        self.observe_idle(now)
+        released = await self.release_idle(now)
         listings: dict[str, str] = {}
         reaped_by_metal: dict[str, list[str]] = {}
         for name in sorted(self.listings):
@@ -818,9 +928,11 @@ class Desk:
         reaped = [name for names in reaped_by_metal.values() for name in names]
         self.strand(reaped)
         knocked = {metal_name: await self.knock(metal_name)
-                   for metal_name in sorted(reaped_by_metal) if metal_name}
+                   for metal_name in sorted(reaped_by_metal)
+                   if metal_name and metal_name not in self.released}
         runs = await self.retry_parked() if reaped else {}
-        return {"listings": listings, "knocked": knocked, "runs": runs}
+        return {"listings": listings, "knocked": knocked, "runs": runs,
+                "released": released}
 
     async def recovers(self, listing: Listing, probes: int,
                        wait: float) -> bool:
@@ -849,17 +961,21 @@ class Desk:
         self.delist(listing.name, reason="reaped")
 
     async def knock(self, name: str) -> bool:
-        """Boot a metal whose container is gone (Q5b): the venue's `boot_for`
-        when it has one, otherwise a `describe()` through the plane address
-        the desk holds — on Modal that call IS the boot. Off the loop, because
-        a boot is seconds to minutes and the reborn container's own
-        registration must be able to reach this desk meanwhile. A knock that
-        fails is a metal that stays dead; the queue waits for the next
-        registration event."""
+        """Boot a metal whose container is gone (Q5b) — or one this desk
+        RELEASED (ADR 0003, Q4), which is the same act for the same reason:
+        the venue's `boot_for` when it has one, otherwise a `describe()`
+        through the plane address the desk holds — on Modal that call IS the
+        boot. The address is read off the metal ROW, not off `metal_remotes`,
+        because a released metal has left the carve-able set and is exactly
+        what a knock is for. Off the loop, because a boot is seconds to
+        minutes and the reborn container's own registration must be able to
+        reach this desk meanwhile. A knock that fails is a metal that stays
+        down; the queue waits for the next registration event."""
+        address = self.metal_addresses.get(name)
         if self.boot_for is not None:
             boot = lambda: self.boot_for(name)          # noqa: E731
-        elif name in self.metal_remotes:
-            boot = self.metal_remotes[name].describe
+        elif address and self.metal_for is not None:
+            boot = self.metal_for(address).describe
         else:
             return False
         try:
@@ -942,6 +1058,129 @@ class Desk:
             self._recontinue, self._recontinue_loop = asyncio.Lock(), loop
         return self._recontinue
 
+    # ---- the idle sweep: metal nothing runs on is released ------------------
+
+    def idle_limit(self, name: str) -> float | None:
+        """The seconds of idleness `name` is released after: the limit its
+        own registration declared, or this desk's default where it declared
+        none. None is PINNED — never released, however long it sits."""
+        return self.metal_idle_s.get(name, self.idle_s)
+
+    def listing_busy(self, listing: Listing, seen: dict[str, int]) -> bool:
+        """IS THIS LISTING WORKING? Three ways to say yes, all read off ONE
+        status frame: a RUNNING tenancy, work IN FLIGHT at its arbiter right
+        now, or an `admitted` counter that MOVED since the previous
+        observation. The counter is what sees a PURE CLIENT — a measurement
+        cron, an evaluator: admitted traffic, no tenancy — whose host would
+        otherwise be released out from under its own sampling (ADR 0003,
+        Q1); in-flight is what sees one long admission that spans two ticks
+        and moves no counter.
+
+        The reading is recorded in `seen` for the next tick, and a listing
+        observed for the FIRST time is busy: metal is released on evidence
+        of idleness, never on the absence of a reading. A silent listing
+        holds nothing running — that is the reaper's business, not this
+        rule's."""
+        try:
+            told = listing.host.status()
+        except Exception:
+            return False
+        admitted = int(told.get("admitted", 0))
+        seen[listing.name] = admitted
+        if listing.name not in self.admitted_at:
+            return True
+        if admitted != self.admitted_at[listing.name]:
+            return True
+        if int(told.get("in_flight", 0)) > 0:
+            return True
+        return any(tenant.get("status") == "running"
+                   for tenant in told.get("tenants", {}).values())
+
+    def observe_idle(self, now: float) -> None:
+        """ONE TICK OF THE IDLE CLOCK. For every carve-able metal: it is IDLE
+        when no listing on it is working (listing_busy — the one rule) or it
+        holds no listings at all. The FIRST idle observation stamps
+        `idle_since`; a busy one clears it, so the clock measures CONTINUOUS
+        idleness and never sums two quiet spells across a busy one.
+
+        Every listing is probed once, and only the listings observed here are
+        remembered: a delisted host's counter leaves with it."""
+        seen: dict[str, int] = {}
+        for name in sorted(self.metal_remotes):
+            busy = [listing for listing in self.listings.values()
+                    if listing.metal == name
+                    and self.listing_busy(listing, seen)]
+            if busy:
+                self.idle_since.pop(name, None)
+            else:
+                self.idle_since.setdefault(name, now)
+        self.admitted_at = seen
+
+    async def release_idle(self, now: float) -> list[str]:
+        """Every metal idle past ITS limit, released — the sweep's second
+        half, and the only place the clock is read. A pinned metal (limit
+        None) is never due, however long its clock has run."""
+        due = [name for name, since in sorted(self.idle_since.items())
+               if self.idle_limit(name) is not None
+               and now - since >= self.idle_limit(name)]
+        for name in due:
+            await self.release(name, reason="released: idle")
+        return due
+
+    async def release(self, name: str, reason: str = "released") -> dict:
+        """THE ACQUIRE RUNG INVERTED, desk-issued (ADR 0003). The departure
+        is journaled FIRST — the intent on the record, as `strand` writes it
+        — then every listing on the metal is delisted with `reason`, and the
+        metal itself is told `release`: its residents come down the ladder
+        and its SHIFT ENDS, so the venue reclaims the container. The row
+        stays as INVENTORY (what the fleet owns) and leaves `metal_remotes`
+        (what the fleet may carve), so `status()` says released and the next
+        placement that needs it KNOCKS it back (provision_unit).
+
+        A silent metal is as released as it gets — the container is already
+        gone, which is the goal state — so the wire's refusal is not this
+        verb's problem. Idempotent: releasing already-released metal
+        re-journals and changes nothing."""
+        if name not in self.metal:
+            raise DeskError(f"metal {name!r} is not registered with this desk")
+        listings = sorted(host for host, listing in self.listings.items()
+                          if listing.metal == name)
+        self.store.append_fleet_event({
+            "event": "release", "t": time.time(), "metal": name,
+            "idle_s": self.idle_limit(name), "listings": listings})
+        for host in listings:
+            self.delist(host, reason=reason)
+        remote = self.metal_remotes.pop(name, None)
+        told = False
+        if remote is not None:
+            try:
+                await remote.release()
+                told = True
+            except Exception:
+                pass            # the container is gone: released, physically
+        self.released.add(name)
+        self.idle_since.pop(name, None)
+        return {"released": True, "metal": name, "listings": listings,
+                "told": told}
+
+    async def reacquire(self, name: str) -> bool:
+        """A RELEASED METAL BROUGHT BACK, with no human in it (ADR 0003, Q4):
+        the human act was the deploy, and this metal is deployed, owned and
+        free. The KNOCK boots its container, whose bring-up registers it
+        again (ADR 0001, Q5a) — and where that registration has not landed
+        by the time the knock returns, the desk registers the row itself
+        from the facts and address it never forgot, so the carve can proceed
+        in the same breath; the container's own announce then supersedes it
+        with MEASURED facts. A metal that does not answer stays released."""
+        if not await self.knock(name):
+            return False
+        if name not in self.metal_remotes:
+            self.register_metal(
+                self.metal[name], self.metal_addresses.get(name),
+                builds=self.metal_builds.get(name),
+                idle_s=self.metal_idle_s.get(name, DESK_DEFAULT))
+        return name in self.metal_remotes
+
     def status(self) -> dict:
         """The desk's inventory, no wire calls: what is listed and what it
         wears, and the registered metal. Occupancy and residual are asked per
@@ -955,6 +1194,8 @@ class Desk:
                              "vram_gb": m.vram_gb,
                              "address": self.metal_addresses.get(name),
                              "plane": name in self.metal_remotes,
+                             "released": name in self.released,
+                             "idle_s": self.idle_limit(name),
                              "builds": self.metal_builds.get(name)}
                       for name, m in sorted(self.metal.items())}}
 
@@ -1006,6 +1247,11 @@ class Desk:
         if verb == "reap":
             return await self.reap(probes=int(payload.get("probes", 3)),
                                    wait=float(payload.get("wait", 0.0)))
+        if verb == "release":
+            # the same verb the idle sweep issues, by hand: an operator who
+            # knows a metal is done need not wait out its clock
+            return await self.release(payload["metal"],
+                                      reason=payload.get("reason", "released"))
         raise ValueError(f"unknown fleet verb {verb!r}")
 
     def answer(self, verb: str, payload: dict) -> dict:
