@@ -1108,6 +1108,10 @@ class MetalService:
         self.pending: list[tuple[str, tuple[int, ...], float]] = []
         self.carves = 0
         self.deaths: list[str] = []                 # hosts decarved by a resident's exit
+        # THE SHIFT, as a latch: set by `release`, awaited by whatever holds
+        # this container open (ADR 0003, Q3). An Event binds to no loop until
+        # it is first awaited, so a venue constructs this service anywhere.
+        self.released = asyncio.Event()
 
     @classmethod
     def measure(cls, name: str) -> Metal:
@@ -1348,6 +1352,34 @@ class MetalService:
             teardowns.extend(self.end_residents(self.hosts[name]))
         return teardowns
 
+    def release(self) -> dict:
+        """THE DESK'S RELEASE, EXECUTED HERE (ADR 0003): every resident down
+        the ladder, the books emptied — and THE SHIFT ENDED, so whatever
+        holds this container open returns and the venue reclaims it. The
+        desk decided; this side only obeys and writes nothing (the fleet
+        journal has one writer, as ever).
+
+        Idempotent: a bare metal, or one already released, answers released
+        just the same — released is a GOAL STATE, not an event, which is what
+        lets the desk retry a release it is unsure landed."""
+        teardowns = self.shutdown()
+        self.hosts.clear()
+        self.addresses.clear()
+        self.services.clear()
+        self.pending.clear()
+        self.released.set()
+        return {"released": True, "metal": self.metal.name,
+                "teardown": [t.line() for t in teardowns if not t.graceful]}
+
+    async def until_released(self) -> None:
+        """THE SHIFT, as a wait: returns when the desk releases this metal.
+        The venue's keepalive awaits this instead of sleeping forever, and
+        the metal's duties loop watches the same latch — so the container is
+        reclaimed as a consequence of the DESK's decision, never of the
+        venue's own timer (ADR 0003, Q3: the venue's scaledown is the
+        backstop, set no shorter than the desk's idle limit)."""
+        await self.released.wait()
+
     # ---- routing and the Transport surface ----------------------------------
 
     def service_for(self, address: str) -> HostService:
@@ -1379,6 +1411,10 @@ class MetalService:
             return await self.carve(payload)
         if verb == "decarve":
             return self.decarve(payload["host"])
+        if verb == "release":
+            # the third metal command (ADR 0003): carve's and decarve's
+            # wholesale cousin — every host down, and the shift with them
+            return self.release()
         raise ValueError(f"unknown metal verb {verb!r}")
 
     def answer(self, verb: str, payload: dict) -> dict:

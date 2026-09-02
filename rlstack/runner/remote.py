@@ -648,7 +648,9 @@ class RemoteMetal:
     bookings. `carve` is the command: the metal books synchronously at its
     own door, so a deduction gone stale between the ask and the command
     costs a refusal, never a double-book. `decarve` frees a host's GB on a
-    still-living container — the reaper's second half."""
+    still-living container — the reaper's second half. `release` is the
+    wholesale one: every host down and the shift ended, so the venue takes
+    the container back (ADR 0003)."""
 
     def __init__(self, transport: Transport) -> None:
         self._transport = transport
@@ -664,6 +666,14 @@ class RemoteMetal:
 
     async def decarve(self, name: str) -> dict:
         return await self._transport.call("decarve", {"host": name})
+
+    async def release(self) -> dict:
+        """The acquire rung inverted at the metal (ADR 0003): every resident
+        down the ladder, the books emptied, and the SHIFT ENDED so the venue
+        reclaims the container. Idempotent — a bare or already-released
+        metal answers released just the same, so a desk unsure whether its
+        release landed may simply say it again."""
+        return await self._transport.call("release", {})
 
 
 class RemoteDesk:

@@ -708,6 +708,41 @@ class MetalServiceTest(DeskFixture):
         with self.assertRaises(Exception):
             service.service_for(born["address"])
 
+    def test_release_ends_the_shift_and_is_idempotent(self) -> None:
+        """The third metal command (ADR 0003, Q3): `release` over the wire
+        takes every resident down the ladder, empties the books, and ENDS
+        THE SHIFT — the keepalive awaiting `until_released` returns, so the
+        venue reclaims the container. Saying it twice, or to a bare metal,
+        is not an error: released is a goal state."""
+        service = self.metal_service(devices=1)
+        remote = RemoteMetal(LocalTransport(service))
+
+        async def drive():
+            born = await service.carve(_inference_request(14.4))
+            residents = service.hosts[born["host"]].residents
+            shift = asyncio.create_task(service.until_released())
+            await asyncio.sleep(0)
+            self.assertFalse(shift.done())          # the shift is standing
+            told = await remote.release()
+            await asyncio.wait_for(shift, 1.0)      # ... and now it is over
+            return born, residents, told, await remote.release()
+        born, residents, told, again = go(drive())
+        self.assertTrue(told["released"], told)
+        self.assertTrue(again["released"], again)   # idempotent
+        self.assertTrue(all(r.stopping for r in residents))
+        self.assertEqual(service.hosts, {})
+        self.assertEqual(service.residual(), [24.0])
+        with self.assertRaises(Exception):
+            service.service_for(born["address"])
+
+    def test_a_bare_metal_releases_too(self) -> None:
+        """Nothing carved, nothing to tear down — and the shift still ends,
+        because release is about the CONTAINER, not its hosts."""
+        service = self.metal_service(devices=1)
+        told = go(service.serve("release", {}))
+        self.assertEqual(told["teardown"], [])
+        self.assertTrue(service.released.is_set())
+
 
 class ReapTest(DeskFixture):
     class Dead:
