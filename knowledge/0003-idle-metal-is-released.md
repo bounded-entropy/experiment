@@ -3,7 +3,7 @@
 | | |
 |---|---|
 | **Date** | 2026-09-01 |
-| **Status** | Accepted (2026-09-01) — all four questions answered as recommended |
+| **Status** | Implemented (2026-09-01; CONTEXT #76) |
 | **Author** | Claude Fable 5.1 (session: gsm-campaign, during ADR 0001's implementation) |
 | **Touches** | `runner/desk.py` (the desk's idle policy, `release`), `runner/remote.py` (one metal verb), `runner/host.py` (two status fields), `deploy/` (per-metal `idle_s`, the venue's scaledown rule), `tests/` |
 | **Invariants** | I12 (acquire is a human's — this ADR bears on its inverse and on re-acquire) |
@@ -210,4 +210,46 @@ exists to close stays open at its second half.
 
 ## Outcome
 
-Filled at implementation.
+**Landed** (CONTEXT #76), on top of ADR 0001, in five commits: the door's two
+counters; the metal's third verb; the desk's idle policy; the venues; the
+vocabulary.
+
+- **The rule.** `Arbiter.in_flight()` / `admitted()` (a monotone count of
+  admissions since birth) on `Host.status()`; `Desk.listing_busy` reads one
+  status frame and says busy on a running tenancy, work in flight, or a
+  counter that moved; `observe_idle(now)` / `release_idle(now)` are the tick;
+  `idle_limit(name)` is the metal's own limit or the desk's
+  (`Desk(idle_s=1800.0)`, `IDLE_S`), None PINNED.
+- **Release.** `Desk.release(name, reason)` journals the intent first, delists
+  every listing, tells the metal, drops it from `metal_remotes` and keeps the
+  row in `metal`; `status()` says `released` and `idle_s`; `from_journal`
+  replays the event and a later `metal` row clears it. `MetalService.release()`
+  + `until_released()` are the metal half — residents down, books emptied, the
+  SHIFT LATCH set — with `RemoteMetal.release()` as the client end.
+- **The door back.** `provision_unit` = `carve_unit` → `knock_released`
+  (`could_hold` against recorded facts) → `carve_unit`; `reacquire` knocks and
+  registers the row itself where the container's announce has not landed.
+- **What the answers changed** — nothing was overturned; three things the
+  questions did not reach were decided in the code and are stated in CONTEXT
+  #76: `in_flight` is part of the busy test as well as the counter (one long
+  admission spans two ticks and moves no counter); a listing observed for the
+  FIRST time is BUSY (release on evidence, never on its absence — one tick's
+  cost, which Q2 already priced); and `knock` had to read the plane address
+  off the METAL ROW rather than `metal_remotes`, since leaving `metal_remotes`
+  is precisely what release means. Two small additions beyond the Touched
+  list: the desk serves `release` by hand (`Desk.serve`, `RemoteDesk.release`
+  — the sketch's "also a manual door") and `register_metal`'s three-valued
+  `idle_s` needed a named absence (`remote.DESK_DEFAULT`).
+- **Tests: 889, from 876** (+13). `test_resume.py` untouched and green. The
+  promises are pinned one to one: the limit on a fake clock; a pure client's
+  traffic through a RemotePool with an empty roster; `idle_s=None` never
+  released; the delist + journal + carve-able set + the rebuilt desk; a later
+  registration clearing the release; the reaper skipping released metal; a
+  placement knocking a released metal and carving (both doors); the shift
+  ending on the wire; idempotence.
+- **UNPROVEN**, as the non-promises said: everything venue-side. No
+  release-then-knock has been seen on Modal — whether the shift's return gets
+  the container reclaimed, whether a knock boots a released container and its
+  announce lands, what the lingering costs between release and reclaim. Still
+  unmeasured: how often idle metal actually sits past 30 minutes on the gsm
+  venues; the `release` events on the fleet journal will now say.

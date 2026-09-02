@@ -3626,6 +3626,116 @@ specs; backends (local/modal/skypilot) and GPU topology are semantics-neutral.
       divide. ADR 0001 is Implemented; ADR 0003 (idle release) extends
       register_metal / reap from here.
 
+76. **IDLE METAL IS RELEASED BY THE DESK (ADR 0003).** Samarth's prompt: "if
+    nothing runs on a piece of metal for some duration (e.g. 30 min), it
+    should be automatically deallocated. it's true that the desk should own
+    this... a property of the desk, with the option to override the limit
+    upon a new metal request hitting the desk." Four questions, all answered
+    as recommended, implemented here. Release is the ACQUIRE RUNG INVERTED —
+    the one rung the desk climbs DOWN — and it is automatic for the same
+    reason a carve is: the metal is already owned, so no money and no human
+    is involved. ADR 0001's supervision loop is what makes the inverse cheap:
+    a released metal that is still deployed costs nothing, and a knock boots
+    it, re-registers it and makes it carve-able again.
+    - **THE RULE (Q1).** A metal is IDLE when no listing on it reports a
+      running tenancy, none has work IN FLIGHT at its arbiter, and no
+      listing's `admitted` counter moved since the previous observation — or
+      it holds no listings at all. `Arbiter.in_flight()` / `admitted()` (a
+      monotone count of admissions since birth, two increments beside the
+      existing in-flight bookkeeping; scheduling untouched) are reported on
+      `Host.status()`, and the desk compares the counter ACROSS TICKS. That
+      counter is the whole point of the ADR's Q1: a PURE CLIENT — a
+      measurement cron, a side evaluator — holds no tenancy, so occupancy
+      alone would release its host out from under its own sampling. TWO
+      REFINEMENTS of the ADR's wording, both stated: `in_flight` is part of
+      the busy test as well (one long admission spanning two ticks moves no
+      counter, which the ADR's own reasoning wants caught), and a listing
+      observed for the FIRST time is BUSY — metal is released on evidence of
+      idleness, never on the absence of a reading, which costs one tick after
+      a desk restart and matches Q2's accepted price.
+    - **THE CLOCK (Q2)** lives in the desk's MEMORY: `observe_idle(now)`
+      stamps `idle_since` on the first idle observation and clears it on a
+      busy one (so it measures CONTINUOUS idleness), `admitted_at` holds the
+      previous tick's counters and is rebuilt from the listings observed, and
+      neither is journaled. A rebuilt desk starts every clock again.
+    - **RELEASE.** `release(name, reason)` journals the departure FIRST (the
+      intent on the record, as `strand` writes it — a crash midway leaves
+      listings on a released metal, which the reaper cures), delists every
+      listing on the metal, tells the metal `release` over the wire, and
+      drops it from `metal_remotes` (what the fleet may CARVE) while KEEPING
+      the row in `metal` (what the fleet OWNS): `status()` gains `released`
+      and `idle_s` per metal, `from_journal` replays the event, and a LATER
+      `metal` row clears it. A silent metal is as released as it gets.
+      Idempotent. `release_idle(now)` takes what is due against
+      `idle_limit(name)` — the metal's own declared limit or the desk's
+      default (`Desk(idle_s=1800.0)`, `IDLE_S`), where None PINS.
+    - **THE DECLARATION.** `register_metal(..., idle_s=)` is THREE-VALUED, so
+      the absence of a declaration is a named value: `remote.DESK_DEFAULT`
+      (the desk's default decides), a number (this metal's limit), None (the
+      metal is pinned). The journal row carries the `idle_s` key only when
+      declared, and `declare_idle` is the one rule; the sentinel lives in
+      remote.py because desk.py imports it and never the reverse.
+    - **THE METAL'S THIRD VERB.** `release` joins carve/decarve:
+      `MetalService.release()` runs `shutdown()` (residents down the ladder),
+      empties the books and SETS THE SHIFT LATCH; `until_released()` is the
+      wait the venue's keepalive stands on (Q3), so the container is
+      reclaimed as a consequence of the DESK's decision rather than the
+      venue's own timer. Idempotent — released is a goal state, not an event.
+      `RemoteMetal.release()` is the client end. Beyond the ADR's Touched
+      list, the desk grows the same verb by hand (`Desk.serve("release")`,
+      `RemoteDesk.release`) — the sketch's "also a manual door", which an
+      operator otherwise could not reach from outside the desk container.
+    - **THE DOOR BACK (Q4).** `provision_unit` is now two attempts:
+      `carve_unit` on the carve-able metal, then `knock_released` — the first
+      released metal whose RECORDED facts (`could_hold`: devices, VRAM; a
+      released container answers no residual) could hold the unit — and
+      `carve_unit` again. `reacquire(name)` knocks and, where the reborn
+      container's own announce has not landed yet (on Modal it is a task, so
+      it is racy), REGISTERS THE ROW ITSELF from the facts and address the
+      release never forgot, which the container's announce then supersedes
+      with measured ones. `knock` now reads the plane address off the METAL
+      ROW rather than `metal_remotes` — without that a released metal could
+      never be knocked at all, since leaving `metal_remotes` is what release
+      means. What no metal, released or live, can hold is still a boot
+      instruction. I12 gains the word NEW.
+    - **THE REAPER.** `reap` sweeps FIRST (observe, then release), so the
+      probing never chases a listing the desk has just taken down; its knock
+      path SKIPS released metals — a released metal is PARKED, not silent —
+      and its reply grows `released: [...]`.
+    - **THE VENUES (UNPROVEN, all of it).** One constant per venue,
+      `IDLE_S = 1800`, in two executable positions: the desk is built with it
+      and every metal container's `scaledown_window` IS it, never shorter, so
+      the venue's timer is the BACKSTOP (Q3: the desk decides first). The
+      metal's `serve` is no longer a sleep loop but the SHIFT
+      (`await self.metal_service.until_released()`), and the duties loop
+      watches the same latch. Five metal containers over four venues (gsm-a,
+      gsm-b, dsl-a, dsl-b, modal-a100); `sweep_a100` is PINNED (`idle_s=None`)
+      because its desk and its two hand-built hosts share ONE container, so
+      releasing would be the desk ending its own shift. TWO COSTS, stated:
+      after a release the container lingers up to `scaledown_window` before
+      Modal reclaims it (one window per cls, and the window must stay long
+      for the case below), and a container woken by a KNOCK has no keepalive
+      input standing (true since ADR 0001) — the venue's window is what holds
+      it, which is exactly why that window equals the desk's own idle limit.
+    - Tests: 889 (from 876, +13). test_host: the door's two numbers.
+      test_desk (MetalService): release ends the shift and is idempotent, a
+      bare metal releases too. test_desk (IdleReleaseTest, 10): the limit on
+      a fake clock; the journal, the delist reasons and the rebuilt desk;
+      desk-level idempotence; a PINNED metal (declaration surviving the
+      journal); a pure client's traffic through a RemotePool keeping the
+      metal alive with an empty roster; the reaper's tick sweeping (first
+      tick reads, second releases); a released metal left parked by the
+      reaper; both doors back (a registration over the wire, and a knock —
+      with `boot_for` and through the plane); the unit no metal can hold.
+      test_resume.py untouched and green.
+    - UNPROVEN ON METAL: everything venue-side. No release-then-knock has
+      been seen on Modal — whether the shift's return actually gets the
+      container reclaimed, whether a knock through the plane boots a released
+      container and its announce lands, and what an A100 costs between the
+      release and the reclaim. Also unmeasured (the ADR said so): how often
+      an idle metal actually sits past 30 minutes on the gsm venues — the
+      reaper's journal will now say, since `release` events are on the record.
+
 ## Open threads (do NOT treat as settled; flag when your answer touches them)
 
 - TODO (Samarth, settled intent — future, nothing now): BUNDLE LRU EVICTION
