@@ -3,7 +3,7 @@
 | | |
 |---|---|
 | **Date** | 2026-09-01 |
-| **Status** | Proposed — Q1–Q12 answered in session 2026-09-01 and folded; Q4a, Q8a and the re-posed Q10 are open |
+| **Status** | Accepted (2026-09-01: every question answered in session and folded) |
 | **Author** | Claude Fable 5.1 (session: gsm-campaign, the ADR 0001 review) |
 | **Touches** | `runner/` (host, desk's MetalService, remote, interfaces, a new residents module), `runner/learners/`, `runner/fakes.py`, `data/stores/` (one opener), `deploy/`, `observe/` (one view, one move), `tests/` |
 | **Invariants** | I8 (multi-tenancy on both sides), I12 (a host is atomic and never reshaped), I5 (topology is semantics-neutral), I7 (the substrate is certified) |
@@ -67,6 +67,17 @@ And, answering the twelve questions of this ADR in session:
 > Q10) what are frames?
 > Q11) sure
 > Q12) sure
+
+And the three that stayed open:
+
+> Q4a: just ensure that its stored in a way where runs can be auto-restartable.
+> as long as that's satisfied, you can do what you want
+>
+> Q8a: sure, that's fine
+>
+> Q10: lets just do JSON.
+>
+> i think we're ready, please implement
 
 ## Context / problem
 
@@ -194,7 +205,13 @@ after the pin IS the partition's first device — and the capacity knobs arrive
 as typed `EngineBuild` / `LearnerBuild` records. The venue contributes exactly
 two JSON-safe values at bring-up: those records and a `StoreAddress` the child
 opens its own store from. No callable crosses to a child, and the same
-(regime, partition, build) builds the same resident on every venue.
+(regime, partition, build) builds the same resident on every venue. The
+recipe lives on the metal and is RE-DECLARED at every bring-up from the
+deploy's own constants, so a restarted container carves the same residents
+with no human step; it is also journaled — on the `metal` registration row
+and on every `host-up` event — so a rebuilt desk and the observer can say
+what recipe a host was built from (Q4a: runs stay auto-restartable through
+resubmit + recarve, and the record of how is durable).
 
 **The door speaks the same verbs to both kinds (Q8).** `sleep`/`wake` are door
 verbs for engines AND learners. An engine's are vLLM's level-1 sleep, as today.
@@ -633,7 +650,13 @@ build record, so the DEMAND side must know engine capacity — either the spec
 grows the knobs (into identity) or the campaign layer invents them (a third
 place, unrecorded).
 
-> **Samarth:**
+> **Samarth:** just ensure that its stored in a way where runs can be
+> auto-restartable. as long as that's satisfied, you can do what you want
+
+*Folded:* the metal re-declares its recipe from the deploy's constants at
+every bring-up, so the recarve a restart goes through (Q7) rebuilds the same
+residents unattended; the recipe is journaled on the `metal` row and every
+`host-up` event so the record of how is durable.
 
 **Q5. The engine resident's transport must multiplex.** An engine serves many
 in-flight requests at once — a Generator's `sample_tokens` and a Scorer's
@@ -733,7 +756,7 @@ is a stub that reports `sleeps: false`; alternating hosts keep two base copies
 resident; ADR 0001's Q7 needs a sum rule after all for the learner-bearing
 case.
 
-> **Samarth:**
+> **Samarth:** sure, that's fine
 
 **Q9. The teardown ladder moves.** `Teardown`, `stop`, `end_the_children`,
 `escalate` (`ranks.py:79`, `:227`, `:279`, `:294`) are the repo's one bounded
@@ -770,7 +793,7 @@ wire.
 
 > **Samarth:** what are frames?
 
-> **Samarth (with the definition above):**
+> **Samarth (with the definition above):** lets just do JSON.
 
 **Q11. Real child processes in the fakes suite.** The suite is stdlib-only and
 ~5 s. `FakeEngine` and `FakeLearner` are stdlib and picklable by module
