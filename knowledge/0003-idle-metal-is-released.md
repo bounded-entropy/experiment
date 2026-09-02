@@ -3,7 +3,7 @@
 | | |
 |---|---|
 | **Date** | 2026-09-01 |
-| **Status** | Proposed |
+| **Status** | Accepted (2026-09-01) — all four questions answered as recommended |
 | **Author** | Claude Fable 5.1 (session: gsm-campaign, during ADR 0001's implementation) |
 | **Touches** | `runner/desk.py` (the desk's idle policy, `release`), `runner/remote.py` (one metal verb), `runner/host.py` (two status fields), `deploy/` (per-metal `idle_s`, the venue's scaledown rule), `tests/` |
 | **Invariants** | I12 (acquire is a human's — this ADR bears on its inverse and on re-acquire) |
@@ -20,6 +20,11 @@
 > this shouldnt be too bad to implement. could you write a quick ADR for it
 > (with only a small number of questions since this is a simple change), and we
 > can move forth?
+
+And, answering in session:
+
+> i agree with the four question resolution you had from ADR 0003. could you
+> implement … or rather, ask an async opus subagent to implement
 
 ## Context / problem
 
@@ -154,7 +159,8 @@ If the other branch: tenancies only — simpler, no status change, and a
 measurement pass or a long evaluation on a bare inference host is cut off by
 the sweep.
 
-> **Samarth:**
+> **Samarth:** agree — "i agree with the four question resolution you had"
+> (idle = no running tenancy AND no admitted work since the previous tick (the `admitted` counter on `status()`))
 
 **Q2. Where does the idle clock live?** In the desk's memory, or journaled.
 Recommendation: **memory.** `idle_since` per metal is set on the first idle
@@ -166,7 +172,8 @@ If the other branch: an `idle` mark per metal in the journal, cleared by a
 `busy` mark — exact across restarts, and two new event types the observer
 must learn.
 
-> **Samarth:**
+> **Samarth:** agree — "i agree with the four question resolution you had"
+> (the clock lives in the desk's memory; a restart costs at most one tick)
 
 **Q3. What does release do to the container, and who owns the timer?** Today
 the spawned shift keeps the container alive and the venue's
@@ -182,7 +189,8 @@ If the other branch: the venue's timer stays shorter and reclaims idle metal
 on its own; the desk then only cleans up after it (0001 Q5's corpses), and
 "the desk owns this" is a description rather than a rule.
 
-> **Samarth:**
+> **Samarth:** agree — "i agree with the four question resolution you had"
+> (release ends the shift so the venue reclaims the container; deploys set the venue's scaledown no shorter than the desk's limit)
 
 **Q4. Is a released metal re-acquired automatically?** I12 says acquire is a
 human's, because new metal costs money.
@@ -197,7 +205,8 @@ If the other branch: a released metal is a boot instruction like any other
 miss, and every idle period costs a human `up` afterward — the loop this ADR
 exists to close stays open at its second half.
 
-> **Samarth:**
+> **Samarth:** agree — "i agree with the four question resolution you had"
+> (a released metal is re-acquired by knock; I12 gains the word NEW)
 
 ## Outcome
 
