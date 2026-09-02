@@ -1,19 +1,22 @@
 """Two A100s the DESK owns end to end, and the DSL campaign running on them.
 
     MODAL_PROFILE=yu-masala-workspace modal deploy deploy/dsl_a100.py
-    ... run deploy/dsl_a100.py::up            # both metals register their planes
+    ... run deploy/dsl_a100.py::up            # boot both metals; each registers itself
     ... run deploy/dsl_a100.py::campaign      # all twelve arms through the desk
     ... run deploy/dsl_a100.py::status        # listings, residuals, roster
     ... run deploy/dsl_a100.py::measure_now   # one measurement pass, by hand
-    ... run deploy/dsl_a100.py::stop --call-id <id>    # kill one metal's shift
+    ... run deploy/dsl_a100.py::stop --call-id <id>    # release one metal
 
 THE VENUE: the desk is its own warm CPU container; each A100 is its OWN
 container wearing ONLY a MetalService over ONE device — two single-GPU
 metals (dsl-a, dsl-b) rather than one two-GPU worker, because Modal
 schedules 1xA100 workers readily while gpus=2 workers queue, and the stack
 never needed colocation: the anchor dials the serve pool over the wire (the
-proven OPD shape). The first submit carves the serve host on dsl-a and the
-learner host on dsl-b; the other eleven join them: one engine, one learner,
+proven OPD shape). Each metal MEASURES its card and REGISTERS ITSELF at
+bring-up (ADR 0001); a preempted container re-registers at the same plane
+address and the desk reaps its corpses and reroutes their runs. The first
+submit carves the serve host (SERVE_GB) on dsl-a and the learner host
+(LEARN_GB) on dsl-b; the other eleven join them: one engine, one learner,
 twelve tenants.
 
 THE EXPERIMENT: two invented tool DSLs (the Stamp Office and the Glyph
@@ -86,8 +89,11 @@ EVAL_SAMPLES = 2
 EVAL_TEMPERATURE = 0.2
 RUNS_KEY = "measurements/dsl/runs.json"    # {run_id: {...}} — the cron's list
 
-SERVE_FRACTION = 0.85
-LEARN_FRACTION = 0.85
+# Memory in GB, TOTAL per member (one shard each): most of a 40 GB card
+# each, so the two hosts land on two metals. The desk books GB; the metal
+# converts against the card it measured (fraction_for_gb, ADR 0001)
+SERVE_GB = 34.0
+LEARN_GB = 34.0
 
 # TWO single-GPU metals: name -> (Modal cls, address scheme). Placement's
 # ladder does the rest — the serve unit carves on dsl-a (first fit), the
@@ -235,17 +241,18 @@ class Desk:
 # ---------------------------------------------------------------------------
 
 def bring_up_metal(name: str):
-    """One metal container's whole state: its books, its factories, its
-    router — shared by MetalA and MetalB, parameterized by the metal name."""
+    """One metal container's whole state: its books, its recipe, its router
+    — shared by MetalA and MetalB, parameterized by the metal name. The card
+    is MEASURED off the device (ADR 0001, Q6), never typed."""
     from rlstack import ModalVolumeStore
     from rlstack.policy.siteschema import hf_schema
-    from rlstack.runner.desk import Metal as OwnedMetal, MetalService
+    from rlstack.runner.desk import MetalService
     from rlstack.runner.residents import Builds, EngineBuild, LearnerBuild
 
     scheme = METALS[name]["scheme"]
     store = ModalVolumeStore("/store", volume=store_volume, locator=STORE)
     service = MetalService(
-        OwnedMetal(name, "A100-40GB", 1, 40.0), store=store,
+        MetalService.measure(name), store=store,
         # the recipe (ADR 0002): what a partition cannot tell you, typed. The
         # class, base, width, device and fraction follow from the carve, and
         # every resident is a child process pinned and capped to its partition
@@ -260,26 +267,36 @@ def bring_up_metal(name: str):
         # routes may point at the OTHER metal's pools: the scheme routes the
         # frame to the right container — the OPD three-host shape
         transport_for=lambda address: MetalTransport(address))
-    print(f"[{name}] up, bare; residual {service.residual()}")
+    print(f"[{name}] up, bare: {service.metal.gpu} x{service.metal.devices} "
+          f"at {service.metal.vram_gb:g} GB; residual {service.residual()}")
     return store, service
 
 
-async def metal_shift(name: str, service) -> None:
-    """The standing shift shared by both metals: register the plane, then
-    hold the door open, a stats task following every carved host."""
-    import asyncio
-
+async def announce(name: str, service) -> None:
+    """The metal REGISTERS ITSELF the moment it exists (ADR 0001, Q5a):
+    measured card, plane address, recipe. A reborn container announces the
+    same way and the desk reaps the previous generation's corpses and
+    retries their runs; a name taken at ANOTHER address is refused, loudly."""
     from rlstack.runner.remote import RemoteDesk
 
-    scheme = METALS[name]["scheme"]
-    desk = RemoteDesk(DeskTransport())
+    metal = service.metal
+    told = await RemoteDesk(DeskTransport()).register_metal(
+        metal.name, metal.gpu, metal.devices, metal.vram_gb,
+        f"{METALS[name]['scheme']}://metal", builds=service.builds.row())
+    print(f"[{name}] registered on the metal plane: {json.dumps(told)}")
+
+
+async def metal_duties(name: str, service) -> None:
+    """The metal's own duties on its own loop, from bring-up (ADR 0001,
+    Q5b), shared by both metals: announce, then a stats task per carved host
+    and the commit tick. Nothing depends on a spawned input surviving a
+    preempt."""
+    import asyncio
+
     try:
-        await desk.register_metal(name, "A100-40GB", 1, 40.0,
-                                   f"{scheme}://metal",
-                                   builds=service.builds.row())
-        print(f"[{name}] registered on the metal plane")
-    except Exception as taken:
-        print(f"[{name}] not re-registered: {taken}")
+        await announce(name, service)
+    except Exception as refused:
+        print(f"[{name}] REGISTRATION REFUSED: {refused}", flush=True)
     stats: dict[str, asyncio.Task] = {}
     tick = 0
     try:
@@ -315,8 +332,14 @@ def roster_of(store, service) -> dict:
 @modal.concurrent(max_inputs=64)
 class MetalA:
     @modal.enter()
-    def bring_up(self) -> None:
+    async def bring_up(self) -> None:
+        import asyncio
+
         self.store, self.metal_service = bring_up_metal("dsl-a")
+        # an async enter: the announce is a task, never a blocking wait on
+        # the desk (whose reply may carve on THIS container)
+        self.duties = asyncio.create_task(metal_duties("dsl-a",
+                                                       self.metal_service))
 
     @modal.method()
     async def host(self, address: str, verb: str, payload: dict) -> dict:
@@ -345,10 +368,18 @@ class MetalA:
 
     @modal.method()
     async def serve(self) -> None:
-        await metal_shift("dsl-a", self.metal_service)
+        """The KEEPALIVE only: an input in flight holds the container open
+        while its hosts carry work, and a spawned input reschedules onto a
+        fresh container after a preempt — where bring_up has already
+        registered and started the duties."""
+        import asyncio
+
+        while True:
+            await asyncio.sleep(60)
 
     @modal.exit()
     def bring_down(self) -> None:
+        self.duties.cancel()
         # every resident down the ladder (ADR 0002): a learner's chorus and
         # an engine's core end with the container, bounded
         for teardown in self.metal_service.shutdown():
@@ -362,8 +393,14 @@ class MetalA:
 @modal.concurrent(max_inputs=64)
 class MetalB:
     @modal.enter()
-    def bring_up(self) -> None:
+    async def bring_up(self) -> None:
+        import asyncio
+
         self.store, self.metal_service = bring_up_metal("dsl-b")
+        # an async enter: the announce is a task, never a blocking wait on
+        # the desk (whose reply may carve on THIS container)
+        self.duties = asyncio.create_task(metal_duties("dsl-b",
+                                                       self.metal_service))
 
     @modal.method()
     async def host(self, address: str, verb: str, payload: dict) -> dict:
@@ -390,10 +427,18 @@ class MetalB:
 
     @modal.method()
     async def serve(self) -> None:
-        await metal_shift("dsl-b", self.metal_service)
+        """The KEEPALIVE only: an input in flight holds the container open
+        while its hosts carry work, and a spawned input reschedules onto a
+        fresh container after a preempt — where bring_up has already
+        registered and started the duties."""
+        import asyncio
+
+        while True:
+            await asyncio.sleep(60)
 
     @modal.exit()
     def bring_down(self) -> None:
+        self.duties.cancel()
         # every resident down the ladder (ADR 0002): a learner's chorus and
         # an engine's core end with the container, bounded
         for teardown in self.metal_service.shutdown():
@@ -522,7 +567,7 @@ def campaign_specs(store) -> tuple[dict, dict]:
     """All twelve arms as values plus the measurement's map:
     ({family}-{arm} -> ExperimentSpec, {family: eval uri})."""
     from rlstack import (
-        AlgoSpec, ExperimentSpec, GenSpec, GpuConfig, GpuGroup, GpuSet,
+        AlgoSpec, ExperimentSpec, GenSpec, GpuConfig, HostSpec,
         LearnerMember, OptimSpec, PolicySpec, PoolMember, SamplingSpec,
         Schedule, Seeds, lora, plora,
     )
@@ -556,11 +601,9 @@ def campaign_specs(store) -> tuple[dict, dict]:
                                               overrides=overrides),
                               schedule=Schedule(microbatch_tokens=4096,
                                                 max_policy_lag=lag)),
-                gpu_config=GpuConfig(groups=(
-                    GpuGroup(gpus=GpuSet(n=1), members=(
-                        PoolMember("main", tp=1, fraction=SERVE_FRACTION),)),
-                    GpuGroup(gpus=GpuSet(n=1), members=(
-                        LearnerMember(fsdp=1, fraction=LEARN_FRACTION),)))),
+                gpu_config=GpuConfig(hosts=(
+                    HostSpec((PoolMember("main", tp=1, vram_gb=SERVE_GB),)),
+                    HostSpec((LearnerMember(fsdp=1, vram_gb=LEARN_GB),)))),
                 seeds=Seeds(master=SEED))
 
         specs[f"{family}-grpo"] = arm(
@@ -656,7 +699,7 @@ async def measure() -> None:
     desk = RemoteDesk(DeskTransport())
     placed = await desk.resolve([Demand(
         pool="main", capability="inference", base=BASE, shape=1,
-        memory=SERVE_FRACTION, group=0, sharing="concurrent")])
+        vram_gb=SERVE_GB, group=0)])
     if not placed.get("placed"):
         print(f"[measure] no pool to measure through: {placed}")
         return
@@ -719,7 +762,8 @@ async def reaper() -> None:
 
 @app.local_entrypoint()
 def up() -> None:
-    """Start BOTH metals' shifts and wait until the desk holds both planes."""
+    """Boot BOTH metals (spawning each keepalive is the knock) and wait until
+    both have registered themselves with the desk."""
     from rlstack.runner.remote import RemoteDesk
 
     for name, row in METALS.items():

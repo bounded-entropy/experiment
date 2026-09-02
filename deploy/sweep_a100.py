@@ -63,8 +63,11 @@ GROUPS_PER_WAVE = 2
 GROUP_SIZE = 8
 MAX_TOKENS = 512
 
-SERVE_FRACTION = 0.42
-LEARN_FRACTION = 0.50
+# Memory in GB, TOTAL per member (one shard each): the spec declares GB
+# (ADR 0001); the two hand-built partitions below take the fraction of the
+# MEASURED card those GB are (fraction_for_gb, the one crossing)
+SERVE_GB = 33.6
+LEARN_GB = 40.0
 
 SERVE_ADDRESS = "sweep://serve"      # opaque strings: the desk and the hosts
 LEARN_ADDRESS = "sweep://train"      # never learn what they mean
@@ -97,8 +100,8 @@ def spec_for(arm: dict, factors: dict[str, str], store):
     """One arm as one ExperimentSpec: the same one-task plans, the same
     schedule, the bank and optimizer the arm names."""
     from rlstack import (
-        AlgoSpec, ExperimentSpec, GenSpec, GpuConfig, GpuGroup, GpuSet,
-        GroupPlan, LearnerMember, OptimSpec, Plans, PolicySpec, PoolMember,
+        AlgoSpec, ExperimentSpec, GenSpec, GpuConfig, GroupPlan, HostSpec,
+        LearnerMember, OptimSpec, Plans, PolicySpec, PoolMember,
         RunPlan, Sample, SamplingSpec, Schedule, Seeds, WavePlan, WaveRef,
         encode, lora, plora,
     )
@@ -134,11 +137,9 @@ def spec_for(arm: dict, factors: dict[str, str], store):
                                       weight_decay=0.0, overrides=overrides),
                       schedule=Schedule(microbatch_tokens=512,
                                         max_policy_lag=1)),
-        gpu_config=GpuConfig(groups=(
-            GpuGroup(gpus=GpuSet(n=1), members=(
-                PoolMember("main", tp=1, fraction=SERVE_FRACTION),)),
-            GpuGroup(gpus=GpuSet(n=1), members=(
-                LearnerMember(fsdp=1, fraction=LEARN_FRACTION),)))),
+        gpu_config=GpuConfig(hosts=(
+            HostSpec((PoolMember("main", tp=1, vram_gb=SERVE_GB),)),
+            HostSpec((LearnerMember(fsdp=1, vram_gb=LEARN_GB),)))),
         seeds=Seeds(master=arm["seed"]))
 
 
@@ -161,7 +162,7 @@ class SweepMetal:
         from rlstack import ModalVolumeStore
         from rlstack.policy.siteschema import hf_schema
         from rlstack.runner.engines.vllm_engine import VllmEngine
-        from rlstack.runner.desk import Desk
+        from rlstack.runner.desk import Desk, MetalService, fraction_for_gb
         from rlstack.runner.host import Host, Partition, Regime
         from rlstack.runner.learners.torch_learner import TorchLearner
         from rlstack.runner.remote import HostService, LocalTransport, RemoteHost
@@ -171,21 +172,26 @@ class SweepMetal:
         self.factors = ensure_factors(self.store)
         ensure_tasks(self.store)
 
+        # the card is MEASURED, never typed, and the two hand-built partitions
+        # own the fraction of it their GB are (ADR 0001)
+        metal = MetalService.measure("modal-a100")
+        serve_fraction = fraction_for_gb(SERVE_GB, metal)
+        learn_fraction = fraction_for_gb(LEARN_GB, metal)
         # serves BOTH adapter types; plora's demands are the wider sizing and
         # are folded last, which the serves order states on purpose
-        engine = VllmEngine(BASE, tp=1, gpu_memory_utilization=SERVE_FRACTION,
+        engine = VllmEngine(BASE, tp=1, gpu_memory_utilization=serve_fraction,
                             max_model_len=1536, max_bundles=64, max_rank=16,
                             max_members=MEMBERS, cas_get=self.store.cas_get,
                             serves=("lora", "plora"))
         self.serve_host = Host(
             "sweep-serve", engines=(engine,), learner=None, store=self.store,
-            partition=Partition("modal-a100", (0,), SERVE_FRACTION, "A100-80GB"),
+            partition=Partition(metal.name, (0,), serve_fraction, metal.gpu),
             regimes=(Regime("serve-tp1", "inference", BASE, 1),))
         transports = {
             SERVE_ADDRESS: LocalTransport(HostService(self.serve_host))}
         self.learn_host = Host(
             "sweep-train", engines=(), learner=TorchLearner(), store=self.store,
-            partition=Partition("modal-a100", (0,), LEARN_FRACTION, "A100-80GB"),
+            partition=Partition(metal.name, (0,), learn_fraction, metal.gpu),
             regimes=(Regime("train-fsdp1", "training", BASE, 1),),
             schema_for=hf_schema,
             transport_for=lambda address: transports[address])

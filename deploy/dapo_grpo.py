@@ -78,7 +78,7 @@ def spec_for(store, train_tasks, eval_tasks, updates, master, init=None):
     """The experiment as one value. `init` starts it from another run's
     sealed policy — a birth fact, consumed once at Phase 1 and never again."""
     from rlstack import (AlgoSpec, ExperimentSpec, GenSpec, GpuConfig,
-                         GpuGroup, GpuSet, LearnerMember, OptimSpec, Plans,
+                         HostSpec, LearnerMember, OptimSpec, Plans,
                          PolicySpec, PoolMember, SamplingSpec, Schedule, Seeds,
                          encode, lora)
     from rlstack.data.tasks import load_tasks
@@ -102,9 +102,10 @@ def spec_for(store, train_tasks, eval_tasks, updates, master, init=None):
                       # single document was longer than the budget).
                       schedule=Schedule(microbatch_tokens=512, max_policy_lag=1)),
         init=init,
-        gpu_config=GpuConfig(groups=(
-            GpuGroup(gpus=GpuSet(n=2), members=(PoolMember("main", tp=2),)),
-            GpuGroup(gpus=GpuSet(n=2), members=(LearnerMember(fsdp=2),)))),
+        # two dedicated hosts, a whole device per shard (vram_gb None)
+        gpu_config=GpuConfig(hosts=(
+            HostSpec((PoolMember("main", tp=2),)),
+            HostSpec((LearnerMember(fsdp=2),)))),
         seeds=Seeds(master=master))
 
 
