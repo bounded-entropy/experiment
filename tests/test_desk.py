@@ -1583,7 +1583,9 @@ class IdleReleaseTest(DeskFixture):
                                trains=True)
         desk = self.desk_with_metal("fake-metal")
         remote = RemoteDesk(LocalTransport(Campaigns(desk)))
-        self.assertTrue(go(remote.release("fake-metal", reason="by hand")))
+        told = go(remote.release("fake-metal", reason="by hand"))
+        self.assertEqual((told["released"], told["metal"], told["told"]),
+                         (True, "fake-metal", True))
         self.transports["fleet://ghost"] = ReapTest.Dead()
         desk.list_host("ghost", living.regimes, "fleet://ghost",
                        metal="fake-metal")

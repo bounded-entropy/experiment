@@ -348,7 +348,9 @@ the *members* are Listings — "fleet" names none of those three on its own.
 
 **Metal** — registered owned hardware the fleet may carve: a name, a GPU kind, a
 device count, and one device's VRAM in GB. Registering Metal *is* the acquire
-rung executed. On a real venue the row is **measured** — `MetalService.measure`
+rung executed — and re-registering is how RELEASED metal comes back (ADR
+0003): a released row stays inventory the desk owns and may knock, but not
+carve. On a real venue the row is **measured** — `MetalService.measure`
 reads the card off the device at bring-up, never typed (ADR 0001, Q6) — and a
 `Metal` stays a plain record so tests construct one without torch.
 `rlstack/runner/desk.py`
@@ -451,7 +453,10 @@ the measured facts (and a new recipe, if carried), its corpses are reaped by
 probe with zero retries ("metal re-registered"), and every registration event
 retries the parked queue — `reroute(park=True)`, which is resume. A known
 name at another address is a collision, refused. A host dying alone stays a
-human's resubmit.
+human's resubmit. THE DESK ALSO RELEASES ITS IDLE METAL (ADR 0003): the same
+tick observes every carve-able metal and releases what has been idle past its
+limit — the acquire rung inverted, automatic because the metal is already
+owned — and the next placement that needs it knocks it back.
 `rlstack/runner/desk.py` (`Desk`, `Listing`), `rlstack/runner/remote.py` (`RemoteDesk`)
 
 **Campaign layer** — where SPECS meet the fleet, the only such place:
@@ -470,8 +475,11 @@ Metal's BOOKS IN GB (built partitions — hand-built hosts enter via
 `adopt_born` — plus pending bookings), and the verbs that create and free
 hosts: `carve` (BOOKS its GB synchronously before the build's first await, so
 carves never double-promise; a failed build releases), `decarve` (every
-resident down the ladder, the GB returns to residual), `residual` / `describe`
-(the desk's deduction feed). `build` is where THE ONE CROSSING happens:
+resident down the ladder, the GB returns to residual), `release` (every host
+down at once AND the SHIFT ended — `until_released()` is the wait the venue's
+keepalive stands on, so the container is reclaimed as a consequence of the
+desk's decision; idempotent, because released is a goal state), `residual` /
+`describe` (the desk's deduction feed). `build` is where THE ONE CROSSING happens:
 `fraction_for_gb` turns the per-device GB into the partition's fraction
 against the card this metal measured, and a slice larger than one device
 raises the acquire rung by name, never clamps. It holds a RECIPE (**Builds**)
@@ -539,6 +547,10 @@ whoever owns the metal (a Host makes its own unless handed one) and shared by
 every experiment admitted to it. It governs its owner's partition, not the
 device — several sub-GPU hosts on one device each admit independently.
 Scheduling policy lives here and is deliberately outside run identity (I5).
+The door is also the one place that knows what is running and what passed
+through, so it COUNTS both: `in_flight()` (admitted and not yet left) and
+`admitted()` (monotone since birth), reported on `Host.status()` and read
+across ticks by the desk's idle rule (ADR 0003).
 `rlstack/runner/arbiter.py`
 
 **Resident** — something that occupies evictable GPU memory (an engine, a
@@ -763,8 +775,39 @@ One currency and one decider per rung (I12):
   the request. The metal BOOKS the GB before it builds (MetalService), so
   carves never double-promise, and converts to a fraction once at build;
   journaled and listed at the desk, the single writer.
-- **acquire / boot** — nothing fits. New metal costs money, so the desk
-  answers with boot instructions and a human executes them.
+- **acquire / boot** — nothing fits. NEW metal costs money, so the desk
+  answers with boot instructions and a human executes them. Metal the fleet
+  ALREADY OWNS is not new: a released one is re-acquired by knock, no human
+  (ADR 0003, Q4).
+- **idle** — a metal nothing has run on: no listing on it reports a running
+  tenancy, none has work IN FLIGHT at its arbiter, and no listing's `admitted`
+  counter moved since the previous observation (ADR 0003, Q1 — the counter is
+  what sees a PURE CLIENT, whose traffic holds no tenancy at all) — or the
+  metal holds no listings. A listing observed for the FIRST time is busy:
+  idleness is read from evidence, never from the absence of a reading.
+  `observe_idle(now)` is one tick — the first idle observation stamps
+  `idle_since` and a busy one clears it, so the clock measures CONTINUOUS
+  idleness — and it lives in the desk's MEMORY, so a restart costs one tick.
+- **release** — ACQUIRE'S INVERSE, and the one rung the desk climbs DOWN.
+  Metal idle past its limit (`Desk(idle_s=)`, default 1800 s, overridden per
+  metal at registration — None there PINS it, never released) has every
+  listing on it DELISTED, is told `release` on the metal plane (residents down
+  the ladder, books emptied, THE SHIFT ENDED so the venue reclaims the
+  container), and is JOURNALED. The row stays as INVENTORY — what the fleet
+  owns — and leaves the carve-able set, so `status()` says released and the
+  reaper skips it: a released metal is PARKED, not silent. A silent metal is
+  as released as it gets. The sweep rides the reaper's tick, before the
+  probing; `release` is a desk verb by hand too, for an operator who knows a
+  metal is done sooner. The venue's own scaledown is set no shorter than the
+  desk's limit, so the desk decides first (ADR 0003, Q3).
+- **re-acquire (knock)** — the door back, with no human in it (ADR 0003, Q4):
+  a placement nothing carve-able holds KNOCKS the first released metal whose
+  RECORDED facts (devices, VRAM) could hold the unit — a released container
+  answers no residual — and the reborn container registers itself, or the desk
+  re-registers the row it kept where that announce has not landed yet. The
+  registration supersedes the release and the carve proceeds in the same
+  breath. What no metal, released or live, can hold is still a boot
+  instruction.
 - **decommission** — carve's inverse, client-asked: decarve at the host's
   metal (engine down, its GB back to residual) plus delist, one desk verb.
   Refused with the running work NAMED when anything lives on or routes
@@ -784,7 +827,9 @@ One currency and one decider per rung (I12):
   journals it PARKED with the boot instructions; the ordinary campaign
   resubmit revives it, same run_id. `placements()` is the archive as a
   read: the latest binding per run_id.
-- **reap / recontinue** — the supervisor's tick (ADR 0001, Q5–Q5d): probe
+- **reap / recontinue** — the supervisor's tick (ADR 0001, Q5–Q5d): SWEEP
+  for idle metal first (observe, then release what is due — ADR 0003, so the
+  probing never chases a listing the desk has just taken down); probe
   every listing; retry the silent; conclude what stays silent (decarve where
   the metal answers, delist "reaped"); STRAND the unfinished runs the reaped
   hosts carried — journaled `parked` BEFORE any move, so a desk that dies

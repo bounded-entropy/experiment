@@ -139,10 +139,15 @@ Placement climbs a ladder with one currency and one decider per rung: JOIN
 sizes are carve hints, ignored once the weights live), CARVE (from RESIDUAL
 only — capacity no partition owns, booked in GB and converted to the
 partition's fraction once, at the metal that measured its card — automatic
-because journaled; births a new host, never reshapes one), ACQUIRE (new
+because journaled; births a new host, never reshapes one), ACQUIRE (NEW
 metal = money = a human; a metal that dies and comes back is the desk's to
-re-register and recontinue, ADR 0001). A multi-regime host ALTERNATES its
-regimes on its own arbiter group — one host wearing masks, never two hosts
+re-register and recontinue, ADR 0001, and metal the fleet ALREADY OWNS is
+re-acquired by a knock with no human in it, ADR 0003). RELEASE is acquire's
+inverse and the one rung the desk climbs DOWN: metal nothing has run on for
+`idle_s` is delisted, told `release` (residents down, the shift ended so the
+venue reclaims the container) and kept as inventory the next placement may
+knock awake.
+A multi-regime host ALTERNATES its regimes on its own arbiter group — one host wearing masks, never two hosts
 coordinating — so a multi-member HostSpec places onto exactly one host. The
 learner is never remote: the runner goes to
 the learner's host and reaches every other partition through RemotePools
