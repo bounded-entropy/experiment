@@ -57,7 +57,7 @@ export async function drawFleet() {
          asOf: fleet.now, freshS: 60}));
   }
   const table = el("table", {}, "<tr><th></th><th>host</th><th>engines</th><th>regimes</th>"
-      + "<th>partition</th><th>tenants</th><th>boots</th><th>last seen</th></tr>");
+      + "<th>partition</th><th>residents</th><th>tenants</th><th>boots</th><th>last seen</th></tr>");
   for (const h of fleet.hosts) {
     const row = el("tr", {});
     row.append(el("td", {}, pulseDot(h.pulse, fleet.now)));
@@ -68,6 +68,10 @@ export async function drawFleet() {
     row.append(el("td", {}, h.partition
         ? esc(`${h.partition.metal ?? h.partition.gpuset} [${(h.partition.devices || []).join(",")}] `
               + `mem ${h.partition.memory}`)
+        : "<span class='k'>—</span>"));
+    // the processes the host was born with (ADR 0002): one per regime, label + pid
+    row.append(el("td", {class: "k"}, (h.residents || []).length
+        ? h.residents.map(r => esc(`${r.label} · pid ${r.pid}`)).join("<br>")
         : "<span class='k'>—</span>"));
     const stalled = h.tenancy.filter(t => t.status === "stalled").length;
     const active = h.running.length - stalled;

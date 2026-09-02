@@ -11,7 +11,7 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-from rlstack.data.stores.base import Store
+from rlstack.data.stores.base import Store, StoreAddress
 
 
 class LocalStore(Store):
@@ -21,6 +21,9 @@ class LocalStore(Store):
 
     def describe(self) -> str:
         return str(self.root)
+
+    def address(self) -> StoreAddress:
+        return StoreAddress("local", str(self.root), self.describe())
 
     def path_of(self, key: str) -> Path:
         """The on-disk path for a key (for tools and tests)."""

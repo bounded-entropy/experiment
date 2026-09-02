@@ -150,6 +150,30 @@ def postdata_part_key(run_dir: str, update: int, producer: str) -> str:
     return f"{run_dir}/postdata/{update:06d}.{producer}.json"
 
 
+@dataclass(frozen=True)
+class StoreAddress:
+    """Where a store IS, as a value: which backend, which root, which locator.
+
+    A resident (runner/residents.py) is a child process of the metal and must
+    open the store the metal opened without being handed a live object —
+    nothing live crosses a spawn. This is the JSON-safe handle it opens from;
+    `open_store` (address.py) is the one place backends are known by name.
+    """
+
+    backend: str                # "local" | "modal_volume" — one file per backend
+    root: str                   # the directory or mount
+    locator: str                # how the store describes itself to outsiders
+
+    def row(self) -> dict[str, str]:
+        return {"backend": self.backend, "root": self.root,
+                "locator": self.locator}
+
+    @classmethod
+    def from_row(cls, row: Mapping[str, Any]) -> "StoreAddress":
+        return cls(backend=str(row["backend"]), root=str(row["root"]),
+                   locator=str(row["locator"]))
+
+
 class Store(ABC):
     """The key tree and its orchestration over a backend's six byte verbs."""
 
@@ -302,6 +326,14 @@ class Store(ABC):
         """Where this store's data lives, for journals and CLIs — a path,
         a bucket, a mount. Backends override; the class name is the floor."""
         return type(self).__name__
+
+    def address(self) -> StoreAddress:
+        """This store as a value a child process can reopen it from. Each
+        backend answers with its own name; the base refuses, so a backend that
+        forgot cannot be reopened by accident."""
+        raise NotImplementedError(
+            f"{type(self).__name__} has no StoreAddress: a backend a resident "
+            f"may reopen must say how (data/stores/address.py)")
 
     # ---- read-only peeks (for observers: never attach, never mutate) --------
 

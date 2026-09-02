@@ -107,6 +107,10 @@ def hosts_data(roots: Sequence[Store | Root]) -> list[dict]:
             "journal_store": root.store.describe(),
             "engines": ups[-1].get("engines", []) if ups else [],
             "partition": ups[-1].get("partition") if ups else None,
+            # the processes the host was born with (ADR 0002): label + pid
+            # off the last host-up, so "which residents are living" reads
+            # off the journal without a probe
+            "residents": ups[-1].get("residents", []) if ups else [],
             "boots": len(ups),
             "first_seen": events[0].get("t") if events else None,
             "last_seen": events[-1].get("t") if events else None,
@@ -124,6 +128,10 @@ def render_hosts(roots: Sequence[Store | Root]) -> str:
         lines.append(f"host {qualified(h['folder'], h['host'])}")
         lines.append(f"  metal   : {_metal(h['partition'])}")
         lines.append(f"  engines : {', '.join(h['engines']) or '?'}")
+        if h["residents"]:
+            lines.append("  residents: " + ", ".join(
+                f"{r.get('label', '?')} (pid {r.get('pid', '?')})"
+                for r in h["residents"]))
         lines.append(f"  journal : {h['journal_store']}")
         lines.append(f"  seen    : first {_when(h['first_seen'])}  last "
                      f"{_when(h['last_seen'])}  ({h['boots']} boot"

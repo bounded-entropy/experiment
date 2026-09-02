@@ -359,8 +359,11 @@ ids). Demand, never a provider name — the spec says what, placement says where
 **Partition** — the irreducible carved share of metal a host is born onto:
 `metal` (the registered Metal's NAME it was carved from — never a GpuSet, which
 is demand), the GPU kind, the device indices, and the memory fraction owned on
-each. Memory partitions honestly; SMs still time-share across partition
-boundaries, which is a stated cost, not a hidden one.
+each. Enforced PER RESIDENT PROCESS (ADR 0002): the devices become that
+process's CUDA_VISIBLE_DEVICES, the fraction is vLLM's reservation for an
+engine and torch's allocator cap for a learner. Memory partitions honestly; SMs
+still time-share across partition boundaries, which is a stated cost, not a
+hidden one.
 `rlstack/runner/host.py`
 
 **Regime** — one `capability` a host can wear: inference (an engine built at
@@ -374,7 +377,10 @@ and deliberately two words: the Partition is the RESOURCE fact (what share of
 what metal), the Host is the SERVICE wearing it (arbiter, engines/learner,
 roster) — the fleet plane speaks partitions, the workload plane speaks hosts.
 It owns its engines, at most
-ONE multi-tenant learner, its arbiter, and its journal store. One regime =
+ONE multi-tenant learner, its arbiter, and its journal store — and since ADR
+0002 those engines and that learner are PROCESSES (residents) it holds as
+proxies (`RemotePool`, `RemoteLearner`); the Host itself is the DOOR — arbiter,
+roster, runner, journal — in the metal process. One regime =
 dedicated; several = it ALTERNATES them on its own arbiter group, one host
 wearing masks rather than two hosts coordinating. `solo` is one more birth
 fact: this partition serves ONE experiment at a time — I8 promises tenants
@@ -432,11 +438,30 @@ carve: the container that owns a device wears it by default. One registered
 Metal's BOOKS (built partitions — hand-built hosts enter via `adopt_born` —
 plus pending bookings), and the verbs that create and free hosts: `carve`
 (BOOKS its fraction synchronously before the build's first await, so carves
-never double-promise; a failed build releases), `decarve` (the venue's
-`release` unmakes the metal, the fraction returns to residual), `residual` /
-`describe` (the desk's deduction feed). The desk DEDUCES, the metal
-ENFORCES; the metal writes nothing to the fleet journal.
+never double-promise; a failed build releases), `decarve` (every resident down
+the ladder, the fraction returns to residual), `residual` / `describe` (the
+desk's deduction feed). It holds a RECIPE (**Builds**) and a carve spawns one
+resident process per regime from it; a resident's unbidden exit decarves its
+host. The desk DEDUCES, the metal ENFORCES; the metal writes nothing to the
+fleet journal.
 `rlstack/runner/desk.py` (`MetalService`), `rlstack/runner/remote.py` (`RemoteMetal`)
+
+**Builds / EngineBuild / LearnerBuild** — a metal's recipe: the capacity knobs
+a partition cannot tell you (an engine's context length, bundle count, rank,
+ensemble width, served adapter types, sleep mode; a learner's dtype, clip,
+activation checkpointing). Everything ELSE about a resident — class, base,
+width, device, fraction — follows from (regime, partition) in `build_engine` /
+`build_learner`, so building is rlstack's, not a venue's. Declared at bring-up
+from the deploy's constants, journaled on the `metal` registration and every
+`host-up`, so a restarted container carves the same residents unattended.
+`FakeEngineBuild` / `FakeLearnerBuild` put the fakes in a real process.
+`rlstack/runner/residents.py`
+
+**StoreAddress / open_store** — a store as a value a child process can reopen
+it from: backend by name, root, locator. `Store.address()` on every backend;
+`open_store` is the one place backends are spelled. A volume store reopens as a
+mount-only view — a resident reads cas blobs and writes nothing.
+`rlstack/data/stores/base.py`, `rlstack/data/stores/address.py`
 
 **Pool** — a NAME traffic routes to, with two lives: declared capacity
 (`PoolMember` in a `GpuConfig`) and a runtime routing entry (`Routes`: pool name
@@ -452,12 +477,24 @@ facts, speaks TOKENS, and pins each request's bundle at submission.
 **Learner** — training metal: differentiable forward/backward plus the
 optimizer, multi-tenant by additive install (`TorchLearner`,
 `FsdpTorchLearner`, `FakeLearner`). `fsdp` is a BUILD fact. The learner is
-never remote — the runner goes to it.
+never remote ACROSS HOSTS — the runner goes to it — and since ADR 0002 it is a
+process INSIDE its host, reached through `RemoteLearner` over its door. Its
+`install` takes a **Parameterization** and its package imports no spec class.
 `rlstack/runner/interfaces.py`, `rlstack/runner/learners/`
 
+**Parameterization** — what `install` builds, projected off the spec BY THE
+RUNNER (`loop.parameterization_of`, the one place a spec becomes an install):
+the base, the loss by REGISTRY KEY (bound at install — the moments belong to
+one loss), the bank entries in install order (adapter type by key, init with
+the per-entry seed already derived, trainable, resolved sites), and the
+optimizer settings. The whole of what a learner may know about an experiment.
+`rlstack/runner/interfaces.py`
+
 **Rank chorus** — the extra processes a sharded learner build needs and no
-more. Rank 0 runs the runner and answers; ranks 1..width-1 exist only to stand
-in the collectives, and rank 0's copy is the truth.
+more. Rank 0 IS the learner resident and answers its door; ranks 1..width-1
+exist only to stand in the collectives, and rank 0's copy is the truth. The
+resident's pin makes "rank r on cuda:r" true by construction, and every
+follower caps its own device. The teardown ladder is `residents.py`'s.
 `rlstack/runner/learners/ranks.py`
 
 **Arbiter** — the physical half of the blackboard: a `GpuArbiter` constructed by
@@ -467,10 +504,15 @@ device — several sub-GPU hosts on one device each admit independently.
 Scheduling policy lives here and is deliberately outside run identity (I5).
 `rlstack/runner/arbiter.py`
 
-**Resident** — something that occupies evictable GPU memory (an engine object,
-a learner object), keyed by OBJECT IDENTITY: ten pools backed by one engine are
-ONE resident.
-`rlstack/runner/arbiter.py`
+**Resident** — something that occupies evictable GPU memory (an engine, a
+learner), keyed by OBJECT IDENTITY: ten pools backed by one engine are ONE
+resident. Since ADR 0002 a resident IS A PROCESS: a supervised child of the
+metal, born pinned to its partition's devices and capped at its fraction,
+built by rlstack's universal builders from the metal's recipe, answering
+JSON frames at a DOOR (`hello`, `sleep`/`wake`, `stop`, plus its Engine or
+Learner verbs). The Host holds it as a proxy, and the proxy is the object the
+arbiter keys. A resident that exits unbidden is a dead host.
+`rlstack/runner/arbiter.py`, `rlstack/runner/residents.py`
 
 **Exclusive group / admission** — an arbiter group (from `GpuGroup.sharing =
 "sleep"`, or a host's own group) inside which exactly one resident is live at a
@@ -574,9 +616,10 @@ the heavy object living on a partition (an Engine, a Learner — nouns of
 capability), a DAEMON is the thin loop that watches the store and pokes a
 resident (Generator, Trainer, Scorer — agent nouns). Daemons synchronize
 through the store ONLY, so colocation with their resident is a transport
-choice, not architecture; the Trainer sits beside its Learner because the
-autograd arc and the seal cannot cross a wire, and everything else could in
-principle live anywhere.
+choice, not architecture. The Trainer sits beside its Learner because the
+runner goes to the learner's HOST; inside that host the Learner is a process
+behind five verbs (ADR 0002) — the autograd arc is the Learner's, the seal is
+the Trainer's, and neither crosses a wire: the verbs' bytes do.
 
 **Measurement** — observation OUTSIDE the run (#70): a value naming held-out
 task ids, samples, a cadence, a scoring pipeline and its own seed, written as

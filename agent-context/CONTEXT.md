@@ -3395,6 +3395,111 @@ specs; backends (local/modal/skypilot) and GPU topology are semantics-neutral.
     10-minute measurement cron sweeping every run's eval set (phrasing 0)
     under the PLAIN env, roster at measurements/dsl/runs.json.
 
+74. **A RESIDENT IS A PROCESS (ADR 0002): engines and learners as supervised
+    children of the metal, pinned and capped by their partition; the
+    learner's install is a typed Parameterization.** Samarth's prompt: move
+    vLLM to its own process ("live monitorability of which pools are living"),
+    and is there a parallel for torch learners. The root, named in the ADR:
+    every substrate knob for WHERE (CUDA_VISIBLE_DEVICES) and HOW MUCH
+    (torch's per-process allocator cap, vLLM's gpu_memory_utilization) is
+    process-granular, and a partition was smaller than a process — so
+    `partition.devices` reached nobody who could act on it (ADR 0001 Q4) and
+    `set_per_process_memory_fraction` lived in one docstring. The answers,
+    all in session: both kinds (Q1); loss bound at install because the
+    moments belong to one loss (Q2); emitted bytes on the wire, with NCCL
+    between two residents named as the NEXT mode and kept open (Q3);
+    building is UNIVERSAL, not a venue's (Q4 — Samarth's correction of the
+    draft); a restart goes through resubmit + recarve so metal, desk and
+    observer agree (Q7); a learner CAN sleep — the draft mistook an absence
+    for an inability (Q8, Q8a: fsdp=1 lands); JSON frames (Q10).
+    - **runner/residents.py** (new): `Resident.spawn(birth)` — a spawn-context
+      child (never fork; NOT daemonic, a learner has a chorus) that pins
+      CUDA_VISIBLE_DEVICES to the partition's devices before torch loads,
+      caps a learner's allocator at partition.memory, builds by rlstack's
+      universal builders, reports a `hello` (kind, base, tp/fsdp, sleeps,
+      devices_seen, pid — the metal refuses a measured device count that is
+      not the partition's) and serves frames; `Resident.in_process(birth,
+      obj)` is the same door around an already-built object (the fakes
+      suite's path, and what makes the two paths one). Frames are JSON-safe
+      dicts, request-id multiplexed over one pipe (`PipeTransport`, one
+      reader thread): an engine child dispatches `call`s concurrently on its
+      own loop so sampling keeps batching (Q5); `ask`s run inline and blocking,
+      exactly today's semantics (Q6, revisit later). Door verbs on no
+      protocol: hello, sleep/wake, stop. The teardown ladder
+      (Teardown/escalate/join_survivors, #53) moved here; ranks.py imports it
+      (Q9).
+    - **BUILDING IS UNIVERSAL.** `build_engine`/`build_learner` own class,
+      base, width, device (`cuda:0` IS the partition's first device once
+      pinned; shape n leads a chorus, every follower capped on its own
+      device) and fraction. A venue declares `Builds(engine=EngineBuild(...),
+      learner=LearnerBuild(...))` — the capacity knobs a partition cannot
+      tell you — and nothing else; `FakeEngineBuild`/`FakeLearnerBuild` put
+      the fakes in a real process. The recipe lives on the metal, is
+      RE-DECLARED at every bring-up from the deploy's constants, and is
+      journaled on the `metal` registration row and every `host-up` (Q4a:
+      runs stay auto-restartable through resubmit + recarve, and the record of
+      HOW is durable). A child reopens the store from a `StoreAddress`
+      (`Store.address()` on both backends; `open_store` in
+      data/stores/address.py — a mount-only view for a volume store, because
+      a resident reads cas blobs and writes nothing).
+    - **THE LEARNER'S BOUNDARY.** `Learner.install(tenant, Parameterization)`:
+      base, loss BY REGISTRY KEY, entries (adapter type by key, init with the
+      per-entry seed already derived, trainable, resolved sites),
+      OptimSettings — built by `loop.parameterization_of`, THE place a spec
+      becomes an install (`init_seed` moved to loop.py; the derivation is
+      byte-identical). `runner/learners/` imports no spec class, pinned in
+      test_architecture (#69's acid test, one region over). The chorus
+      broadcasts the Parameterization instead of the spec. `RemoteLearner`/
+      `LearnerService` are the wire (codecs for TokenBatch / TrainStats /
+      Emitted / Parameterization, bytes as base64 in ONE codec, so the NCCL
+      carriage later replaces the codec and leaves the verbs alone).
+      `EngineService` is the engine-verb half of HostService; HostService
+      admits, then forwards through the proxy. `RemotePool` is now also the
+      Host's proxy to its own engine child; `attach_residents` treats a
+      RemotePool the host attached at birth as local (a remote pool is one
+      nobody attached).
+    - **THE HOST STAYS THE DOOR.** Arbiter, roster, runner, journal in the
+      metal process; `Host(residents=...)`; `_attach_regimes` wires
+      evict/wake hooks to the door of every resident whose hello says
+      `sleeps` — engine AND learner (Q8): `TorchLearner.sleep`/`wake` move
+      the base, every tenant's params and moments to host RAM and empty the
+      allocator's cache (fsdp=1; a chorus reports sleeps=false, DTensor
+      offload is its own proof). This un-orphans the sleep seam on this
+      branch, where nothing wired it. `status()` and `describe()` carry
+      `residents` rows; `host-up` carries label + pid; the observer's hosts
+      view and the UI's hosts page show them.
+    - **A DEAD RESIDENT IS A DEAD HOST (Q7).** The watcher waits on the
+      child's SENTINEL — never join(): two threads reaping one child made
+      the loser read ECHILD as "alive" through the whole ladder, observed on
+      fakes — and `MetalService.resident_exited` decarves the host: siblings
+      down the ladder, booking freed, address gone, the death on
+      `service.deaths`; the desk's next probe reaps the listing. Nothing
+      restarts in place. MetalService takes `builds` + `spawn` instead of
+      engine_factory/learner_factory/release; `decarve` is the ladder;
+      `shutdown()` is what @modal.exit calls. Four venues converted
+      (gsm/dsl/gsm_sweep/fleet a100): typed recipes, `register_metal(...,
+      builds=)`, bring_down through the ladder.
+    - Tests: 868 (+13). test_residents: codecs; RemoteLearner over
+      LocalTransport byte-identical; the in-process door (hooks for both
+      kinds, refusal without `sleeps`, status/host-up rows, the pin
+      asserted); REAL children — a run through process residents
+      byte-identical to in-process with sleep/wake frames crossing to real
+      pids, a SIGKILLed resident decarves its host, a birth failing inside
+      the child reported through the hello and released, the ladder's rungs
+      on stubs (no torch needed now). test_desk's fixture spawns in-process
+      residents. Suite ~7 s.
+    - UNPROVEN ON METAL, all of it real: the pin on a 2+-device metal, the
+      torch cap, learner sleep's move set (adapter tensors outside
+      `parameters()` are a stated gap), the follower cap, `open_store` on a
+      Modal mount, teardown inside Modal's 30 s grace, and the round-trip
+      cost of a TokenBatch frame and of `tokenize` per trajectory (the local
+      tokenizer beside RemotePool is now due). Two deviations from the ADR,
+      stated: `observe/locate.store_for` is untouched (the address is derived
+      from the Store object, not parsed from a locator), and the pipe
+      transport lives in residents.py beside the door it serves rather than
+      in remote.py. ADR 0001's Q4 is answered here (branch b); its
+      alternation sizing (Q7 there) now rests on Q8a's learner sleep.
+
 ## Open threads (do NOT treat as settled; flag when your answer touches them)
 
 - TODO (Samarth, settled intent — future, nothing now): BUNDLE LRU EVICTION

@@ -82,6 +82,17 @@ class TestMembrane(unittest.TestCase):
             imports = rlstack_imports(PACKAGE / module)
             self.assertFalse(imports, f"{module} imports {sorted(imports)}")
 
+    def test_the_learners_import_no_spec_class(self) -> None:
+        """ADR 0002's acid test, in #69's shape: a learner owns tensors, not
+        experiments. What reaches it is a Parameterization built by the runner
+        — the loss and every adapter type BY REGISTRY KEY, seeds derived,
+        sites resolved — so runner/learners/ has no business importing
+        rlstack.spec."""
+        for file, imports in imports_by_region("runner/learners").items():
+            bad = {i for i in imports if i.startswith("rlstack.spec")}
+            self.assertFalse(bad, f"{file} imports {sorted(bad)} — a learner "
+                                  f"may not read the experiment")
+
     def test_the_client_library_never_imports_engine_code(self) -> None:
         """rlstack_engine ships in the ENGINE image; rlstack names plugins by
         string only. The import is one-way: engine code may import rlstack

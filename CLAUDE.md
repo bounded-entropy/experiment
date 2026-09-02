@@ -53,6 +53,20 @@ continue is in the repo.
 
 ## State at handover
 
+- A RESIDENT IS A PROCESS (ADR 0002, CONTEXT #74): every engine and learner
+  a host wears is a child of the metal process, pinned to its partition's
+  devices and capped at its fraction; the Host is the door (arbiter, roster,
+  runner) holding RemotePool / RemoteLearner proxies over each child's
+  frames. Building is UNIVERSAL (runner/residents.py): a venue declares
+  `Builds(EngineBuild, LearnerBuild)` — the capacity knobs — and nothing
+  else; the recipe is journaled on `metal` and `host-up`. `Learner.install`
+  takes a Parameterization (loss by registry key, seeds derived) and
+  runner/learners/ imports no spec class. A dead resident is a dead host
+  (decarved; the desk reaps). Learner sleep exists at fsdp=1. ALL OF IT IS
+  UNPROVEN ON METAL — the four a100 venues are converted but no run has
+  landed since; the first metal run should watch the pin (hello's
+  devices_seen), the cap, teardown inside Modal's grace, and per-microbatch
+  frame cost.
 - THE RUN'S SHAPE IS DATA (#59/#60/#61): a RunPlan is waves x groups x
   leaves, written as a cas artifact and pinned in the spec, so group_size /
   trajectories_per_wave / n_updates / epochs_per_wave are gone from Schedule

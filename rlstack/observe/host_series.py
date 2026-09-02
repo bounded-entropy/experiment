@@ -32,7 +32,7 @@ from rlstack.observe.views import hosts_data, runs_data
 # What the named readings above already render. Everything else numeric an
 # event carries falls through to the open slot inside metric_series.
 CLAIMED_FIELDS = {
-    "host-up": ("engines", "partition", "regimes", "store"),
+    "host-up": ("engines", "partition", "regimes", "residents", "store"),
     "attach": ("pools", "remotes", "n_updates", "store"),
     "detach": ("status", "updates_completed"),
     "stats": ("gpus",),
@@ -115,6 +115,7 @@ def host_series(roots: Sequence[Store | Root], host: str,
         "engines": latest.get("engines", []),
         "partition": latest.get("partition"),
         "regimes": latest.get("regimes", []),
+        "residents": latest.get("residents", []),
         "first_seen": events[0].get("t"),
         "last_seen": events[-1].get("t"),
         "tenancy": lanes_overlapping(tenancy_lanes(events), since),
@@ -131,6 +132,7 @@ def boot_facts(events: Sequence[dict]) -> list[dict]:
              "engines": list(event.get("engines", [])),
              "partition": event.get("partition"),
              "regimes": list(event.get("regimes", [])),
+             "residents": list(event.get("residents", [])),
              "store": event.get("store")}
             for event in events if event.get("event") == "host-up"]
 

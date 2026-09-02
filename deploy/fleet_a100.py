@@ -216,35 +216,31 @@ class Metal:
     def bring_up(self) -> None:
         from rlstack import ModalVolumeStore
         from rlstack.policy.siteschema import hf_schema
-        from rlstack.runner.engines.vllm_engine import VllmEngine
         from rlstack.runner.desk import Metal as OwnedMetal, MetalService
-        from rlstack.runner.learners.torch_learner import TorchLearner
         from rlstack.runner.remote import LocalTransport
+        from rlstack.runner.residents import Builds, EngineBuild, LearnerBuild
 
         self.store = ModalVolumeStore("/store", volume=store_volume,
                                       locator=STORE)
         ensure_tasks(self.store)
 
         # THE METAL PLANE, and NOTHING standing: the container wears only its
-        # books and factories, so the WHOLE device is residual and every host
+        # books and its recipe, so the WHOLE device is residual and every host
         # on it is a desk-issued carve — the space is the desk's to give.
-        # The factory pays for both adapter families up front (the sweep's
-        # rule: plora's demands are the wider sizing).
+        # The recipe (ADR 0002) pays for both adapter families up front (the
+        # sweep's rule: plora's demands are the wider sizing); every resident
+        # a carve births is a child process pinned and capped to its partition.
         self.metal_service = MetalService(
             OwnedMetal(METAL_NAME, "A100-40GB", 1, 40.0), store=self.store,
-            engine_factory=lambda regime, partition: VllmEngine(
-                regime.base, tp=regime.shape,
-                gpu_memory_utilization=partition.memory,
-                max_model_len=1536, max_bundles=16, max_rank=16,
-                max_members=MEMBERS, cas_get=self.store.cas_get,
-                serves=("lora", "plora")),
-            learner_factory=lambda regime, partition: TorchLearner(),
+            builds=Builds(
+                engine=EngineBuild(max_model_len=1536, max_bundles=16,
+                                   max_rank=16, max_members=MEMBERS,
+                                   serves=("lora", "plora")),
+                learner=LearnerBuild()),
             address_of=lambda name: f"a100://{name}",
             schema_for=hf_schema,
             transport_for=lambda address: LocalTransport(
-                self.metal_service.service_for(address)),
-            release=lambda host: [engine.shutdown()
-                                  for engine in host.engines])
+                self.metal_service.service_for(address)))
         print(f"[metal] up: {METAL_NAME} bare; "
               f"residual {self.metal_service.residual()}")
 
@@ -307,7 +303,8 @@ class Metal:
         desk = RemoteDesk(DeskTransport())
         try:
             await desk.register_metal(METAL_NAME, "A100-40GB", 1, 40.0,
-                                       METAL_ADDRESS)
+                                       METAL_ADDRESS,
+                                       builds=self.metal_service.builds.row())
             print(f"[metal] registered {METAL_NAME} on the metal plane")
         except Exception as taken:
             print(f"[metal] {METAL_NAME} not re-registered: {taken}")
@@ -330,9 +327,11 @@ class Metal:
 
     @modal.exit()
     def bring_down(self) -> None:
-        for service in self.metal_service.services.values():
-            for engine in service.host.engines:
-                engine.shutdown()
+        # every resident down the ladder (ADR 0002): a learner's chorus and
+        # an engine's core end with the container, bounded
+        for teardown in self.metal_service.shutdown():
+            if not teardown.graceful:
+                print(teardown.line(), flush=True)
 
 
 # ---------------------------------------------------------------------------

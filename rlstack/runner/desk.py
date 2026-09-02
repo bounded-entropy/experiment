@@ -33,8 +33,11 @@ from dataclasses import dataclass
 from rlstack.data.stores.base import Store
 from rlstack.policy.siteschema import SiteSchema
 from rlstack.runner.host import Host, Partition, Regime
-from rlstack.runner.interfaces import Engine, Learner
+from rlstack.runner.residents import (
+    GRACE_S, SIGNAL_GRACE_S, Builds, Resident, ResidentBirth, Teardown,
+)
 from rlstack.runner.remote import (
+    RemoteLearner, RemotePool,
     HostService, LocalTransport, RemoteHost, RemotePool, Transport,
 )
 
@@ -226,6 +229,10 @@ class Desk:
         self.metal_for = metal_for
         self.metal: dict[str, Metal] = {}
         self.metal_remotes: dict[str, "RemoteMetal"] = {}
+        # name -> the metal's build recipe row (Builds.row()), as it declared
+        # it: descriptive inventory, journaled so the record of HOW a host was
+        # built survives the desk (ADR 0002, Q4a). The desk never builds.
+        self.metal_builds: dict[str, dict] = {}
         self.listings: dict[str, Listing] = {}
 
     @classmethod
@@ -251,24 +258,31 @@ class Desk:
                 address = event.get("address")
                 if address and metal_for is not None:
                     desk.metal_remotes[event["name"]] = metal_for(address)
+                if event.get("builds"):
+                    desk.metal_builds[event["name"]] = dict(event["builds"])
         return desk
 
-    def register_metal(self, metal: Metal, address: str | None = None) -> None:
+    def register_metal(self, metal: Metal, address: str | None = None,
+                       builds: Mapping | None = None) -> None:
         """The acquire rung, recorded at the desk: what the fleet OWNS and may
         carve against. Journaled like a listing, so a rebuilt desk knows its
         inventory too. `address` is where that metal's own container answers
         the metal plane (carve/decarve/residual) — with it and a resolver the
         desk can command the standing carve; without it the row is inventory
-        only and misses still answer with boot instructions."""
+        only and misses still answer with boot instructions. `builds` is the
+        metal's recipe row, kept and journaled as description."""
         if metal.name in self.metal:
             raise DeskError(f"metal {metal.name!r} is already registered")
         self.metal[metal.name] = metal
         if address and self.metal_for is not None:
             self.metal_remotes[metal.name] = self.metal_for(address)
+        if builds:
+            self.metal_builds[metal.name] = dict(builds)
         self.store.append_fleet_event({
             "event": "metal", "t": time.time(), "name": metal.name,
             "gpu": metal.gpu, "devices": metal.devices,
-            "vram_gb": metal.vram_gb, "address": address})
+            "vram_gb": metal.vram_gb, "address": address,
+            "builds": dict(builds) if builds else None})
 
     def list_host(self, name: str, regimes: Sequence[Regime], address: str,
                   solo: bool = False, partition: Mapping | None = None,
@@ -705,7 +719,8 @@ class Desk:
             for name, listing in sorted(self.listings.items())},
             "metal": {name: {"gpu": m.gpu, "devices": m.devices,
                              "vram_gb": m.vram_gb,
-                             "plane": name in self.metal_remotes}
+                             "plane": name in self.metal_remotes,
+                             "builds": self.metal_builds.get(name)}
                       for name, m in sorted(self.metal.items())}}
 
     # ---- the Transport surface (HostService's contract, fleet-addressed) ----
@@ -745,7 +760,8 @@ class Desk:
                 Metal(name=payload["name"], gpu=payload.get("gpu", "L4"),
                       devices=int(payload.get("devices", 1)),
                       vram_gb=float(payload.get("vram_gb", 24.0))),
-                address=payload.get("address"))
+                address=payload.get("address"),
+                builds=payload.get("builds"))
             return {"registered": payload["name"]}
         if verb == "reap":
             return await self.reap(probes=int(payload.get("probes", 3)),
@@ -795,7 +811,7 @@ def _listing_from(event: Mapping,
 
 class MetalService:
     """The metal-side end of the standing carve: ONE registered Metal's
-    devices, the factories that realize partitions on them, and the BOOKING
+    devices, the RECIPE that realizes partitions on them, and the BOOKING
     rule that makes a desk-issued carve safe.
 
     The desk DEDUCES, the metal ENFORCES: `residual` is the deduction feed
@@ -806,6 +822,16 @@ class MetalService:
     promised but not yet built. A failed build releases its booking; nothing
     half-born is ever routed.
 
+    EVERY RESIDENT IS A PROCESS (ADR 0002): a carve spawns one child per
+    regime — pinned to the partition's devices, capped at its fraction, built
+    by rlstack's own universal builders from this metal's `builds` recipe —
+    and the Host it lists holds proxies over each child's door. `spawn` is
+    how a birth becomes a resident: `Resident.spawn` (a child) in every
+    venue, `Resident.in_process` where a test needs a fake it can hold open
+    or break. A resident that exits unbidden is a host that died: the
+    watcher tells this service, which decarves the host and frees its
+    booking, and the desk's next probe reaps the listing (Q7).
+
     Hosts born here — and hosts the venue built at boot and handed in via
     `adopt_born` — live in ONE table, so the residual is honest about both;
     the venue routes host frames through `service_for(address)`. The metal
@@ -815,31 +841,31 @@ class MetalService:
     always, because they are each host's own.
     """
 
-    def __init__(self, metal: Metal, *, store: Store,
-                 engine_factory: Callable[[Regime, Partition], Engine],
-                 learner_factory: Callable[[Regime, Partition], Learner],
+    def __init__(self, metal: Metal, *, store: Store, builds: Builds,
                  address_of: Callable[[str], str],
                  schema_for: Callable[[str], SiteSchema] | None = None,
                  transport_for: Callable[[str], Transport] | None = None,
-                 release: Callable[[Host], None] | None = None) -> None:
+                 spawn: Callable[[ResidentBirth], Resident] = Resident.spawn
+                 ) -> None:
         self.metal = metal
         self.store = store
-        self.engine_factory = engine_factory
-        self.learner_factory = learner_factory
+        # the recipe: what a venue declares and everything a partition cannot
+        # tell you; re-declared at every bring-up from the deploy's constants,
+        # so a restarted container carves the same residents unattended
+        self.builds = builds
         # address formats are venue (I5): the venue mints a born host's
-        # address, and the venue unmakes what the factories made (`release`,
-        # decarve's teardown — an engine shutdown on real metal, nothing on
-        # fakes). schema_for/transport_for are the adoption birth facts every host
-        # born here is handed, same as a hand-built one.
+        # address. schema_for/transport_for are the adoption birth facts every
+        # host born here is handed, same as a hand-built one.
         self.address_of = address_of
         self.schema_for = schema_for
         self.transport_for = transport_for
-        self.release = release
+        self.spawn = spawn
         self.hosts: dict[str, Host] = {}
         self.addresses: dict[str, str] = {}         # host name -> address
         self.services: dict[str, HostService] = {}  # address -> service
         self.pending: list[tuple[str, tuple[int, ...], float]] = []
         self.carves = 0
+        self.deaths: list[str] = []                 # hosts decarved by a resident's exit
 
     # ---- the books ----------------------------------------------------------
 
@@ -926,6 +952,11 @@ class MetalService:
             address = self.address_of(name)
             self.addresses[name] = address
             self.services[address] = HostService(host)
+            # the host is in the books: an exit from here on finds it (Q7)
+            loop = asyncio.get_running_loop()
+            for resident in host.residents:
+                resident.watch(lambda r, host_name=name, loop=loop:
+                               self.report_exit(loop, host_name, r))
         except Exception as failure:
             return {"carved": False, "residual": self.residual(),
                     "error": f"the build failed and the booking is released: "
@@ -941,36 +972,93 @@ class MetalService:
 
     def build(self, name: str, regimes: tuple[Regime, ...],
               devices: tuple[int, ...], memory: float) -> Host:
-        """(worker thread) The factories realize the partition and the Host
-        constructor attests the result against
-        books this container owns."""
+        """(worker thread) One resident per regime is born — pinned, capped,
+        built from this metal's recipe — and the Host constructor attests the
+        proxies against the regimes, exactly as it attested objects. A birth
+        that fails ends the residents already born, so a half-carved host
+        never holds metal."""
         partition = Partition(self.metal.name, devices, memory, self.metal.gpu)
-        engines: list[Engine] = []
-        carved_learner: Learner | None = None
-        for regime in regimes:
-            if regime.capability == "inference":
-                engines.append(self.engine_factory(regime, partition))
-            else:
-                carved_learner = self.learner_factory(regime, partition)
-        return Host(name, engines=tuple(engines), learner=carved_learner,
-                    store=self.store, partition=partition, regimes=regimes,
-                    schema_for=self.schema_for, transport_for=self.transport_for)
+        residents: list[Resident] = []
+        try:
+            for regime in regimes:
+                residents.append(self.spawn(ResidentBirth(
+                    label=f"{name}:{regime.name}", partition=partition,
+                    regime=regime, build=self.builds.for_regime(regime),
+                    store=self.store.address())))
+            engines = [RemotePool(r.transport, base=r.hello["base"],
+                                  tp=int(r.hello["tp"]))
+                       for r in residents if r.regime.capability == "inference"]
+            learners = [RemoteLearner(r.transport, fsdp=int(r.hello["fsdp"]))
+                        for r in residents if r.regime.capability == "training"]
+            return Host(name, engines=tuple(engines),
+                        learner=learners[0] if learners else None,
+                        store=self.store, partition=partition, regimes=regimes,
+                        schema_for=self.schema_for,
+                        transport_for=self.transport_for, residents=residents)
+        except BaseException:
+            for resident in residents:
+                resident.stop(grace_s=SIGNAL_GRACE_S,
+                              signal_grace_s=SIGNAL_GRACE_S)
+            raise
 
     def decarve(self, name: str) -> dict:
-        """The inverse, for the reaper and the deliberate retirement: the
-        venue's `release` unmakes what its factories made, the host leaves
-        the books, and its fraction is residual again. The desk journals the
-        departure (its delist) — this side only frees."""
+        """The inverse, for the reaper and the deliberate retirement: every
+        resident is ended down the ladder, the host leaves the books, and its
+        fraction is residual again. The desk journals the departure (its
+        delist) — this side only frees."""
         host = self.hosts.pop(name, None)
         if host is None:
             return {"decarved": False,
                     "error": f"no host {name!r} on metal {self.metal.name!r}"}
         address = self.addresses.pop(name)
         self.services.pop(address, None)
-        if self.release is not None:
-            self.release(host)
+        teardowns = self.end_residents(host)
         return {"decarved": True, "host": name,
-                "partition": host.partition.row()}
+                "partition": host.partition.row(),
+                "teardown": [t.line() for t in teardowns if not t.graceful]}
+
+    def end_residents(self, host: Host) -> list[Teardown]:
+        """Every resident of `host` down the ladder, each reported. A
+        resident already gone costs nothing; one that ignores the stop frame
+        is signalled, and one that survives the kill is named, not
+        pretended away."""
+        return [resident.stop(grace_s=GRACE_S, signal_grace_s=SIGNAL_GRACE_S)
+                for resident in host.residents]
+
+    def report_exit(self, loop: asyncio.AbstractEventLoop, host_name: str,
+                    resident: Resident) -> None:
+        """(watcher thread) Hand the exit to the loop that carved, where the
+        books are mutated; if that loop is already closed — a test's
+        asyncio.run ended, a container is on its way out — conclude it here,
+        because a dead resident must not wait for a loop that will never
+        turn."""
+        try:
+            loop.call_soon_threadsafe(self.resident_exited, host_name, resident)
+        except RuntimeError:
+            self.resident_exited(host_name, resident)
+
+    def resident_exited(self, host_name: str, resident: Resident) -> None:
+        """A resident left without being told to: its host is dead (I12 — a
+        host is atomic, and a host missing a resident is not a host). The
+        host is decarved — siblings ended, booking freed, address gone — so
+        the desk's next probe finds nothing at the listing and reaps it.
+        Nothing is restarted here: the tenant returns by resubmit and
+        recarve, on the record (Q7)."""
+        if host_name not in self.hosts:
+            return                          # already decarved, by whoever came first
+        print(f"[metal {self.metal.name}] resident {resident.label!r} exited "
+              f"unbidden (pid {resident.pid()}): decarving host {host_name!r}",
+              flush=True)
+        self.deaths.append(host_name)
+        self.decarve(host_name)
+
+    def shutdown(self) -> list[Teardown]:
+        """The container's way out: every host's residents down the ladder,
+        in one bounded pass. What @modal.exit calls."""
+        teardowns: list[Teardown] = []
+        for name in sorted(self.hosts):
+            teardowns.extend(self.end_residents(self.hosts[name]))
+        return teardowns
 
     # ---- routing and the Transport surface ----------------------------------
 
@@ -992,8 +1080,10 @@ class MetalService:
         return {"name": self.metal.name, "gpu": self.metal.gpu,
                 "devices": self.metal.devices, "vram_gb": self.metal.vram_gb,
                 "residual": self.residual(),
+                "builds": self.builds.row(),
                 "hosts": {name: {"address": self.addresses[name],
-                                 "partition": host.partition.row()}
+                                 "partition": host.partition.row(),
+                                 "residents": [r.row() for r in host.residents]}
                           for name, host in sorted(self.hosts.items())}}
 
     async def serve(self, verb: str, payload: dict) -> dict:

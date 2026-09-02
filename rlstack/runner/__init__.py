@@ -22,11 +22,17 @@ The map, by responsibility — read top to bottom:
     host.py         a host: an atomic purposed partition (Partition +
                     Regimes) owning its engines, its one learner, its arbiter
                     and its journal; submit binds / fits / attests / runs
-    fleet.py        the inventory of Metal and hosts, and the placement
-                    ladder over them: join → carve → acquire
-    remote.py       the wire: HostService serves pool verbs on its own metal
-                    under its own arbiter, RemotePool is the whole Engine
-                    protocol over a Transport
+    desk.py         the desk (listings, metal, placement over them: join →
+                    carve → acquire) and MetalService, the metal-side books
+                    that spawn residents from the metal's recipe
+    residents.py    a resident is a process (ADR 0002): the build records a
+                    venue declares, the universal builders, the door and its
+                    frames, Resident.spawn / in_process / stop, the ladder
+    remote.py       the wire: HostService admits pool verbs at its own
+                    arbiter and forwards through the resident's proxy;
+                    EngineService / LearnerService are the resident's end;
+                    RemotePool / RemoteLearner are the whole protocols over
+                    a Transport
     assemble.py     a planned wave becomes real: sample it, or take it
     refs.py         where an already-sealed trajectory lives
                     (live / replay / static), one file each

@@ -63,9 +63,13 @@ function drawBirth(host) {
     ? host.regimes.map(r =>
         esc(`${r.name} = ${r.capability ?? r.kind} × ${r.base ?? "*"} × ${r.shape}`)).join("<br>")
     : "<span class='k'>not journaled (a host older than #43's regimes)</span>";
+  const residents = (host.residents || []).length
+    ? host.residents.map(r => esc(`${r.label} · pid ${r.pid}`)).join("<br>")
+    : "<span class='k'>in-process (a hand-built host, or older than ADR 0002)</span>";
   holder.append(el("table", {},
     `<tr><th>partition</th><td>${partition}</td></tr>`
     + `<tr><th>regimes</th><td>${regimes}</td></tr>`
+    + `<tr><th>residents</th><td>${residents}</td></tr>`
     + `<tr><th>engines</th><td>${esc(host.engines.join(", ") || "?")}</td></tr>`
     + `<tr><th>seen</th><td>${esc(when(host.first_seen))} → ${esc(when(host.last_seen))}`
     + ` <span class="k">(${esc(span(host))})</span></td></tr>`));

@@ -24,6 +24,7 @@ import asyncio
 import subprocess
 import time
 from collections.abc import Callable, Mapping, Sequence
+from typing import TYPE_CHECKING
 from dataclasses import dataclass, field
 
 from rlstack.data.stores.base import Store
@@ -34,6 +35,9 @@ from rlstack.runner.loop import (
     RunReport, experiment_identity, run_experiment_async,
 )
 from rlstack.runner.meters import HostJournal, TrafficMeter
+
+if TYPE_CHECKING:
+    from rlstack.runner.residents import Resident
 from rlstack.runner.remote import spec_from_json
 from rlstack.spec.specs import ExperimentSpec, PoolMember
 
@@ -46,11 +50,14 @@ class HostError(RuntimeError):
 class Partition:
     """The irreducible carved share of metal a host is born onto: the NAME of
     the Metal it was carved from, the KIND of GPU it is made of ("L4",
-    "H100"), the device indices, and the memory fraction it owns on each
-    (vLLM's gpu_memory_utilization is a reservation, torch's
-    set_per_process_memory_fraction a cap; both honor this number). Memory
-    partitions honestly; SMs still time-share across partition boundaries — a
-    stated cost, visible in latency, not hidden by this record.
+    "H100"), the device indices, and the memory fraction it owns on each.
+    Since ADR 0002 every resident wearing this partition is its own PROCESS,
+    so both numbers are enforced where the substrate can enforce them: the
+    devices become that process's CUDA_VISIBLE_DEVICES, and the fraction is
+    vLLM's gpu_memory_utilization for an engine and torch's per-process
+    allocator cap for a learner (runner/residents.py). Memory partitions
+    honestly; SMs still time-share across partition boundaries — a stated
+    cost, visible in latency, not hidden by this record.
     `metal` is a registered Metal's NAME, never a GpuSet: a GpuSet is pure
     device demand inside a spec, and this record is a provider fact. `gpu` is
     descriptive, never decisive: the carve carries the kind down from the
@@ -110,10 +117,17 @@ class Host:
                  capacity: float = 1.0, solo: bool = False,
                  transport_for: Callable[[str], "Transport"] | None = None,
                  schema_for: Callable[[str], SiteSchema] | None = None,
-                 sampler=None) -> None:
+                 sampler=None,
+                 residents: Sequence["Resident"] = ()) -> None:
         self.name = name
         self.engines = tuple(engines)
         self.learner = learner
+        # The processes behind `engines` and `learner` when this host was
+        # carved by a metal (ADR 0002): one per regime, each holding the door
+        # its proxy speaks through. Empty for a hand-built host whose engines
+        # and learner are plain objects in this process — the same Host,
+        # because the daemons cannot tell and were never meant to.
+        self.residents = tuple(residents)
         self.store = store
         self.arbiter = arbiter or GpuArbiter()
         self.partition = partition
@@ -149,6 +163,10 @@ class Host:
             "regimes": [{"name": r.name, "capability": r.capability,
                          "base": r.base, "shape": r.shape} for r in regimes],
             "solo": self.solo,
+            # the processes this host was born with, label + pid: what lets
+            # the hosts view show which residents are living without a probe
+            "residents": [{"label": r.label, "pid": r.pid()}
+                          for r in self.residents],
             "store": store.describe()})
 
     # ---- birth facts, one named method per rule -----------------------------
@@ -225,10 +243,25 @@ class Host:
         for regime in self.regimes:
             obj = (self.learner if regime.capability == "training"
                    else self.engine_for(regime.base, regime.shape))
+            resident = self.resident_for(regime)
+            sleeps = resident is not None and resident.hello.get("sleeps")
             # fraction 0.0, not None: a later tenant's declared fraction is
-            # a carve hint and must never be adopted into this host's load
+            # a carve hint and must never be adopted into this host's load.
+            # The alternation hooks are the resident's door verbs, wired for
+            # every resident whose hello says it can hand the device back —
+            # engine or learner alike (ADR 0002, Q8)
             self.arbiter.attach(obj, label=f"{self.name}:{regime.name}",
-                                group=group, fraction=0.0)
+                                group=group, fraction=0.0,
+                                wake=resident.wake if sleeps else None,
+                                evict=resident.sleep if sleeps else None)
+
+    def resident_for(self, regime: Regime) -> "Resident | None":
+        """The process wearing `regime`, if this host was carved (label is
+        `<host>:<regime>`); None on a hand-built host."""
+        for resident in self.residents:
+            if resident.regime.name == regime.name:
+                return resident
+        return None
 
     def wire_meter(self) -> None:
         """ONE meter per host: every engine it owns counts its tokens into
@@ -588,6 +621,7 @@ class Host:
             "solo": self.solo,
             "declared_load": round(self.arbiter.declared_load(), 3),
             "residency": self.arbiter.residency(),
+            "residents": [r.row() for r in self.residents],
             "tenants": {rid: {"status": t.status, "pools": t.pools,
                               "updates_completed": t.updates_completed}
                         for rid, t in sorted(self.roster.items())},

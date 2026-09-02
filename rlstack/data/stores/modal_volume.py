@@ -36,6 +36,7 @@ from __future__ import annotations
 
 import concurrent.futures
 
+from rlstack.data.stores.base import StoreAddress
 from rlstack.data.stores.local import LocalStore
 
 
@@ -67,6 +68,13 @@ class ModalVolumeStore(LocalStore):
         mount path only resolves inside this container; journals must name
         something an outside reader can act on."""
         return self._locator or str(self.root)
+
+    def address(self) -> StoreAddress:
+        """Reopened by a resident as a MOUNT-ONLY view (open_store hands no
+        volume handle): a resident reads cas blobs off the mount and journals
+        nothing — the metal process is the writer, and its commits are what
+        make the mount current."""
+        return StoreAddress("modal_volume", str(self.root), self.describe())
 
     def _persist(self) -> None:
         """The durability hook: stage -> volume. Called at every durable point

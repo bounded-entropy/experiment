@@ -32,6 +32,7 @@ from rlstack.runner.desk import (
 from rlstack.runner.remote import (
     HostService, LocalTransport, RemoteDesk, RemoteHost, RemoteMetal,
 )
+from rlstack.runner.residents import Builds, Resident, ResidentBirth
 
 BASE = "Qwen/Qwen3-0.6B"
 SCHEMA = fake_qwen_schema(4, base=BASE)
@@ -97,22 +98,25 @@ class DeskFixture(unittest.TestCase):
     def metal_service(self, name: str = "fake-metal", devices: int = 2,
                       build_gate=None, broken: bool = False,
                       sample_gate: asyncio.Event | None = None) -> MetalService:
-        """One metal container's books on fakes: factories that can be held
-        open (build_gate) or broken, for the booking claims — and engines
-        whose sampling waits at `sample_gate`, for the stop/reroute ones."""
-        def engine_factory(regime, partition):
+        """One metal container's books on fakes: IN-PROCESS residents whose
+        birth can be held open (build_gate) or broken, for the booking
+        claims — and engines whose sampling waits at `sample_gate`, for the
+        stop/reroute ones. Real child processes are test_residents' claim."""
+        def spawn(birth: ResidentBirth) -> Resident:
             if build_gate is not None:
                 build_gate.wait()
             if broken:
                 raise RuntimeError("the factory is broken")
+            if birth.regime.capability == "training":
+                return Resident.in_process(birth, FakeLearner())
             if sample_gate is not None:
-                return GatedEngine(sample_gate, base=regime.base)
-            return FakeEngine(base=regime.base)
+                return Resident.in_process(
+                    birth, GatedEngine(sample_gate, base=birth.regime.base))
+            return Resident.in_process(birth, FakeEngine(base=birth.regime.base))
 
         service = MetalService(
             Metal(name, "L4", devices, 24.0), store=self.store,
-            engine_factory=engine_factory,
-            learner_factory=lambda regime, partition: FakeLearner(),
+            builds=Builds.fakes(), spawn=spawn,
             address_of=lambda host_name: f"fleet://carved/{host_name}",
             schema_for=lambda base: fake_qwen_schema(4, base=base),
             transport_for=lambda address: self._transport(address))
@@ -634,12 +638,15 @@ class MetalServiceTest(DeskFixture):
         service = self.metal_service(devices=1)
         born = go(service.carve(_inference_request(0.6)))
         self.assertAlmostEqual(service.residual()[0], 0.4)
-        released: list[Host] = []
-        service.release = released.append
+        residents = service.hosts[born["host"]].residents
+        self.assertEqual(len(residents), 1)
         reply = go(service.serve("decarve", {"host": born["host"]}))
         self.assertTrue(reply["decarved"], reply)
         self.assertEqual(service.residual(), [1.0])
-        self.assertEqual(len(released), 1)        # the venue unmade the metal
+        # decarve is process teardown now (ADR 0002): the resident was told to
+        # stop and its object released — no venue hook unmakes anything
+        self.assertTrue(all(r.stopping for r in residents))
+        self.assertTrue(residents[0].transport.door.obj.down)
         with self.assertRaises(Exception):
             service.service_for(born["address"])
 

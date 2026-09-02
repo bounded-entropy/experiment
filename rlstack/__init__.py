@@ -64,13 +64,14 @@ from rlstack.data.tasks import load_tasks, split_tasks, write_tasks
 from rlstack.data.stores import (
     DEFAULT_RETENTION, KeepRestorable, LedgerError, LocalStore,
     ManifestMismatch, ModalVolumeStore, RetentionPolicy, RunHandle, Store,
-    StoreError, Swept, bump,
+    StoreAddress, StoreError, Swept, bump, open_store,
 )
 from rlstack.policy.compile import (
     Bundle, compile_bundle, group_by_adapter_type, group_by_mechanism,
 )
 from rlstack.runner.interfaces import (
-    Emitted, Engine, FinishEvent, Learner, TokenEvent, TrainStats,
+    Emitted, Engine, EntryInstall, FinishEvent, Learner, OptimSettings,
+    Parameterization, TokenEvent, TrainStats,
 )
 from rlstack.runner.seeds import derive
 from rlstack.runner.traffic import EnginePoolClient, Routes, load_task_sets
@@ -84,7 +85,12 @@ from rlstack.runner.host import (
     Host, HostError, Partition, Regime, Tenancy,
 )
 from rlstack.runner.remote import (
-    HostService, LocalTransport, RemotePool, Transport,
+    EngineService, HostService, LearnerService, LocalTransport, RemoteLearner,
+    RemotePool, Transport,
+)
+from rlstack.runner.residents import (
+    Builds, EngineBuild, FakeEngineBuild, FakeLearnerBuild, LearnerBuild,
+    Resident, ResidentBirth, ResidentError, Teardown,
 )
 from rlstack.runner.campaign import Campaigns, demands_of
 from rlstack.runner.desk import (
@@ -93,6 +99,7 @@ from rlstack.runner.desk import (
 )
 from rlstack.runner.measure import Measurement, measure_run
 from rlstack.runner.loop import (
-    RunReport, experiment_identity, plan_daemons, run_experiment,
+    RunReport, experiment_identity, parameterization_of, plan_daemons,
+    run_experiment,
 )
 from rlstack.runner.fakes import FakeEngine, FakeLearner

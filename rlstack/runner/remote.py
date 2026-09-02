@@ -16,8 +16,14 @@ every transport implements against:
 
 Costs, stated: sample replies are non-streamed (one reply carries the whole
 event list), add_bundle ships payload bytes as base64, and the learner is never
-remote. LocalTransport round-trips every frame through json in both directions,
-so anything that works over it works over a real transport.
+remote ACROSS HOSTS — the runner goes to it. Since ADR 0002 the learner IS
+behind a wire INSIDE its host: every resident (engine or learner) is a child
+process of the metal, so `EngineService`/`LearnerService` are the resident's
+end of that door and `RemoteLearner` is the Host's end for its learner
+(`RemotePool` already was for an engine). `HostService` keeps admission and
+forwards through the proxy, so the two hops are: admission at the host, then
+the resident. LocalTransport round-trips every frame through json in both
+directions, so anything that works over it works over a real transport.
 """
 
 from __future__ import annotations
@@ -27,11 +33,15 @@ import json
 from collections.abc import AsyncIterator, Mapping, Sequence
 from typing import TYPE_CHECKING, Protocol
 
+from rlstack.data.flatten import TokenBatch
 from rlstack.data.trajectory import Message, Role
 from rlstack.policy.adapters.base import Mechanism
 from rlstack.policy.compile import Bundle
 from rlstack.policy.siteschema import SiteMeta
-from rlstack.runner.interfaces import Engine, FinishEvent, TokenEvent
+from rlstack.runner.interfaces import (
+    Emitted, Engine, EntryInstall, FinishEvent, Learner, OptimSettings,
+    Parameterization, TokenEvent, TrainStats,
+)
 from rlstack.runner.meters import TrafficMeter
 from rlstack.spec.canonical import TYPE_KEY
 from rlstack.spec.specs import SamplingSpec
@@ -206,6 +216,94 @@ def decode_sites(rows: Sequence[dict]) -> tuple[SiteMeta, ...]:
                  is_boundary=r["is_boundary"]) for r in rows)
 
 
+def encode_token_batch(batch: TokenBatch) -> dict:
+    """Tuples become lists; floats ride as Python's repr, which JSON keeps
+    exact; extras must already be JSON-safe — the membrane's own rule at
+    seal time (waves/<update>.jsonl.gz), so the wire adds none."""
+    return {"token_ids": list(batch.token_ids),
+            "loss_mask": list(batch.loss_mask),
+            "behavior_logprobs": list(batch.behavior_logprobs),
+            "segment_ids": list(batch.segment_ids),
+            "doc_starts": list(batch.doc_starts),
+            "postdata": {k: list(v) for k, v in batch.postdata.items()},
+            "token_extras": {k: list(v) for k, v in batch.token_extras.items()},
+            "doc_turn_extras": [[dict(m) for m in doc]
+                                for doc in batch.doc_turn_extras],
+            "microbatches_in_update": batch.microbatches_in_update}
+
+
+def decode_token_batch(row: Mapping) -> TokenBatch:
+    return TokenBatch(
+        token_ids=tuple(row["token_ids"]), loss_mask=tuple(row["loss_mask"]),
+        behavior_logprobs=tuple(row["behavior_logprobs"]),
+        segment_ids=tuple(row["segment_ids"]),
+        doc_starts=tuple(row["doc_starts"]),
+        postdata={k: tuple(v) for k, v in row["postdata"].items()},
+        token_extras={k: tuple(v) for k, v in row["token_extras"].items()},
+        doc_turn_extras=tuple(tuple(doc) for doc in row["doc_turn_extras"]),
+        microbatches_in_update=int(row["microbatches_in_update"]))
+
+
+def encode_train_stats(stats: TrainStats) -> dict:
+    return {"loss": stats.loss, "mean_ratio": stats.mean_ratio,
+            "logprob_gap": stats.logprob_gap, "grad_norm": stats.grad_norm,
+            "tokens": stats.tokens, "provided": dict(stats.provided)}
+
+
+def decode_train_stats(row: Mapping) -> TrainStats:
+    return TrainStats(loss=row["loss"], mean_ratio=row["mean_ratio"],
+                      logprob_gap=row["logprob_gap"], grad_norm=row["grad_norm"],
+                      tokens=int(row["tokens"]), provided=dict(row["provided"]))
+
+
+def encode_emitted(emitted: Emitted) -> dict:
+    """Bytes as base64, the way bundles already cross. ONE codec on purpose:
+    a by-reference carriage later (payloads moving resident-to-resident over
+    NCCL, ADR 0002 Q3) replaces this function and leaves every verb alone."""
+    return {"adapters": {k: _b64(v) for k, v in emitted.adapters.items()},
+            "optim": {k: _b64(v) for k, v in emitted.optim.items()}}
+
+
+def decode_emitted(row: Mapping) -> Emitted:
+    return Emitted(adapters={k: _unb64(v) for k, v in row["adapters"].items()},
+                   optim={k: _unb64(v) for k, v in row["optim"].items()})
+
+
+def encode_payloads(payloads: Mapping[str, bytes] | None) -> dict | None:
+    return None if payloads is None else {k: _b64(v) for k, v in payloads.items()}
+
+
+def decode_payloads(row: Mapping | None) -> dict[str, bytes] | None:
+    return None if row is None else {k: _unb64(v) for k, v in row.items()}
+
+
+def encode_parameterization(p: Parameterization) -> dict:
+    return {"base": p.base, "loss": p.loss,
+            "entries": [{"name": e.name, "adapter_type": e.adapter_type,
+                         "init": dict(e.init), "trainable": e.trainable,
+                         "sites": encode_sites(e.sites)} for e in p.entries],
+            "optim": {"name": p.optim.name, "lr": p.optim.lr,
+                      "betas": list(p.optim.betas),
+                      "weight_decay": p.optim.weight_decay,
+                      "overrides": {k: dict(v)
+                                    for k, v in p.optim.overrides.items()}}}
+
+
+def decode_parameterization(row: Mapping) -> Parameterization:
+    optim = row["optim"]
+    return Parameterization(
+        base=row["base"], loss=row["loss"],
+        entries=tuple(EntryInstall(
+            name=e["name"], adapter_type=e["adapter_type"], init=dict(e["init"]),
+            trainable=bool(e["trainable"]), sites=decode_sites(e["sites"]))
+            for e in row["entries"]),
+        optim=OptimSettings(name=optim["name"], lr=optim["lr"],
+                            betas=tuple(optim["betas"]),
+                            weight_decay=optim["weight_decay"],
+                            overrides={k: dict(v)
+                                       for k, v in optim["overrides"].items()}))
+
+
 # ---------------------------------------------------------------------------
 # the transport
 # ---------------------------------------------------------------------------
@@ -276,17 +374,7 @@ class HostService:
         if verb not in ("sample_tokens", "score_tokens"):
             raise ValueError(f"unknown admitted verb {verb!r}")
         async with self.host.arbiter.admit(engine):
-            if verb == "sample_tokens":
-                events = [event async for event in engine.sample_tokens(
-                    decode_messages(payload["messages"]),
-                    decode_sampling(payload["sampling"]),
-                    tuple(payload["stop"]), payload["bundle_id"],
-                    payload["seed"])]
-                return {"events": encode_events(events)}
-            scores = await engine.score_tokens(
-                decode_messages(payload["messages"]),
-                tuple(payload["token_ids"]), payload["bundle_id"])
-            return {"logprobs": list(scores)}
+            return await EngineService(engine).serve(verb, payload)
 
     def answer(self, verb: str, payload: dict) -> dict:
         """One admission-free verb: additive registration (add_bundle never
@@ -297,23 +385,93 @@ class HostService:
         if verb == "status":
             return self.host.status()
         engine = self._engine(payload["base"], payload["tp"])
+        return EngineService(engine).answer(verb, payload)
+
+
+class EngineService:
+    """ONE engine's verbs, admission-free: the resident's end of its door.
+
+    HostService admits and resolves, then forwards here — so this is the
+    engine-verb half of the host wire with the admission left behind, and
+    the whole of what an engine resident (runner/residents.py) serves. A
+    frame reaching this class has already been admitted by the host that
+    owns the partition, or came from that host's own runner."""
+
+    def __init__(self, engine: Engine) -> None:
+        self.engine = engine
+
+    async def serve(self, verb: str, payload: dict) -> dict:
+        if verb == "sample_tokens":
+            events = [event async for event in self.engine.sample_tokens(
+                decode_messages(payload["messages"]),
+                decode_sampling(payload["sampling"]),
+                tuple(payload["stop"]), payload["bundle_id"],
+                payload["seed"])]
+            return {"events": encode_events(events)}
+        if verb == "score_tokens":
+            scores = await self.engine.score_tokens(
+                decode_messages(payload["messages"]),
+                tuple(payload["token_ids"]), payload["bundle_id"])
+            return {"logprobs": list(scores)}
+        raise ValueError(f"unknown engine verb {verb!r}")
+
+    def answer(self, verb: str, payload: dict) -> dict:
         if verb == "add_bundle":
-            engine.add_bundle(decode_bundle(payload["bundle"]))
+            self.engine.add_bundle(decode_bundle(payload["bundle"]))
             return {}
         if verb == "knows_bundle":
-            return {"known": engine.knows_bundle(payload["bundle_id"])}
+            return {"known": self.engine.knows_bundle(payload["bundle_id"])}
         if verb == "reachability":
-            reach = engine.reachability(decode_sites(payload["sites"]))
+            reach = self.engine.reachability(decode_sites(payload["sites"]))
             return {"mechanisms": {name: mech.name
                                    for name, mech in reach.items()}}
         if verb == "tokenize":
-            return {"token_ids": list(engine.tokenize(payload["text"]))}
+            return {"token_ids": list(self.engine.tokenize(payload["text"]))}
         raise ValueError(f"unknown admission-free verb {verb!r}")
 
 
-def _json_roundtrip(frame: dict) -> dict:
+class LearnerService:
+    """ONE learner's five verbs as frames: the learner resident's end of its
+    door. Every verb is synchronous and pins a tenant (I8), so all five ride
+    the `ask` path and arrive in the order the Trainer issued them; nothing
+    here admits — the Trainer admitted itself at its host's arbiter before
+    the first frame."""
+
+    def __init__(self, learner: Learner) -> None:
+        self.learner = learner
+
+    async def serve(self, verb: str, payload: dict) -> dict:
+        raise ValueError(
+            f"{verb!r}: a learner's verbs are synchronous — they ride ask, "
+            f"never call")
+
+    def answer(self, verb: str, payload: dict) -> dict:
+        tenant = payload["tenant"]
+        if verb == "install":
+            self.learner.install(
+                tenant, decode_parameterization(payload["parameterization"]))
+            return {}
+        if verb == "forward_backward":
+            return encode_train_stats(self.learner.forward_backward(
+                tenant, decode_token_batch(payload["batch"])))
+        if verb == "optim_step":
+            self.learner.optim_step(tenant)
+            return {}
+        if verb == "emit":
+            return encode_emitted(self.learner.emit(tenant))
+        if verb == "load":
+            self.learner.load(tenant, decode_payloads(payload["adapters"]) or {},
+                              decode_payloads(payload["optim"]))
+            return {}
+        raise ValueError(f"unknown learner verb {verb!r}")
+
+
+def json_roundtrip(frame: dict) -> dict:
     """The honesty gate: a frame that survives this survives any real wire."""
     return json.loads(json.dumps(frame))
+
+
+_json_roundtrip = json_roundtrip
 
 
 class LocalTransport:
@@ -321,7 +479,8 @@ class LocalTransport:
     (json round-trip both ways), so a fleet whose hosts share one process is
     indistinguishable, from above, from one whose hosts do not."""
 
-    def __init__(self, service: HostService) -> None:
+    def __init__(self, service: "HostService | EngineService | LearnerService"
+                 ) -> None:
         self.service = service
 
     async def call(self, verb: str, payload: dict) -> dict:
@@ -400,6 +559,43 @@ class RemotePool:
         reply = self._transport.ask("tokenize", {
             **self._address(), "text": text})
         return tuple(reply["token_ids"])
+
+
+class RemoteLearner:
+    """A Learner served by a resident, reached through a Transport — the
+    Host's end of its learner's door, and RemotePool's twin.
+
+    Implements the whole Learner protocol; `fsdp` is the build fact the
+    resident reported in its hello, which the host attests against its
+    training regime exactly as it did against an in-process learner. Every
+    verb is one `ask` frame, synchronous and blocking like the in-process
+    call it replaces (ADR 0002, Q6): the wire adds custody, never
+    scheduling."""
+
+    def __init__(self, transport: Transport, *, fsdp: int = 1) -> None:
+        self.fsdp = fsdp
+        self._transport = transport
+
+    def install(self, tenant: str, parameterization: Parameterization) -> None:
+        self._transport.ask("install", {
+            "tenant": tenant,
+            "parameterization": encode_parameterization(parameterization)})
+
+    def forward_backward(self, tenant: str, batch: TokenBatch) -> TrainStats:
+        return decode_train_stats(self._transport.ask("forward_backward", {
+            "tenant": tenant, "batch": encode_token_batch(batch)}))
+
+    def optim_step(self, tenant: str) -> None:
+        self._transport.ask("optim_step", {"tenant": tenant})
+
+    def emit(self, tenant: str) -> Emitted:
+        return decode_emitted(self._transport.ask("emit", {"tenant": tenant}))
+
+    def load(self, tenant: str, adapters: Mapping[str, bytes],
+             optim: Mapping[str, bytes] | None) -> None:
+        self._transport.ask("load", {
+            "tenant": tenant, "adapters": encode_payloads(adapters),
+            "optim": encode_payloads(optim)})
 
 
 class RemoteHost:
@@ -560,13 +756,17 @@ class RemoteDesk:
         return self._transport.ask("placements", {})["placements"]
 
     async def register_metal(self, name: str, gpu: str, devices: int,
-                             vram_gb: float, address: str) -> dict:
+                             vram_gb: float, address: str,
+                             builds: Mapping | None = None) -> dict:
         """A metal container phones home its OWN existence — the other half
         of the deploy contract: after this the desk can deduce (residual)
-        and command (carve/decarve) against it at `address`."""
+        and command (carve/decarve) against it at `address`. `builds` is the
+        metal's recipe row (Builds.row()), journaled with the registration so
+        the record of HOW a host was built is durable (ADR 0002, Q4a)."""
         return await self._transport.call("metal", {
             "name": name, "gpu": gpu, "devices": devices,
-            "vram_gb": vram_gb, "address": address})
+            "vram_gb": vram_gb, "address": address,
+            "builds": dict(builds) if builds else None})
 
     async def reap(self, probes: int = 3, wait: float = 0.0) -> dict:
         """The janitor's sweep, run by the desk now: probe every listing,

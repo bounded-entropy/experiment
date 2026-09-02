@@ -3,11 +3,11 @@
 | | |
 |---|---|
 | **Date** | 2026-09-01 |
-| **Status** | Accepted (2026-09-01: every question answered in session and folded) |
+| **Status** | Implemented (2026-09-01; CONTEXT #74) |
 | **Author** | Claude Fable 5.1 (session: gsm-campaign, the ADR 0001 review) |
 | **Touches** | `runner/` (host, desk's MetalService, remote, interfaces, a new residents module), `runner/learners/`, `runner/fakes.py`, `data/stores/` (one opener), `deploy/`, `observe/` (one view, one move), `tests/` |
 | **Invariants** | I8 (multi-tenancy on both sides), I12 (a host is atomic and never reshaped), I5 (topology is semantics-neutral), I7 (the substrate is certified) |
-| **CONTEXT** | extends #43 (the host), #44 (row routing), #45 (the rank chorus), #51/#52 (sub-GPU hosts, the sleep seam), #53 (bounded rank teardown), #68 (the metal plane), #69 (the blind desk); answers ADR 0001's Q4 with its branch (b); the entry number lands at implementation |
+| **CONTEXT** | extends #43 (the host), #44 (row routing), #45 (the rank chorus), #51/#52 (sub-GPU hosts, the sleep seam), #53 (bounded rank teardown), #68 (the metal plane), #69 (the blind desk); answers ADR 0001's Q4 with its branch (b); recorded as **#74** |
 
 ## Original prompt
 
@@ -822,4 +822,53 @@ away instead of on the page.
 
 ## Outcome
 
-Filled at implementation.
+Landed 2026-09-01 on gsm-campaign, recorded as CONTEXT #74.
+
+**What landed.** `runner/residents.py` (Builds / EngineBuild / LearnerBuild /
+FakeEngineBuild / FakeLearnerBuild, ResidentBirth, the universal
+`build_engine` / `build_learner`, pin / cap / devices_seen, the Door and its
+frames over a request-id multiplexed pipe, `Resident.spawn` / `in_process` /
+`watch` / `stop`, the ladder lifted from ranks.py); `Parameterization` /
+`EntryInstall` / `OptimSettings` in interfaces.py with `install(tenant,
+parameterization)`; `loop.parameterization_of` + `init_seed`; `RemoteLearner`,
+`LearnerService`, `EngineService` and the four codecs in remote.py; `Host(
+residents=)` with door-wired hooks and resident rows; `MetalService(builds=,
+spawn=)` with `decarve`-as-ladder, `resident_exited`, `shutdown`, `describe`
+carrying the recipe; `Desk.register_metal(builds=)` journaled and replayed;
+`StoreAddress` / `Store.address()` / `open_store`; `TorchLearner.sleep` /
+`wake` / `shutdown`, `FsdpTorchLearner.sleeps = width == 1`, follower caps;
+fakes with `sleeps` / `naps` / `down`; the observer's resident rows; four
+venues converted.
+
+**What the answers changed.** Q4 turned name-by-string builders in `deploy/`
+into rlstack-owned universal builders plus typed recipes — the deploy lambdas
+were the universal part interleaved with an unwritten record. Q8 made the
+door symmetric and added the learner's sleep (fsdp=1). Q4a put the recipe on
+the metal, re-declared at bring-up and journaled on `metal` and `host-up`
+rows. Q3 pinned one payload codec and kept resident identities stable for
+the NCCL mode. Q6 stayed synchronous, as recommended.
+
+**Tests.** 868 green on fakes (from 855; +13 in `tests/test_residents.py`),
+110 torch-gated skips, ~7 s. `test_resume.py` untouched and green. One new
+architecture edge: `runner/learners/` imports nothing from `rlstack.spec`.
+
+**One thing found by the tests.** The watcher waits on the child's sentinel
+rather than joining it: two threads reaping one child left the loser reading
+ECHILD as "alive" through every rung of the ladder (deaf, wedged, even lost
+after SIGKILL), observed on fakes and fixed before landing.
+
+**Unproven on metal.** The pin on a 2+-device metal (asserted by device count
+in the hello, never yet exercised), the torch cap, learner sleep's move set
+(adapter-type tensors outside `parameters()` are a stated gap), the follower
+cap, `open_store` on a Modal mount, teardown inside Modal's grace, and every
+round-trip cost — the TokenBatch frame per microbatch, the emitted bytes per
+update, `tokenize` per trajectory (the local tokenizer beside RemotePool is
+now due). Learner sleep at `fsdp > 1` is not built; a chorus reports
+`sleeps: false`.
+
+**Deviations, stated.** `observe/locate.store_for` was not moved: the child's
+address is derived from the Store object (`Store.address()`), not parsed from
+a locator, so the observer's resolver had nothing to gain. The pipe transport
+lives in `residents.py` beside the door it serves, not in `remote.py`; the
+protocol-level pieces (services, codecs, `RemoteLearner`) are in `remote.py`
+as decided.

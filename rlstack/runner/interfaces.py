@@ -23,7 +23,7 @@ from rlstack.policy.adapters.base import Mechanism
 from rlstack.policy.compile import Bundle
 from rlstack.policy.siteschema import SiteMeta
 from rlstack.runner.meters import TrafficMeter
-from rlstack.spec.specs import ExperimentSpec, SamplingSpec
+from rlstack.spec.specs import SamplingSpec
 
 
 # ---------------------------------------------------------------------------
@@ -84,6 +84,48 @@ class Emitted:
 
     adapters: Mapping[str, bytes]
     optim: Mapping[str, bytes]
+
+
+@dataclass(frozen=True)
+class EntryInstall:
+    """One bank entry as the learner needs it: the adapter type BY REGISTRY
+    KEY (resolved on the learner's side, against the same image), its init
+    with the per-entry seed ALREADY DERIVED (the master seed never crosses),
+    whether it trains, and the sites the runner resolved off the schema."""
+
+    name: str
+    adapter_type: str
+    init: Mapping[str, Any]
+    trainable: bool
+    sites: tuple[SiteMeta, ...]
+
+
+@dataclass(frozen=True)
+class OptimSettings:
+    """The optimizer as the learner needs it: OptimSpec's fields, projected.
+    Overrides are keyed by entry ("pi") or entry.group ("pi.mapper")."""
+
+    name: str
+    lr: float
+    betas: tuple[float, float]
+    weight_decay: float
+    overrides: Mapping[str, Mapping[str, object]]
+
+
+@dataclass(frozen=True)
+class Parameterization:
+    """What `install` builds, projected off the spec BY THE RUNNER: the base,
+    the loss by registry key, the bank entries in install order, and the
+    optimizer settings. Nothing else of the experiment reaches a learner —
+    a learner owns tensors, not experiments — and the loss is bound HERE
+    rather than per forward, because the moments it accumulates belong to
+    one loss (ADR 0002, Q2). The one place a spec becomes one of these is
+    `loop.parameterization_of`."""
+
+    base: str
+    loss: str
+    entries: tuple[EntryInstall, ...]
+    optim: OptimSettings
 
 
 # ---------------------------------------------------------------------------
@@ -191,14 +233,11 @@ class Learner(Protocol):
     parameters shard. A build fact (#43), attested at submit against the
     LearnerMember's declared fsdp (learner-shape-mismatch); 1 = unsharded."""
 
-    def install(
-        self,
-        tenant: str,
-        spec: ExperimentSpec,
-        resolved_sites: Mapping[str, tuple[SiteMeta, ...]],
-    ) -> None:
+    def install(self, tenant: str, parameterization: Parameterization) -> None:
         """Phase 1: build `tenant`'s trainable parameterization for every bank
-        entry. Additive across tenants; rebuilding a tenant resets its state."""
+        entry. Additive across tenants; rebuilding a tenant resets its state.
+        The record is the whole of what a learner may know about the
+        experiment (ADR 0002)."""
         ...
 
     def forward_backward(self, tenant: str, batch: TokenBatch) -> TrainStats:

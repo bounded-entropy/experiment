@@ -15,6 +15,7 @@ committed, and the daemons pick up from the ledger tail.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 from collections.abc import Mapping
 from dataclasses import dataclass
 
@@ -23,7 +24,9 @@ from rlstack.policy.compile import Bundle, compile_bundle
 from rlstack.policy.siteschema import SiteSchema, resolve
 from rlstack.registry import ADAPTER_TYPES, POST, code_hashes
 from rlstack.runner.daemons import Daemon, Generator, Scorer, Trainer
-from rlstack.runner.interfaces import Engine, Learner
+from rlstack.runner.interfaces import (
+    Engine, EntryInstall, Learner, OptimSettings, Parameterization,
+)
 from rlstack.runner.arbiter import GpuArbiter
 from rlstack.runner.meters import HostJournal
 from rlstack.data.plan import RunPlan, decode
@@ -167,7 +170,7 @@ async def run_experiment_async(
                       if ADAPTER_TYPES.get(a.adapter_type).instance.serving is not None)
     adapter_types = {name: bank[name].adapter_type for name in servable}
     resolved = {name: resolve(space, a.site) for name, a in bank.items()}
-    learner.install(rid, spec, resolved)
+    learner.install(rid, parameterization_of(spec, resolved))
     if arbiter is None:
         arbiter = GpuArbiter()
     attach_residents(spec, engine_map, learner, arbiter)
@@ -225,6 +228,38 @@ async def run_experiment_async(
 
     return RunReport(run_id=rid, updates_completed=len(plans["train"]),
                      resumed_from=resumed_from)
+
+
+def parameterization_of(spec: ExperimentSpec,
+                        resolved: Mapping[str, tuple]) -> Parameterization:
+    """THE place a spec becomes an install (ADR 0002, Q2): the base, the loss
+    by registry key, every bank entry in bank order with its adapter type BY
+    KEY, its init carrying the per-entry seed already derived, and the
+    optimizer settings. The master seed never crosses — the derivation lives
+    here so the learner receives a seed and not the tree it came from."""
+    entries = []
+    for name, adapter in spec.policy.bank.items():
+        init = dict(adapter.init)
+        init.setdefault("seed", init_seed(spec.seeds.master, name))
+        entries.append(EntryInstall(
+            name=name, adapter_type=adapter.adapter_type, init=init,
+            trainable=adapter.trainable, sites=tuple(resolved[name])))
+    optim = spec.algo.optim
+    return Parameterization(
+        base=spec.policy.base, loss=spec.algo.loss, entries=tuple(entries),
+        optim=OptimSettings(name=optim.name, lr=optim.lr,
+                            betas=tuple(optim.betas),
+                            weight_decay=optim.weight_decay,
+                            overrides={k: dict(v)
+                                       for k, v in optim.overrides.items()}))
+
+
+def init_seed(master: int, entry: str) -> int:
+    """One bank entry's init seed off the master: sha256("<master>:init:
+    <entry>")'s first eight bytes. Bytes-stable — every existing run's
+    deltas were initialized from exactly this number."""
+    digest = hashlib.sha256(f"{master}:init:{entry}".encode()).digest()
+    return int.from_bytes(digest[:8], "big")
 
 
 def load_plans(declared: Plans, store: Store) -> dict[str, RunPlan]:
@@ -362,7 +397,11 @@ def attach_residents(spec: ExperimentSpec, engine_map, learner,
         return group
 
     for name in sorted(engine_map):
-        if isinstance(engine_map[name], RemotePool):
+        # A RemotePool the host attached AT BIRTH is its own resident's door
+        # (ADR 0002: every engine is a process behind a proxy) and takes the
+        # local path below; one nobody attached is served by ANOTHER host.
+        if (isinstance(engine_map[name], RemotePool)
+                and not arbiter.is_attached(engine_map[name])):
             if pool_group.get(name) is not None:
                 raise ValueError(
                     f"pool {name!r} is served by another host but declared "
