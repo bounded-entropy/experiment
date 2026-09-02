@@ -20,14 +20,14 @@ import json
 
 from common import arith_spec, arith_store
 from rlstack import (
-    FakeEngine, FakeLearner, GpuConfig, GpuGroup, Host, Metal, Regime, Seeds,
-    fake_qwen_schema, gpus, learner, pool,
+    FakeEngine, FakeLearner, GpuConfig, Host, HostSpec, Metal, Regime, Seeds,
+    fake_qwen_schema, learner, pool,
 )
 from rlstack.runner.host import Partition
 from rlstack.spec.canonical import canonical_json
 from rlstack.runner.campaign import Campaigns, demands_of
 from rlstack.runner.desk import (
-    Demand, Desk, Listing, MetalService, demand_rows,
+    Demand, Desk, DeskError, Listing, MetalService, demand_rows,
 )
 from rlstack.runner.remote import (
     HostService, LocalTransport, RemoteDesk, RemoteHost, RemoteMetal,
@@ -162,10 +162,9 @@ class DeskFixture(unittest.TestCase):
 
     def split_spec(self):
         """main on one partition, the learner on another — the two-listing
-        placement."""
-        return arith_spec(self.train, gpu_config=GpuConfig(groups=(
-            GpuGroup(gpus(n=1), (pool("main"),)),
-            GpuGroup(gpus(n=1), (learner(),)))))
+        placement (two HostSpecs, two dedicated hosts)."""
+        return arith_spec(self.train, gpu_config=GpuConfig(hosts=(
+            HostSpec((pool("main"),)), HostSpec((learner(),)))))
 
 
 class DeskTest(DeskFixture):
@@ -219,9 +218,8 @@ class DeskTest(DeskFixture):
         other_store, other_train, _ = arith_store(tmp.name)
         plain = Host("plain", engines=(FakeEngine(base=BASE),),
                      learner=FakeLearner(), store=other_store)
-        spec = arith_spec(other_train, gpu_config=GpuConfig(groups=(
-            GpuGroup(gpus(n=1), (pool("main"),)),
-            GpuGroup(gpus(n=1), (learner(),)))))
+        spec = arith_spec(other_train, gpu_config=GpuConfig(hosts=(
+            HostSpec((pool("main"),)), HostSpec((learner(),)))))
         report = go(plain.submit(spec, SCHEMA))
         self.assertEqual(reply["run_id"], report.run_id)
         self.assertEqual(
@@ -374,8 +372,8 @@ class ProvisionTest(DeskFixture):
         self.assertEqual(len(service.hosts), 2)      # main unit + learner unit
         listing = desk.listings[reply["host"]]
         self.assertEqual(listing.metal, "fake-metal")
-        self.assertEqual(listing.partition["memory"], 1.0)
-        self.assertEqual(service.residual(), [0.0, 0.0])
+        self.assertEqual(listing.partition["memory"], 1.0)   # a whole L4
+        self.assertEqual(service.residual(), [0.0, 0.0])       # GB free
         events = [e["event"] for e in self.store.read_fleet_log()]
         self.assertEqual(events.count("provision"), 2)
         self.assertEqual(events.count("list"), 2)
@@ -422,7 +420,7 @@ class ProvisionTest(DeskFixture):
                 self.metal_transports[addr]))
         self.assertEqual(reborn.metal["fake-metal"].devices, 2)
         self.assertEqual(reborn.metal_remotes["fake-metal"].residual(),
-                         [1.0, 1.0])
+                         [24.0, 24.0])                         # GB per device
 
 
 class MigrateTest(DeskFixture):
@@ -574,52 +572,81 @@ class LivenessTest(DeskFixture):
         self.assertEqual(sorted(reborn.listings), ["alive-a"])
 
 
-def _inference_request(memory: float) -> dict:
+def _inference_request(vram_gb: float | None) -> dict:
+    """A carve command as the desk sends it: per-device GB (None = a whole
+    device of whatever card the metal holds), no recipe of its own."""
     return {"regimes": [{"name": "main-tp1", "capability": "inference",
                          "base": BASE, "shape": 1}],
-            "base": BASE, "memory": memory}
+            "base": BASE, "vram_gb": vram_gb}
 
 
 class MetalServiceTest(DeskFixture):
-    """The metal's books: booked before built, released on failure, honest
-    about hand-built neighbors, freed by decarve."""
+    """The metal's books, in GB: booked before built, released on failure,
+    honest about hand-built neighbors, freed by decarve — and the ONE
+    crossing to a fraction happens at build, against the measured card."""
 
     def test_a_carve_books_before_it_builds(self) -> None:
         """The invariant the metal plane exists for: while one carve's build
-        is still open, a second that would share its metal REFUSES — the
-        fraction is promised the moment the command is accepted, not when
-        the engine finally stands."""
+        is still open, a second that would share its metal REFUSES — the GB
+        is promised the moment the command is accepted, not when the engine
+        finally stands."""
         import threading
         gate = threading.Event()
         service = self.metal_service(devices=1, build_gate=gate)
 
         async def drive():
-            first = asyncio.create_task(service.carve(_inference_request(0.6)))
+            first = asyncio.create_task(service.carve(_inference_request(14.4)))
             await asyncio.sleep(0.05)     # first books, enters its build
-            second = await service.carve(_inference_request(0.6))
+            second = await service.carve(_inference_request(14.4))
             gate.set()
             return await first, second
         first, second = go(drive())
         self.assertTrue(first["carved"], first)
         self.assertFalse(second["carved"])
         self.assertIn("residual", second)
-        self.assertAlmostEqual(service.residual()[0], 0.4)
+        self.assertAlmostEqual(service.residual()[0], 9.6)     # 24 - 14.4 GB
         self.assertEqual(service.pending, [])
         self.assertIn(first["address"], service.services)
+        # the crossing, once, at build: 14.4 GB of a 24 GB L4 is 0.6
+        self.assertAlmostEqual(first["partition"]["memory"], 0.6)
 
     def test_a_failed_build_releases_its_booking(self) -> None:
         service = self.metal_service(devices=1, broken=True)
-        refusal = go(service.carve(_inference_request(0.6)))
+        refusal = go(service.carve(_inference_request(14.4)))
         self.assertFalse(refusal["carved"])
         self.assertIn("released", refusal["error"])
-        self.assertEqual(service.residual(), [1.0])
+        self.assertEqual(service.residual(), [24.0])
         self.assertEqual(service.pending, [])
         self.assertEqual(service.hosts, {})
 
+    def test_a_slice_past_one_device_is_the_acquire_rung(self) -> None:
+        """More GB than the card holds is not a smaller fraction: the carve
+        refuses naming the card, and the crossing itself raises the acquire
+        rung by name — never clamps (ADR 0001's promise)."""
+        service = self.metal_service(devices=1)
+        refusal = go(service.carve(_inference_request(30.0)))
+        self.assertFalse(refusal["carved"])
+        self.assertIn("holds 24 GB", refusal["error"])
+        self.assertEqual(service.residual(), [24.0])
+        with self.assertRaises(DeskError) as caught:
+            service.build("too-big", (Regime("main-tp1", "inference", BASE, 1),),
+                          (0,), 30.0)
+        self.assertIn("acquire rung", str(caught.exception))
+
+    def test_a_whole_device_is_the_whole_of_this_card(self) -> None:
+        """vram_gb None (Q10) resolves at the metal: on an L4 it is 24 GB,
+        the partition's fraction is 1.0, and the device is spoken for."""
+        service = self.metal_service(devices=1)
+        born = go(service.carve(_inference_request(None)))
+        self.assertTrue(born["carved"], born)
+        self.assertEqual(born["partition"]["memory"], 1.0)
+        self.assertEqual(service.residual(), [0.0])
+
     def test_hand_built_hosts_share_the_books(self) -> None:
         """adopt_born: a bring_up's own standing host counts into residual
-        exactly like a carve's child — and a partitionless host is refused,
-        because unaccounted metal is the double-book this class kills."""
+        exactly like a carve's child (its fraction of THIS card, read back
+        in GB) — and a partitionless host is refused, because unaccounted
+        metal is the double-book this class kills."""
         service = self.metal_service(devices=1)
         standing = Host(
             "standing", engines=(FakeEngine(base=BASE),), learner=None,
@@ -627,8 +654,8 @@ class MetalServiceTest(DeskFixture):
             partition=Partition("fake-metal", (0,), 0.5, "L4"),
             regimes=(Regime("standing-serve", "inference", BASE, 1),))
         service.adopt_born(standing, "fleet://standing")
-        self.assertEqual(service.residual(), [0.5])
-        self.assertIsNone(service.choose_devices(1, 0.6))
+        self.assertEqual(service.residual(), [12.0])
+        self.assertIsNone(service.choose_devices(1, 14.4))
         bare = Host("bare", engines=(), learner=FakeLearner(),
                     store=self.store)
         with self.assertRaises(Exception):
@@ -636,13 +663,13 @@ class MetalServiceTest(DeskFixture):
 
     def test_decarve_frees_and_the_address_stops_answering(self) -> None:
         service = self.metal_service(devices=1)
-        born = go(service.carve(_inference_request(0.6)))
-        self.assertAlmostEqual(service.residual()[0], 0.4)
+        born = go(service.carve(_inference_request(14.4)))
+        self.assertAlmostEqual(service.residual()[0], 9.6)
         residents = service.hosts[born["host"]].residents
         self.assertEqual(len(residents), 1)
         reply = go(service.serve("decarve", {"host": born["host"]}))
         self.assertTrue(reply["decarved"], reply)
-        self.assertEqual(service.residual(), [1.0])
+        self.assertEqual(service.residual(), [24.0])
         # decarve is process teardown now (ADR 0002): the resident was told to
         # stop and its object released — no venue hook unmakes anything
         self.assertTrue(all(r.stopping for r in residents))
@@ -730,7 +757,7 @@ class ReapTest(DeskFixture):
         self.assertEqual(set(verdicts.values()), {"reaped"})
         self.assertEqual(desk.listings, {})
         self.assertEqual(service.hosts, {})
-        self.assertEqual(service.residual(), [1.0, 1.0])
+        self.assertEqual(service.residual(), [24.0, 24.0])
 
     def test_reap_rides_the_wire(self) -> None:
         dead = self.Dead()
@@ -756,7 +783,7 @@ class BlindDeskTest(DeskFixture):
         desk.list_host("serve-a", serving.regimes, "fleet://a")
         reply = go(desk.place((Demand(
             pool="main", capability="inference", base=BASE, shape=1,
-            memory=0.2, group=0, sharing="concurrent"),)))
+            vram_gb=5.0, group=0),)))
         self.assertTrue(reply["placed"])
         self.assertEqual(reply["pools"], {"main": "fleet://a"})
         self.assertEqual(serving.roster, {})

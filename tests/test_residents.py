@@ -29,10 +29,10 @@ import unittest
 from common import arith_spec, arith_store
 from rlstack import (
     Builds, Emitted, EntryInstall, FakeEngine, FakeEngineBuild, FakeLearner,
-    FakeLearnerBuild, GpuConfig, GpuGroup, Host, LearnerService,
+    FakeLearnerBuild, GpuConfig, HostSpec, Host, LearnerService,
     LocalTransport, Metal, OptimSettings, Parameterization, Partition, Regime,
     RemoteLearner, RemotePool, Resident, ResidentBirth, ResidentError,
-    SiteMeta, TokenBatch, fake_qwen_schema, gpus, learner, pool,
+    SiteMeta, TokenBatch, fake_qwen_schema, learner, pool,
     run_experiment,
 )
 from rlstack.runner.campaign import Campaigns
@@ -52,10 +52,10 @@ def go(coro):
     return asyncio.run(coro)
 
 
-def sleep_spec(train_uri: str):
-    """One host wearing both regimes — the alternating shape, one carve."""
-    return arith_spec(train_uri, gpu_config=GpuConfig(groups=(
-        GpuGroup(gpus(n=1), (pool("main"), learner()), sharing="sleep"),)))
+def alternating_spec(train_uri: str):
+    """One HostSpec wearing both regimes — the alternating shape, one carve."""
+    return arith_spec(train_uri, gpu_config=GpuConfig(hosts=(
+        HostSpec((pool("main"), learner())),)))
 
 
 # ---- the stub children for the ladder (module-level: spawned by name) ------
@@ -272,10 +272,10 @@ class ProcessFixture(unittest.TestCase):
         return desk
 
     @staticmethod
-    def inference_request(memory: float) -> dict:
+    def inference_request(vram_gb: float) -> dict:
         return {"regimes": [{"name": "serve", "capability": "inference",
                              "base": BASE, "shape": 1}],
-                "base": BASE, "memory": memory}
+                "base": BASE, "vram_gb": vram_gb}
 
 
 class ProcessResidentTest(ProcessFixture):
@@ -289,7 +289,7 @@ class ProcessResidentTest(ProcessFixture):
         desk = self.desk(service)
 
         async def drive():
-            reply = await Campaigns(desk).submit(sleep_spec(self.train))
+            reply = await Campaigns(desk).submit(alternating_spec(self.train))
             self.assertTrue(reply["accepted"], reply)
             await service.hosts[reply["host"]]._adoptions[reply["run_id"]]
             return reply
@@ -317,7 +317,7 @@ class ProcessResidentTest(ProcessFixture):
         other_store, other_train, _ = arith_store(tmp.name)
         plain = Host("plain", engines=(FakeEngine(base=BASE),),
                      learner=FakeLearner(), store=other_store)
-        report = go(plain.submit(sleep_spec(other_train), SCHEMA))
+        report = go(plain.submit(alternating_spec(other_train), SCHEMA))
         self.assertEqual(reply["run_id"], report.run_id)
         for key in ("ledger.jsonl", "waves/000001.jsonl.gz"):
             self.assertEqual(
@@ -334,9 +334,9 @@ class ProcessResidentTest(ProcessFixture):
         the booking is free again, the address answers nothing, and the death
         is on the record — nothing is restarted in place (ADR 0002, Q7)."""
         service = self.metal()
-        born = go(service.carve(self.inference_request(0.6)))
+        born = go(service.carve(self.inference_request(14.4)))
         self.assertTrue(born["carved"], born)
-        self.assertAlmostEqual(service.residual()[0], 0.4)
+        self.assertAlmostEqual(service.residual()[0], 9.6)     # GB
         resident = service.hosts[born["host"]].residents[0]
 
         os.kill(resident.pid(), signal.SIGKILL)
@@ -345,7 +345,7 @@ class ProcessResidentTest(ProcessFixture):
             time.sleep(0.05)
 
         self.assertNotIn(born["host"], service.hosts)
-        self.assertEqual(service.residual(), [1.0])
+        self.assertEqual(service.residual(), [24.0])
         self.assertEqual(service.deaths, [born["host"]])
         with self.assertRaises(Exception):
             service.service_for(born["address"])
@@ -356,10 +356,10 @@ class ProcessResidentTest(ProcessFixture):
         booking is released, and no process is left behind."""
         service = self.metal(builds=Builds(engine=FakeLearnerBuild(),
                                            learner=FakeLearnerBuild()))
-        born = go(service.carve(self.inference_request(0.5)))
+        born = go(service.carve(self.inference_request(12.0)))
         self.assertFalse(born["carved"], born)
         self.assertIn("not an engine build", born["error"])
-        self.assertEqual(service.residual(), [1.0])
+        self.assertEqual(service.residual(), [24.0])
         self.assertEqual(service.hosts, {})
         self.assertFalse(multiprocessing.active_children())
 

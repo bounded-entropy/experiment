@@ -9,10 +9,10 @@ from typing import Any
 
 
 from rlstack import (
-    AlgoSpec, ExperimentSpec, GenSpec, GpuConfig, GpuGroup, GroupPlan,
+    AlgoSpec, ExperimentSpec, GenSpec, GpuConfig, GroupPlan, HostSpec,
     LocalStore, Message, OptimSpec, Plans, PolicySpec, Role, Rollout, RunPlan,
     Sample, Schedule, Seeds, Task, Trajectory, Turn, WavePlan, WaveRef, encode,
-    gpus, learner, lora, pool,
+    learner, lora, pool,
 )
 
 
@@ -95,8 +95,10 @@ def arith_spec(train_uri: str, heldout_uri: str | None = None,
         algo=AlgoSpec(loss="grpo", post=("verifier", "grpo_advantage"),
                       optim=OptimSpec("adamw", lr=1e-5),
                       schedule=Schedule(microbatch_tokens=64)),
-        gpu_config=GpuConfig(groups=(
-            GpuGroup(gpus(n=1), (pool("main"), learner())),)),
+        # main and the learner as two dedicated hosts (the side-by-side
+        # shape); an alternating single host is HostSpec((pool, learner))
+        gpu_config=GpuConfig(hosts=(HostSpec((pool("main"),)),
+                                    HostSpec((learner(),)))),
         seeds=Seeds(master=17),
     )
     fields.update(overrides)

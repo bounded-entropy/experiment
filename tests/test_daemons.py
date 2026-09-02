@@ -16,8 +16,8 @@ from dataclasses import replace
 
 from common import arith_spec, arith_store
 from rlstack import (
-    FakeEngine, FakeLearner, GpuArbiter, GpuConfig, GpuGroup, RunSignals,
-    Schedule, fake_qwen_schema, gpus, learner, pool, run_experiment,
+    FakeEngine, FakeLearner, GpuArbiter, GpuConfig, HostSpec, RunSignals,
+    Schedule, fake_qwen_schema, learner, pool, run_experiment,
 )
 
 SCHEMA = fake_qwen_schema(4, base="Qwen/Qwen3-0.6B")
@@ -282,9 +282,11 @@ class BlackboardRunTest(unittest.TestCase):
                         # only the Phase-1 initial bundle is not in the ledger
                         self.assertLessEqual(update, 2)
 
-    def test_sleep_colocation_runs_green(self) -> None:
-        spec = arith_spec(self.train, self.heldout, gpu_config=GpuConfig(groups=(
-            GpuGroup(gpus(n=1), (pool("main"), learner()), sharing="sleep"),)))
+    def test_alternating_colocation_runs_green(self) -> None:
+        """One HostSpec, both members: main and the learner ALTERNATE on one
+        partition (the exclusive arbiter group), and the run still commits."""
+        spec = arith_spec(self.train, self.heldout, gpu_config=GpuConfig(hosts=(
+            HostSpec((pool("main"), learner())),)))
         report, run = self.run_spec(spec)
         self.assertEqual(len(run.read_ledger()), 4)
 

@@ -13,7 +13,7 @@ The map, by responsibility — read top to bottom:
                     over the store — daemons never call each other
     arbiter.py      the PHYSICAL half: the GpuArbiter owns admission to the
                     metal — object-keyed residents, exclusive groups from
-                    GpuGroup.sharing="sleep", sticky drain-until-blocked
+                    a multi-member HostSpec, sticky drain-until-blocked
     traffic.py      what travels to pools: EnginePoolClient (sample +
                     score) → episode seal (run_episode) → sealed wave
                     (collect_wave)

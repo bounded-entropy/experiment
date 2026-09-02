@@ -34,7 +34,7 @@ class PostProcessor(ABC):
     `pools` declares EVERY pool this processor sends traffic to, whether via
     `client.pool(name)` or the default main-pinned client. Phase 0 holds it
     against the spec's declared pools ("main" exempt — the runner requires it
-    unconditionally) and against sleep-sharing: the trainer admits exactly
+    unconditionally) and against alternation: the trainer admits exactly
     these residents around the pipeline, so an undeclared pool is sampled
     UNADMITTED, which under sleep colocation means a sleeping engine.
     `sampling` overrides the run's generation sampling for this processor's

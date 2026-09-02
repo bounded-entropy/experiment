@@ -17,7 +17,7 @@ from rlstack.spec.specs import (
     ExperimentSpec,
     GenSpec,
     GpuConfig,
-    GpuGroup,
+    HostSpec,
     OptimSpec,
     PolicySpec,
     Plans,
@@ -25,7 +25,6 @@ from rlstack.spec.specs import (
     Schedule,
     Seeds,
     pool,
-    gpus,
     learner,
     lora,
 )
@@ -70,7 +69,7 @@ def _small_spec() -> ExperimentSpec:
             schedule=Schedule(),
         ),
         gpu_config=GpuConfig(
-            groups=(GpuGroup(gpus(n=1), (pool("main"), learner())),)
+            hosts=(HostSpec((pool("main"), learner())),)
         ),
         seeds=Seeds(master=0),
     )
@@ -115,11 +114,10 @@ class TestCanonicalJsonShape(unittest.TestCase):
             '"sampling":{"__type__":"SamplingSpec",'
             '"max_tokens":1024,"temperature":1.0,"top_p":1.0},'
             '"tasks":["cas://abc/train.jsonl"]},'
-            '"gpu_config":{"__type__":"GpuConfig","groups":[{"__type__":"GpuGroup",'
-            '"gpus":{"__type__":"GpuSet","ids":null,"n":1,"nodes":1},'
-            '"members":[{"__type__":"PoolMember","base":null,"fraction":null,'
-            '"n":1,"name":"main","tp":1},{"__type__":"LearnerMember",'
-            '"fraction":null,"fsdp":1}],"sharing":"concurrent"}]},"init":null,'
+            '"gpu_config":{"__type__":"GpuConfig","hosts":[{"__type__":"HostSpec",'
+            '"members":[{"__type__":"PoolMember","base":null,"name":"main",'
+            '"tp":1,"vram_gb":null},{"__type__":"LearnerMember","fsdp":1,'
+            '"vram_gb":null}]}]},"init":null,'
             '"plans":{"__type__":"Plans",'
             '"rollout":"cas://plan/roll","train":"cas://plan/train"},'
             '"policy":{"__type__":"PolicySpec","bank":{"pi":{"__type__":'
@@ -270,7 +268,13 @@ class TestContentHash(unittest.TestCase):
             "tp": dataclasses.replace(
                 base,
                 gpu_config=GpuConfig(
-                    groups=(GpuGroup(gpus(n=1), (pool("main", tp=2), learner())),)
+                    hosts=(HostSpec((pool("main", tp=2), learner())),)
+                ),
+            ),
+            "vram_gb": dataclasses.replace(
+                base,
+                gpu_config=GpuConfig(
+                    hosts=(HostSpec((pool("main", vram_gb=12), learner())),)
                 ),
             ),
         }

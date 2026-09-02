@@ -6,7 +6,7 @@ why per-experiment mutexes died: two tenants' private locks coordinate nothing.
 It governs the partition that owns it, not the device: several sub-GPU hosts on
 one device each admit independently. Alternation exists only inside an
 exclusive group
-(GpuGroup.sharing="sleep", or a host's own group); everything else co-resides
+(a multi-member HostSpec, or a host's own group); everything else co-resides
 and admit() is a plain counter — and even inside a group, alternation is about
 memory, never mutual exclusion on work: any amount of work overlaps on the
 resident that is live. Scheduling policy is sticky drain-until-blocked and
@@ -128,7 +128,7 @@ class GpuArbiter:
 
     def residency(self) -> dict[str, str | None]:
         """Per exclusive group: the resident's label (None: nothing yet).
-        The GpuSet's STATE, as the host's status reports it."""
+        The partition's STATE, as the host's status reports it."""
         return {name: (self._entry(group.resident).label
                        if group.resident is not None else None)
                 for name, group in sorted(self._groups.items())}

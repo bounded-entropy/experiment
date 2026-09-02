@@ -32,9 +32,9 @@ from typing import Any
 from common import arith_spec, arith_store, sealed
 from test_resume import CrashingStore, SimulatedCrash
 from rlstack import (
-    Bundle, FakeEngine, FakeLearner, GpuArbiter, GpuConfig, GpuGroup, Group,
+    Bundle, FakeEngine, FakeLearner, GpuArbiter, GpuConfig, HostSpec, Group,
     LocalStore, Message, PostProcessor, Role, Rollout, RunSignals, Scorer, Task,
-    Trajectory, Turn, Wave, fake_qwen_schema, gpus, learner, pool, postprocessor,
+    Trajectory, Turn, Wave, fake_qwen_schema, learner, pool, postprocessor,
     run_experiment, validate,
 )
 from rlstack.data.plan import RunPlan
@@ -73,8 +73,9 @@ def judged_spec(train_uri: str, heldout_uri: str | None = None):
     return replace(
         base,
         algo=replace(base.algo, post=("llm_judge", "grpo_advantage")),
-        gpu_config=GpuConfig(groups=(
-            GpuGroup(gpus(n=1), (pool("main"), pool("judge"), learner())),)))
+        gpu_config=GpuConfig(hosts=(
+            HostSpec((pool("main"),)), HostSpec((pool("judge"),)),
+            HostSpec((learner(),)))))
 
 
 def selfscored_spec(train_uri: str):
@@ -191,8 +192,9 @@ class SplitOrderGateTest(unittest.TestCase):
         base = arith_spec(self.train)
         spec = replace(
             base, algo=replace(base.algo, post=pipeline),
-            gpu_config=GpuConfig(groups=(GpuGroup(
-                gpus(n=1), (pool("main"), pool("judge"), learner())),)))
+            gpu_config=GpuConfig(hosts=(
+                HostSpec((pool("main"),)), HostSpec((pool("judge"),)),
+                HostSpec((learner(),)))))
         return [issue.code for issue in validate(spec, SCHEMA)]
 
     def test_pooled_consuming_inline_is_refused(self) -> None:
@@ -213,8 +215,9 @@ class SplitOrderGateTest(unittest.TestCase):
         spec = replace(
             base, algo=replace(base.algo, post=(
                 "verifier", "scorer_test_pooled_consumer", "grpo_advantage")),
-            gpu_config=GpuConfig(groups=(GpuGroup(
-                gpus(n=1), (pool("main"), pool("judge"), learner())),)))
+            gpu_config=GpuConfig(hosts=(
+                HostSpec((pool("main"),)), HostSpec((pool("judge"),)),
+                HostSpec((learner(),)))))
         issue = next(i for i in validate(spec, SCHEMA)
                      if i.code == "post-split-order")
         self.assertEqual(issue.path, "algo.post[1]")
@@ -332,9 +335,10 @@ class VersionPinningTest(unittest.TestCase):
         base = arith_spec(self.train)
         teacher = replace(base, algo=replace(
             base.algo, loss="opd", post=("verifier", "teacher_logprobs")),
-            gpu_config=GpuConfig(groups=(GpuGroup(gpus(n=1), (
-                pool("main"), pool("teacher", base=TEACHER_BASE),
-                learner())),)))
+            gpu_config=GpuConfig(hosts=(
+                HostSpec((pool("main"),)),
+                HostSpec((pool("teacher", base=TEACHER_BASE),)),
+                HostSpec((learner(),)))))
         scorer = self.scorer_for(teacher)
         self.assertEqual(scorer.pools, ["teacher"])
         self.assertIs(scorer.pinned_bundle(4, self.wave_at("bundle:old", {})),

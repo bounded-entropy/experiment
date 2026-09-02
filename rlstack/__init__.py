@@ -29,9 +29,9 @@ from rlstack.data.plan import (
 )
 from rlstack.spec.specs import (
     AdapterSpec, AlgoSpec, BackendProfile, PoolMember, ExperimentSpec,
-    GenSpec, GpuConfig, GpuSet, GpuGroup, LearnerMember, OptimSpec, PolicySpec,
+    GenSpec, GpuConfig, HostSpec, LearnerMember, OptimSpec, PolicySpec,
     Plans, SamplingSpec, Schedule, Seeds, WarmStart,
-    attn_bias, gpus, learner, lora, plora, pool, soft_prompt,
+    attn_bias, learner, lora, plora, pool, soft_prompt,
 )
 from rlstack.registry import (
     ADAPTER_TYPES, ENVS, LOSSES, POST,

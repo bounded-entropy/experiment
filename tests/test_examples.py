@@ -20,7 +20,7 @@ from rlstack import (
     ExperimentSpec,
     GenSpec,
     GpuConfig,
-    GpuGroup,
+    HostSpec,
     Group,
     GroupPlan,
     Message,
@@ -48,7 +48,6 @@ from rlstack import (
     pool,
     environment,
     flatten,
-    gpus,
     learner,
     lora,
     loss,
@@ -159,9 +158,10 @@ def example_1() -> ExperimentSpec:
                             overrides={"head": {"lr": 3e-6}}),
             schedule=Schedule(),
         ),
-        gpu_config=GpuConfig(groups=(
-            GpuGroup(gpus(n=6), (pool("main", tp=2, n=3), learner(fsdp=2))),
-            GpuGroup(gpus(n=1), (pool("eval"),)),
+        gpu_config=GpuConfig(hosts=(
+            HostSpec((pool("main", tp=2),)),
+            HostSpec((learner(fsdp=2),)),
+            HostSpec((pool("eval"),)),
         )),
         seeds=Seeds(master=17),
     )
@@ -329,15 +329,18 @@ class TestExample5MultiNode(unittest.TestCase):
             plans=plans_for("tool_use"),
             algo=replace(example_1().algo,
                          schedule=Schedule(max_policy_lag=1)),
-            gpu_config=GpuConfig(groups=(
-                GpuGroup(gpus(n=16, nodes=2), (pool("main", tp=2, n=8),)),
-                GpuGroup(gpus(n=8), (learner(fsdp=8),)),
-                GpuGroup(gpus(n=1), (pool("eval"),)),
+            gpu_config=GpuConfig(hosts=(
+                HostSpec((pool("main", tp=2, vram_gb=120),)),
+                HostSpec((learner(fsdp=8, vram_gb=400),)),
+                HostSpec((pool("eval"),)),
             )),
         )
         validate_or_raise(exp, SCHEMA_35B)
-        # Semantics-neutral (I5): no provider name anywhere in the spec.
-        for provider in ("modal", "skypilot", "aws", "H100"):
+        # Semantics-neutral (I5): no provider name anywhere in the spec —
+        # and no card either: memory is GB, total across shards, so the
+        # same experiment hashes identically on an L4 fleet and an H100 one
+        for provider in ("modal", "skypilot", "aws", "H100", "L4",
+                         "fraction", "sharing"):
             self.assertNotIn(provider, canonical_json(exp))
 
 
@@ -350,9 +353,9 @@ class TestExample6Replicates(unittest.TestCase):
             policy=PolicySpec(base="Qwen/Qwen3-1.7B",
                               bank={"pi": lora("layers.0-31.mlp.*", r=16)}),
             plans=example_1().plans,
-            gpu_config=GpuConfig(groups=(
-                GpuGroup(gpus(ids=("0",)),
-                      (pool("main", n=2, fraction=0.30), learner(fraction=0.25))),
+            gpu_config=GpuConfig(hosts=(
+                HostSpec((pool("main", vram_gb=7),)),
+                HostSpec((learner(vram_gb=6),)),
             )),
         )
 
@@ -364,12 +367,14 @@ class TestExample6Replicates(unittest.TestCase):
                for s in range(5)}
         self.assertEqual(len(ids), 5)  # five run_ids, one resident engine
 
-    def test_the_memory_treaty_is_checked_at_submit(self) -> None:
-        overfull = replace(self.base(), gpu_config=GpuConfig(groups=(
-            GpuGroup(gpus(ids=("0",)),
-                  (pool("main", n=2, fraction=0.80), learner(fraction=0.25))),)))
-        self.assertEqual({i.code for i in validate(overfull, SCHEMA_17B)},
-                         {"fraction-overflow"})
+    def test_the_memory_treaty_left_the_gate(self) -> None:
+        """ADR 0001 (Q7): sizes are GB and the gate holds no metal, so
+        whether two hosts fit one card is placement's question, answered
+        against a real residual — the gate no longer sums anything."""
+        generous = replace(self.base(), gpu_config=GpuConfig(hosts=(
+            HostSpec((pool("main", vram_gb=70),)),
+            HostSpec((learner(vram_gb=70),)))))
+        self.assertEqual(validate(generous, SCHEMA_17B), [])
 
 
 if __name__ == "__main__":

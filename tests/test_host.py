@@ -2,7 +2,7 @@
 
 The claims under test: a host-submitted run is byte-identical to a raw
 run_experiment (the host adds custody, never semantics); pools bind onto
-owned engines by base; capacity refuses what cannot fit; the journal records
+owned engines by base; fit is custody, never memory; the journal records
 attach/detach truthfully (including failures); and the CLI renders all of it
 from the store alone.
 """
@@ -16,8 +16,8 @@ from dataclasses import replace
 
 from common import arith_spec, arith_store
 from rlstack import (
-    FakeEngine, FakeLearner, GpuConfig, GpuGroup, Host, HostError, Partition,
-    Regime, Seeds, SpecError, fake_qwen_schema, gpus, learner, pool,
+    FakeEngine, FakeLearner, GpuConfig, HostSpec, Host, HostError, Partition,
+    Regime, Seeds, SpecError, fake_qwen_schema, learner, pool,
     run_experiment,
 )
 from rlstack.observe import render_gpu, render_hosts, render_runs, store_for
@@ -77,10 +77,10 @@ class HostTest(unittest.TestCase):
         judge_engine = FakeEngine(base="Qwen/Qwen3-8B")
         host = self.host(engines=(FakeEngine(base="Qwen/Qwen3-0.6B"),
                                   judge_engine))
-        spec = arith_spec(self.train, gpu_config=GpuConfig(groups=(
-            GpuGroup(gpus(n=1), (pool("main"),
-                                 pool("judge", base="Qwen/Qwen3-8B"),
-                                 learner())),)))
+        spec = arith_spec(self.train, gpu_config=GpuConfig(hosts=(
+            HostSpec((pool("main"),)),
+            HostSpec((pool("judge", base="Qwen/Qwen3-8B"),)),
+            HostSpec((learner(),)))))
         binding = host.bind_pools(spec)
         self.assertIs(binding["judge"], judge_engine)
 
@@ -89,23 +89,24 @@ class HostTest(unittest.TestCase):
             lonely.bind_pools(spec)
         self.assertIn("Qwen/Qwen3-8B", str(caught.exception))
 
-    def test_capacity_refuses_what_cannot_fit(self) -> None:
+    def test_fit_is_custody_never_memory_arithmetic(self) -> None:
+        """A spec's `vram_gb` is a CARVE size the metal converts at build
+        (ADR 0001): a host sums nothing at its door, so two tenants sized
+        past the card in GB both submit onto a bare host — the arbiter's
+        declared load stays the host's own — and the one refusal FIT still
+        owns is a learner member on a host wearing no learner."""
         host = self.host()
-        heavy = arith_spec(self.train, gpu_config=GpuConfig(groups=(
-            GpuGroup(gpus(n=1), (pool("main", fraction=0.7),
-                                 learner(fraction=0.4))),)))
-        with self.assertRaises(HostError) as caught:
-            go(host.submit(heavy, SCHEMA))
-        self.assertIn("cannot fit", str(caught.exception))
+        heavy = arith_spec(self.train, gpu_config=GpuConfig(hosts=(
+            HostSpec((pool("main", vram_gb=60),)),
+            HostSpec((learner(vram_gb=60),)))))
+        go(host.submit(heavy, SCHEMA))
+        go(host.submit(replace(heavy, seeds=Seeds(master=99)), SCHEMA))
+        self.assertEqual(host.arbiter.declared_load(), 0.0)
 
-        # a second tenant over the SAME objects adds no load: submits fine
-        fits = arith_spec(self.train, gpu_config=GpuConfig(groups=(
-            GpuGroup(gpus(n=1), (pool("main", fraction=0.5),
-                                 learner(fraction=0.4))),)))
-        go(host.submit(fits, SCHEMA))
-        again = replace(fits, seeds=Seeds(master=99))
-        go(host.submit(again, SCHEMA))
-        self.assertLessEqual(host.arbiter.declared_load(), 1.0)
+        engine_only = self.host(learner=None)
+        with self.assertRaises(HostError) as caught:
+            go(engine_only.submit(heavy, SCHEMA))
+        self.assertIn("no training regime", str(caught.exception))
 
     def test_journal_records_attach_detach_and_failure(self) -> None:
         host = self.host()
@@ -275,14 +276,14 @@ class ShapeAndRegimeTest(unittest.TestCase):
         tp2 = FakeEngine(base="Qwen/Qwen3-8B", tp=2)
         host = Host("shaped", engines=(FakeEngine(), tp2),
                     learner=FakeLearner(), store=self.store)
-        spec = arith_spec(self.train, gpu_config=GpuConfig(groups=(
-            GpuGroup(gpus(n=2), (pool("judge", base="Qwen/Qwen3-8B", tp=2),)),
-            GpuGroup(gpus(n=1), (pool("main"), learner())),)))
+        spec = arith_spec(self.train, gpu_config=GpuConfig(hosts=(
+            HostSpec((pool("judge", base="Qwen/Qwen3-8B", tp=2),)),
+            HostSpec((pool("main"),)), HostSpec((learner(),)))))
         self.assertIs(host.bind_pools(spec)["judge"], tp2)
 
-        four = arith_spec(self.train, gpu_config=GpuConfig(groups=(
-            GpuGroup(gpus(n=4), (pool("judge", base="Qwen/Qwen3-8B", tp=4),)),
-            GpuGroup(gpus(n=1), (pool("main"), learner())),)))
+        four = arith_spec(self.train, gpu_config=GpuConfig(hosts=(
+            HostSpec((pool("judge", base="Qwen/Qwen3-8B", tp=4),)),
+            HostSpec((pool("main"),)), HostSpec((learner(),)))))
         with self.assertRaises(HostError) as caught:
             host.bind_pools(four)
         self.assertIn("tp=4", str(caught.exception))
@@ -300,11 +301,11 @@ class ShapeAndRegimeTest(unittest.TestCase):
                  regimes=(Regime("learner-fsdp2", "training", None, 2),))
         self.assertIn("fsdp=2", str(caught.exception))
 
-    def test_a_regime_host_admits_joins_fraction_free(self) -> None:
-        """Fractions this heavy would be refused by a bare host (see
-        test_capacity_refuses_what_cannot_fit) — on a regime-host they are
-        carve hints, ignored: the partition already is the footprint, and
-        the run alternates under the host's own birth group."""
+    def test_a_regime_host_admits_joins_size_free(self) -> None:
+        """Sizes are CARVE hints (GB the metal converts at build) and mean
+        nothing on a join: the partition already is the footprint, and the
+        run alternates under the host's own birth group whatever the spec
+        declares."""
         host = Host(
             "carved", engines=(FakeEngine(),), learner=FakeLearner(),
             store=self.store,
@@ -313,10 +314,9 @@ class ShapeAndRegimeTest(unittest.TestCase):
                      Regime("learner-fsdp1", "training", None, 1)))
         def heavy(master: int):
             return arith_spec(self.train, seeds=Seeds(master=master),
-                              gpu_config=GpuConfig(groups=(
-                                  GpuGroup(gpus(n=1),
-                                           (pool("main", fraction=0.6),
-                                            learner(fraction=0.4))),)))
+                              gpu_config=GpuConfig(hosts=(
+                                  HostSpec((pool("main", vram_gb=30),
+                                            learner(vram_gb=20))),)))
 
         report = go(host.submit(heavy(17), SCHEMA))     # two full-fraction
         go(host.submit(heavy(99), SCHEMA))              # tenants both admit
@@ -341,8 +341,8 @@ class ShapeAndRegimeTest(unittest.TestCase):
                                          {"event": "host-up"})
 
     def test_learner_shape_mismatch_is_a_binding_issue(self) -> None:
-        spec = arith_spec(self.train, gpu_config=GpuConfig(groups=(
-            GpuGroup(gpus(n=2), (pool("main"), learner(fsdp=2))),)))
+        spec = arith_spec(self.train, gpu_config=GpuConfig(hosts=(
+            HostSpec((pool("main"),)), HostSpec((learner(fsdp=2),)))))
         with self.assertRaises(SpecError) as caught:
             run_experiment(spec, SCHEMA, self.store, FakeEngine(),
                            FakeLearner())

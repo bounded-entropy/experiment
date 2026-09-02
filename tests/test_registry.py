@@ -20,8 +20,8 @@ from rlstack.registry import (
     source_hash,
 )
 from rlstack.spec.specs import (
-    AlgoSpec, ExperimentSpec, GenSpec, GpuConfig, GpuGroup, OptimSpec,
-    PolicySpec, Plans, Schedule, Seeds, gpus, learner, lora, pool,
+    AlgoSpec, ExperimentSpec, GenSpec, GpuConfig, HostSpec, OptimSpec,
+    PolicySpec, Plans, Schedule, Seeds, learner, lora, pool,
 )
 
 
@@ -213,8 +213,8 @@ def minimal_spec(**overrides: Any) -> ExperimentSpec:
         algo=AlgoSpec(loss="grpo", post=("verifier", "grpo_advantage"),
                       optim=OptimSpec("adamw", lr=1e-5),
                       schedule=Schedule()),
-        gpu_config=GpuConfig(groups=(
-            GpuGroup(gpus(n=1), (pool("main"), learner())),)),
+        gpu_config=GpuConfig(hosts=(HostSpec((pool("main"),)),
+                                    HostSpec((learner(),)))),
         seeds=Seeds(master=0),
     )
     fields.update(overrides)

@@ -66,10 +66,10 @@ def _issue(code: str, path: str, message: str) -> ValidationIssue:
 def _declared_pools(spec: ExperimentSpec) -> dict[str, str]:
     """Engine pool name -> the spec path that declares it."""
     pools: dict[str, str] = {}
-    for gi, group in enumerate(spec.gpu_config.groups):
-        for mi, member in enumerate(group.members):
+    for hi, host in enumerate(spec.gpu_config.hosts):
+        for mi, member in enumerate(host.members):
             if isinstance(member, PoolMember) and member.name not in pools:
-                pools[member.name] = f"gpu_config.groups[{gi}].members[{mi}]"
+                pools[member.name] = f"gpu_config.hosts[{hi}].members[{mi}]"
     return pools
 
 
@@ -340,22 +340,22 @@ def check_sites_reachable_on(
     return issues
 
 
-def check_groups_exist(spec: ExperimentSpec, schema: SiteSchema) -> list[ValidationIssue]:
-    """The topology declares at least one group."""
-    if spec.gpu_config.groups:
+def check_hosts_exist(spec: ExperimentSpec, schema: SiteSchema) -> list[ValidationIssue]:
+    """The topology declares at least one host."""
+    if spec.gpu_config.hosts:
         return []
-    return [_issue("no-groups", "gpu_config", "gpu_config declares no groups")]
+    return [_issue("no-hosts", "gpu_config", "gpu_config declares no hosts")]
 
 
 def check_pool_names_are_unique(spec: ExperimentSpec, schema: SiteSchema) -> list[ValidationIssue]:
-    """Each engine pool name appears in exactly one group."""
+    """Each engine pool name appears on exactly one host."""
     issues = []
     first: dict[str, str] = {}
-    for gi, group in enumerate(spec.gpu_config.groups):
-        for mi, member in enumerate(group.members):
+    for hi, host in enumerate(spec.gpu_config.hosts):
+        for mi, member in enumerate(host.members):
             if not isinstance(member, PoolMember):
                 continue
-            path = f"gpu_config.groups[{gi}].members[{mi}]"
+            path = f"gpu_config.hosts[{hi}].members[{mi}]"
             if member.name in first:
                 issues.append(_issue(
                     "duplicate-pool", path,
@@ -365,50 +365,33 @@ def check_pool_names_are_unique(spec: ExperimentSpec, schema: SiteSchema) -> lis
     return issues
 
 
-def check_sleep_groups_have_one_learner(spec: ExperimentSpec, schema: SiteSchema) -> list[ValidationIssue]:
-    """sharing='sleep' makes an exclusive group in which the learner alternates
-    with the engines — so exactly one learner."""
-    issues = []
-    for gi, group in enumerate(spec.gpu_config.groups):
-        if group.sharing != "sleep":
-            continue
-        n_learners = sum(1 for m in group.members if isinstance(m, LearnerMember))
-        if n_learners != 1:
-            issues.append(_issue(
-                "bad-sleep-group", f"gpu_config.groups[{gi}]",
-                f"sharing='sleep' alternates one learner with the engines, "
-                f"but this group has {n_learners} learner member(s)"))
-    return issues
+def alternates_the_learner(host) -> bool:
+    """Does this HostSpec make the learner ALTERNATE with an engine? A
+    multi-member host is one partition with one resident live at a time
+    (ADR 0001, Q1: "alternate" — the word "sleep" survives only as vLLM's
+    build fact); when the learner is one of those members, generation and
+    training take turns on the same memory."""
+    return (len(host.members) > 1
+            and any(isinstance(m, LearnerMember) for m in host.members)
+            and any(isinstance(m, PoolMember) for m in host.members))
 
 
-def check_sleep_implies_zero_lag(spec: ExperimentSpec, schema: SiteSchema) -> list[ValidationIssue]:
-    """Sleep serializes generation and training, so sampled waves are never stale."""
-    has_sleep = any(g.sharing == "sleep" for g in spec.gpu_config.groups)
-    if not has_sleep or spec.algo is None:
+def check_alternation_implies_zero_lag(spec: ExperimentSpec, schema: SiteSchema) -> list[ValidationIssue]:
+    """A learner alternating with an engine serializes generation and
+    training, so sampled waves are never stale and a lag buffer is a
+    contradiction. Two pools alternating on a host of their own bind
+    nothing here: the learner elsewhere keeps training while they switch."""
+    if spec.algo is None:
+        return []
+    if not any(alternates_the_learner(h) for h in spec.gpu_config.hosts):
         return []
     lag = spec.algo.schedule.max_policy_lag
     if lag == 0:
         return []
     return [_issue(
-        "sleep-lag-conflict", "algo.schedule.max_policy_lag",
-        f"sharing='sleep' implies lag 0, but max_policy_lag={lag}")]
-
-
-def check_fractions_fit(spec: ExperimentSpec, schema: SiteSchema) -> list[ValidationIssue]:
-    """When every member of a group states its memory fraction, they must fit
-    in 1.0. A group with any unstated fraction is left to Phase-1 memory
-    probing."""
-    issues = []
-    for gi, group in enumerate(spec.gpu_config.groups):
-        fractions = [m.fraction for m in group.members]
-        if not fractions or any(f is None for f in fractions):
-            continue
-        total = sum(fractions)
-        if total > 1.0 + 1e-9:
-            issues.append(_issue(
-                "fraction-overflow", f"gpu_config.groups[{gi}]",
-                f"member fractions sum to {total:.3f} > 1.0"))
-    return issues
+        "alternation-lag-conflict", "algo.schedule.max_policy_lag",
+        f"a learner alternating with an engine on one host implies lag 0, "
+        f"but max_policy_lag={lag}")]
 
 
 def check_traffic_routes_to_declared_pools(spec: ExperimentSpec, schema: SiteSchema) -> list[ValidationIssue]:
@@ -418,7 +401,7 @@ def check_traffic_routes_to_declared_pools(spec: ExperimentSpec, schema: SiteSch
     if spec.gen is not None and "main" not in pools:
         issues.append(_issue(
             "main-pool-missing", "gpu_config",
-            f"gen traffic routes to the pool named 'main', which no group declares; "
+            f"gen traffic routes to the pool named 'main', which no host declares; "
             f"pools: {', '.join(sorted(pools)) or '(none)'}"))
     return issues
 
@@ -430,8 +413,8 @@ def check_pools_serve_their_base(spec: ExperimentSpec, engine_map) -> list[Valid
     None — fakes standing in for metal — serve anything. Outside CHECKS
     because it consults live engine objects, so the loop runs it at submit."""
     declared_base: dict[str, str] = {}
-    for group in spec.gpu_config.groups:
-        for member in group.members:
+    for host in spec.gpu_config.hosts:
+        for member in host.members:
             if isinstance(member, PoolMember):
                 declared_base[member.name] = member.base or spec.policy.base
     issues = []
@@ -455,8 +438,8 @@ def check_members_match_their_shape(spec: ExperimentSpec, engine_map,
     check_pools_serve_their_base, this consults live metal, so the loop runs
     it at submit."""
     declared_tp: dict[str, int] = {}
-    for group in spec.gpu_config.groups:
-        for member in group.members:
+    for host in spec.gpu_config.hosts:
+        for member in host.members:
             if isinstance(member, PoolMember):
                 declared_tp[member.name] = member.tp
     issues = []
@@ -467,8 +450,8 @@ def check_members_match_their_shape(spec: ExperimentSpec, engine_map,
                 "pool-shape-mismatch", f"gpu_config({name})",
                 f"pool {name!r} declares tp={expected} but the engine handed "
                 f"for it is built tp={engine.tp}"))
-    for group in spec.gpu_config.groups:
-        for member in group.members:
+    for host in spec.gpu_config.hosts:
+        for member in host.members:
             if isinstance(member, LearnerMember) and learner.fsdp != member.fsdp:
                 issues.append(_issue(
                     "learner-shape-mismatch", "gpu_config(learner)",
@@ -496,7 +479,7 @@ def check_post_pools_are_declared(spec: ExperimentSpec, schema: SiteSchema) -> l
                     issues.append(_issue(
                         "post-pool-missing", f"{field}[{i}]",
                         f"postprocessor {name!r} samples from pool {pool!r}, "
-                        f"which no group declares; pools: "
+                        f"which no host declares; pools: "
                         f"{', '.join(sorted(pools)) or '(none)'}"))
     return issues
 
@@ -515,21 +498,19 @@ def traffic_pools(spec: ExperimentSpec) -> set[str]:
 
 def check_post_pools_can_coreside(spec: ExperimentSpec, schema: SiteSchema) -> list[ValidationIssue]:
     """A pipeline holds every pool it addresses CO-RESIDENT for its whole run —
-    but two pools in one exclusive group alternate on the same memory by
+    but two pools on one multi-member host ALTERNATE on the same memory by
     declaration, so no admission order can satisfy that pipeline. Refused at
     submit; the arbiter would raise at runtime, later and louder. The algo
     pipeline's set is its processors' declared pools (the Scorer admits exactly
-    those — they are its whole half by the split rule); the eval pipeline
-    additionally holds eval.pool, since the evaluator runs episodes and scoring
-    under one admission."""
-    sleep_group: dict[str, int] = {}
-    for gi, group in enumerate(spec.gpu_config.groups):
-        if group.sharing != "sleep":
+    those — they are its whole half by the split rule)."""
+    alternating_host: dict[str, int] = {}
+    for hi, host in enumerate(spec.gpu_config.hosts):
+        if len(host.members) < 2:
             continue
-        for member in group.members:
+        for member in host.members:
             if isinstance(member, PoolMember):
-                sleep_group[member.name] = gi
-    if not sleep_group:
+                alternating_host[member.name] = hi
+    if not alternating_host:
         return []
 
     pipelines = []
@@ -539,17 +520,17 @@ def check_post_pools_can_coreside(spec: ExperimentSpec, schema: SiteSchema) -> l
     for field, pipeline, held in pipelines:
         sampled = set(held) | {pool for name in pipeline if name in POST
                                for pool in POST.get(name).pools}
-        by_group: dict[int, list[str]] = {}
+        by_host: dict[int, list[str]] = {}
         for pool in sorted(sampled):
-            if pool in sleep_group:
-                by_group.setdefault(sleep_group[pool], []).append(pool)
-        for gi, members in sorted(by_group.items()):
+            if pool in alternating_host:
+                by_host.setdefault(alternating_host[pool], []).append(pool)
+        for hi, members in sorted(by_host.items()):
             if len(members) > 1:
                 issues.append(_issue(
                     "post-pools-conflict", field,
                     f"pipeline needs pools {members} co-resident, but they "
-                    f"alternate in sleep group gpu_config.groups[{gi}] — an "
-                    f"alternation set cannot serve one pipeline"))
+                    f"alternate on gpu_config.hosts[{hi}] — an alternating "
+                    f"host cannot serve one pipeline"))
     return issues
 
 
@@ -607,11 +588,9 @@ CHECKS = (
     check_adapter_types_accept_their_sites,
     check_plora_entries_name_their_factors,
     check_plora_shapes_are_positive,
-    check_groups_exist,
+    check_hosts_exist,
     check_pool_names_are_unique,
-    check_sleep_groups_have_one_learner,
-    check_sleep_implies_zero_lag,
-    check_fractions_fit,
+    check_alternation_implies_zero_lag,
     check_traffic_routes_to_declared_pools,
     check_post_pools_are_declared,
     check_post_pools_can_coreside,

@@ -23,7 +23,7 @@ stand in the collectives and their answers are discarded, which is safe only
 while the five verbs stay deterministic functions of their arguments — a verb
 consulting rank-local state the ranks do not share would desynchronize them.
 
-Out of scope, deliberately: sleep-sharing (an alternation would have to swing
+Out of scope, deliberately: alternation (a sleep would have to swing
 every rank in step), so an FSDP host is dedicated or concurrent.
 """
 

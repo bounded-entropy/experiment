@@ -20,9 +20,9 @@ import unittest
 from common import cas_uri, make_turn
 from rlstack import (
     AlgoSpec, ExperimentSpec, FakeEngine, FakeLearner, GenSpec, GpuConfig,
-    GpuGroup, GroupPlan, Host, LocalStore, Message, OptimSpec, Plans,
+    HostSpec, GroupPlan, Host, LocalStore, Message, OptimSpec, Plans,
     PolicySpec, Role, Rollout, RunPlan, Sample, Schedule, Seeds, Task,
-    WavePlan, WaveRef, encode, fake_qwen_schema, gpus, learner, lora, pool,
+    WavePlan, WaveRef, encode, fake_qwen_schema, learner, lora, pool,
     validate, write_tasks,
 )
 from rlstack.data.plan import Derive, decode
@@ -193,8 +193,8 @@ def arm_spec(store, *, loss: str, post: tuple[str, ...],
         algo=AlgoSpec(loss=loss, post=post,
                       optim=OptimSpec("adamw", lr=1e-5),
                       schedule=Schedule(microbatch_tokens=2048)),
-        gpu_config=GpuConfig(groups=(
-            GpuGroup(gpus(n=1), (pool("main"), learner())),)),
+        gpu_config=GpuConfig(hosts=(HostSpec((pool("main"),)),
+                                    HostSpec((learner(),)))),
         seeds=Seeds(master=23))
 
 
@@ -371,8 +371,8 @@ class ReflectLoopTest(unittest.TestCase):
             algo=AlgoSpec(loss="sdpo", post=("stamp_grade",),
                           optim=OptimSpec("adamw", lr=1e-5),
                           schedule=Schedule(microbatch_tokens=4096)),
-            gpu_config=GpuConfig(groups=(
-                GpuGroup(gpus(n=1), (pool("main"), learner())),)),
+            gpu_config=GpuConfig(hosts=(HostSpec((pool("main"),)),
+                                        HostSpec((learner(),)))),
             seeds=Seeds(master=29))
         self.assertEqual(validate(spec, SCHEMA), [])
         host = Host("loop-fake", engines=(FakeEngine(),), learner=FakeLearner(),

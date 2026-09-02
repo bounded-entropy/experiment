@@ -1,4 +1,4 @@
-"""Host: an ATOMIC, PURPOSED PARTITION of GPU capacity — the fleet's unit.
+"""Host: an ATOMIC, PURPOSED PARTITION of GPU memory — the fleet's unit.
 
 Not a GPU, not a node, not a container: a host is some slice of some GPUs, born
 with its Partition and its Regimes, attesting the metal it was handed against
@@ -10,7 +10,8 @@ journal, and the one traffic meter both of the former count into.
 
 `await host.submit(spec, schema, store)` is how an experiment reaches metal:
 BIND each declared pool onto an owned engine serving that base at that shape,
-FIT (refuse past capacity), ATTEST (roster in memory, journal to
+FIT (a learner member finds a learner here — custody, never memory
+arithmetic), ATTEST (roster in memory, journal to
 hosts/<name>/log.jsonl — observability only, which correctness never reads),
 and RUN under the shared arbiter against the experiment's OWN run store. That
 last is the rule submit exists to enforce: one experiment, one store, for life
@@ -43,14 +44,15 @@ from rlstack.spec.specs import ExperimentSpec, PoolMember
 
 
 class HostError(RuntimeError):
-    """A submission this host cannot serve (no matching engine, no capacity)."""
+    """A submission this host cannot serve (no matching engine, no learner,
+    a solo host already occupied)."""
 
 
 @dataclass(frozen=True)
 class Partition:
     """The irreducible carved share of metal a host is born onto: the NAME of
     the Metal it was carved from, the KIND of GPU it is made of ("L4",
-    "H100"), the device indices, and the memory fraction it owns on each.
+    "H100"), the device indices, and the memory FRACTION it owns on each.
     Since ADR 0002 every resident wearing this partition is its own PROCESS,
     so both numbers are enforced where the substrate can enforce them: the
     devices become that process's CUDA_VISIBLE_DEVICES, and the fraction is
@@ -58,11 +60,15 @@ class Partition:
     allocator cap for a learner (runner/residents.py). Memory partitions
     honestly; SMs still time-share across partition boundaries — a stated
     cost, visible in latency, not hidden by this record.
-    `metal` is a registered Metal's NAME, never a GpuSet: a GpuSet is pure
-    device demand inside a spec, and this record is a provider fact. `gpu` is
-    descriptive, never decisive: the carve carries the kind down from the
-    Metal it drew on, because a fraction alone cannot tell 0.5 of an L4 from
-    0.5 of an H100."""
+    `memory` is the SUBSTRATE'S unit, never the spec's (ADR 0001): a spec
+    declares GB (`vram_gb`, total across shards), the desk deduces in GB, and
+    the metal DERIVES this fraction once at build — `fraction_for_gb` against
+    the card it measured — because 0.5 of an L4 and 0.5 of an H100 are
+    different amounts of memory and only the metal knows which it holds.
+    `gpu` is descriptive, never decisive: the carve carries the kind down from
+    the Metal it drew on, so a reader of this row can tell the two halves
+    apart. `metal` is a registered Metal's NAME — a provider fact; the spec
+    names no metal at all."""
 
     metal: str
     devices: tuple[int, ...]
@@ -114,7 +120,7 @@ class Host:
                  arbiter: GpuArbiter | None = None,
                  partition: Partition | None = None,
                  regimes: tuple[Regime, ...] = (),
-                 capacity: float = 1.0, solo: bool = False,
+                 solo: bool = False,
                  transport_for: Callable[[str], "Transport"] | None = None,
                  schema_for: Callable[[str], SiteSchema] | None = None,
                  sampler=None,
@@ -132,7 +138,6 @@ class Host:
         self.arbiter = arbiter or GpuArbiter()
         self.partition = partition
         self.regimes = regimes
-        self.capacity = capacity
         # A birth fact like the partition and the regimes (I12): this host's
         # purpose is ONE experiment at a time. Nothing about it is discovered
         # or negotiated later — a deploy that means it says so at construction.
@@ -235,19 +240,19 @@ class Host:
 
     def _attach_regimes(self) -> None:
         """A regime-host's residents attach AT BIRTH: the partition is the
-        footprint, so a joining tenant's declared fraction never counts here
-        (a fraction is a carve hint, meaningless on a join — the weights
-        already live). Several regimes share ONE exclusive group: the
-        alternation IS the host, switched by its own arbiter."""
+        footprint, so a joining tenant's declared size never counts here (a
+        size is a carve hint, meaningless on a join — the weights already
+        live). Several regimes share ONE exclusive group: the alternation IS
+        the host, switched by its own arbiter."""
         group = f"host:{self.name}" if len(self.regimes) > 1 else None
         for regime in self.regimes:
             obj = (self.learner if regime.capability == "training"
                    else self.engine_for(regime.base, regime.shape))
             resident = self.resident_for(regime)
             sleeps = resident is not None and resident.hello.get("sleeps")
-            # fraction 0.0, not None: a later tenant's declared fraction is
-            # a carve hint and must never be adopted into this host's load.
-            # The alternation hooks are the resident's door verbs, wired for
+            # fraction 0.0, not None: the arbiter's declared load stays the
+            # host's own (nothing a tenant declares is adopted into it). The
+            # alternation hooks are the resident's door verbs, wired for
             # every resident whose hello says it can hand the device back —
             # engine or learner alike (ADR 0002, Q8)
             self.arbiter.attach(obj, label=f"{self.name}:{regime.name}",
@@ -293,8 +298,8 @@ class Host:
         model at that shape. Pools named in `remotes` are served by ANOTHER
         host and skip local binding."""
         binding: dict[str, Engine] = {}
-        for group in spec.gpu_config.groups:
-            for member in group.members:
+        for host in spec.gpu_config.hosts:
+            for member in host.members:
                 if not isinstance(member, PoolMember):
                     continue
                 if member.name in remotes:
@@ -311,36 +316,22 @@ class Host:
 
     def check_fit(self, spec: ExperimentSpec, binding: dict[str, Engine],
                   remotes: frozenset[str] = frozenset()) -> None:
-        """Refuse a submission whose NEW residents' declared fractions push
-        the GpuSet past capacity. Already-attached residents add nothing (the
-        arbiter keys residents by object: a shared engine or learner is one
-        footprint), so multi-tenancy over shared metal is free and honestly
-        bounded — and a regime-host attached its residents at birth, which is
-        what makes every join fraction-free. A remote pool is another
-        partition's footprint and never counts here."""
-        addition = 0.0
-        seen: set[int] = set()
-        for group in spec.gpu_config.groups:
-            for member in group.members:
+        """FIT is custody, not arithmetic: this host can HOLD the submission
+        when every declared pool is bound (bind_pools' job, already done) and
+        a learner member finds an owned learner here. Memory is NOT summed at
+        this door — since ADR 0001 a spec declares GB and a partition owns a
+        fraction, the crossing happens once at the metal's build, and the
+        residents enforce it per process (vLLM's reservation, torch's cap); a
+        JOIN is always memory-free because the weights already live. A remote
+        pool is another partition's footprint and never counts here."""
+        for host in spec.gpu_config.hosts:
+            for member in host.members:
                 if isinstance(member, PoolMember):
-                    if member.name in remotes:
-                        continue
-                    obj = binding[member.name]
-                else:
-                    if self.learner is None:
-                        raise HostError(
-                            f"host {self.name!r} has no training regime; it "
-                            f"cannot serve this spec's learner member")
-                    obj = self.learner
-                if self.arbiter.is_attached(obj) or id(obj) in seen:
                     continue
-                seen.add(id(obj))
-                addition += member.fraction or 0.0
-        load = self.arbiter.declared_load() + addition
-        if load > self.capacity:
-            raise HostError(
-                f"host {self.name!r} cannot fit this submission: declared "
-                f"load would be {load:.2f} of capacity {self.capacity:.2f}")
+                if self.learner is None:
+                    raise HostError(
+                        f"host {self.name!r} has no training regime; it "
+                        f"cannot serve this spec's learner member")
 
     # ---- submit -------------------------------------------------------------
 
@@ -569,8 +560,8 @@ class Host:
         from rlstack.runner.remote import RemotePool
 
         members = {member.name: member
-                   for group in spec.gpu_config.groups
-                   for member in group.members
+                   for host in spec.gpu_config.hosts
+                   for member in host.members
                    if isinstance(member, PoolMember)}
         remotes: dict[str, Engine] = {}
         for name, address in sorted(routes.items()):

@@ -143,71 +143,63 @@ class AlgoSpec:
 
 
 # ---------------------------------------------------------------------------
-# topology — semantics-neutral (I5): moving members between groups never
-# changes results, only throughput
+# topology — semantics-neutral (I5): moving members between hosts never
+# changes results, only throughput. One HostSpec is one host (ADR 0001).
 # ---------------------------------------------------------------------------
-
-@dataclass(frozen=True)
-class GpuSet:
-    """Pure device demand: what, never where (I5) — placement decides that.
-    Literal ids are only for pinning a dedicated daemon."""
-
-    n: int | None = None
-    nodes: int = 1
-    ids: tuple[str, ...] | None = None
-
 
 @dataclass(frozen=True)
 class PoolMember:
     """A pool's declared capacity: the name traffic routes to, serving sample
     and score under it. `tp` is the width the engine handed for it must be
-    BUILT at, never a request."""
+    BUILT at, never a request. `vram_gb` is the memory it needs, in GB, TOTAL
+    across its tp shards (the per-device need is vram_gb / tp, so the number
+    is invariant under re-sharding, as I5 requires); None means a whole
+    device per shard. GB, never a fraction: 0.625 of an L4 is 15 GB and of
+    an H100 is 50 GB, and the metal that lands it knows which card it is."""
 
     name: str
     base: str | None = None       # None → the policy base
     tp: int = 1
-    n: int = 1
-    fraction: float | None = None # share of the group's GPU memory
+    vram_gb: float | None = None  # TOTAL across shards; None = a whole device per shard
 
 
 @dataclass(frozen=True)
 class LearnerMember:
     """The differentiable fwd/bwd workload; `fsdp` is likewise a build width
-    the handed learner must already have."""
+    the handed learner must already have, and `vram_gb` is total across the
+    fsdp shards, None a whole device per shard."""
 
     fsdp: int = 1
-    fraction: float | None = None
+    vram_gb: float | None = None
 
 
 Member = PoolMember | LearnerMember
 
 
 @dataclass(frozen=True)
-class GpuGroup:
-    """The unit of colocation: members co-resident on one GpuSet.
+class HostSpec:
+    """ONE HOST: a single placement unit, carved as one Partition and listed
+    as one Host. One member is a dedicated host; several members ALTERNATE on
+    its partition — one resident live at a time (the host's own exclusive
+    arbiter group), so a learner alternating with an engine serializes
+    generation and training and implies max_policy_lag == 0. Two workloads
+    that should run side by side are two HostSpecs, two carves, two honest
+    bookings — never one host wearing both at once.
 
     The member vocabulary is closed at pool + learner; everything else
     (rollout, eval, judge, teacher) is traffic routed to named pools.
-    sharing="sleep" makes it an exclusive group: the learner alternates with
-    the engines on the same memory, and therefore implies max_policy_lag == 0.
     """
 
-    gpus: GpuSet
     members: tuple[Member, ...]
-    sharing: str = "concurrent"
-
-    def __post_init__(self) -> None:
-        if self.sharing not in ("concurrent", "sleep"):
-            raise ValueError(
-                f"GpuGroup.sharing must be 'concurrent' or 'sleep', got {self.sharing!r}"
-            )
 
 
 @dataclass(frozen=True)
 class GpuConfig:
-    """All groups. Each pool name appears once; feasibility is checked at submit."""
+    """All hosts. Each pool name appears once; feasibility is checked at
+    submit, and what fits WHERE is placement's question, answered against a
+    real residual — never here."""
 
-    groups: tuple[GpuGroup, ...]
+    hosts: tuple[HostSpec, ...]
 
 
 # ---------------------------------------------------------------------------
@@ -288,20 +280,15 @@ class BackendProfile:
 # sugar — plain constructors, nothing hidden
 # ---------------------------------------------------------------------------
 
-def gpus(n: int | None = None, nodes: int = 1, ids: tuple[str, ...] | None = None) -> GpuSet:
-    """gpus(6) | gpus(16, nodes=2) | gpus(ids=("0", "1"))."""
-    return GpuSet(n=n, nodes=nodes, ids=ids)
+def pool(name: str, base: str | None = None, tp: int = 1,
+         vram_gb: float | None = None) -> PoolMember:
+    """One declared pool, served by its host's metal."""
+    return PoolMember(name=name, base=base, tp=tp, vram_gb=vram_gb)
 
 
-def pool(name: str, base: str | None = None, tp: int = 1, n: int = 1,
-            fraction: float | None = None) -> PoolMember:
-    """One declared pool, served by this group's metal."""
-    return PoolMember(name=name, base=base, tp=tp, n=n, fraction=fraction)
-
-
-def learner(fsdp: int = 1, fraction: float | None = None) -> LearnerMember:
+def learner(fsdp: int = 1, vram_gb: float | None = None) -> LearnerMember:
     """The differentiable member."""
-    return LearnerMember(fsdp=fsdp, fraction=fraction)
+    return LearnerMember(fsdp=fsdp, vram_gb=vram_gb)
 
 
 def lora(site: str, r: int, tie: bool = False) -> AdapterSpec:

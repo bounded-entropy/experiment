@@ -18,8 +18,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from rlstack import (
-    AlgoSpec, EvalSpec, ExperimentSpec, GenSpec, GpuConfig, GpuGroup, LocalStore,
-    OptimSpec, PolicySpec, Schedule, Seeds, TrajectorySource, gpus,
+    AlgoSpec, EvalSpec, ExperimentSpec, GenSpec, GpuConfig, HostSpec, LocalStore,
+    OptimSpec, PolicySpec, Schedule, Seeds, TrajectorySource,
     fake_qwen_schema, learner, lora, pool,
 )
 from rlstack.runner.fakes import FakeEngine, FakeLearner
@@ -54,8 +54,8 @@ def main() -> None:
                               microbatch_tokens=256),
         ),
         eval=EvalSpec(tasks=heldout_uri, every=2, post=("verifier",)),
-        gpu_config=GpuConfig(groups=(
-            GpuGroup(gpus(n=1), (pool("main"), learner())),)),
+        gpu_config=GpuConfig(hosts=(HostSpec((pool("main"),)),
+                                    HostSpec((learner(),)))),
         seeds=Seeds(master=17),
     )
 

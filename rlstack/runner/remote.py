@@ -137,8 +137,8 @@ def _spec_classes() -> dict[str, type]:
     classes = (
         specs.SamplingSpec, specs.GenSpec, specs.AdapterSpec,
         specs.PolicySpec, specs.Plans, specs.OptimSpec, specs.Schedule,
-        specs.AlgoSpec, specs.GpuSet, specs.PoolMember, specs.LearnerMember,
-        specs.GpuGroup, specs.GpuConfig, specs.Seeds, specs.WarmStart,
+        specs.AlgoSpec, specs.PoolMember, specs.LearnerMember,
+        specs.HostSpec, specs.GpuConfig, specs.Seeds, specs.WarmStart,
         specs.ExperimentSpec,
     )
     return {cls.__name__: cls for cls in classes}
@@ -354,7 +354,7 @@ class HostService:
         """One admitted verb, admission included: enter the owning host's
         arbiter, run, leave. A regime-host's engines are attached at birth; a
         bare host's attach here on first remote use, at zero footprint — a
-        joiner never re-counts a fraction the partition already owns.
+        joiner never re-counts a size the partition already owns.
 
         `adopt` and `stop` ride this async path but are NOT admitted: adopt
         registers a tenancy whose daemons admit their own work, stop cancels
@@ -643,12 +643,12 @@ class RemoteHost:
 class RemoteMetal:
     """The desk's end of the METAL PLANE: deduce, then command.
 
-    `residual` is the deduction feed — per-device free fractions from the
+    `residual` is the deduction feed — per-device free GB from the
     container that owns the device, counting built partitions AND in-flight
     bookings. `carve` is the command: the metal books synchronously at its
     own door, so a deduction gone stale between the ask and the command
-    costs a refusal, never a double-book. `decarve` frees a host's fraction
-    on a still-living container — the reaper's second half."""
+    costs a refusal, never a double-book. `decarve` frees a host's GB on a
+    still-living container — the reaper's second half."""
 
     def __init__(self, transport: Transport) -> None:
         self._transport = transport
@@ -729,7 +729,7 @@ class RemoteDesk:
     async def decommission(self, name: str, force: bool = False,
                            reroute: bool = False) -> dict:
         """Carve's inverse at the desk, one frame: decarve at the host's
-        metal (engine down, fraction back to residual) plus delist. Refused
+        metal (engine down, its GB back to residual) plus delist. Refused
         with the running work NAMED when anything lives on or routes through
         the host; `force` tears it down anyway. `reroute` MOVES the running
         work first — each dependent replayed onto a fresh placement with

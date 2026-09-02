@@ -28,24 +28,24 @@ from rlstack.spec.specs import ExperimentSpec, PoolMember
 
 def demands_of(spec: ExperimentSpec) -> tuple[Demand, ...]:
     """The spec's gpu_config as capability demands, learner marked ANCHOR.
-    A member with no declared fraction demands a WHOLE device per shard when
-    carved — the safe default; sub-device partitions are opt-in via
-    fractions."""
+    One HostSpec is one placement unit (its index is the demand's `group`),
+    and `vram_gb` passes through AS DECLARED — total across shards, None for
+    a whole device per shard. The spec speaks GB and so does the desk; the
+    crossing to a partition's fraction happens once, at the metal's build,
+    where the card is known (ADR 0001) — never here."""
     out: list[Demand] = []
-    for gi, group in enumerate(spec.gpu_config.groups):
-        for member in group.members:
+    for hi, host in enumerate(spec.gpu_config.hosts):
+        for member in host.members:
             if isinstance(member, PoolMember):
                 out.append(Demand(
                     pool=member.name, capability="inference",
                     base=member.base or spec.policy.base, shape=member.tp,
-                    memory=member.fraction if member.fraction is not None else 1.0,
-                    group=gi, sharing=group.sharing))
+                    vram_gb=member.vram_gb, group=hi))
             else:
                 out.append(Demand(
                     pool=None, capability="training", base=spec.policy.base,
-                    shape=member.fsdp,
-                    memory=member.fraction if member.fraction is not None else 1.0,
-                    group=gi, sharing=group.sharing, anchor=True))
+                    shape=member.fsdp, vram_gb=member.vram_gb, group=hi,
+                    anchor=True))
     return tuple(out)
 
 

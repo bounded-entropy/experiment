@@ -13,9 +13,14 @@ already serves the capability (coverage is capability equality; solo-and-
 occupied skipped, dead listings skipped), CARVE a new host out of a
 registered metal's residual (the desk deduces, the metal's own books
 enforce), or answer with BOOT instructions — new metal costs money, so
-acquiring stays a human's. A sleep group places as ONE unit onto one
-multi-regime host; concurrent members place per member (I5: colocation is a
-hint, never semantics).
+acquiring stays a human's. One HostSpec is ONE placement unit: a single
+member is a dedicated host, several members alternate on one multi-regime
+host (I5: where a member lands is a hint, never semantics).
+
+THE DESK SPEAKS GB (ADR 0001). A demand's `vram_gb` is total across its
+shards; the desk deduces per-device GB against each metal's residual, also
+in GB; and the metal converts to its partition's fraction exactly once, at
+build, against the card it MEASURED — `fraction_for_gb`, the one crossing.
 
 Truth stays in the store: every listing, metal registration, placement and
 delisting is journaled, `from_journal` rebuilds the desk after a kill, and
@@ -49,11 +54,14 @@ class DeskError(RuntimeError):
 
 @dataclass(frozen=True)
 class Metal:
-    """Owned metal: one GpuSet the fleet may carve. Registering Metal IS the
-    acquire rung executed — the rung that costs money, so the one a human
-    does. `gpu` is the KIND (what was bought) and `vram_gb` one device's VRAM
-    in GB (what a model is measured against — L4=24, A100=40 or 80, H100=80);
-    a carve stamps the kind onto the Partition it births."""
+    """Owned metal: one registered card set the fleet may carve. Registering
+    Metal IS the acquire rung executed — the rung that costs money, so the one
+    a human does. `gpu` is the KIND (what was bought) and `vram_gb` one
+    device's VRAM in GB (what a model is measured against — L4=24, A100=40 or
+    80, H100=80); a carve stamps the kind onto the Partition it births. On a
+    real venue both are MEASURED off the device by `MetalService.measure`,
+    never typed (ADR 0001, Q6): a declared card is wrong confidently, a
+    measured one is a fact. A plain record, so tests construct it directly."""
 
     name: str
     gpu: str = "L4"
@@ -62,13 +70,14 @@ class Metal:
 
 
 def fraction_for_gb(gb: float, metal: Metal) -> float:
-    """THE meeting point of the unit a human sizes models in (GB of VRAM) and
-    the unit a partition owns (a fraction of ONE device): the carve hint `gb`
-    becomes gb / metal.vram_gb on the target metal. Partition.memory stays a
-    fraction because both substrates take one, so a GB figure is converted
-    HERE, against the metal it will live on, and never stored. More GB than
-    one device holds is not a smaller fraction, it is bigger metal — the
-    acquire rung — so it raises instead of clamping."""
+    """THE ONE CROSSING between the unit a human sizes models in (GB of VRAM,
+    what the spec and the desk speak) and the unit a partition owns (a
+    fraction of ONE device, what both substrates take): `gb` per device
+    becomes gb / metal.vram_gb on the metal it will live on. Called once, at
+    `MetalService.build`, against the card that metal measured — a GB figure
+    is never stored as a fraction anywhere else. More GB than one device
+    holds is not a smaller fraction, it is bigger metal — the acquire rung —
+    so it raises by name instead of clamping."""
     fraction = gb / metal.vram_gb
     if fraction > 1.0 + 1e-9:
         raise DeskError(
@@ -78,52 +87,64 @@ def fraction_for_gb(gb: float, metal: Metal) -> float:
     return fraction
 
 
+def gb_of(partition: Partition, metal: Metal) -> float:
+    """The GB a built partition owns on each of its devices: its fraction of
+    THIS card. fraction_for_gb's read-back, used only by the metal's own
+    books so `residual` can answer in GB — the unit the desk deduces in."""
+    return partition.memory * metal.vram_gb
+
+
 @dataclass(frozen=True)
 class Demand:
     """One member's capability demand, read off the spec: WHAT is needed
-    (capability, base, shard shape), never WHERE. `memory` is the carve hint —
-    it sizes a new partition at rung two and is ignored on a join. `pool`
-    None is the learner member."""
+    (capability, base, shard shape), never WHERE. `vram_gb` is the carve
+    size — TOTAL across the demand's shards, so the per-device need is
+    vram_gb / shape; None means a whole device per shard, resolved at the
+    metal that knows its card (Q10). It sizes a new partition at rung two and
+    is ignored on a join. `group` is the HostSpec the member came from: one
+    HostSpec is one placement unit, so members sharing a group alternate on
+    one host. `pool` None is the learner member."""
 
     pool: str | None
     capability: str                 # "inference" | "training"
     base: str
     shape: int
-    memory: float
+    vram_gb: float | None
     group: int
-    sharing: str
     # the ANCHOR is where a delivered frame lands — the one demand whose host
     # receives the workload. The desk never knows WHY (for an experiment it is
     # the learner, because the learner is never remote — but that rule lives
     # with whoever built the demands, not here).
     anchor: bool = False
 
+    def per_device_gb(self) -> float | None:
+        """The memory this demand needs on EACH device it spans: the total
+        divided across its shards. None stays None — a whole device."""
+        return None if self.vram_gb is None else self.vram_gb / self.shape
+
 
 def demand_rows(demands: Sequence[Demand]) -> list[dict]:
     """Demands as wire rows — the desk's whole input vocabulary."""
     return [{"pool": d.pool, "capability": d.capability, "base": d.base,
-             "shape": d.shape, "memory": d.memory, "group": d.group,
-             "sharing": d.sharing, "anchor": d.anchor} for d in demands]
+             "shape": d.shape, "vram_gb": d.vram_gb, "group": d.group,
+             "anchor": d.anchor} for d in demands]
 
 
 def demands_from(rows: Sequence[Mapping]) -> tuple[Demand, ...]:
     """Wire rows back as Demands — demand_rows' typed inverse."""
     return tuple(Demand(
         pool=row["pool"], capability=row["capability"], base=row["base"],
-        shape=int(row["shape"]), memory=float(row["memory"]),
-        group=int(row["group"]), sharing=row["sharing"],
+        shape=int(row["shape"]),
+        vram_gb=None if row.get("vram_gb") is None else float(row["vram_gb"]),
+        group=int(row["group"]),
         anchor=bool(row.get("anchor", False))) for row in rows)
 
 
 def placement_units(demands: Sequence[Demand]) -> tuple[tuple[Demand, ...], ...]:
-    """A GpuGroup is a CO-LOCATION statement, so its members place as ONE
-    unit whatever the sharing: sleep members because they alternate on one
-    partition (one host wearing masks), concurrent members because the spec
-    put them on one card (the stress-matrix shape — engine and learner side
-    by side, the tenancy's pool LOCAL, no wire between them; two carves here
-    made the anchor reach its own container over the wire per sample,
-    observed
-    parked). Separate groups place one by one onto per-capability hosts."""
+    """ONE HOSTSPEC IS ONE HOST, so its members place as ONE unit: a single
+    member is a dedicated host, several alternate on one partition (one host
+    wearing masks, never two hosts coordinating). Separate HostSpecs place
+    one by one onto per-capability hosts (ADR 0001)."""
     units: list[tuple[Demand, ...]] = []
     seen: set[int] = set()
     for demand in demands:
@@ -132,6 +153,16 @@ def placement_units(demands: Sequence[Demand]) -> tuple[tuple[Demand, ...], ...]
         seen.add(demand.group)
         units.append(tuple(d for d in demands if d.group == demand.group))
     return tuple(units)
+
+
+def unit_gb(unit: Sequence[Demand], metal: Metal) -> float:
+    """The per-device GB a placement unit's partition must hold on `metal`:
+    the LARGEST member's per-device need, because the unit's members
+    alternate — one resident live at a time, each sized for itself — and a
+    whole-device member (None) is the whole of THIS metal's card. Sized per
+    metal because "a whole device" is a different number on every kind."""
+    return max(metal.vram_gb if d.per_device_gb() is None else d.per_device_gb()
+               for d in unit)
 
 
 def regime_of(demand: Demand) -> Regime:
@@ -369,7 +400,12 @@ class Desk:
                     "regimes": [regime_of(d).name for d in unit],
                     "capabilities": sorted({d.capability for d in unit}),
                     "base": unit[0].base,
-                    "memory": max(d.memory for d in unit)})
+                    "devices": max(d.shape for d in unit),
+                    # the largest member's per-device need, in GB — None is
+                    # a whole device of whatever card answers the boot
+                    "vram_gb": max((d.per_device_gb() for d in unit
+                                    if d.per_device_gb() is not None),
+                                   default=None)})
                 continue
             for demand in unit:
                 placement[demand.pool] = listing
@@ -378,31 +414,28 @@ class Desk:
     async def provision_unit(self, unit: tuple[Demand, ...]) -> Listing | None:
         """The standing CARVE, desk-issued: nothing listed serves this unit,
         so the desk asks each registered metal whether it can hold it (the
-        residual — the DEDUCTION) and COMMANDS the first that can (carve).
-        The metal ENFORCES: it books the fraction synchronously at its own
-        door, so a deduction gone stale between the ask and the command costs
-        a refusal, never a double-book — and a refusal or a silent metal
-        falls through to the next, then to the boot instructions. What comes
-        back is journaled and listed HERE: the desk stays the fleet journal's
-        one writer, which is exactly why the metal writes nothing."""
+        residual, in GB per device — the DEDUCTION) and COMMANDS the first
+        that can (carve). The metal ENFORCES: it books the GB synchronously at
+        its own door and converts to its partition's fraction at build, so a
+        deduction gone stale between the ask and the command costs a
+        refusal, never a double-book — and a refusal or a silent metal falls
+        through to the next, then to the boot instructions. The carve request
+        carries this desk's `builds` row for the metal (Q5c: the desk's
+        recipe is canon and rides every carve). What comes back is journaled
+        and listed HERE: the desk stays the fleet journal's one writer, which
+        is exactly why the metal writes nothing."""
         if not self.metal_remotes:
             return None
         need_devices = max(demand.shape for demand in unit)
-        need_memory = max(demand.memory for demand in unit)
-        request = {
-            "regimes": [{"name": regime_of(d).name,
-                         "capability": d.capability,
-                         "base": d.base, "shape": d.shape} for d in unit],
-            "base": unit[0].base,
-            "memory": need_memory,
-        }
         for metal_name in sorted(self.metal_remotes):
             remote = self.metal_remotes[metal_name]
+            need_gb = unit_gb(unit, self.metal[metal_name])
+            request = self.carve_request(unit, metal_name, need_gb)
             try:
                 free = remote.residual()
             except Exception:
                 continue                # a silent metal is the reaper's, not ours
-            if sum(1 for f in free if f >= need_memory - 1e-9) < need_devices:
+            if sum(1 for f in free if f >= need_gb - 1e-9) < need_devices:
                 continue
             try:
                 born = await remote.carve(request)
@@ -432,6 +465,22 @@ class Desk:
                 partition=born.get("partition"), metal=metal_name)
             return self.listings[born["host"]]
         return None
+
+    def carve_request(self, unit: tuple[Demand, ...], metal_name: str,
+                      need_gb: float) -> dict:
+        """The carve command as the metal verb speaks it: the regimes the
+        host will wear, the per-device GB its partition must hold, and the
+        recipe it builds from — this desk's journaled `builds` row for that
+        metal, the canon a reborn container is rebuilt from (Q5c). A metal
+        registered without a recipe is carved from its own."""
+        return {
+            "regimes": [{"name": regime_of(d).name,
+                         "capability": d.capability,
+                         "base": d.base, "shape": d.shape} for d in unit],
+            "base": unit[0].base,
+            "vram_gb": need_gb,
+            "builds": self.metal_builds.get(metal_name),
+        }
 
     # ---- place and submit: demands in, addresses (and one delivery) out -----
 
@@ -627,7 +676,7 @@ class Desk:
     async def decommission(self, name: str, force: bool = False,
                            reroute: bool = False) -> dict:
         """CARVE'S INVERSE, client-asked: tear the host down at its metal
-        (decarve — the engine shut down, the fraction back to residual) and
+        (decarve — the engine shut down, its GB back to residual) and
         delist it, one verb. The refusal is the point: a host that running
         work lives on OR routes through is NAMED rather than yanked, and
         `force` says you mean it. With `reroute` the running work is MOVED
@@ -637,7 +686,7 @@ class Desk:
         either way, and a parked run waits whole in the store for metal a
         human adds. A hand-listed host (no metal on its listing) only
         delists — its metal was never the desk's to touch; a silent metal
-        delists too, reap's reasoning on demand: the fraction freed itself
+        delists too, reap's reasoning on demand: the memory freed itself
         when the container died. The freed metal is reallocated by nothing
         more than existing rules — residual grew, so the next placement's
         carve may land there."""
@@ -678,7 +727,7 @@ class Desk:
         waits, and probes again gives the reboot its window — `recovered` is
         that verdict. A listing silent through every retry is concluded:
         DECARVED at its metal when the metal still answers (a living
-        container frees the fraction back to residual; a dead one already
+        container frees its GB back to residual; a dead one already
         did, physically), then DELISTED with the reason journaled, so a
         rebuilt desk agrees the host is gone. Verdicts per listing:
         alive | recovered | reaped."""
@@ -703,7 +752,7 @@ class Desk:
                     await self.metal_remotes[listing.metal].decarve(name)
                 except Exception:
                     pass            # the metal is as dead as the host: the
-                                    # fraction freed itself when the container did
+                                    # memory freed itself when the container did
             self.delist(name, reason="reaped")
             verdicts[name] = "reaped"
         return verdicts
@@ -815,12 +864,14 @@ class MetalService:
     rule that makes a desk-issued carve safe.
 
     The desk DEDUCES, the metal ENFORCES: `residual` is the deduction feed
-    (per-device free = 1 - built - booked, this container's own books), and
-    `carve` is the command — it books its fraction SYNCHRONOUSLY, before the
-    build's first await, so two carves in one breath see each other and the
-    loser refuses instead of double-booking the window where metal is
-    promised but not yet built. A failed build releases its booking; nothing
-    half-born is ever routed.
+    (per-device free GB = the card - built - booked, this container's own
+    books), and `carve` is the command — it books its GB SYNCHRONOUSLY,
+    before the build's first await, so two carves in one breath see each
+    other and the loser refuses instead of double-booking the window where
+    metal is promised but not yet built. A failed build releases its
+    booking; nothing half-born is ever routed. THE BOOKS ARE IN GB and the
+    partition is a fraction: `build` converts once, with `fraction_for_gb`,
+    against the card this metal measured (ADR 0001).
 
     EVERY RESIDENT IS A PROCESS (ADR 0002): a carve spawns one child per
     regime — pinned to the partition's devices, capped at its fraction, built
@@ -874,12 +925,12 @@ class MetalService:
         into residual and routed at its address exactly like a carve's child,
         so hand-built standing hosts and desk-carved ones share one table and
         one truth. Refuses a host born without a partition — a host that owns
-        no stated fraction cannot be accounted, and unaccounted metal is the
+        no stated share cannot be accounted, and unaccounted metal is the
         double-book this class exists to kill."""
         if host.partition is None:
             raise DeskError(
                 f"host {host.name!r} has no partition: a metal's books count "
-                f"fractions, so every host on them must own one")
+                f"shares, so every host on them must own one")
         if host.name in self.hosts:
             raise DeskError(f"host {host.name!r} is already on this metal")
         self.hosts[host.name] = host
@@ -887,25 +938,32 @@ class MetalService:
         self.services[address] = HostService(host)
 
     def residual(self) -> list[float]:
-        """Free memory per device, counting BUILT partitions and PENDING
-        bookings — capacity nobody owns and nobody has been promised. The
-        number the desk reads to deduce, and the number choose_devices
-        refuses over."""
-        free = [1.0] * self.metal.devices
+        """Free GB per device, counting BUILT partitions (their fraction of
+        this card, read back) and PENDING bookings — capacity nobody owns and
+        nobody has been promised. The number the desk reads to deduce, and
+        the number choose_devices refuses over."""
+        free = [self.metal.vram_gb] * self.metal.devices
         for host in self.hosts.values():
             for device in host.partition.devices:
-                free[device] -= host.partition.memory
-        for _, devices, memory in self.pending:
+                free[device] -= gb_of(host.partition, self.metal)
+        for _, devices, gb in self.pending:
             for device in devices:
-                free[device] -= memory
+                free[device] -= gb
         return free
 
-    def choose_devices(self, count: int, memory: float) -> tuple[int, ...] | None:
+    def choose_devices(self, count: int, gb: float) -> tuple[int, ...] | None:
         """First-fit against this metal's own books: `count` devices each
-        with `memory` free — plan_carve's rule, where the truth lives."""
+        with `gb` free — plan_carve's rule, where the truth lives."""
         free = self.residual()
-        chosen = [i for i, f in enumerate(free) if f >= memory - 1e-9][:count]
+        chosen = [i for i, f in enumerate(free) if f >= gb - 1e-9][:count]
         return tuple(chosen) if len(chosen) == count else None
+
+    def per_device_gb(self, request: Mapping) -> float:
+        """The GB a carve request wants on each device: its `vram_gb`, or —
+        None, a whole device — the whole of THIS card, resolved here because
+        only the metal knows what a whole device is (Q10)."""
+        wanted = request.get("vram_gb")
+        return self.metal.vram_gb if wanted is None else float(wanted)
 
     def carve_name(self, devices: tuple[int, ...],
                    regimes: tuple[Regime, ...]) -> str:
@@ -921,31 +979,35 @@ class MetalService:
 
     async def carve(self, request: Mapping) -> dict:
         """The desk's command executed: decode the regimes, choose and BOOK
-        the devices synchronously, then build (factories may block for
-        minutes — an engine boot — so they run in a worker thread), attest
-        (the Host constructor's own job), route, and reply with the listing
-        facts. The booking is released on every exit: on success the born
-        partition has replaced it on the books in the same tick; on failure
-        the fraction is free again and the refusal says what the residual is
-        NOW, so the desk's next deduction is current."""
+        the devices synchronously (in GB), then build (a resident's birth may
+        block for minutes — an engine boot — so it runs in a worker thread),
+        attest (the Host constructor's own job), route, and reply with the
+        listing facts. The booking is released on every exit: on success the
+        born partition has replaced it on the books in the same tick; on
+        failure the GB is free again and the refusal says what the residual
+        is NOW, so the desk's next deduction is current. A request carrying
+        the desk's `builds` row is built from it (Q5c)."""
         regimes = tuple(
             Regime(r["name"], r["capability"], r["base"],
                    int(r.get("shape", 1)))
             for r in request["regimes"])
-        memory = float(request["memory"])
+        gb = self.per_device_gb(request)
         count = max(regime.shape for regime in regimes)
-        devices = self.choose_devices(count, memory)
+        devices = self.choose_devices(count, gb)
         if devices is None:
             return {"carved": False, "residual": self.residual(),
                     "error": f"metal {self.metal.name!r} cannot hold "
-                             f"{count} device(s) at {memory:g}: residual is "
-                             f"{self.residual()}"}
+                             f"{count} device(s) at {gb:g} GB: residual is "
+                             f"{self.residual()} (one {self.metal.gpu} device "
+                             f"holds {self.metal.vram_gb:g} GB)"}
+        if request.get("builds"):
+            self.adopt_recipe(Builds.from_row(request["builds"]))
         name = self.carve_name(devices, regimes)
-        booking = (name, devices, memory)
+        booking = (name, devices, gb)
         self.pending.append(booking)
         try:
             host = await asyncio.to_thread(self.build, name, regimes,
-                                           devices, memory)
+                                           devices, gb)
             # booked -> built in one tick: no await between the thread's
             # return and these lines, so residual never blinks
             self.hosts[name] = host
@@ -970,14 +1032,26 @@ class MetalService:
                              "base": r.base, "shape": r.shape}
                             for r in regimes]}
 
+    def adopt_recipe(self, builds: Builds) -> None:
+        """The desk's recipe row is CANON (Q5c): a carve request that carries
+        one replaces this metal's own, so its deploy constants are only its
+        FIRST declaration and `describe()` reports what it last built from.
+        A redeploy's new constants reach the desk through re-registration,
+        which updates the row that rides the next carve."""
+        self.builds = builds
+
     def build(self, name: str, regimes: tuple[Regime, ...],
-              devices: tuple[int, ...], memory: float) -> Host:
-        """(worker thread) One resident per regime is born — pinned, capped,
-        built from this metal's recipe — and the Host constructor attests the
-        proxies against the regimes, exactly as it attested objects. A birth
-        that fails ends the residents already born, so a half-carved host
-        never holds metal."""
-        partition = Partition(self.metal.name, devices, memory, self.metal.gpu)
+              devices: tuple[int, ...], gb: float) -> Host:
+        """(worker thread) THE crossing happens here, once: `gb` per device
+        becomes this partition's fraction against the card this metal
+        measured (fraction_for_gb — more than one device holds raises the
+        acquire rung by name, never clamps). Then one resident per regime is
+        born — pinned, capped, built from this metal's recipe — and the Host
+        constructor attests the proxies against the regimes, exactly as it
+        attested objects. A birth that fails ends the residents already born,
+        so a half-carved host never holds metal."""
+        partition = Partition(self.metal.name, devices,
+                              fraction_for_gb(gb, self.metal), self.metal.gpu)
         residents: list[Resident] = []
         try:
             for regime in regimes:
@@ -1004,8 +1078,8 @@ class MetalService:
     def decarve(self, name: str) -> dict:
         """The inverse, for the reaper and the deliberate retirement: every
         resident is ended down the ladder, the host leaves the books, and its
-        fraction is residual again. The desk journals the departure (its
-        delist) — this side only frees."""
+        GB is residual again. The desk journals the departure (its delist) —
+        this side only frees."""
         host = self.hosts.pop(name, None)
         if host is None:
             return {"decarved": False,
