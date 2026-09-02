@@ -3,7 +3,7 @@
 | | |
 |---|---|
 | **Date** | 2026-09-01 |
-| **Status** | Proposed |
+| **Status** | Proposed — Q1–Q3, Q5, Q5a, Q7 answered; Q4 closed by ADR 0002; Q5b–Q5d open; Q6, Q8–Q10 carry offered defaults |
 | **Author** | Claude Opus 5 (session: gsm-campaign review) |
 | **Touches** | `spec/`, `runner/` (desk, host, campaign), `deploy/`, `tests/` |
 | **Invariants** | I3 (identity is computed), I5 (topology is semantics-neutral), I12 (a host is atomic and never reshaped) |
@@ -111,6 +111,22 @@ metal, at build time, and finally has a caller. `Partition.memory` stays a
 fraction because both substrates take one. And the metal MEASURES its card at
 registration instead of declaring it, because GB against a lying `vram_gb` is
 worse than a fraction — it is wrong confidently.
+
+**Since answered (Q5, 2026-09-01): the desk supervises its metals.** The one
+restart that is automatic is a METAL's — a Modal preempt takes every host on
+it, and the runs must recontinue with no human in the loop. The desk is the
+supervisor because it already holds everything the loop needs: the metal's
+build recipe (journaled on the `metal` row since ADR 0002 and replayed by
+`from_journal`), the archived deliveries (`placements()`, #72), and the move
+verb (`reroute`, #72). The loop is reap → knock → re-register → reroute: the
+reaper concludes the metal silent, knocks its plane address (on a lazy venue
+the knock IS the boot), the reborn container registers itself at bring-up
+(Q5a) and the row updates in place (Q5), and every run whose placement was on
+that metal is rerouted — re-placed onto whatever fits, the reborn metal
+included, and redelivered, which is resume. A HOST dying alone (a resident's
+OOM, ADR 0002 Q7) is not auto-restarted: decarve, delist, and a human
+resubmit — Samarth's boundary, stated. The mechanism's three forks are Q5b–Q5d;
+this paragraph is folded into Touched / Interfaces once they are answered.
 
 ### Touched / untouched
 
@@ -271,8 +287,10 @@ containers. That is its own ADR, not a clause in this one.
 engines AND learners, because the torch memory cap is per process too — so
 this question is answered there, and here it reduces to: does this ADR
 state the obligation in the meantime, or defer the whole of "which" to 0002?
+*Closed:* ADR 0002 is Implemented (CONTEXT #74) and landed branch (b) — the pin,
+the cap, and the device-count assertion at hello. Nothing remains here.
 
-> **Samarth:**
+> **Samarth:** (no answer needed — closed by ADR 0002)
 
 **Q5. A metal container restarts — who wins, the journal or the device, and what
 IS a re-registration?** Today `register_metal` refuses a taken name
@@ -332,7 +350,28 @@ loyalty, and the failure mode when someone forgets is a wrong number in
 `status()` rather than an error; the orphaned listings stay the scheduled
 reaper's for up to 15 minutes.
 
-> **Samarth:**
+> **Samarth:** for auto-restart, there are two cases we need to consider: if a
+> host dies, or if the metal dies. i think personally, the only case we should
+> actually care about auto-restarting is if the metal dies, because there could
+> be a chance that's due to a modal pre-empt (and we should auto-recontinue). in
+> that case, the desk needs to be the one to respawn the metal upon preempt. so
+> the desk needs to have the build instructions. i think this is fine because
+> now, we dont have factory lambdas anymore, so everything should be able to
+> live on the desk
+
+*Folded:* the answer widens Q5 from "what is a re-registration" to "the desk
+supervises its metals" (the Decision's new paragraph). Three facts make that
+cheaper than it sounds. The desk already holds the build instructions: since
+ADR 0002 the recipe is journaled on the `metal` row and replayed
+(`desk.py:262`, `:280`), so the precondition is met. The desk already has the
+move: `reroute(run_id, avoiding, park)` replays an archived delivery onto a
+fresh placement — resume, nothing copied (#72). And on Modal a respawn is a
+KNOCK: a call to a stopped-but-deployed container boots it, the reaper's own
+`recovered` verdict (#68). What is missing is the composition, reap → knock →
+re-register → reroute, and Q5's recommendation is the re-register step of it,
+now load-bearing: the reborn metal announces itself at the same address, the
+row updates, its corpses are reaped by probe. A host death without a metal
+death stays manual, as answered. The rest is Q5b–Q5d.
 
 **Q5a. Where does registration run — the shift, or bring-up?** Today it is the
 first act of `metal_shift`, inside the `serve` input that `up` spawns once
@@ -348,6 +387,69 @@ birth is exactly the phone-home contract `list_host` already holds hosts to.
 If the other branch: registration stays the shift's first act, a knock-booted
 metal is an unregistered stranger until the next `up`, and Q5's rule is
 reachable only through the human loop.
+
+> **Samarth:** see Q5's answer.
+
+*Folded:* implied yes — a metal the desk respawned has no human to run `up`,
+so it must announce itself at bring-up or the loop never closes. What remains
+of the shift is Q5b.
+
+**Q5b. Who knocks, and what becomes of the shift?** Today the plane address
+resolves through `metal_for(address)`, and a call on it boots a stopped Modal
+container; the shift (`metal_shift`: per-host stats tasks and the volume
+commit tick) is an input `up` spawns once and nothing restarts.
+Recommendation: **the reaper knocks through the plane address it already
+holds — `describe()` on the silent metal's `RemoteMetal` — and a venue whose
+knock does not boot supplies a `boot_for(name)` resolver beside
+`host_for`/`metal_for`, the pattern the desk already uses for every venue
+fact. The shift's residual duties move into the metal's own process, started
+at bring-up (stats tasks on first carve, the commit tick on the metal's loop),
+so nothing depends on a spawned `serve` surviving a preempt.** The desk's own
+preempt is already covered: the reaper runs on a `modal.Period` schedule (#68),
+and that scheduled call is the knock that boots the desk, which rebuilds
+itself from the journal.
+If the other branch: the desk learns a second venue vocabulary (shelling out
+to `modal`, or spawning `serve` by handle), and a metal whose shift died
+quietly stops committing its volume with nobody noticing.
+
+> **Samarth:**
+
+**Q5c. Which copy of the recipe is canon on respawn?** Two exist: the deploy's
+constants, re-declared at every bring-up (ADR 0002 Q4a), and the desk's
+journaled row.
+Recommendation: **the desk's row is canon and rides every carve request; the
+metal builds from the request's recipe, and its own constants are only its
+FIRST declaration. A re-registration at the same address carrying a different
+recipe is a redeploy — a human's act — and UPDATES the row, journaled,
+last-write-wins like the card (Q5).** This is what "everything lives on the
+desk" means in code: `MetalService.build` reads `request["builds"]`, and
+`describe()` reports what it last built from.
+If the other branch: constants canon and the row descriptive — the desk cannot
+rebuild a metal whose image changed underneath it, and two containers of one
+metal name can build different residents for the same regime across a
+redeploy with no record of the switch.
+
+> **Samarth:**
+
+**Q5d. Reap → reroute: the auto-recontinue, its park, and its retry.** The
+reaper today delists a silent host and stops; the runs on it are orphaned
+until a campaign resubmits.
+Recommendation: **the reaper's conclusion grows one step. After reaping a
+metal's listings it knocks (Q5b), then for every run whose latest placement
+was on them runs `reroute(run_id, avoiding=<dead host>, park=True)`: re-place
+— a carve on any metal that fits, the reborn one included, since its
+registration updated the row and its residual is asked live — and redeliver,
+which is resume. Nothing fits → `parked` is journaled, as #72 already does,
+and the desk RETRIES every parked run on each `metal` registration event —
+the reborn metal's own registration is exactly that trigger, so a knock that
+boots slowly still recontinues.** Crash midway: each reroute journals its new
+placement, `from_journal` replays it, and a second attempt sees the new
+binding in `placements()` with the old host delisted; `stop_anchored` probes
+and at most one roster answers, so no run is adopted twice. Byte identity:
+#72 already prices a move at one uncommitted update, and resume-equivalence
+makes the recontinued run the same run.
+If the other branch: reap parks always and a human resubmits — the preempt
+costs a human wake-up, which is the case the answer to Q5 rules out.
 
 > **Samarth:**
 
@@ -373,7 +475,7 @@ placement's question, answered against a real residual. `validate` holds a
 If the other branch: keep a GB version and it can only compare a member against
 itself, since validate never learns what card it will land on.
 
-> **Samarth:**
+> **Samarth:** yea let's just delete the fraction sum check that's fine.
 
 **Q8. Delete `PoolMember.n` with `GpuSet`?** It is read by nobody in `rlstack/`
 or `deploy/` — the third inert field, alongside `GpuSet.n` and `GpuSet.nodes`.
