@@ -145,20 +145,51 @@ class DeskFixture(unittest.TestCase):
         self.transports[address] = LocalTransport(HostService(host))
         return host
 
-    def desk(self) -> Desk:
+    class LazyPlane:
+        """The metal PLANE resolved on every frame, like LazyTransport: a
+        test kills a metal's container by shadowing its plane address with
+        a Dead transport, and revives it by putting the service back."""
+
+        def __init__(self, fixture: "DeskFixture", address: str) -> None:
+            self.fixture, self.address = fixture, address
+
+        async def call(self, verb: str, payload: dict) -> dict:
+            return await self.fixture.metal_transports[self.address].call(
+                verb, payload)
+
+        def ask(self, verb: str, payload: dict) -> dict:
+            return self.fixture.metal_transports[self.address].ask(verb, payload)
+
+    def desk(self, boot_for=None) -> Desk:
         return Desk(
             self.store,
             host_for=lambda addr: RemoteHost(self.LazyTransport(self, addr)),
-            metal_for=lambda addr: RemoteMetal(
-                self.metal_transports[addr]))
+            metal_for=lambda addr: RemoteMetal(self.LazyPlane(self, addr)),
+            boot_for=boot_for)
 
-    def desk_with_metal(self, *names) -> Desk:
+    def desk_with_metal(self, *names, boot_for=None) -> Desk:
         """A desk with the named metal services registered, plane and all."""
-        desk = self.desk()
+        desk = self.desk(boot_for)
         for name in names:
             desk.register_metal(self.metal_services[name].metal,
-                                address=f"metal://{name}")
+                                address=f"metal://{name}",
+                                builds=self.metal_services[name].builds.row())
         return desk
+
+    async def container_dies(self, service: MetalService) -> None:
+        """The metal's container generation turns over: every adoption task
+        on it dies with it (cancelled here — a real preempt takes the
+        process), the books come back EMPTY with the carve counter reset,
+        and every carved address stops answering. The same MetalService
+        object, so a lazily resolved plane transport still reaches it — the
+        reborn container, bare."""
+        for host in list(service.hosts.values()):
+            for run_id in list(host._adoptions):
+                await host.stop(run_id)
+        service.hosts.clear()
+        service.addresses.clear()
+        service.services.clear()
+        service.carves = 0
 
     def split_spec(self):
         """main on one partition, the learner on another — the two-listing
@@ -723,8 +754,10 @@ class ReapTest(DeskFixture):
         desk.list_host("gone", living.regimes, "fleet://gone")
 
         verdicts = go(desk.reap(probes=3))
-        self.assertEqual(verdicts, {"well": "alive", "reboots": "recovered",
-                                    "gone": "reaped"})
+        self.assertEqual(verdicts["listings"],
+                         {"well": "alive", "reboots": "recovered",
+                          "gone": "reaped"})
+        self.assertEqual(verdicts["runs"], {})      # nothing was placed there
         self.assertEqual(sorted(desk.listings), ["reboots", "well"])
         self.assertEqual(dead.attempts, 4)           # the probe + 3 retries
         last_delist = [e for e in self.store.read_fleet_log()
@@ -754,10 +787,16 @@ class ReapTest(DeskFixture):
         for listing in desk.listings.values():        # both containers die
             self.transports[listing.address] = self.Dead()
         verdicts = go(desk.reap(probes=1))
-        self.assertEqual(set(verdicts.values()), {"reaped"})
+        self.assertEqual(set(verdicts["listings"].values()), {"reaped"})
         self.assertEqual(desk.listings, {})
         self.assertEqual(service.hosts, {})
         self.assertEqual(service.residual(), [24.0, 24.0])
+        # the run had FINISHED before its hosts died: not work, not stranded,
+        # not rerouted — and the metal was knocked (its plane still answers)
+        self.assertEqual(verdicts["runs"], {})
+        self.assertEqual(verdicts["knocked"], {"fake-metal": True})
+        self.assertEqual([e for e in self.store.read_fleet_log()
+                          if e.get("event") == "parked"], [])
 
     def test_reap_rides_the_wire(self) -> None:
         dead = self.Dead()
@@ -769,7 +808,7 @@ class ReapTest(DeskFixture):
         desk.list_host("gone", living.regimes, "fleet://gone")
         remote = RemoteDesk(LocalTransport(Campaigns(desk)))
         verdicts = go(remote.reap(probes=1))
-        self.assertEqual(verdicts, {"well": "alive", "gone": "reaped"})
+        self.assertEqual(verdicts["listings"], {"well": "alive", "gone": "reaped"})
 
 
 class BlindDeskTest(DeskFixture):
@@ -1075,3 +1114,277 @@ class RerouteTest(DeskFixture):
         refusal = go(desk.reroute("cafe01"))
         self.assertFalse(refusal["rerouted"])
         self.assertIn("campaign", refusal["error"])
+
+
+class ReRegistrationTest(DeskFixture):
+    """ADR 0001, Q5: a known metal name at the SAME address is the container
+    generation turning over — the row updates in place, its corpses are
+    reaped by probe, its runs recontinued; at ANOTHER address it is two
+    deploys colliding on a name, and refused."""
+
+    def test_same_address_updates_the_row_and_the_journal_replays_it(self) -> None:
+        self.metal_service(devices=2)
+        desk = self.desk_with_metal("fake-metal")
+        remote = RemoteDesk(LocalTransport(Campaigns(desk)))
+        # the reborn container measured a different card and carries a new
+        # recipe (a redeploy): both are the desk's canon from here
+        told = go(remote.register_metal(
+            "fake-metal", "H100", 2, 80.0, "metal://fake-metal",
+            builds=Builds.fakes(engine_sleeps=True).row()))
+        self.assertEqual(told, {"registered": "fake-metal", "reaped": [],
+                                "retried": {}})
+        self.assertEqual(desk.metal["fake-metal"].vram_gb, 80.0)
+        self.assertEqual(desk.status()["metal"]["fake-metal"]["gpu"], "H100")
+        self.assertTrue(desk.metal_builds["fake-metal"]["engine"]["sleeps"])
+        reborn = Desk.from_journal(
+            self.store, host_for=lambda addr: RemoteHost(self._transport(addr)),
+            metal_for=lambda addr: RemoteMetal(self.LazyPlane(self, addr)))
+        self.assertEqual(reborn.metal["fake-metal"].vram_gb, 80.0)   # last write wins
+        self.assertTrue(reborn.metal_builds["fake-metal"]["engine"]["sleeps"])
+        self.assertEqual(reborn.metal_addresses["fake-metal"], "metal://fake-metal")
+
+    def test_a_different_address_is_a_collision_and_refused(self) -> None:
+        self.metal_service(devices=2)
+        desk = self.desk_with_metal("fake-metal")
+        with self.assertRaises(DeskError) as caught:
+            desk.register_metal(Metal("fake-metal", "L4", 2, 24.0),
+                                address="metal://elsewhere")
+        self.assertIn("colliding", str(caught.exception))
+        self.assertEqual(desk.metal_addresses["fake-metal"], "metal://fake-metal")
+
+    def test_the_desks_recipe_rides_the_carve(self) -> None:
+        """Q5c: the desk's row is canon. Re-registered with a recipe whose
+        engine sleeps, the next carve on this metal builds THAT resident —
+        the metal's own constants were only its first declaration — and
+        describe() reports what it last built from."""
+        service = self.metal_service(devices=2)
+        self.assertFalse(service.builds.engine.sleeps)
+        desk = self.desk_with_metal("fake-metal")
+        go(RemoteDesk(LocalTransport(Campaigns(desk))).register_metal(
+            "fake-metal", "L4", 2, 24.0, "metal://fake-metal",
+            builds=Builds.fakes(engine_sleeps=True).row()))
+
+        async def drive():
+            reply = await Campaigns(desk).submit(self.split_spec())
+            await service.hosts[reply["host"]]._adoptions[reply["run_id"]]
+            return reply
+        reply = go(drive())
+        self.assertTrue(reply["accepted"], reply)
+        self.assertTrue(service.builds.engine.sleeps)
+        self.assertTrue(service.describe()["builds"]["engine"]["sleeps"])
+        # the birth the resident was spawned from carries the desk's recipe
+        # (the fixture's in-process fakes ignore it; a child process builds
+        # from exactly this record — test_residents' claim)
+        serve = service.hosts[reply["pools"]["main"]]
+        self.assertTrue(serve.residents[0].birth.build.sleeps)
+
+    def test_a_double_up_is_a_no_op_and_a_rebirth_reaps_the_corpses(self) -> None:
+        """Probing is what tells the two apart: living hosts answer and stay
+        listed under a second `up`; after the container turns over the same
+        frame finds them silent, delists them with the reason journaled, and
+        the run they carried is stranded and recontinued on the reborn metal
+        — no human step."""
+        gate = asyncio.Event()
+        service = self.metal_service(devices=2, sample_gate=gate)
+        desk = self.desk_with_metal("fake-metal")
+        remote = RemoteDesk(LocalTransport(Campaigns(desk)))
+
+        async def drive():
+            reply = await Campaigns(desk).submit(self.split_spec())
+            rid = reply["run_id"]
+            again = await remote.register_metal(       # a second `up`
+                "fake-metal", "L4", 2, 24.0, "metal://fake-metal")
+            still_listed = sorted(desk.listings)
+            await self.container_dies(service)
+            reborn = await remote.register_metal(      # the rebirth
+                "fake-metal", "L4", 2, 24.0, "metal://fake-metal")
+            gate.set()
+            landed = desk.placements()[rid]["host"]
+            await service.hosts[landed]._adoptions[rid]
+            return reply, again, still_listed, reborn, landed
+        reply, again, still_listed, reborn, landed = go(drive())
+        rid = reply["run_id"]
+        self.assertEqual(again["reaped"], [])
+        self.assertEqual(still_listed, sorted(reply["pools"].values()))
+        self.assertEqual(sorted(reborn["reaped"]), sorted(reply["pools"].values()))
+        self.assertEqual(reborn["retried"], {rid: "rerouted"})
+        self.assertEqual(service.hosts[landed].roster[rid].status, "done")
+        reasons = [e.get("reason") for e in self.store.read_fleet_log()
+                   if e.get("event") == "delist"]
+        self.assertEqual(reasons.count("metal re-registered"), 2)
+        self.assertEqual(desk.parked(), {})
+
+
+class SuperviseTest(DeskFixture):
+    """ADR 0001, Q5b-Q5d: reap → knock → reroute. A metal's container dies
+    with a run on it; the reaper concludes its listings, knocks the metal,
+    strands the run (journaled parked — the queue) and retries it: the run
+    lands on the reborn metal and finishes under the same run_id. What
+    nothing fits stays parked until the next registration event retries it.
+    The crash-midway state is on the journal, so a rebuilt desk finishes the
+    recontinue without adopting the run twice."""
+
+    def test_reap_knocks_and_recontinues_the_run(self) -> None:
+        gate = asyncio.Event()
+        service = self.metal_service(devices=2, sample_gate=gate)
+        knocked: list[str] = []
+        desk = self.desk_with_metal("fake-metal", boot_for=knocked.append)
+
+        async def drive():
+            reply = await Campaigns(desk).submit(self.split_spec())
+            await self.container_dies(service)
+            verdicts = await desk.reap(probes=1)
+            gate.set()
+            landed = desk.placements()[reply["run_id"]]["host"]
+            await service.hosts[landed]._adoptions[reply["run_id"]]
+            return reply, verdicts, landed
+        reply, verdicts, landed = go(drive())
+        rid = reply["run_id"]
+        self.assertEqual(set(verdicts["listings"].values()), {"reaped"})
+        self.assertEqual(verdicts["knocked"], {"fake-metal": True})
+        self.assertEqual(knocked, ["fake-metal"])
+        self.assertEqual(verdicts["runs"], {rid: "rerouted"})
+        self.assertEqual(service.hosts[landed].roster[rid].status, "done")
+        self.assertEqual(desk.parked(), {})
+        # the record, in order: reaped, stranded (parked), re-placed
+        kinds = [(e["event"], e.get("reason") or e.get("delivered"))
+                 for e in self.store.read_fleet_log()
+                 if e.get("event") in ("delist", "parked")
+                 or (e.get("event") == "place" and e.get("run_id") == rid)]
+        self.assertEqual(kinds[0], ("place", True))
+        self.assertEqual(kinds[1:3], [("delist", "reaped")] * 2)
+        self.assertEqual(kinds[3][0], "parked")
+        self.assertIn("reaped", kinds[3][1])
+        self.assertEqual(kinds[4], ("place", True))
+
+    def test_the_default_knock_is_a_describe_through_the_plane(self) -> None:
+        """No boot_for: the reaper knocks the plane address it holds — on
+        Modal that call IS the boot. A plane that does not answer is a knock
+        that failed, and the run waits parked."""
+        gate = asyncio.Event()
+        service = self.metal_service(devices=2, sample_gate=gate)
+        desk = self.desk_with_metal("fake-metal")
+
+        async def drive():
+            reply = await Campaigns(desk).submit(self.split_spec())
+            await self.container_dies(service)
+            self.metal_transports["metal://fake-metal"] = ReapTest.Dead()
+            verdicts = await desk.reap(probes=1)
+            return reply, verdicts
+        reply, verdicts = go(drive())
+        rid = reply["run_id"]
+        self.assertEqual(verdicts["knocked"], {"fake-metal": False})
+        self.assertEqual(verdicts["runs"], {rid: "parked"})
+        self.assertIn(desk.parked()[rid], reply["pools"].values())
+
+    def test_a_parked_run_is_retried_on_the_next_registration(self) -> None:
+        """Nothing fit when the metal died (its plane was gone too); the
+        reborn container's own registration is the trigger: the queue is
+        retried, the run carves onto it and finishes."""
+        gate = asyncio.Event()
+        service = self.metal_service(devices=2, sample_gate=gate)
+        desk = self.desk_with_metal("fake-metal")
+        remote = RemoteDesk(LocalTransport(Campaigns(desk)))
+
+        async def drive():
+            reply = await Campaigns(desk).submit(self.split_spec())
+            rid = reply["run_id"]
+            await self.container_dies(service)
+            self.metal_transports["metal://fake-metal"] = ReapTest.Dead()
+            parked = await desk.reap(probes=1)
+            self.metal_transports["metal://fake-metal"] = LocalTransport(service)
+            told = await remote.register_metal(
+                "fake-metal", "L4", 2, 24.0, "metal://fake-metal")
+            gate.set()
+            landed = desk.placements()[rid]["host"]
+            await service.hosts[landed]._adoptions[rid]
+            return reply, parked, told, landed
+        reply, parked, told, landed = go(drive())
+        rid = reply["run_id"]
+        self.assertEqual(parked["runs"], {rid: "parked"})
+        self.assertEqual(told["retried"], {rid: "rerouted"})
+        self.assertEqual(service.hosts[landed].roster[rid].status, "done")
+        self.assertEqual(desk.parked(), {})
+
+    def test_crash_midway_leaves_the_intent_on_the_journal(self) -> None:
+        """The desk dies between concluding the hosts and moving their run:
+        the stranding is already journaled, so a desk rebuilt from the
+        journal retries it — once. A second retry finds the new binding in
+        placements() and nothing parked; stop_anchored probed and at most one
+        roster ever carried the run, so it was adopted exactly once."""
+        gate = asyncio.Event()
+        service = self.metal_service(devices=2, sample_gate=gate)
+        desk = self.desk_with_metal("fake-metal")
+
+        async def crash():
+            raise RuntimeError("the desk died here")
+        desk.retry_parked = crash            # the crash, after conclude + strand
+
+        async def drive():
+            reply = await Campaigns(desk).submit(self.split_spec())
+            rid = reply["run_id"]
+            await self.container_dies(service)
+            with self.assertRaises(RuntimeError):
+                await desk.reap(probes=1)
+            reborn = Desk.from_journal(
+                self.store,
+                host_for=lambda addr: RemoteHost(self.LazyTransport(self, addr)),
+                metal_for=lambda addr: RemoteMetal(self.LazyPlane(self, addr)))
+            queued = dict(reborn.parked())
+            first = await reborn.retry_parked()
+            second = await reborn.retry_parked()
+            gate.set()
+            landed = reborn.placements()[rid]["host"]
+            await service.hosts[landed]._adoptions[rid]
+            return reply, queued, first, second, landed, reborn
+        reply, queued, first, second, landed, reborn = go(drive())
+        rid = reply["run_id"]
+        self.assertEqual(sorted(queued), [rid])
+        self.assertIn(queued[rid], reply["pools"].values())
+        self.assertEqual(first, {rid: "rerouted"})
+        self.assertEqual(second, {})
+        self.assertEqual(reborn.placements()[rid]["host"], landed)
+        carrying = [host.name for host in service.hosts.values()
+                    if rid in host._adoptions]
+        self.assertEqual(carrying, [landed])                # adopted once
+        self.assertEqual(service.hosts[landed].roster[rid].status, "done")
+
+    def test_a_decommission_park_is_retried_on_registration_too(self) -> None:
+        """The queue is every parked run, whoever parked it: a decommission
+        with nowhere to go parks; the next metal registration revives it."""
+        gate = asyncio.Event()
+        service = self.metal_service(devices=2, sample_gate=gate)
+        desk = self.desk_with_metal("fake-metal")
+        remote = RemoteDesk(LocalTransport(Campaigns(desk)))
+
+        async def drive():
+            reply = await Campaigns(desk).submit(self.split_spec())
+            rid = reply["run_id"]
+            verdict = await remote.decommission(reply["host"], reroute=True)
+            told = await remote.register_metal(
+                "fake-metal", "L4", 2, 24.0, "metal://fake-metal")
+            gate.set()
+            landed = desk.placements()[rid]["host"]
+            await service.hosts[landed]._adoptions[rid]
+            return reply, verdict, told, landed
+        reply, verdict, told, landed = go(drive())
+        rid = reply["run_id"]
+        self.assertTrue(verdict["rerouted"][rid]["parked"], verdict)
+        self.assertEqual(told["retried"], {rid: "rerouted"})
+        self.assertEqual(service.hosts[landed].roster[rid].status, "done")
+
+
+class MeasureTest(unittest.TestCase):
+    def test_measure_refuses_where_no_cuda_device_is(self) -> None:
+        """Q6: a card is measured, never declared — and a machine that has
+        none to measure says so by name instead of guessing one."""
+        try:
+            import torch
+            present = torch.cuda.is_available()
+        except ImportError:
+            present = False
+        if present:
+            self.skipTest("a CUDA device is present: measure() would succeed")
+        with self.assertRaises(DeskError) as caught:
+            MetalService.measure("laptop")
+        self.assertIn("measured, never declared", str(caught.exception))

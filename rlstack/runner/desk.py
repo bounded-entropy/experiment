@@ -22,6 +22,18 @@ shards; the desk deduces per-device GB against each metal's residual, also
 in GB; and the metal converts to its partition's fraction exactly once, at
 build, against the card it MEASURED — `fraction_for_gb`, the one crossing.
 
+THE DESK SUPERVISES ITS METALS (ADR 0001, Q5). The one restart that is
+automatic is a METAL's — a preempt takes every host on it — and the loop is
+reap → knock → re-register → reroute: the reaper concludes the metal's
+listings silent, KNOCKS its plane address (on a lazy venue the knock is the
+boot; `boot_for` where it is not), the reborn container REGISTERS itself at
+bring-up (a known name at the same address UPDATES the row and reaps its
+corpses by probe), and every run whose placement was on the dead hosts is
+STRANDED — journaled `parked`, the queue — and RETRIED with `reroute`: re-
+placed onto whatever fits, the reborn metal included, and redelivered, which
+is resume. Every registration event retries the whole queue. A host dying
+alone stays a human's resubmit.
+
 Truth stays in the store: every listing, metal registration, placement and
 delisting is journaled, `from_journal` rebuilds the desk after a kill, and
 the desk's memory is only the single writer's cache — "the fleet" names the
@@ -35,6 +47,7 @@ import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 
+from rlstack.data.plan import wave_count
 from rlstack.data.stores.base import Store
 from rlstack.policy.siteschema import SiteSchema
 from rlstack.runner.host import Host, Partition, Regime
@@ -248,6 +261,7 @@ class Desk:
     def __init__(self, store: Store,
                  host_for: Callable[[str], "RemoteHost"],
                  metal_for: Callable[[str], "RemoteMetal"] | None = None,
+                 boot_for: Callable[[str], None] | None = None,
                  ) -> None:
         self.store = store
         # address -> RemoteHost: how the desk reaches a listed host
@@ -258,24 +272,37 @@ class Desk:
         # still places over listings and answers misses with boot
         # instructions, it just cannot command a carve.
         self.metal_for = metal_for
+        # name -> the venue's way to BOOT a metal whose container is gone,
+        # for venues where knocking the plane address does not boot it. None
+        # means the knock IS the boot (Modal: a call to a stopped-but-deployed
+        # container starts one), so the reaper knocks with `describe()`.
+        self.boot_for = boot_for
         self.metal: dict[str, Metal] = {}
+        self.metal_addresses: dict[str, str | None] = {}
         self.metal_remotes: dict[str, "RemoteMetal"] = {}
-        # name -> the metal's build recipe row (Builds.row()), as it declared
-        # it: descriptive inventory, journaled so the record of HOW a host was
-        # built survives the desk (ADR 0002, Q4a). The desk never builds.
+        # name -> the metal's build recipe row (Builds.row()): the CANON a
+        # carve is built from (ADR 0001, Q5c — it rides every carve request,
+        # so a reborn container is rebuilt from the desk's row, and its own
+        # constants are only its first declaration), journaled so the record
+        # of HOW a host was built survives the desk. The desk never builds.
         self.metal_builds: dict[str, dict] = {}
         self.listings: dict[str, Listing] = {}
+        self._recontinue: asyncio.Lock | None = None
+        self._recontinue_loop: asyncio.AbstractEventLoop | None = None
 
     @classmethod
     def from_journal(cls, store: Store,
                      host_for: Callable[[str], "RemoteHost"],
                      metal_for: Callable[[str], "RemoteMetal"] | None = None,
+                     boot_for: Callable[[str], None] | None = None,
                      ) -> "Desk":
         """The desk, rebuilt from its own record: every `list` event resolves
-        its address again, and so does every addressed `metal` event. Kill -9 the
-        desk and nothing was lost but a process — the same recovery shape as
-        attach, on the fleet plane."""
-        desk = cls(store, host_for, metal_for)
+        its address again, and so does every addressed `metal` event — the
+        latest `metal` event per name wins, so a re-registration's measured
+        facts and recipe replay exactly as they landed. Kill -9 the desk and
+        nothing was lost but a process — the same recovery shape as attach,
+        on the fleet plane."""
+        desk = cls(store, host_for, metal_for, boot_for)
         for event in store.read_fleet_log():
             if event.get("event") == "list":
                 desk.listings[event["host"]] = _listing_from(event, host_for)
@@ -287,6 +314,7 @@ class Desk:
                     devices=int(event.get("devices", 1)),
                     vram_gb=float(event.get("vram_gb", 24.0)))
                 address = event.get("address")
+                desk.metal_addresses[event["name"]] = address
                 if address and metal_for is not None:
                     desk.metal_remotes[event["name"]] = metal_for(address)
                 if event.get("builds"):
@@ -294,17 +322,34 @@ class Desk:
         return desk
 
     def register_metal(self, metal: Metal, address: str | None = None,
-                       builds: Mapping | None = None) -> None:
+                       builds: Mapping | None = None) -> list[str]:
         """The acquire rung, recorded at the desk: what the fleet OWNS and may
         carve against. Journaled like a listing, so a rebuilt desk knows its
         inventory too. `address` is where that metal's own container answers
         the metal plane (carve/decarve/residual) — with it and a resolver the
         desk can command the standing carve; without it the row is inventory
         only and misses still answer with boot instructions. `builds` is the
-        metal's recipe row, kept and journaled as description."""
-        if metal.name in self.metal:
-            raise DeskError(f"metal {metal.name!r} is already registered")
+        metal's recipe row: kept as the desk's canon, journaled.
+
+        A KNOWN NAME AT THE SAME ADDRESS IS THE CONTAINER GENERATION TURNING
+        OVER (ADR 0001, Q5): the row is overwritten with the frame's measured
+        facts (and its recipe, if it carries one — a redeploy is a human's
+        act and updates the canon), journaled as a fresh `metal` event so the
+        rebuilt desk replays last-write-wins, and that metal's listings are
+        RECONCILED by probe at once (reconcile_metal) — the metal itself just
+        said it is up and bare, so a silent host on it is a corpse. The
+        corpses' runs are stranded; the caller retries them (retry_parked).
+        Returns the corpses reaped. A known name at a DIFFERENT address is two
+        deploys colliding on a name, not a restart: refused loudly."""
+        known = metal.name in self.metal
+        if known and self.metal_addresses.get(metal.name) != address:
+            raise DeskError(
+                f"metal {metal.name!r} is already registered at "
+                f"{self.metal_addresses.get(metal.name)!r}; a registration "
+                f"from {address!r} is a second deploy colliding on the name, "
+                f"not a restart — deregister or rename it")
         self.metal[metal.name] = metal
+        self.metal_addresses[metal.name] = address
         if address and self.metal_for is not None:
             self.metal_remotes[metal.name] = self.metal_for(address)
         if builds:
@@ -313,7 +358,25 @@ class Desk:
             "event": "metal", "t": time.time(), "name": metal.name,
             "gpu": metal.gpu, "devices": metal.devices,
             "vram_gb": metal.vram_gb, "address": address,
-            "builds": dict(builds) if builds else None})
+            "builds": self.metal_builds.get(metal.name)})
+        return self.reconcile_metal(metal.name) if known else []
+
+    def reconcile_metal(self, name: str) -> list[str]:
+        """The reaper's conclusion scoped to ONE metal, with zero retries: a
+        metal that has just re-registered is up and bare, so a listing on it
+        that does not answer is dead, not rebooting. Each corpse is delisted
+        with the reason journaled — no decarve, the memory freed itself when
+        the container did — and its runs are STRANDED for the retry. Probing
+        (rather than trusting the frame) is what makes a double `up` a no-op:
+        living hosts answer and stay listed, a host carved onto the newborn
+        before its frame landed answers too."""
+        corpses = [host_name for host_name in sorted(self.listings)
+                   if self.listings[host_name].metal == name
+                   and not self.listings[host_name].alive()]
+        for host_name in corpses:
+            self.delist(host_name, reason="metal re-registered")
+        self.strand(corpses)
+        return corpses
 
     def list_host(self, name: str, regimes: Sequence[Regime], address: str,
                   solo: bool = False, partition: Mapping | None = None,
@@ -720,42 +783,164 @@ class Desk:
         """Every listing probed, the silent ones retried, the still-silent
         ones REAPED — the desk's answer to a host that died without saying
         delist (a crashed process can never announce its crash; someone else
-        must ask and hear nothing).
+        must ask and hear nothing) — and then the RECONTINUE (ADR 0001, Q5d):
+        the runs the reaped hosts carried are stranded (journaled `parked`,
+        the queue), every metal that lost listings is KNOCKED (on a lazy
+        venue the knock boots it; the reborn container registers itself at
+        bring-up), and the queue is retried with `reroute` — re-placed onto
+        whatever fits, the reborn metal included, and redelivered, which is
+        resume. Nothing fits → the run stays parked for the next registration
+        event.
 
-        The retries ARE the restart attempt: on a lazy venue the knock itself
-        boots a stopped-but-still-deployed container, so a probe that fails,
-        waits, and probes again gives the reboot its window — `recovered` is
-        that verdict. A listing silent through every retry is concluded:
-        DECARVED at its metal when the metal still answers (a living
-        container frees its GB back to residual; a dead one already
-        did, physically), then DELISTED with the reason journaled, so a
-        rebuilt desk agrees the host is gone. Verdicts per listing:
-        alive | recovered | reaped."""
-        verdicts: dict[str, str] = {}
+        The retries ARE a listing's own restart attempt: a probe that fails,
+        waits, and probes again gives a rebooting container its window —
+        `recovered` is that verdict. A listing silent through every retry is
+        concluded: DECARVED at its metal when the metal still answers (a
+        living container frees its GB back to residual; a dead one already
+        did, physically), then DELISTED with the reason journaled. Verdicts:
+        per listing alive | recovered | reaped; per knocked metal whether it
+        answered; per stranded or parked run rerouted | parked."""
+        listings: dict[str, str] = {}
+        reaped_by_metal: dict[str, list[str]] = {}
         for name in sorted(self.listings):
-            listing = self.listings[name]
+            listing = self.listings.get(name)
+            if listing is None:
+                continue                # concluded meanwhile by a re-registration
             if listing.alive():
-                verdicts[name] = "alive"
+                listings[name] = "alive"
                 continue
-            recovered = False
-            for _ in range(probes):
-                if wait:
-                    await asyncio.sleep(wait)
-                if listing.alive():
-                    recovered = True
-                    break
-            if recovered:
-                verdicts[name] = "recovered"
+            if await self.recovers(listing, probes, wait):
+                listings[name] = "recovered"
                 continue
-            if listing.metal and listing.metal in self.metal_remotes:
-                try:
-                    await self.metal_remotes[listing.metal].decarve(name)
-                except Exception:
-                    pass            # the metal is as dead as the host: the
-                                    # memory freed itself when the container did
-            self.delist(name, reason="reaped")
-            verdicts[name] = "reaped"
-        return verdicts
+            await self.conclude(listing)
+            listings[name] = "reaped"
+            reaped_by_metal.setdefault(listing.metal, []).append(name)
+        reaped = [name for names in reaped_by_metal.values() for name in names]
+        self.strand(reaped)
+        knocked = {metal_name: await self.knock(metal_name)
+                   for metal_name in sorted(reaped_by_metal) if metal_name}
+        runs = await self.retry_parked() if reaped else {}
+        return {"listings": listings, "knocked": knocked, "runs": runs}
+
+    async def recovers(self, listing: Listing, probes: int,
+                       wait: float) -> bool:
+        """Retry a silent listing `probes` times, `wait` seconds apart: on a
+        lazy venue the knock itself boots a stopped-but-deployed container,
+        so this is its window to come back."""
+        for _ in range(probes):
+            if wait:
+                await asyncio.sleep(wait)
+            if listing.alive():
+                return True
+        return False
+
+    async def conclude(self, listing: Listing) -> None:
+        """A listing concluded dead: decarved at its metal when the metal
+        answers, delisted with reason "reaped" either way. Idempotent — a
+        listing another path already delisted is left alone."""
+        if listing.name not in self.listings:
+            return
+        if listing.metal and listing.metal in self.metal_remotes:
+            try:
+                await self.metal_remotes[listing.metal].decarve(listing.name)
+            except Exception:
+                pass            # the metal is as dead as the host: the
+                                # memory freed itself when the container did
+        self.delist(listing.name, reason="reaped")
+
+    async def knock(self, name: str) -> bool:
+        """Boot a metal whose container is gone (Q5b): the venue's `boot_for`
+        when it has one, otherwise a `describe()` through the plane address
+        the desk holds — on Modal that call IS the boot. Off the loop, because
+        a boot is seconds to minutes and the reborn container's own
+        registration must be able to reach this desk meanwhile. A knock that
+        fails is a metal that stays dead; the queue waits for the next
+        registration event."""
+        if self.boot_for is not None:
+            boot = lambda: self.boot_for(name)          # noqa: E731
+        elif name in self.metal_remotes:
+            boot = self.metal_remotes[name].describe
+        else:
+            return False
+        try:
+            await asyncio.to_thread(boot)
+        except Exception:
+            return False
+        return True
+
+    # ---- the recontinue: strand, the queue, retry --------------------------
+
+    def strand(self, hosts: Sequence[str]) -> list[str]:
+        """Every UNFINISHED run whose latest placement touched one of `hosts`
+        is journaled `parked` — written BEFORE any reroute is attempted, so a
+        desk that dies between concluding a host and moving its runs leaves
+        the intent on the record and the next event retries it. A run whose
+        ledger already reached its plan is not work and is left alone; a run
+        already parked is not parked twice."""
+        already = self.parked()
+        stranded: list[str] = []
+        for run_id, row in sorted(self.placements().items()):
+            lost = [host for host in hosts if host in row["pools"].values()]
+            if not lost or run_id in already or self.finished(run_id):
+                continue
+            self.store.append_fleet_event({
+                "event": "parked", "t": time.time(), "run_id": run_id,
+                "reason": f"host {lost[0]!r} reaped", "avoiding": lost[0]})
+            stranded.append(run_id)
+        return stranded
+
+    def finished(self, run_id: str) -> bool:
+        """Is this run still WORK? Its ledger against its train plan's length
+        — the Trainer's own done condition, read off the store, because the
+        anchor's roster died with its metal and the store is the run. A run
+        with no plan on record is taken to be work."""
+        plan = self.store.peek_plan(run_id, "train")
+        if plan is None:
+            return False
+        entries = self.store.peek_ledger(run_id)
+        committed = int(entries[-1]["update"]) if entries else 0
+        return committed >= wave_count(plan)
+
+    def parked(self) -> dict[str, str]:
+        """THE QUEUE, read off the journal: every run whose latest disposition
+        is `parked` — by a decommission with nowhere to go, a stranding, or a
+        redelivery refused — mapped to the host it is avoiding ("" if none).
+        A later delivered placement supersedes the park."""
+        queue: dict[str, str] = {}
+        for event in self.store.read_fleet_log():
+            run_id = event.get("run_id")
+            if not run_id:
+                continue
+            if event.get("event") == "place" and event.get("delivered") \
+                    and event.get("accepted"):
+                queue.pop(run_id, None)
+            elif event.get("event") == "parked":
+                queue[run_id] = event.get("avoiding") or ""
+        return queue
+
+    async def retry_parked(self) -> dict[str, str]:
+        """Every parked run rerouted with `park=True`: placed onto whatever
+        fits now (a reborn metal's residual is asked live), stopped wherever
+        a roster still carries it, and redelivered — resume — or parked again
+        with the boot instructions. Serialized under one lock, because a
+        reap's retry and a re-registration's retry can run in the same
+        breath and a run must not be adopted twice. Verdicts per run:
+        rerouted | parked."""
+        async with self.recontinue_lock():
+            verdicts: dict[str, str] = {}
+            for run_id, avoiding in sorted(self.parked().items()):
+                reply = await self.reroute(run_id, avoiding=avoiding, park=True)
+                verdicts[run_id] = "rerouted" if reply.get("rerouted") else "parked"
+            return verdicts
+
+    def recontinue_lock(self) -> asyncio.Lock:
+        """One lock per running loop: the desk outlives any single
+        asyncio.run (tests drive one desk through several), and a Lock is
+        bound to the loop that first waits on it."""
+        loop = asyncio.get_running_loop()
+        if self._recontinue is None or self._recontinue_loop is not loop:
+            self._recontinue, self._recontinue_loop = asyncio.Lock(), loop
+        return self._recontinue
 
     def status(self) -> dict:
         """The desk's inventory, no wire calls: what is listed and what it
@@ -768,6 +953,7 @@ class Desk:
             for name, listing in sorted(self.listings.items())},
             "metal": {name: {"gpu": m.gpu, "devices": m.devices,
                              "vram_gb": m.vram_gb,
+                             "address": self.metal_addresses.get(name),
                              "plane": name in self.metal_remotes,
                              "builds": self.metal_builds.get(name)}
                       for name, m in sorted(self.metal.items())}}
@@ -804,14 +990,19 @@ class Desk:
                 park=bool(payload.get("park", False)))
         if verb == "metal":
             # the metal container phones home its OWN existence, address
-            # included — after this the desk can deduce and command against it
-            self.register_metal(
+            # included — after this the desk can deduce and command against
+            # it; a re-registration reaps that metal's corpses, and EVERY
+            # registration retries the parked queue (the reborn metal's own
+            # registration is the trigger that recontinues its runs)
+            reaped = self.register_metal(
                 Metal(name=payload["name"], gpu=payload.get("gpu", "L4"),
                       devices=int(payload.get("devices", 1)),
                       vram_gb=float(payload.get("vram_gb", 24.0))),
                 address=payload.get("address"),
                 builds=payload.get("builds"))
-            return {"registered": payload["name"]}
+            retried = await self.retry_parked()
+            return {"registered": payload["name"], "reaped": reaped,
+                    "retried": retried}
         if verb == "reap":
             return await self.reap(probes=int(payload.get("probes", 3)),
                                    wait=float(payload.get("wait", 0.0)))
@@ -917,6 +1108,29 @@ class MetalService:
         self.pending: list[tuple[str, tuple[int, ...], float]] = []
         self.carves = 0
         self.deaths: list[str] = []                 # hosts decarved by a resident's exit
+
+    @classmethod
+    def measure(cls, name: str) -> Metal:
+        """The registration row READ OFF THE DEVICE, never typed (ADR 0001,
+        Q6): the card's own name, how many devices this container sees, and
+        one device's VRAM in GB (GiB — the unit torch's total_memory and a
+        model's weights are counted in). torch is imported here, lazily, and
+        only a real venue calls this; a machine with no CUDA device refuses
+        by name rather than guessing a card. `Metal` stays a plain record so
+        the fakes suite constructs one without torch."""
+        try:
+            import torch
+        except ImportError as absent:
+            raise DeskError(
+                f"cannot measure metal {name!r}: torch is not installed, and a "
+                f"card is measured, never declared") from absent
+        if not torch.cuda.is_available():
+            raise DeskError(
+                f"cannot measure metal {name!r}: no CUDA device is visible to "
+                f"this process — a card is measured, never declared")
+        card = torch.cuda.get_device_properties(0)
+        return Metal(name=name, gpu=card.name, devices=torch.cuda.device_count(),
+                     vram_gb=round(card.total_memory / 2 ** 30, 2))
 
     # ---- the books ----------------------------------------------------------
 

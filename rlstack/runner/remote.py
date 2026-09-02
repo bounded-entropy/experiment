@@ -760,9 +760,15 @@ class RemoteDesk:
                              builds: Mapping | None = None) -> dict:
         """A metal container phones home its OWN existence — the other half
         of the deploy contract: after this the desk can deduce (residual)
-        and command (carve/decarve) against it at `address`. `builds` is the
-        metal's recipe row (Builds.row()), journaled with the registration so
-        the record of HOW a host was built is durable (ADR 0002, Q4a)."""
+        and command (carve/decarve) against it at `address`. The facts are
+        MEASURED (MetalService.measure). `builds` is the metal's recipe row
+        (Builds.row()), the desk's canon from here on, journaled so the
+        record of HOW a host was built is durable (ADR 0002, Q4a). A known
+        name at the same address is a re-registration — the container
+        generation turned over: the desk updates the row, reaps that metal's
+        corpses and retries the parked queue (ADR 0001, Q5); the reply says
+        what it reaped and retried. A known name at another address is
+        refused."""
         return await self._transport.call("metal", {
             "name": name, "gpu": gpu, "devices": devices,
             "vram_gb": vram_gb, "address": address,
@@ -772,7 +778,10 @@ class RemoteDesk:
         """The janitor's sweep, run by the desk now: probe every listing,
         retry the silent (on a lazy venue the knock is the restart), reap
         what stays silent — decarve at its metal, delist with the reason
-        journaled. Returns {host: alive | recovered | reaped}."""
+        journaled — then RECONTINUE: strand the reaped hosts' runs, knock
+        their metals, retry the parked queue (ADR 0001, Q5d). Returns
+        {"listings": {host: alive | recovered | reaped}, "knocked":
+        {metal: answered}, "runs": {run_id: rerouted | parked}}."""
         return await self._transport.call("reap", {"probes": probes,
                                                    "wait": wait})
 
