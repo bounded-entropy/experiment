@@ -845,7 +845,9 @@ per-forward verb per mechanism); the deploy; then what metal taught.
   with a steer bank, the plugin lifecycle and the demand refusals are pinned
   in the fakes. Tests: 889 locally from 835 (+54; 111 torch-gated skips),
   885 green in the image.
+- **Q10's last step ran green:** a placement for the same demands knocked
+  the released metal awake, the container announced, a host was carved, and
+  the desk released it again — the door back, seen on Modal.
 - **Unproven, as the non-promises said:** TP above 1 (one flag away),
-  pipeline parallel, the knock back after release (`::knock` written, not
-  run), the throughput cost of eager plus hooks, mid-layer sites (Q8's later
-  ADR).
+  pipeline parallel, the throughput cost of eager plus hooks, mid-layer sites
+  (Q8's later ADR).

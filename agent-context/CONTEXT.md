@@ -3862,10 +3862,15 @@ specs; backends (local/modal/skypilot) and GPU topology are semantics-neutral.
       and every door re-runs the bring-up on a released container — a
       knock's own meaning (ADR 0003 Q4). A wave refuses duplicate group keys,
       so two groups of one problem are keyed `task#index` (the plora key).
+    - **THE DOOR BACK, SEEN (ADR 0003 Q4).** `::knock`: with the metal
+      released and off the plane, `RemoteDesk.resolve` for the serving
+      demand knocked it — the container booted, announced, a serving host
+      was carved and placed — then the desk released it again and the plane
+      read empty. Both halves of ADR 0003's UNPROVEN list are now observed on
+      Modal.
     - **NOT PROVEN, STATED.** Tensor parallel above 1 (the add is replicated
       per rank by construction; `RLSTACK_STEER_GPU=L4:2 RLSTACK_STEER_TP=2
-      modal deploy` is the one flag). Pipeline parallel. The knock back after
-      a release (`::knock` exists; not run in this session). The throughput
+      modal deploy` is the one flag). Pipeline parallel. The throughput
       cost of eager plus hooks (unmeasured). Mid-layer boundary sites (Q8, a
       later ADR: a `resid_mid` is a steer, not an attention bias — a vector
       added after attention cannot re-weight the softmax). The parity
