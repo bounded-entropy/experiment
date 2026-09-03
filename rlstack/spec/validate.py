@@ -245,6 +245,35 @@ def check_adapter_types_accept_their_sites(
     return issues
 
 
+def check_sites_do_not_overlap(
+        spec: ExperimentSpec, schema: SiteSchema) -> list[ValidationIssue]:
+    """THE BANK RULE, at the gate: a site carries at most one delta per
+    tenant, so no two bank entries may resolve to a common site.
+
+    Stated at the replay seam since #44 (adapters/replay.py) and, until ADR
+    0004, enforced nowhere: two entries at one path both installed and both
+    applied — two policies wearing one version number, summed silently, for
+    every adapter type. The fix for a spec is one entry (a wider pattern, or
+    `tie`); across TENANTS nothing here applies — that is I8, and the site
+    wrapper's roster. Reported once per pair, at the later entry.
+    """
+    space = site_space(spec, schema)
+    matched = {name: {meta.name for meta in resolve(space, adapter.site)}
+               for name, adapter in spec.policy.bank.items()}
+    issues = []
+    names = list(spec.policy.bank)
+    for later_at, later in enumerate(names):
+        for earlier in names[:later_at]:
+            shared = sorted(matched[earlier] & matched[later])
+            if shared:
+                issues.append(_issue(
+                    "site-overlap", f"policy.bank.{later}.site",
+                    f"entries {earlier!r} and {later!r} both resolve to "
+                    f"{len(shared)} site(s) ({', '.join(shared[:4])}) — a "
+                    f"site carries at most one delta per tenant"))
+    return issues
+
+
 def _plora_entries(spec: ExperimentSpec) -> list[tuple[str, Mapping]]:
     """Every bank entry of adapter type "plora", as (name, init).
 
@@ -586,6 +615,7 @@ CHECKS = (
     check_schema_describes_the_base,
     check_sites_resolve,
     check_adapter_types_accept_their_sites,
+    check_sites_do_not_overlap,
     check_plora_entries_name_their_factors,
     check_plora_shapes_are_positive,
     check_hosts_exist,

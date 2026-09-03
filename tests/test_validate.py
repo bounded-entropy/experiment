@@ -203,6 +203,38 @@ class TestDeclarationWiring(unittest.TestCase):
         self.assertEqual(codes(spec), {"post-collision"})
 
 
+class TestBankRule(unittest.TestCase):
+    """The bank rule at the gate (ADR 0004, Q7): a site carries at most one
+    delta per tenant, so two entries resolving to one site are refused —
+    which, until the check existed, they were not (both installed, both
+    applied, summed silently, for every adapter type)."""
+
+    def test_two_entries_at_one_site_are_refused(self) -> None:
+        spec = clean_spec(policy=PolicySpec(base="Qwen/Qwen3-1.7B", bank={
+            "a": lora("layers.0-3.self_attn.q_proj", r=8),
+            "b": lora("layers.2.self_attn.q_proj", r=4)}))
+        issues = [i for i in validate(spec, SCHEMA) if i.code == "site-overlap"]
+        self.assertEqual(len(issues), 1)
+        self.assertEqual(issues[0].path, "policy.bank.b.site")
+        self.assertIn("layers.2.self_attn.q_proj", issues[0].message)
+
+    def test_disjoint_ranges_of_one_adapter_type_compose(self) -> None:
+        spec = clean_spec(policy=PolicySpec(base="Qwen/Qwen3-1.7B", bank={
+            "early": lora("layers.0-1.self_attn.*", r=8),
+            "late": lora("layers.2-3.self_attn.*", r=8)}))
+        self.assertEqual(validate(spec, SCHEMA), [])
+
+    def test_the_rule_is_per_tenant_not_per_adapter_type(self) -> None:
+        """Two adapter TYPES at one site in one bank are two deltas at one
+        site just the same."""
+        spec = clean_spec(policy=PolicySpec(base="Qwen/Qwen3-1.7B", bank={
+            "pi": lora("layers.0-3.self_attn.*", r=8),
+            "critic": AdapterSpec(adapter_type="value_head", site="final_hidden"),
+            "critic2": AdapterSpec(adapter_type="value_head",
+                                   site="final_hidden")}))
+        self.assertIn("site-overlap", codes(spec))
+
+
 class TestSites(unittest.TestCase):
     def test_site_no_match(self) -> None:
         # The fake schema has 4 layers; layer 9 does not exist.
