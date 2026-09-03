@@ -241,7 +241,23 @@ def bring_up_metal():
     learner."""
     from rlstack.policy.siteschema import hf_schema
     from rlstack.runner.desk import MetalService
+    from rlstack.runner.remote import LocalTransport
     from rlstack.runner.residents import Builds, EngineBuild, LearnerBuild
+
+    born: dict = {}
+
+    def transport_for(address: str):
+        """A host reaching a pool on THIS metal goes in-process: the wire is
+        LocalTransport over the sibling host's own service (json both ways,
+        admission at that host's arbiter — the plora venue's shape). Never a
+        Modal call to this container from inside this container: a host
+        adopts on the container's event loop and asks reachability through
+        the transport's SYNC verb, so a self-call would wait on the loop it
+        is blocking — the wedge the first check died of (an hour of silence
+        after a delivered tenant). A foreign scheme is another metal's."""
+        if address.startswith(f"{SCHEME}://"):
+            return LocalTransport(born["service"].service_for(address))
+        return MetalTransport(address)
 
     service = MetalService(
         MetalService.measure(METAL), store=a_store(),
@@ -251,7 +267,8 @@ def bring_up_metal():
             learner=LearnerBuild()),
         address_of=lambda host_name: f"{SCHEME}://{host_name}",
         schema_for=hf_schema,
-        transport_for=lambda address: MetalTransport(address))
+        transport_for=transport_for)
+    born["service"] = service
     print(f"[{METAL}] up, bare: {service.metal.gpu} x{service.metal.devices} "
           f"at {service.metal.vram_gb:g} GB; residual {service.residual()}")
     return service
