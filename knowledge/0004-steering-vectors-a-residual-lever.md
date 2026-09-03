@@ -3,9 +3,9 @@
 | | |
 |---|---|
 | **Date** | 2026-09-02 |
-| **Status** | Proposed |
+| **Status** | Answered (2026-09-02: Q1, Q3, Q4, Q6, Q7, Q9, Q10 agreed; Q5 and Q11 resolved by the agent at Samarth's delegation; Q8 deferred to a later ADR, its question answered below; Q2 REFOLDED — positions are a per-request directive — which opens **Q2a**, the one question still open before Accepted) |
 | **Author** | Claude Fable 5.1 (session: the vLLM-Hook assessment, 2026-09-02) |
-| **Touches** | `policy/adapters/` (one new adapter type, three files: `steer.py`, `steer_torch.py`, `steer_vllm.py`), `policy/adapters/base.py` (one `Mechanism` member), `policy/adapters/rollout.py` (two `Levers` fields), `runner/engines/vllm_engine.py` (the bus pays the two new levers), `runner/fakes.py` (the fake engine's inventory), `rlstack_engine/` (the first real plugin: `steer.py`, and `BatchView.from_vllm` built), `spec/validate.py` (one check, Q7), `spec/specs.py` (sugar), `deploy/steer_l4.py` (the metal proof, through the desk), `tests/` |
+| **Touches** | `policy/adapters/` (one new adapter type, three files: `steer.py`, `steer_torch.py`, `steer_vllm.py`), `policy/adapters/base.py` (one `Mechanism` member), `policy/adapters/rollout.py` (two `Levers` fields), `runner/engines/vllm_engine.py` (the bus pays the two new levers, and builds `Request` with `occupied` and the directives), `client.py` + `runner/interfaces.py` + `runner/traffic.py` + `runner/remote.py` (Q2: one keyword, `directives`, on `sample` and `score`, carried over the wire), `runner/fakes.py` (the fake engine's inventory and the keyword), `rlstack_engine/` (the first real plugin: `steer.py`, and `BatchView.from_vllm` built), `spec/validate.py` (one check, Q7), `spec/specs.py` (sugar), `deploy/steer_l4.py` (the metal proof, through the desk), `tests/` |
 | **Invariants** | I2 (an adapter type ships both lowerings — this one's rollout half is the first on a plugin), I7 (the plugin probes at boot and refuses the build it cannot serve), I8 (per-request selection inside one fused batch, on a lever the engine does not natively index), I12 (the check ends by the desk's `release`, never the venue's timer) |
 | **CONTEXT** | extends #29 (the plugin contract: probe / slots / `cache_salt` / BatchView), #46 (soft prompts served, side attention refused — and the reason it was refused), #48 (the Lowering: one contract per adapter type per side), #76 (ADR 0003's `release`, whose Modal half is still UNPROVEN and which this ADR's check observes); the entry number lands at implementation |
 
@@ -29,6 +29,38 @@ And the ask:
 > ok nice. could you create an ADR for steering vectors? the check should be a
 > real deployment onto modal (along with a takedown of the metal, by calling
 > the desk (since we have this implemented.)
+
+And, answering in session (2026-09-02):
+
+> Q1) agree
+>
+> Q2) ideally id be able to modify which positions at runtime. this is
+> interesting -- i guess it's a property of the request itself.
+> architecturally, adding some sort of meta information parameter to the
+> engine adapter add-on or whatever doesnt seem like too big of a deal. what
+> do you think (i dont see any issues). what do you think?
+>
+> Q3) i agree, we should salt the cache with the bundle id obfviously.
+>
+> 4) i agree with your suggestion.
+>
+> 5) decide what you think is good
+>
+> 6) sure
+>
+> 7) yea wait this should already be the case.
+>
+> 8) yea let's do that in a later ADR. quick question: with this new
+> self_attn output, will that remove the need for the custom flash attention
+> rewrite for the logit bias?
+>
+> 9) yea this makes sense to m
+>
+> 10) sure. id like to ideally test this under different conditions (TP,
+> etc.) shortly. just make sure at the end of tests, all metals are
+> deallocated.
+>
+> 11) just decide what's best for these races.
 
 ## Context / problem
 
@@ -129,13 +161,21 @@ with one vector per layer, `tie=True` shares one across the range — the LoRA
 shape, `lora_torch.py:120`); zero is its exact identity, so init is zero by
 default and the gradient is non-zero from the first step. The replay lowering
 is a `SiteWrapper` at the boundary path that adds each routed row's vector to
-the module's output, at every position, and is transparent to every other
-tenant's rows — the value head's tap plus one add. The rollout lowering
-demands a worker class and eager mode, attaches a bundle's vectors as ONE
-content-addressed file under the build's workdir (what `lora_vllm.attach`
-does with a PEFT dir, `lora_vllm.py:55-73`), applies by naming that file in
-the request's `SamplingParams.extra_args` and the bundle in its `cache_salt`,
-aligns zero positions, and detaches by removing the file. The engine-image
+the module's output — at every position by default, or inside the WINDOW
+that row's turns recorded — and is transparent to every other tenant's rows:
+the value head's tap plus one add. WHICH positions is a property of the
+request (Q2, refolded): an environment may pass a `SteerWindow` directive
+with `sample`, the rollout lowering resolves it against the request it sees
+(real-token coordinates, offset by the positions other adapter types occupy)
+and RECORDS the resolved window as a turn fact (I6), the replay wrapper reads
+it back from `ReplayRows.facts` and masks the add to those positions, and a
+trajectory whose turns disagree is refused at replay — plora's one-draw rule
+(`plora_torch.py:344`). The rollout lowering demands a worker class and eager
+mode, attaches a bundle's vectors as ONE content-addressed file under the
+build's workdir (what `lora_vllm.attach` does with a PEFT dir,
+`lora_vllm.py:55-73`), applies by naming that file and the resolved window in
+the request's `SamplingParams.extra_args` and the bundle PLUS the window in
+its `cache_salt`, aligns zero positions, and detaches by removing the file. The engine-image
 half, `rlstack_engine/steer.py`, is the first real `EnginePlugin`: it probes
 four symbols at boot, installs one hook per served boundary at model load,
 builds `BatchView.from_vllm` off the forward context, holds a bounded
@@ -163,14 +203,25 @@ container's reclaim observed.
 - **Touched** — `policy/adapters/rollout.py`: `Levers` grows `extra_args`
   (per-request selection the worker reads) and `cache_salt` (prefix-cache
   identity the engine cannot hash itself); `merged_with` joins the first and
-  refuses two different salts; `claims` may name either. `check_levers_compose`
-  unchanged.
+  refuses two different salts; `claims` may name either. `Request` grows
+  `occupied` (the positions other adapter types put in front of the real
+  tokens, summed by the bus — what a window is offset by) and `directives`
+  (the typed per-request records the caller passed; an adapter type picks
+  its own by type). `check_levers_compose` unchanged.
+- **Touched** — `client.py`, `runner/interfaces.py`, `runner/traffic.py`,
+  `runner/remote.py` (Q2): `PoolClient.sample` and `score` gain one keyword,
+  `directives: Sequence[Directive] = ()`; `Engine.sample_tokens` /
+  `score_tokens` carry it; the wire frame encodes each directive by its
+  adapter type's name and the adapter type decodes its own record. An
+  environment that passes nothing is unchanged — every call site today
+  passes nothing (`math_single_turn.py:14`, `dapo_math.py:33`).
 - **Touched** — `runner/engines/vllm_engine.py`: the bus pays the two levers
   — `sample_tokens` and `score_tokens` fold `levers.extra_args` into the
   `SamplingParams` they build (`:222`, `:281`) and `levers.cache_salt` into
-  whatever prompt form `_levers_for` produced. No mechanism word enters the
-  file; `_pay_demands` still refuses a `plugin=` demand — this plugin arrives
-  as ENGINE ARGS (Q5), which the bus already pays.
+  whatever prompt form `_levers_for` produced — and builds `Request` with
+  `occupied` and the directives. No mechanism word enters the file;
+  `_pay_demands` still refuses a `plugin=` demand — this plugin arrives as
+  ENGINE ARGS (Q5), which the bus already pays.
 - **Touched** — `runner/fakes.py`: `FakeEngine.reachability` answers
   `RESIDUAL` for boundary sites when its build serves `steer`, so Phase 0 and
   the resume suite exercise the adapter type without torch.
@@ -190,9 +241,13 @@ container's reclaim observed.
   `rl-stack-spec.md` at the v4 fold (I2's mechanism list), `CONTEXT.md` at
   implementation.
 - **Untouched** — `runner/learners/torch_learner.py`, `fsdp_torch.py`: the
-  replay lowering is a site wrapper routed by the row plan, the #44 shape;
-  no learner file changes, as #46 and #48 both managed. `policy/adapters/
-  replay.py`: `SiteWrapper`, `join_site`, `RowPlan` are used as they stand.
+  replay lowering is a site wrapper routed by the row plan, the #44 shape,
+  and the recorded window reaches it through `ReplayRows.facts`, which the
+  learner already threads adapter-blind (`torch_learner.py:349`); no learner
+  file changes, as #46 and #48 both managed. `policy/adapters/replay.py`:
+  `SiteWrapper`, `join_site`, `RowPlan`, `facts` are used as they stand.
+  `data/trajectory.py`, `data/flatten.py`: `Turn.turn_extras` and
+  `TokenBatch.doc_turn_extras` already carry a per-turn fact to the row.
 - **Untouched** — `policy/siteschema.py`: no new sites (Q8); the grammar
   already has numeric ranges (`:45-65`). `policy/compile.py`: a steer payload
   is a payload; `group_by_adapter_type` routes it. `runner/residency.py`:
@@ -228,6 +283,16 @@ container's reclaim observed.
   the way side attention's is: probe names the missing seam, the bank is
   per-slot, a token gathers from its own request's slot, an unknown slot
   raises.
+- **Promises — the window (Q2).** A `SteerWindow` passed with `sample` is
+  applied on the engine to exactly the positions it names, is sealed into
+  `Turn.turn_extras` resolved (slice coordinates, offset included), and the
+  replay wrapper adds at exactly those row positions and nowhere else —
+  pinned in the fakes by a round trip (directive → turn → batch → mask) and
+  on metal by Promise 2 run under a window. A call with no directive steers
+  every position, which is the recorded default. A trajectory whose turns
+  recorded different windows is refused at replay with the row named. The
+  prefix-cache salt carries the window beside the bundle id, so two requests
+  under one bundle and two windows never share a block.
 - **Promises — on metal, `deploy/steer_l4.py`** (Q10):
   1. **Zero-tolerance control.** With `v = 0`, the served per-token logprobs
      and the replayed ones are BIT-IDENTICAL to the base's (max |Δ| =
@@ -247,8 +312,18 @@ container's reclaim observed.
      gone; the spawned keepalive input RETURNS — `until_released` fired, the
      container reclaimed because the desk decided (ADR 0003 Q3, seen for the
      first time).
+  5. **No metal left standing (Q10).** Every entrypoint that acquires metal
+     ends — in a `finally`, whatever the run did — by asking the desk to
+     release every metal it holds and then ASSERTING, from `status()`, that
+     no metal is on the plane (`plane: False` for every row). A `sweep`
+     entrypoint does the same for a run that died before its `finally`. The
+     venue's scaledown stays the backstop, set no shorter than the desk's
+     limit (ADR 0003 Q3).
 - **Non-promises.** Tensor parallel above 1 is UNPROVEN (the add is
-  replicated per rank by construction; not measured). Pipeline parallel,
+  replicated per rank by construction; not measured) — but the deploy takes
+  `--tp` and `--gpu`, so the follow-up Samarth asked for (TP and other
+  conditions, "shortly") is one flag and a second L4, not a new script.
+  Pipeline parallel,
   CUDA graphs (forfeited by demand), norm matching and positional subsets
   (not built — Q2), mid-layer boundary sites (Q8), the knock back after
   release unless Q10's last step runs green, and the throughput cost of eager
@@ -259,7 +334,12 @@ container's reclaim observed.
 ### Interfaces
 
 `Mechanism` gains `RESIDUAL`. `Levers` gains `extra_args` and `cache_salt`
-and the bus pays both in the two request paths it owns. `BuildDemands`
+and the bus pays both in the two request paths it owns. `Request` gains
+`occupied` and `directives`; `PoolClient.sample` / `score`,
+`Engine.sample_tokens` / `score_tokens` and the wire's two frames gain
+`directives`, encoded per adapter type. The steer adapter type declares
+`records = ("steer_window",)` — the per-turn fact the rollout writes and
+the replay reads (`ReplayRows.facts`). `BuildDemands`
 carries the plugin as ENGINE ARGS (`worker_cls`, `enforce_eager`), so a build
 that serves `steer` is `VllmEngine(serves=("lora", "steer"))` and nothing
 else changes at construction. `Engine.reachability` answers `RESIDUAL` for
@@ -294,15 +374,37 @@ class Steer(AdapterType):
     # init: d (width), tie=False, init_std=0.0 (zero IS the identity), seed
 
 
+# policy/adapters/steer.py — the directive (Q2): a typed per-request record
+@dataclass(frozen=True)
+class SteerWindow:
+    """Which positions of THIS request the steer applies to, in real-token
+    coordinates: 0 is the first prompt token, len(prompt) the first generated
+    one, None runs to the end of generation. Absent: every position."""
+    start: int = 0
+    end: int | None = None
+
+
 # policy/adapters/steer_torch.py
 class SteerSite(SiteWrapper):
     """The boundary add: pass the module's output through with each routed
-    row's vector added — at every position — and every other row untouched."""
+    row's vector added inside the row's RECORDED window (every position when
+    none was recorded), and every other row untouched."""
     def forward(self, *args, **kwargs):
         out = self.inner(*args, **kwargs)
+        rows = self.plan.rows
         for state in self.installed:
-            out = out + state.rows_delta(self.path, self.plan.rows)   # [rows, 1, d], zero off-slot
+            mask = window_mask(rows, state.slot, out.shape[1])   # [rows, W, 1] off facts; raises if a row's turns disagree
+            out = out + mask * state.rows_delta(self.path, rows)  # [rows, 1, d], zero off-slot
         return out
+
+
+# policy/adapters/rollout.py
+@dataclass(frozen=True)
+class Request:
+    token_ids: tuple[int, ...]
+    seed: int | None = None
+    occupied: int = 0                              # positions other adapter types put in front
+    directives: tuple[Any, ...] = ()               # the caller's typed records; pick yours by type
 
 
 # policy/adapters/steer_vllm.py
@@ -310,6 +412,10 @@ class SteerRollout(RolloutLowering):
     adapter_type = "steer"
     mechanism = Mechanism.RESIDUAL
     claims = ("extra_args.rlstack_steer", "cache_salt")
+    # apply(): window = the SteerWindow among request.directives, or the default;
+    # resolved = (occupied + start, occupied + end) in slice coordinates;
+    # extra_args carries the file AND the resolved window; turn_extras records
+    # {"steer_window": [start, end, occupied]}; cache_salt = f"{bundle}/{start}:{end}"
 
     def demands(self) -> BuildDemands:
         return BuildDemands(engine_args={
@@ -388,7 +494,7 @@ name is exact) and the value head keeps its output tap — two adapter types
 reading one site name as two tensors, which is the mismatch this repo exists
 to refuse.
 
-> **Samarth:**
+> **Samarth:** agree — "Q1) agree"
 
 **Q2. Which positions?** IBM steers the last token of each slice per forward
 (the last prompt position, then every decode token); vllm-lens steers every
@@ -404,6 +510,58 @@ If the other branch: completion-only or last-token needs the prompt length
 per row on the replay side (the boundary catches the attention mask, as the
 value head does) and, for last-token, a rule for the prefill's final position
 that scoring traffic (one prefill, no decode) breaks.
+
+> **Samarth:** disagree, extended — "ideally id be able to modify which
+> positions at runtime. this is interesting -- i guess it's a property of the
+> request itself. architecturally, adding some sort of meta information
+> parameter to the engine adapter add-on or whatever doesnt seem like too big
+> of a deal. what do you think (i dont see any issues)."
+
+**Refolded.** Agreed: the positions are a property of the REQUEST, and the
+harness already has every seam but one. What exists: a per-request fact
+channel from the engine to the seal (`Levers.turn_extras` →
+`Turn.turn_extras`, I6) and from the seal to the replay row
+(`TokenBatch.doc_turn_extras` → `ReplayRows.facts`, threaded adapter-blind
+by the learner, `torch_learner.py:349`) — plora's recorded latent rides it
+today. What does not exist: a way for the CALLER to hand the engine a
+per-request choice. `PoolClient.sample(messages, stop)` and
+`Engine.sample_tokens(messages, sampling, stop, bundle_id, seed)` carry
+messages and spec-level knobs only. So the one addition is a typed
+`directives` keyword on `sample` and `score`, carried on `Request`, and the
+window's whole life is then: the environment passes `SteerWindow(start,
+end)` in real-token coordinates → `apply` resolves it against the request
+(offset by `Request.occupied`, the positions other adapter types put in
+front — a soft prompt's rows are in the batch slice too) and writes the
+resolved window into `extra_args` for the hook and into `turn_extras` for
+the seal → the replay wrapper masks its add to those row positions off
+`facts`. Two rules follow, both from precedent. (i) A trajectory's turns
+must AGREE on the window — one forward gives each position one hidden
+state, so a context steered one way for turn k and another for turn k−1 is
+not replayable — and disagreeing turns are refused with the row named,
+which is plora's "one trajectory is one draw" (`plora_torch.py:344`). (ii)
+The prefix-cache salt carries the window beside the bundle: a block
+prefilled under one window is wrong for another exactly as it is wrong for
+another bundle. Score traffic takes the default (every position) unless the
+scorer passes a directive — the hinted and teacher processors can. The
+directive is TYPED (a frozen record the adapter type declares), never a
+mapping: the wire encodes it by adapter type name and the adapter type
+decodes its own. Three things this deliberately does not add: a per-token
+column (the window is an interval, one fact per turn covers it), a
+`segments` tensor on the row plan (an interval in absolute coordinates needs
+no turn map), and a learner change (facts already flow).
+
+**Q2a. Where the window enters.** The refold above makes the caller pass it
+per request; the alternative is a window in the spec (`steer(...,
+window=(start, end))`, static for the run, no keyword anywhere).
+Recommendation: **the per-request directive, as refolded — `sample(...,
+directives=(SteerWindow(...),))` — with "every position" as the default when
+none is passed.** It is what "at runtime" means, and the blast radius is one
+keyword on two client verbs, two engine verbs and two wire frames, all
+defaulting to empty; every existing call site is unchanged. The spec form is
+a one-line addition later if wanted (a default directive declared in `init`),
+but a static window would not be runtime, which is the ask.
+If the other branch: the window lives in the spec, hashes into run identity,
+and no client verb changes — and changing it means a new experiment.
 
 > **Samarth:**
 
@@ -428,7 +586,9 @@ If the other branch: skip reads (correct, and every group re-prefills its
 prompt eight times), or disable caching on any build serving steer (correct,
 and the lora tenant beside it pays too).
 
-> **Samarth:**
+> **Samarth:** agree — "i agree, we should salt the cache with the bundle id
+> obfviously." (Folded with Q2: the salt is the bundle id PLUS the resolved
+> window, `f"{bundle}/{start}:{end}"`, for the same reason.)
 
 **Q4. How does a bundle's vector reach the worker?** Three shapes exist:
 vllm-lens pushes per REQUEST by `collective_rpc` before generate; IBM names a
@@ -452,7 +612,7 @@ bus grows `await settle()` before generate, and the worker holds a slot bank
 with no file — cleaner on paper, one more seam to keep, and a second way for
 the engine and worker to disagree about what is resident.
 
-> **Samarth:**
+> **Samarth:** agree — "i agree with your suggestion."
 
 **Q5. Which seam claims the worker: `worker_cls` or `worker_extension_cls`?**
 vLLM's extension mechanism composes by ADDING methods to the worker and (to
@@ -470,7 +630,13 @@ If the other branch: the extension plus `await collective_rpc("install")`
 from an async `_ensure_llm` — composable with a second extension nobody has,
 and a probe that runs at first sample instead of at boot.
 
-> **Samarth:**
+> **Samarth:** delegated — "decide what you think is good". Resolved by the
+> agent: **`worker_cls`**, as recommended — the probe belongs at boot in the
+> process that runs the forward (I7). One obligation stated: the first
+> implementation commit confirms in the pinned image that vLLM's V1
+> multiprocess executor resolves a custom `worker_cls` by string in the
+> worker process; if it does not, the fallback is the extension plus the
+> install RPC, and CONTEXT says which landed.
 
 **Q6. Eager mode and the model runner are DEMANDS.** Hooks do not fire inside
 a captured CUDA graph; IBM's guard skips the add during capture, which means
@@ -489,7 +655,7 @@ If the other branch: rely on the default and the guard — and the day
 `enforce_eager` flips for throughput, every steer tenant on the fleet trains
 against a rollout that never steered.
 
-> **Samarth:**
+> **Samarth:** agree — "sure"
 
 **Q7. The bank rule, enforced.** Two entries of one adapter type at one site
 in one bank are summed today, silently, for every adapter type
@@ -505,7 +671,10 @@ If the other branch: the sum is declared the semantics, ARCHITECTURE.md's
 bank sentence is rewritten to say so, and LoRA inherits a composition nobody
 designed.
 
-> **Samarth:**
+> **Samarth:** agree — "yea wait this should already be the case." (It was
+> the documented rule and never a gate. Folded: `site-overlap` is the FIRST
+> implementation commit, on its own, before any steer code — a gate bug fixed
+> for every adapter type, with the overlapping-lora case pinned as its test.)
 
 **Q8. New boundary sites now?** After attention (`model.layers.<n>.self_attn`
 output) and the layer input are residual points both sides expose; only
@@ -521,7 +690,24 @@ If the other branch: add them here; every run on the volume is un-attachable
 under the new schema unless the compiler is versioned, which is a bigger ADR
 than this one.
 
-> **Samarth:**
+> **Samarth:** agree — "yea let's do that in a later ADR. quick question: with
+> this new self_attn output, will that remove the need for the custom flash
+> attention rewrite for the logit bias?"
+
+**Answer: no.** The attention-logit bias (`attn_bias`, the `queries ->
+prompt[:n]` rectangle) changes the scores BEFORE the softmax, so it re-weights
+which keys each query mixes — a per-query, per-head, data-dependent change to
+the attention pattern whose effect on the output is `Σ_j (softmax(s+b)_j −
+softmax(s)_j) · v_j`. A vector added at the attention module's OUTPUT is a
+constant shift per position that does not depend on the keys or the query at
+all; no choice of it reproduces a re-weighting, even for one query, let alone
+for every query in a batch. So a `resid_mid.<n>` site buys "steer the stream
+after attention", which is a steer, and not "bias the attention", which still
+needs the kernel seam — the score_mod route or the LSE shim the #46 CORRECTION
+measured. What the residual lever does change is the COST of that judgment:
+side attention was refused because a plugin meant a kernel; a plugin now means
+whatever seam the mechanism actually needs, and for attention bias that seam
+is still inside the kernel.
 
 **Q9. The plugin contract's per-forward verb.** `EnginePlugin.attend(view, q,
 out, lse)` is abstract and attention-shaped; a residual plugin adds, it does
@@ -535,7 +721,7 @@ the verbs.
 If the other branch: `SteerWorker` implements `attend` by raising, and the
 contract says one thing while its only real instance does another.
 
-> **Samarth:**
+> **Samarth:** agree — "yea this makes sense to m"
 
 **Q10. The check.** `deploy/steer_l4.py`, modeled on `plora_l4.py`'s specs
 and the recovered `gsm_a100.py`'s desk wiring: a CPU `Desk` container with
@@ -561,7 +747,18 @@ it does not.
 If the other branch: stop at the release; the knock back stays unseen on the
 venue, as ADR 0003 left it.
 
-> **Samarth:**
+> **Samarth:** agree — "sure. id like to ideally test this under different
+> conditions (TP, etc.) shortly. just make sure at the end of tests, all
+> metals are deallocated."
+
+**Folded, two ways.** (i) Promise 5: every entrypoint that acquires metal
+releases every metal through the desk in a `finally` and then ASSERTS from
+`status()` that nothing is on the plane — a test that ends with metal
+standing has failed, whatever else it showed — and a `sweep` entrypoint
+releases whatever a dead run left. (ii) The deploy takes `--tp` and `--gpu`
+(the `tp_l4` precedent, #45), so the TP condition Samarth wants shortly is
+one flag on the same script and a second L4; it stays a non-promise of THIS
+ADR and lands as a CONTEXT line when run.
 
 **Q11. Races, the crash midway, and the unknown slot.** (a) `detach` removes a
 file a request might still name; (b) `attach` can die with a half-written
@@ -584,7 +781,15 @@ not.
 If the other branch: a missing path skips silently and a tenant trains
 against rollouts that steered some requests and not others, undetectably.
 
-> **Samarth:**
+> **Samarth:** delegated — "just decide what's best for these races."
+> Resolved by the agent: **as recommended, all three** — (a) `pinned()`
+> spans the request, so detach under a live request cannot happen; (b)
+> write-then-rename on attach, a tolerant detach, content-addressed ids as
+> the proof; (c) an unknown path RAISES in the hook, a request without the
+> key adds nothing. One addition from Q2: a window that does not fit the
+> request (start beyond its length, end before start) is refused at `apply`
+> with the request named, never clamped — a clamped window would record
+> something the caller did not ask for.
 
 ## Outcome
 
