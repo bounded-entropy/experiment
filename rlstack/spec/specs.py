@@ -328,6 +328,17 @@ def soft_prompt(site: str, n: int, d: int) -> AdapterSpec:
     return AdapterSpec(adapter_type="soft_prompt", site=site, init={"n": n, "d": d})
 
 
+def steer(site: str, d: int, tie: bool = False,
+          init_std: float = 0.0) -> AdapterSpec:
+    """A steering vector of width d at every matched residual boundary
+    ("resid_pre.8-20", "final_hidden"), added at every position of a request
+    or inside the window the caller passes per request (SteerWindow). tie=
+    shares one vector across the range; init_std=0.0 starts at the identity.
+    Served on the residual lever, our hook in the engine image (ADR 0004)."""
+    return AdapterSpec(adapter_type="steer", site=site,
+                       init={"d": d, "tie": tie, "init_std": init_std})
+
+
 def attn_bias(site: str, **init: object) -> AdapterSpec:
     """Learned bias on an attention-score rectangle: the one adapter type served
     by a mechanism of ours (side_attention, an engine plugin) rather than a

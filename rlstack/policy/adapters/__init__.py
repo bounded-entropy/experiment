@@ -5,9 +5,9 @@ lowerings beside it. Importing this package registers the builtins.
 """
 
 from rlstack.policy.adapters.base import (  # noqa: F401
-    AdapterType, AdapterTypeDef, Mechanism, adapter_type,
+    AdapterType, AdapterTypeDef, Directive, Mechanism, adapter_type,
 )
 from rlstack.policy.adapters import (  # noqa: F401  (registers builtins)
-    attn_bias, lora, plora, soft_prompt, spectral, spectral_latent,
+    attn_bias, lora, plora, soft_prompt, spectral, spectral_latent, steer,
     value_head,
 )

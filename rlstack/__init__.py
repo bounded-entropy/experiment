@@ -31,7 +31,7 @@ from rlstack.spec.specs import (
     AdapterSpec, AlgoSpec, BackendProfile, PoolMember, ExperimentSpec,
     GenSpec, Topology, HostSpec, LearnerMember, OptimSpec, PolicySpec,
     Plans, SamplingSpec, Schedule, Seeds, WarmStart,
-    attn_bias, learner, lora, plora, pool, soft_prompt,
+    attn_bias, learner, lora, plora, pool, soft_prompt, steer,
 )
 from rlstack.registry import (
     ADAPTER_TYPES, ENVS, LOSSES, POST,
@@ -40,7 +40,10 @@ from rlstack.registry import (
 )
 from rlstack.client import PoolClient
 from rlstack.policy.siteschema import SiteMeta, SiteSchema, fake_qwen_schema, resolve
-from rlstack.policy.adapters import AdapterType, AdapterTypeDef, Mechanism, adapter_type
+from rlstack.policy.adapters import (
+    AdapterType, AdapterTypeDef, Directive, Mechanism, adapter_type,
+)
+from rlstack.policy.adapters.steer import SteerWindow
 from rlstack.inference.rollout import Rollout
 from rlstack.inference import makers as _makers   # registers task makers
 from rlstack.inference.environments import (

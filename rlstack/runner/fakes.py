@@ -100,8 +100,9 @@ class FakeEngine:
     def reachability(self, sites: Sequence[SiteMeta]) -> Mapping[str, Mechanism]:
         """A realistic fake build: punica reaches weighted matrices, prompt
         rows enter at the embedding boundary, logits have a processor, and the
-        side-attention rectangle is reachable only when the plugin is
-        installed. Everything else is honestly NONE."""
+        two plugin levers — the side-attention rectangle, the residual
+        boundaries — are reachable only when their plugin is installed.
+        Everything else is honestly NONE."""
         def reach(meta: SiteMeta) -> Mechanism:
             if meta.has_weight:
                 return Mechanism.PUNICA
@@ -112,6 +113,11 @@ class FakeEngine:
             if meta.path == "attn_scores":
                 return (Mechanism.SIDE_ATTENTION
                         if Mechanism.SIDE_ATTENTION in self.plugins
+                        else Mechanism.NONE)
+            if meta.is_boundary and (meta.path.startswith("model.layers.")
+                                     or meta.path == "model.norm"):
+                return (Mechanism.RESIDUAL
+                        if Mechanism.RESIDUAL in self.plugins
                         else Mechanism.NONE)
             return Mechanism.NONE
         return {meta.name: reach(meta) for meta in sites}

@@ -35,17 +35,19 @@ if TYPE_CHECKING:                       # the seam imports this module back
 class Mechanism(StrEnum):
     """How an engine reaches a site: the CLOSED set of serving levers.
 
-    PUNICA, PROMPT_EMBEDS and LOGITS are the engine's own; SIDE_ATTENTION is
-    ours, shipped as an engine plugin that must re-earn per-request selection,
-    cache correctness and parity on every build. Whether a lever reaches a given
-    site on a given BUILD is the engine's to answer (Engine.reachability), never
-    a static table here (I7).
+    PUNICA, PROMPT_EMBEDS and LOGITS are the engine's own; SIDE_ATTENTION and
+    RESIDUAL are ours, shipped as engine plugins that must re-earn per-request
+    selection, cache correctness and parity on every build. Whether a lever
+    reaches a given site on a given BUILD is the engine's to answer
+    (Engine.reachability), never a static table here (I7).
     """
 
     PUNICA = "punica"                 # per-token weight deltas (vLLM multi-LoRA)
     PROMPT_EMBEDS = "prompt_embeds"   # virtual rows before the prompt
     LOGITS = "logits"                 # logits processor
     SIDE_ATTENTION = "side_attention" # our LSE-merge plugin (soft prompt + bias)
+    RESIDUAL = "residual"             # our hook: a per-slot vector added at a
+    #                                   residual boundary (ADR 0004)
     NONE = "none"                     # inventory answer only: not reachable
 
 
