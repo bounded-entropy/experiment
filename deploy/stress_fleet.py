@@ -166,14 +166,16 @@ class MetalPlaneTransport:
 
 
 def same_metal_transport(address: str):
-    """A host reaching a pool on its OWN metal goes in-process (the plora
-    venue's shape): a Modal self-call from the container's loop to the same
-    container waits on an input the loop must itself dispatch."""
+    """A host reaching a pool on its OWN metal goes in-process — LocalTransport
+    over the sibling host's own service (json both ways, admission at that
+    host's arbiter; the plora venue's shape, proven by the steer venue). Never
+    a Modal self-call: a host adopts on the container's loop and asks
+    reachability through the transport's SYNC verb, so a self-call would wait
+    on the loop it is blocking. A foreign scheme is another metal's."""
     from rlstack.runner.remote import LocalTransport
 
-    service = _METAL_SERVICE.get("service")
-    if service is not None and address in service.services:
-        return LocalTransport(service.services[address])
+    if address.startswith(f"{SCHEME}://"):
+        return LocalTransport(_METAL_SERVICE["service"].service_for(address))
     return MetalTransport(address)
 
 
