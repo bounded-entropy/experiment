@@ -327,27 +327,45 @@ async def metal_duties(service) -> None:
 class MetalS:
     @modal.enter()
     async def bring_up(self) -> None:
+        self.stand_up()
+
+    def stand_up(self) -> None:
+        """A fresh metal on this container: books, recipe, router, duties."""
         import asyncio
 
         self.born = time.time()
         self.metal_service = bring_up_metal()
         self.duties = asyncio.create_task(metal_duties(self.metal_service))
 
+    def live(self):
+        """The metal every door answers through — reborn first if the desk
+        RELEASED the one standing here. A released service is done: its
+        books are empty, its duties ended, its shift latch set; and the
+        venue keeps the container alive until its idle scaledown, so a
+        knock or a fresh keepalive within that window lands HERE (found on
+        the venue: a new check waited 900 s for a registration a released
+        container never sends). Standing a new metal up on the same container
+        is exactly what a knock asks for (ADR 0003, Q4)."""
+        if self.metal_service.released.is_set():
+            print(f"[{METAL}] reborn on a released container", flush=True)
+            self.stand_up()
+        return self.metal_service
+
     @modal.method()
     async def host(self, address: str, verb: str, payload: dict) -> dict:
-        return await self.metal_service.service_for(address).serve(verb, payload)
+        return await self.live().service_for(address).serve(verb, payload)
 
     @modal.method()
     def host_ask(self, address: str, verb: str, payload: dict) -> dict:
-        return self.metal_service.service_for(address).answer(verb, payload)
+        return self.live().service_for(address).answer(verb, payload)
 
     @modal.method()
     async def metal(self, verb: str, payload: dict) -> dict:
-        return await self.metal_service.serve(verb, payload)
+        return await self.live().serve(verb, payload)
 
     @modal.method()
     def metal_ask(self, verb: str, payload: dict) -> dict:
-        return self.metal_service.answer(verb, payload)
+        return self.live().answer(verb, payload)
 
     @modal.method()
     async def serve(self) -> dict:
@@ -355,8 +373,17 @@ class MetalS:
         what keeps this container from scaling down while its hosts carry
         work, and it RETURNS when the desk releases this metal — so the
         venue reclaims the container as a consequence of the desk's decision,
-        never of its own timer (which is the backstop, set no shorter)."""
-        await self.metal_service.until_released()
+        never of its own timer (which is the backstop, set no shorter). After
+        the shift the container stops taking inputs, so the venue reclaims it
+        NOW rather than at the idle scaledown, and a later knock boots a
+        fresh one."""
+        service = self.live()
+        await service.until_released()
+        try:
+            from modal.experimental import stop_fetching_inputs
+            stop_fetching_inputs()
+        except ImportError:
+            pass                       # the idle scaledown is the backstop
         return {"released": True, "metal": METAL,
                 "shift_s": round(time.time() - self.born, 1)}
 
