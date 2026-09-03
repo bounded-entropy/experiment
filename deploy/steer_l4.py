@@ -379,10 +379,13 @@ def rollout_plan(task_ids, updates: int):
     def wave(u: int):
         chosen = [task_ids[(u * GROUPS_PER_WAVE + g) % len(task_ids)]
                   for g in range(GROUPS_PER_WAVE)]
+        # a group is the advantage's baseline scope, not a task: two groups
+        # of one problem are two baselines, keyed apart (a wave refuses
+        # duplicate group keys — found on the venue, the plora key is the rule)
         return WavePlan(tuple(
-            GroupPlan(task_id, tuple(Sample(task_id, "dapo_math")
-                                     for _ in range(GROUP_SIZE)))
-            for task_id in chosen))
+            GroupPlan(f"{task_id}#{g}", tuple(Sample(task_id, "dapo_math")
+                                              for _ in range(GROUP_SIZE)))
+            for g, task_id in enumerate(chosen)))
     return RunPlan(tuple(wave(u) for u in range(updates)))
 
 
