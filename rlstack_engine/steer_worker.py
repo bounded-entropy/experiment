@@ -45,8 +45,8 @@ def live_symbols(worker: Any) -> frozenset[str]:
         found.add("vllm.forward_context.get_forward_context")
     except ImportError:
         pass
-    if callable(getattr(Worker, "load_model", None)):
-        found.add("vllm.v1.worker.gpu_worker.Worker.load_model")
+    if callable(getattr(Worker, "compile_or_warm_up_model", None)):
+        found.add("vllm.v1.worker.gpu_worker.Worker.compile_or_warm_up_model")
     runner = getattr(worker, "model_runner", None)
     if hasattr(runner, "input_batch") and hasattr(runner.input_batch, "req_ids"):
         found.add("vllm.v1.worker.gpu_model_runner.GPUModelRunner.input_batch")
@@ -86,10 +86,18 @@ class ModelSeam(Seam):
 
 
 class SteerWorker(Worker):
-    """vLLM's GPU worker, plus the residual hook."""
+    """vLLM's GPU worker, plus the residual hook.
 
-    def load_model(self, *args, **kwargs) -> None:
-        super().load_model(*args, **kwargs)
+    The probe and the install sit at the LAST boot step, not at load_model:
+    the runner's request table and input batch — two of the seams the hook
+    reads — are born after the KV cache is configured (initialize_from_config),
+    so a probe at model load would refuse a build that is fine. The warm-up
+    that follows runs the model with no attention metadata and so exercises
+    the hooks' nothing-to-do path before any request arrives.
+    """
+
+    def compile_or_warm_up_model(self, *args, **kwargs) -> None:
+        self.routing: SteerRouting | None = None
         self.steer = SteerPlugin(
             max_slots=int(self.vllm_config.scheduler_config.max_num_seqs),
             device=self.device, dtype=self.model_config.dtype)
@@ -103,8 +111,8 @@ class SteerWorker(Worker):
                 f"no residual boundary named model.layers.<n> or model.norm "
                 f"in {type(self.model_runner.model).__name__}: the steer hook "
                 f"has nowhere to stand on this model family")
-        self.routing: SteerRouting | None = None
         self.steer.install(ModelSeam(self))
+        super().compile_or_warm_up_model(*args, **kwargs)
 
     # ---- the hooks -----------------------------------------------------------
 
@@ -116,7 +124,7 @@ class SteerWorker(Worker):
 
     def add_at(self, path: str):
         def hook(module, args, output) -> None:
-            if self.routing is None or not self.routing.steers:
+            if getattr(self, "routing", None) is None or not self.routing.steers:
                 return None
             hidden = output[0] if isinstance(output, tuple) else output
             self.steer.add(self.routing, path, hidden)

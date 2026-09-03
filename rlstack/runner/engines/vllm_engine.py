@@ -27,6 +27,7 @@ tokenized exactly as flatten will re-tokenize it — no chat template.
 
 from __future__ import annotations
 
+import os
 import tempfile
 import time
 from collections.abc import AsyncIterator, Mapping, Sequence
@@ -35,7 +36,7 @@ from pathlib import Path
 from rlstack.data.trajectory import Message
 from rlstack.policy.adapters.base import Directive, Mechanism
 from rlstack.policy.adapters.rollout import (
-    BuildDemands, Levers, Request, RolloutLowering, ServingBuild,
+    Levers, Request, RolloutLowering, ServingBuild, check_demand_fits,
     check_levers_compose,
 )
 from rlstack.policy.compile import Bundle, group_by_adapter_type
@@ -84,6 +85,9 @@ class VllmEngine:
             gpu_memory_utilization=gpu_memory_utilization,
             tensor_parallel_size=tp, enable_sleep_mode=enable_sleep_mode,
             enforce_eager=enforce_eager, disable_log_stats=True)
+        # the environment the engine's process must carry when it is built —
+        # paid demands, applied in _ensure_llm before the core is spawned
+        self._engine_env: dict[str, str] = {}
         for lowering in self._lowerings.values():
             self._engine_args.update(self._pay_demands(lowering))
         self._llm = None                       # built inside the running loop
@@ -118,34 +122,19 @@ class VllmEngine:
                 f"adapter type {lowering.adapter_type!r} demands the engine plugin "
                 f"{demands.plugin!r}; this build installs none, so it cannot "
                 f"serve it (reachability stays NONE and Phase 0 refuses)")
-        self.check_demand_fits(lowering.adapter_type, demands)
+        check_demand_fits(lowering.adapter_type, demands, self._engine_args,
+                          {**os.environ, **self._engine_env})
+        self._engine_env.update(demands.env)
         return demands.engine_args
-
-    def check_demand_fits(self, adapter_type: str, demands: BuildDemands) -> None:
-        """A demand that CHANGES an argument the build already carries is a
-        refusal, never an override (ADR 0004, Q6).
-
-        The build's own arguments are facts the deploy chose — eager mode,
-        the worker class — and an earlier adapter type's paid demands are
-        facts too; an adapter type whose demand contradicts either cannot be
-        served on this build, and says so at construction (I7) rather than
-        silently rebuilding the engine under everyone else's feet. Two adapter
-        types demanding the same worker class is the same refusal: one plugin
-        claims the seam.
-        """
-        for key, value in demands.engine_args.items():
-            if key in self._engine_args and self._engine_args[key] != value:
-                raise NotImplementedError(
-                    f"adapter type {adapter_type!r} demands {key}={value!r}, "
-                    f"but this build carries {key}={self._engine_args[key]!r}; "
-                    f"a demand never overrides a build fact, so this build "
-                    f"cannot serve it")
 
     def _ensure_llm(self):
         """AsyncLLMEngine wants a running event loop; the runner has one by
         the first sample — so construction is deferred to that moment."""
         if self._llm is None:
             from vllm import AsyncEngineArgs, AsyncLLMEngine
+            # the paid environment demands, in THIS process: the engine core
+            # and its workers are spawned from here and inherit them
+            os.environ.update(self._engine_env)
             self._llm = AsyncLLMEngine.from_engine_args(
                 AsyncEngineArgs(**self._engine_args))
         return self._llm

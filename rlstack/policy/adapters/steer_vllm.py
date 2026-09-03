@@ -62,11 +62,16 @@ class SteerRollout(RolloutLowering):
     claims = (f"extra_args.{STEER_FILE}", "cache_salt")
 
     def demands(self) -> BuildDemands:
-        """The seam and its price: OUR worker class (probe at boot, hooks at
-        model load) and eager mode, stated so a graph-captured build refuses
-        this adapter type at construction instead of steering nothing."""
+        """The seam and its price: OUR worker class (probe at boot, hooks on
+        the model), eager mode — a hook does not fire inside a captured graph
+        — and the V1 model runner, whose request table the hook reads; vllm
+        0.28.0 boots the V2 runner by default and exposes the choice as an
+        environment variable only. All three stated, so a build that will not
+        pay refuses this adapter type at construction instead of steering
+        nothing."""
         return BuildDemands(engine_args={"worker_cls": WORKER,
-                                         "enforce_eager": True})
+                                         "enforce_eager": True},
+                            env={"VLLM_USE_V2_MODEL_RUNNER": "0"})
 
     def reaches(self, meta: SiteMeta) -> bool:
         """The residual boundaries the hook stands at: every decoder layer's

@@ -25,7 +25,9 @@ from rlstack import (
     Message, PolicySpec, Role, SamplingSpec, SteerWindow, fake_qwen_schema,
     lora, run_experiment, steer,
 )
-from rlstack.policy.adapters.rollout import Request
+from rlstack.policy.adapters.rollout import (
+    BuildDemands, Request, check_demand_fits,
+)
 from rlstack.policy.adapters.steer import (
     STEER_RECORD, Steer, resolve_window,
 )
@@ -136,6 +138,35 @@ class WindowTest(unittest.TestCase):
         self.assertEqual(fact, {STEER_RECORD: [3, 4]})
         self.assertEqual(Steer().record_directive(None, Request((1,))),
                          {STEER_RECORD: [0, None]})
+
+
+class DemandsTest(unittest.TestCase):
+    """A demand never overrides a build fact (ADR 0004, Q6): arguments,
+    environment, and an earlier adapter type's paid demands are all facts."""
+
+    STEER = BuildDemands(engine_args={"worker_cls": "w", "enforce_eager": True},
+                         env={"VLLM_USE_V2_MODEL_RUNNER": "0"})
+
+    def test_a_build_that_already_agrees_pays_silently(self) -> None:
+        check_demand_fits("steer", self.STEER, {"enforce_eager": True},
+                          {"VLLM_USE_V2_MODEL_RUNNER": "0"})
+        check_demand_fits("steer", self.STEER, {}, {})
+
+    def test_a_graph_captured_build_refuses(self) -> None:
+        with self.assertRaises(NotImplementedError) as refused:
+            check_demand_fits("steer", self.STEER, {"enforce_eager": False}, {})
+        self.assertIn("enforce_eager", str(refused.exception))
+
+    def test_a_process_pinned_to_the_other_runner_refuses(self) -> None:
+        with self.assertRaises(NotImplementedError) as refused:
+            check_demand_fits("steer", self.STEER, {},
+                              {"VLLM_USE_V2_MODEL_RUNNER": "1"})
+        self.assertIn("VLLM_USE_V2_MODEL_RUNNER", str(refused.exception))
+
+    def test_two_plugins_claiming_the_worker_refuse(self) -> None:
+        with self.assertRaises(NotImplementedError):
+            check_demand_fits("other", BuildDemands(engine_args={"worker_cls": "x"}),
+                              {"worker_cls": "w"}, {})
 
 
 class SealTest(unittest.TestCase):

@@ -55,14 +55,47 @@ class ServingBuild:
 class BuildDemands:
     """What the BUILD must pay for one adapter type to be servable at all.
 
-    `engine_args` are folded into the engine's construction arguments; `plugin`
-    is a module the engine IMAGE must carry and install (named by string — the
-    import is one-way, rlstack never imports rlstack_engine). A build that
-    cannot pay a demand refuses the adapter type at construction.
+    `engine_args` are folded into the engine's construction arguments; `env`
+    are environment variables the engine's PROCESS must carry before the
+    engine is built (its core and workers inherit them — the door vLLM leaves
+    for a choice it exposes no argument for, such as which model runner);
+    `plugin` is a module the engine IMAGE must carry and install (named by
+    string — the import is one-way, rlstack never imports rlstack_engine). A
+    build that cannot pay a demand refuses the adapter type at construction.
     """
 
     engine_args: Mapping[str, Any] = field(default_factory=dict)
+    env: Mapping[str, str] = field(default_factory=dict)
     plugin: str | None = None
+
+
+def check_demand_fits(adapter_type: str, demands: BuildDemands,
+                      build_args: Mapping[str, Any],
+                      build_env: Mapping[str, str]) -> None:
+    """A demand that CHANGES a fact the build already carries is a refusal,
+    never an override (ADR 0004, Q6).
+
+    The build's arguments are facts the deploy chose — eager mode, the worker
+    class — its process's environment is a fact too, and an earlier adapter
+    type's paid demands are facts as well; an adapter type whose demand
+    contradicts any of them cannot be served on this build, and says so at
+    construction (I7) rather than silently rebuilding the engine under
+    everyone else's feet. Two adapter types demanding the same worker class
+    is the same refusal: one plugin claims the seam.
+    """
+    for key, value in demands.engine_args.items():
+        if key in build_args and build_args[key] != value:
+            raise NotImplementedError(
+                f"adapter type {adapter_type!r} demands {key}={value!r}, but "
+                f"this build carries {key}={build_args[key]!r}; a demand never "
+                f"overrides a build fact, so this build cannot serve it")
+    for key, value in demands.env.items():
+        if key in build_env and build_env[key] != value:
+            raise NotImplementedError(
+                f"adapter type {adapter_type!r} demands {key}={value!r} in the "
+                f"engine's environment, but this process carries "
+                f"{key}={build_env[key]!r}; a demand never overrides a build "
+                f"fact, so this build cannot serve it")
 
 
 @dataclass(frozen=True)

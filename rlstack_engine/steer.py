@@ -70,11 +70,13 @@ class SteerPlugin(EnginePlugin):
     mechanism = Mechanism.RESIDUAL
     consumes = ("steer",)
     # The seams this mechanism stands on, on the pinned build (vllm 0.28.0):
-    # the worker class whose load_model we extend, the forward context the
-    # batch geometry is read from, the runner's request table and input
-    # batch (request ids in batch order), and the per-request extra_args.
+    # the worker class whose boot we extend, the forward context the batch
+    # geometry is read from, the V1 runner's request table and input batch
+    # (request ids in batch order — the V2 runner the build boots by default
+    # has neither, so the adapter type demands V1), and the per-request
+    # extra_args.
     required_symbols = frozenset({
-        "vllm.v1.worker.gpu_worker.Worker.load_model",
+        "vllm.v1.worker.gpu_worker.Worker.compile_or_warm_up_model",
         "vllm.forward_context.get_forward_context",
         "vllm.v1.worker.gpu_model_runner.GPUModelRunner.input_batch",
         "vllm.v1.worker.gpu_model_runner.GPUModelRunner.requests",
