@@ -705,13 +705,15 @@ def plane_is_empty() -> bool:
     return not standing
 
 
-async def release_everything(reason: str) -> list[str]:
+def release_everything(reason: str) -> list[str]:
     """Every metal the desk can still command, released by the desk."""
+    import asyncio
+
     held = desk().status().get("metal", {})
     released = []
     for name, row in sorted(held.items()):
         if row.get("plane"):
-            told = await desk().release(name, reason=reason)
+            told = asyncio.run(desk().release(name, reason=reason))
             print(f"[release] {name}: {json.dumps(told)}")
             released.append(name)
     return released
@@ -727,10 +729,17 @@ def up() -> None:
 
 
 @app.local_entrypoint()
-async def check(master: int = 11) -> None:
+def check(master: int = 11) -> None:
     """THE CHECK: up, two tenants through the desk, their ledgers, then the
     desk's release with the keepalive observed to return — and, whatever
-    happened, every metal released and the plane asserted empty."""
+    happened, every metal released and the plane asserted empty.
+
+    A SYNC entrypoint on purpose: the desk's admission-free verbs (status)
+    are blocking Modal calls on a worker thread, which deadlock under an
+    entrypoint's own event loop; the async verbs (submit, release) are
+    awaited explicitly, one loop each."""
+    import asyncio
+
     from rlstack.runner.remote import spec_from_json
 
     call = metal_handle().serve.spawn()
@@ -738,11 +747,12 @@ async def check(master: int = 11) -> None:
     verdict: dict = {"keepalive": call.object_id}
     try:
         print(json.dumps(wait_for_metal(), indent=1))
-        rows = await build_specs.remote.aio(master)
+        rows = build_specs.remote(master)
         runs: dict[str, str] = {}
         hosts: dict[str, dict] = {}
         for name in ("lora", "steer"):
-            reply = await desk().submit(spec_from_json(rows[name]), subdir="steer")
+            reply = asyncio.run(desk().submit(spec_from_json(rows[name]),
+                                              subdir="steer"))
             print(f"[submit] {name}: {json.dumps(reply, default=str)[:400]}")
             if not reply.get("accepted"):
                 raise SystemExit(f"{name} was not accepted: {reply}")
@@ -755,7 +765,7 @@ async def check(master: int = 11) -> None:
 
         deadline = time.time() + 3600
         while time.time() < deadline:
-            progress = await ledgers.remote.aio(list(runs.values()))
+            progress = ledgers.remote(list(runs.values()))
             line = {name: progress[rid]["committed"] for name, rid in runs.items()}
             print(f"[ledger] {json.dumps(line)}")
             if all(n >= UPDATES for n in line.values()):
@@ -770,7 +780,7 @@ async def check(master: int = 11) -> None:
             verdict[f"{name}_logprob_gap"] = gaps
     finally:
         # promise 4 and 5: the desk hands the metal back and the shift ends
-        released = await release_everything("steer check done")
+        released = release_everything("steer check done")
         verdict["released"] = released
         status = desk().status()
         row = status.get("metal", {}).get(METAL, {})
@@ -791,25 +801,27 @@ async def check(master: int = 11) -> None:
 
 
 @app.local_entrypoint()
-async def knock() -> None:
+def knock() -> None:
     """The door back (ADR 0003 Q4, ADR 0004 Q10): a placement for the same
     demands KNOCKS the released metal awake, the container announces, the
     desk lists it carve-able again — then it is released once more."""
+    import asyncio
+
     from rlstack.runner.desk import Demand
 
     before = desk().status().get("metal", {}).get(METAL, {})
     print(f"[knock] before: released={before.get('released')} plane={before.get('plane')}")
     try:
-        placed = await desk().resolve((Demand(pool="main", capability="inference",
-                                              base=BASE, shape=TP,
-                                              vram_gb=MAIN_GB * TP, group=0),))
+        placed = asyncio.run(desk().resolve((
+            Demand(pool="main", capability="inference", base=BASE, shape=TP,
+                   vram_gb=MAIN_GB * TP, group=0),)))
         print(f"[knock] placed: {json.dumps(placed, default=str)[:400]}")
         after = desk().status().get("metal", {}).get(METAL, {})
         print(f"[knock] after: released={after.get('released')} plane={after.get('plane')}")
         if not after.get("plane"):
             raise SystemExit("the knock did not bring the metal back")
     finally:
-        await release_everything("knock check done")
+        release_everything("knock check done")
         if not plane_is_empty():
             raise SystemExit("metal left standing after the knock")
 
@@ -822,20 +834,23 @@ def status() -> None:
 
 
 @app.local_entrypoint()
-async def sweep() -> None:
+def sweep() -> None:
     """Release whatever a dead run left standing, and assert the plane is
     empty."""
-    await release_everything("sweep")
+    release_everything("sweep")
     if not plane_is_empty():
         raise SystemExit("metal still standing after the sweep")
 
 
 @app.local_entrypoint()
-async def down(call_id: str = "") -> None:
+def down(call_id: str = "") -> None:
     """Hand the metal back by hand and, given the keepalive's call id, watch
     it return."""
-    await release_everything("released by hand")
+    started = time.time()
+    release_everything("released by hand")
     if call_id:
-        print(json.dumps(modal.FunctionCall.from_id(call_id).get(timeout=600)))
+        shift = modal.FunctionCall.from_id(call_id).get(timeout=600)
+        print(f"[shift] the keepalive returned {json.dumps(shift)} "
+              f"{time.time() - started:.1f}s after the release")
     if not plane_is_empty():
         raise SystemExit("metal still standing")
