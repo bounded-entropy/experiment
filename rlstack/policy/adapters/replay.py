@@ -199,11 +199,18 @@ def leaf_module(model: Any, path: str) -> tuple[Any, str]:
     leaf, and every one of them addresses it the same way — the site's path is
     the base's own dotted `named_modules()` name (siteschema.SiteMeta.path), so
     the walk belongs here beside the routing rather than once per adapter type.
+
+    A wrapper standing ON THE WAY is walked through: a steer at a decoder
+    layer wraps that layer's forward, not its children, so the path to the
+    layer's q_proj continues into the wrapped module — whichever adapter type
+    installed first (ADR 0004, found on metal: a lora after a steer).
     """
     parent = model
     *walk, leaf = path.split(".")
     for step in walk:
         parent = getattr(parent, step)
+        while isinstance(parent, SiteWrapper):
+            parent = parent.inner
     return parent, leaf
 
 

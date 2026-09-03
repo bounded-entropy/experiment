@@ -296,6 +296,61 @@ class ReplayNumericsTest(unittest.TestCase):
         self.assertIs(self.model.block.b, b)
 
 
+class _Block(torch.nn.Module if torch is not None else object):
+    """A decoder-layer stand-in: a module WITH children, so a steer at its
+    output stands on the path to its projection."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.proj = torch.nn.Linear(WIDTH, WIDTH, bias=False)
+
+    def forward(self, x):
+        return self.proj(x)
+
+
+LAYER = (SiteMeta(name="resid_pre.0", path="layer", has_weight=False,
+                  shape=None, is_boundary=True),)
+LAYER_PROJ = (SiteMeta(name="layer.proj", path="layer.proj", has_weight=True,
+                       shape=(WIDTH, WIDTH), is_boundary=False),)
+
+
+@needs_torch
+class WrapperOnTheWayTest(unittest.TestCase):
+    """Found on metal: a steer wrapping model.layers.8 hid the layer's
+    children from the walk to model.layers.8.self_attn.q_proj. A wrapper on
+    the way is walked through, in either install order."""
+
+    def compose(self, steer_first: bool):
+        torch.manual_seed(0)
+        model = torch.nn.Module()
+        model.layer = _Block()
+        x = torch.randn(1, 3, WIDTH)
+        base = model.layer(x).detach().clone()
+        vec = steer_torch.build(LAYER, {"d": WIDTH, "seed": 1, "init_std": 0.5})
+        delta = lora_torch.build(LAYER_PROJ, {"r": 2, "seed": 2})
+        delta.b["layer.proj"].data = torch.randn(WIDTH, 2) / 2
+        order = [(steer_torch, vec), (lora_torch, delta)]
+        for lowering, state in (order if steer_first else order[::-1]):
+            lowering.install(model, state)
+        plan = rows_for([{"layer": vec, "layer.proj": delta}], [0],
+                        facts((0, None)))
+        with row_plan(model).route(plan):
+            out = model.layer(x)
+        lora_only = (x @ delta.a["layer.proj"].T) @ delta.b["layer.proj"].T
+        expected = base + lora_only + vec.vectors["layer"].detach()
+        self.assertTrue(torch.allclose(out, expected, atol=1e-5))
+        for lowering, state in order:
+            lowering.uninstall(model, state)
+        self.assertIsInstance(model.layer, _Block)
+        self.assertIsInstance(model.layer.proj, torch.nn.Linear)
+
+    def test_a_lora_installs_inside_a_steered_layer(self) -> None:
+        self.compose(steer_first=True)
+
+    def test_a_steer_wraps_a_layer_holding_a_lora(self) -> None:
+        self.compose(steer_first=False)
+
+
 @needs_torch
 class StateTest(unittest.TestCase):
     def test_tied_is_one_parameter_under_every_path(self) -> None:
