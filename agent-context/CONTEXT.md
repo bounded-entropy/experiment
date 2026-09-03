@@ -3876,6 +3876,73 @@ specs; backends (local/modal/skypilot) and GPU topology are semantics-neutral.
       added after attention cannot re-weight the softmax). The parity
       certificate stays unwired, as for every adapter type.
 
+78. **THE FLEET UNDER UNTRIED CONDITIONS: TP AND FSDP WITH EVERY ADAPTER
+    TYPE, A TENANT JOINING MID-RUN, BASES THAT ARE NOT QWEN** (Samarth,
+    2026-09-03: "i want to spend some time stress testing the systems that
+    ive already built ... 1) tp and fsdp with adapters 2) trainer joining
+    later onto an existing learner (multi-tenant) 3) different models ...
+    run stress tests on the smallest possible topologies"). One venue,
+    `deploy/stress_fleet.py`, three doors, every one ending with the desk
+    releasing every metal and the plane asserted empty (ADR 0004 promise 5).
+    Nothing in rlstack/ needed to change for (1) or (2); (3) found one
+    refusal worth naming.
+    - **(1) TP=2 + FSDP=2, THREE ADAPTER TYPES (`::topology`, one L4:2).**
+      A tp=2 engine serving lora, steer AND soft_prompt, an fsdp=2 learner,
+      three tenants — lora / steer / soft_prompt — submitted through the desk
+      and JOINED onto one serving host (`stress-l4:0-1.main-tp2`) and one
+      learner (`stress-l4:0-1.learner-fsdp2`), two updates each on the
+      screened DAPO problem. `logprob_gap` per update: lora 0.0135 / 0.0168,
+      steer 0.0132 / 0.0172, soft_prompt 0.0222 / 0.0174 — the same band as
+      the single-device checks (#77). Lora and steer trained (loss ±2e-4); the
+      soft prompt's groups were all-or-nothing at this size (loss 0.0), so
+      its gradient is not shown here. What this proves that #45/#46 had
+      not: the RESIDUAL hook on a sharded engine (each rank adds to its
+      replicated stream), `prompt_embeds` on a tp=2 build (#46 had it
+      "not built" above tp=1), and a `SiteWrapper` AROUND an FSDP2-sharded
+      decoder block (the steer wraps `model.layers.<n>` after `fully_shard`;
+      the block's hooks fire through `inner`). Release told; the keepalive
+      back 0.1 s after, shift 611 s; plane empty.
+    - **(2) A TENANT JOINS A LEARNER MID-RUN (`::latejoin`, same fleet).** A
+      (lora, 4 updates) alone; once A had committed 1, B (steer, 2 updates)
+      was submitted and JOINED A's listings; the learner host's roster showed
+      both `running`; B's install landed on a learner between A's forwards;
+      B finished while A still had an update left (a tenant LEAVING mid-run,
+      too). A's rail: 0.0111 alone, then 0.0131 / 0.0158 / 0.0117 beside B —
+      unmoved; B: 0.0133 / 0.0117. Both plans complete; released; plane
+      empty. Through residents and the desk, which #46's in-process
+      three-tenant check never was.
+    - **(3) BASES (`::bases`, five single L4s in parallel, no desk; schema →
+      gate → engine+learner parity → a windowed generation).** Qwen3-0.6B,
+      OLMo-2-0425-1B (Olmo2, hidden 2048, 16 layers) and
+      SmolLM2-1.7B-Instruct (Llama, 2048, 24) PASS every stage: zero steer is
+      the base bit for bit on both sides; gaps (base / lora / steer /
+      window) Qwen 0.042 / 0.067 / 0.097 / 0.020, OLMo-2 0.028 / 0.060 /
+      0.022 / 0.015, SmolLM2 0.080 / 0.086 / 0.042 / 0.077; the window is
+      recorded. SmolLM2's greedy generation on a raw (untemplated) prompt
+      was empty — the instruct model emits EOS at once without its chat
+      template; the harness is untemplated by v0 choice, so an instruct base
+      needs the environment to speak its template. pythia-1b (GPT-NeoX) is
+      REFUSED BY NAME at the schema: `hf_schema` compiles the Llama family
+      (`model.layers.<n>.self_attn.{q,k,v,o}_proj` + `mlp.{gate,up,down}_
+      proj`, GQA) and a config lacking `num_key_value_heads` is another
+      module tree — `llama_family_schema` is the pure half, tested; before
+      this it died two calls deep on an attribute error. gemma-3-1b-it and
+      Llama-3.2-1B are GATED on the Hub and the venue has no secret:
+      `modal secret create huggingface HF_TOKEN=...` then
+      `RLSTACK_HF_SECRET=huggingface modal run ...::bases` is the door, untried.
+    - **FOUND AND FIXED, VENUE ONLY.** A generator expression holding an
+      `await` is an async generator `max()` cannot consume (the first matrix
+      run's parity stage). The desk-driven doors reuse #77's shapes verbatim
+      (sync entrypoints, same-metal transport in-process, released
+      containers reborn on a door) and hit none of #77's traps.
+    - **NOT TRIED, STATED.** The 1x1 shape of the same venue
+      (`RLSTACK_STRESS_GPU=L4 ..._TP=1 ..._FSDP=1`); tp=2 with fsdp=1 or the
+      reverse; larger bases (8B at tp=2 was #45's; with a learner beside it
+      the L4:2 does not fit); plora/spectral under TP; a tenant joining an
+      FSDP learner mid-FORWARD (B's install waited for A's frame, as the
+      door serializes — the coalescer question, #44); resume of a joined
+      tenant.
+
 ## Open threads (do NOT treat as settled; flag when your answer touches them)
 
 - TODO (Samarth, settled intent — future, nothing now): BUNDLE LRU EVICTION
