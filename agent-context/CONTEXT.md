@@ -3826,8 +3826,14 @@ specs; backends (local/modal/skypilot) and GPU topology are semantics-neutral.
       keepalive input RETURNED 0.1 s later with shift_s 248 (the container
       served four minutes and ended because the desk said so — ADR 0003's
       Modal half, SEEN for the first time), the listings gone, the plane
-      asserted empty. Suite: 889 locally (111 torch-gated skips), 885 in the
-      image with the torch cases running.
+      asserted empty. That first clean check's loss was exactly 0.0 on both
+      tenants (all-or-nothing groups at 0.6B on an unscreened draw); the
+      same check on the plora venue's SCREENED problem (two groups of eight,
+      1024 tokens) trained both — loss lora 0.0001 / −0.0001, steer 0.0002 /
+      0.0003; `logprob_gap` lora 0.013 / 0.015, steer 0.015 / 0.021 — and
+      released the same way (shift 429 s, the keepalive back 0.3 s after the
+      release, plane empty). Suite: 889 locally (111 torch-gated skips), 885
+      in the image with the torch cases running.
     - **FOUND ON METAL, FIXED.** (1) A steer wrapping `model.layers.8` hid
       the layer's children from the path walk to `model.layers.8.self_attn.
       q_proj`: `leaf_module` now walks THROUGH a wrapper on the way (a
@@ -3847,7 +3853,15 @@ specs; backends (local/modal/skypilot) and GPU topology are semantics-neutral.
       container after 30 s — it looked like a preempt), and drivers print
       block-buffered into a file (`PYTHONUNBUFFERED=1`). Python-source-only
       images ship no `observe/web`, so the suite in the image asserted the
-      UI's absence until the deploy added the directory.
+      UI's absence until the deploy added the directory. A RELEASED
+      CONTAINER IS A ZOMBIE until the venue's idle scaledown: Modal keeps it
+      alive, its shift latch is set and its duties ended, and the next
+      keepalive or knock lands on it — a check waited 900 s for a
+      registration it never sends. The venue now ends the shift with
+      `stop_fetching_inputs` (the container leaves as the desk's decision)
+      and every door re-runs the bring-up on a released container — a
+      knock's own meaning (ADR 0003 Q4). A wave refuses duplicate group keys,
+      so two groups of one problem are keyed `task#index` (the plora key).
     - **NOT PROVEN, STATED.** Tensor parallel above 1 (the add is replicated
       per rank by construction; `RLSTACK_STEER_GPU=L4:2 RLSTACK_STEER_TP=2
       modal deploy` is the one flag). Pipeline parallel. The knock back after

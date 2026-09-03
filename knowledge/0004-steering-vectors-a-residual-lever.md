@@ -825,16 +825,23 @@ per-forward verb per mechanism); the deploy; then what metal taught.
   worker's boot step must return the warm-up's reply. On the venue: a host
   reaching a pool on its own metal by a Modal self-call wedges the container
   (same-metal addresses are in-process now), a killed driver kills the metal
-  (a cancellation propagates), and drivers must print unbuffered.
+  (a cancellation propagates), drivers must print unbuffered, and a released
+  container is a zombie until the venue's scaledown (the shift now ends with
+  `stop_fetching_inputs`, and a door landing on a released container stands
+  a fresh metal up).
 - **Promises, checked.** 1: the L4 probe's zero-tolerance control passed on
   both sides (max |Δ| 0.00e+00). 2: gaps 0.042–0.059 at three magnitudes,
   0.052 beside a lora (the lora alone: 0.067), shift control 20–30× the gap;
   the window replays as recorded; the cache never aliased; decode is steered
   under an open window and not under a closed one. 3: two tenants through
   `RemoteDesk.submit`, the second joined the first's listings, two updates
-  each, rails 0.017–0.023. 4: `RemoteDesk.release` told, the keepalive
-  returned 0.1 s later after a 248 s shift — the first observed release on
-  Modal. 5: the plane asserted empty. The window round trip, the resume case
+  each, rails 0.017–0.023 (loss 0.0: all-or-nothing groups on an unscreened
+  draw), then again on the plora venue's screened problem with a non-zero
+  loss on both tenants (lora 0.0001 / −0.0001, steer 0.0002 / 0.0003; rails
+  0.013–0.021). 4: `RemoteDesk.release` told, the keepalive returned 0.1 s
+  later after a 248 s shift — the first observed release on Modal — and
+  again after 429 s. 5: the plane asserted empty, every time, a failed run's
+  `finally` included. The window round trip, the resume case
   with a steer bank, the plugin lifecycle and the demand refusals are pinned
   in the fakes. Tests: 889 locally from 835 (+54; 111 torch-gated skips),
   885 green in the image.
