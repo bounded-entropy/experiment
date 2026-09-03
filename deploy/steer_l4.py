@@ -80,10 +80,16 @@ LORA_SITE = "layers.0-27.self_attn.*"
 RANK = 16
 STEER_LR = 1e-3                 # a vector wants its own LR (the soft prompt's lesson, #46)
 
+# THE one problem both tenants train on — screened by deploy/plora_l4.py: the
+# base passes it 4/8 at temperature 1.0, so its groups split and the
+# advantages are non-zero. An unscreened draw of the task file gave two
+# updates of all-or-nothing groups and a loss of exactly 0.0 on the first
+# clean check (rails fine, gradient never exercised).
+SCREENED_TASK = "dapo-math-17k/a6d38312-86c7-4022-b8d2-adcf19fa0c3a"
 UPDATES = 2
 GROUPS_PER_WAVE = 2
-GROUP_SIZE = 4
-MAX_TOKENS = 256
+GROUP_SIZE = 8
+MAX_TOKENS = 1024
 
 # The partition treaty on one L4 (24 GB), in GB (ADR 0001): serving and the
 # learner compose on one device because vLLM budgets against the device total.
@@ -396,9 +402,11 @@ def spec_for(store, bank: dict, overrides: dict, updates: int, master: int):
     )
     from rlstack.data.tasks import load_tasks
 
-    task_ids = [t.id for t in load_tasks(store, TRAIN_TASKS)][:16]
+    if not any(t.id == SCREENED_TASK for t in load_tasks(store, TRAIN_TASKS)):
+        raise ValueError(f"{SCREENED_TASK!r} is not in {TRAIN_TASKS}")
     plans = Plans(train=store.cas_put(encode(train_plan(updates))),
-                  rollout=store.cas_put(encode(rollout_plan(task_ids, updates))))
+                  rollout=store.cas_put(encode(rollout_plan([SCREENED_TASK],
+                                                            updates))))
     return ExperimentSpec(
         policy=PolicySpec(base=BASE, bank=bank),
         gen=GenSpec(envs=("dapo_math",), tasks=(TRAIN_TASKS, EVAL_TASKS),
