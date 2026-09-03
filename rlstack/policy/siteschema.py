@@ -29,6 +29,11 @@ class SiteMeta:
     `name` is the spec-side address (what a bank entry's site pattern matches);
     `path` is the trainer-side address (where install_replay hooks, an entry in
     the base's `named_modules()`). Engine reachability is deliberately absent.
+
+    A BOUNDARY site names the tensor its module puts OUT, on both sides:
+    `resid_pre.<n>` at `model.layers.<n>` is the stream leaving layer n — the
+    value head reads it there and the steer adds there (ADR 0004, Q1) — and
+    `final_hidden` is the final norm's output.
     """
 
     name: str                       # canonical name, e.g. "layers.3.self_attn.q_proj"

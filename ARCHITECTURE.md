@@ -129,9 +129,9 @@ named `pi`" means this.
 **Adapter type** — **a registered class**: the thing `@adapter_type("lora")`
 puts in the `ADAPTER_TYPES` registry, which `AdapterSpec.adapter_type` names by
 string. An adapter type owns the declaration (`serving`, `provides`, `records`,
-`site_ok`, `exports`) and both lowerings; an adapter is one *use* of an adapter
-type.
-`rlstack/policy/adapters/base.py`, `rlstack/policy/adapters/{lora,plora,soft_prompt,attn_bias,value_head}.py`
+`site_ok`, `exports`, `directive` — the per-request record it accepts) and
+both lowerings; an adapter is one *use* of an adapter type.
+`rlstack/policy/adapters/base.py`, `rlstack/policy/adapters/{lora,plora,soft_prompt,attn_bias,value_head,steer}.py`
 
 **records / provides** — the two halves of the same mirror. `records` are
 sampling-time FACTS, frozen at the seal and never recomputable (per token in
@@ -191,14 +191,19 @@ grammar is canon and cannot vary by backend.
 `has_weight`, `shape`, `is_boundary`) and the whole per-base collection of
 them. A schema is a pure function of one checkpoint, built by a compiler
 (`hf_schema`, `fake_qwen_schema`) and inert afterwards. It deliberately knows
-nothing about engine reachability or adapter-created sites.
+nothing about engine reachability or adapter-created sites. A BOUNDARY site
+names the tensor its module puts OUT, on both sides of the bridge:
+`resid_pre.<n>` at `model.layers.<n>` is the stream leaving layer n (the
+value head reads it there, the steer adds there, and on vLLM's fused pair the
+add lands on `hidden`, whose next norm sums it into the stream — ADR 0004,
+Q1), `final_hidden` is the final norm's output.
 `rlstack/policy/siteschema.py`
 
 **Mechanism / lever** — the closed set of ways an engine can reach a site:
-`punica`, `prompt_embeds`, `logits`, `side_attention`, `none`. A *lever* is the
-same thing named from the build's side — something an engine build pays for and
-then has. Native levers are the engine's own; `side_attention` is ours, shipped
-as a plugin.
+`punica`, `prompt_embeds`, `logits`, `side_attention`, `residual`, `none`. A
+*lever* is the same thing named from the build's side — something an engine
+build pays for and then has. Native levers are the engine's own;
+`side_attention` and `residual` are ours, shipped as plugins.
 `rlstack/policy/adapters/base.py` (`Mechanism`)
 
 > **Why the set is closed.** A mechanism is not a label — it is the
@@ -211,9 +216,11 @@ as a plugin.
 > per-sequence); one that needs
 > per-tenant compute *inside* the fused forward must ship a NEW mechanism as
 > an engine plugin, re-earning the per-token → tenant index mapping the
-> trainer's row plan gets for free (`side_attention` is the standing example,
-> refused until its mechanism exists). The lowerings select *into* a
-> mechanism; they never create one.
+> trainer's row plan gets for free. `residual` is the first such plugin that
+> EXISTS (ADR 0004): a hook at a module boundary, the cheapest seam there
+> is, re-earning the index through `BatchView`; `side_attention` stays
+> refused because its seam is inside the attention kernel. The lowerings
+> select *into* a mechanism; they never create one.
 
 **Lowering** — how one adapter type's math is realized on one side of the
 bridge. Every adapter type ships two. A **rollout lowering** serves it through
@@ -251,8 +258,12 @@ learner, for a lowering whose math depends on a draw the rollout already made.
 **Engine plugin** — a serving mechanism the stock engine lacks, shipped in the
 engine image and named from an adapter type by string only. It must re-earn per-request
 selection, cache correctness and parity at seams the engine never promised to
-keep stable.
-`rlstack_engine/plugin.py`, `rlstack_engine/side_attention.py`
+keep stable. The lifecycle (probe / install / load / evict / cache_salt) is
+the contract's; the per-forward verb is the mechanism's own, written against
+**BatchView** — the one version-pinned view of a batch (per-token slot,
+position, request; per-request extra args), built by `view_of` from any
+engine's columns and read off vLLM by `from_vllm`.
+`rlstack_engine/plugin.py`, `rlstack_engine/batch_view.py`, `rlstack_engine/side_attention.py`, `rlstack_engine/steer.py` + `steer_worker.py` (the `residual` plugin and its `worker_cls`)
 
 **Parity certificate** — the numerical exam binding an adapter type's two lowerings,
 keyed by build fingerprint so a version bump re-runs it (I7). Designed and
@@ -282,7 +293,9 @@ version, seeds, finish reasons, and any per-token facts an adapter type recorded
 
 **Turn** — one request inside a trajectory: token ids, behavior logprobs,
 finish reason, the bundle id and policy version pinned at submission, the seed,
-and the per-token/per-turn extras.
+and the per-token/per-turn extras — including what the request's DIRECTIVES
+made its adapter types do (`record_directive`), recorded so replay never has
+to know what the caller asked.
 `rlstack/data/trajectory.py`
 
 **Group** — one partial loss contribution (a GRPO group, a preference pair) and
@@ -705,8 +718,17 @@ ENGINE backs that name, under a pinned BUNDLE.
 **PoolClient** — the neutral interface both worlds type against: environments
 sample during rollouts, postprocessors sample or score after the seal, and
 `pool(name)` reaches any declared pool. Every client for one episode shares one
-seed sequence.
+seed sequence. Both verbs take `directives`.
 `rlstack/client.py` (protocol), `rlstack/runner/traffic.py` (`EnginePoolClient`)
+
+**Directive** — a per-request instruction to ONE adapter type, passed by the
+caller of `sample` / `score` (ADR 0004): a typed record the adapter type
+declares (`AdapterType.directive`), at most one per adapter type per
+request, carried on `Request` to the rollout lowering and across the wire by
+adapter type name. A spec fixes what an adapter IS; a directive says what it
+does for THIS request (a `SteerWindow`: which positions). Its effect is
+recorded at the seal, so passing one asks replay to remember nothing.
+`rlstack/policy/adapters/base.py` (`Directive`), `rlstack/policy/adapters/steer.py` (`SteerWindow`)
 
 ---
 

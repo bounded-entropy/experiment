@@ -62,6 +62,9 @@ gpu_image = (
           "PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:True",
           "RLSTACK_STEER_TP": str(TP)})
     .add_local_python_source("rlstack", "rlstack_engine")
+    # the observer's static assets are not python sources; the suite in the
+    # image asserts they ship (test_architecture), so ship them
+    .add_local_dir("rlstack/observe/web", remote_path="/root/rlstack/observe/web")
     .add_local_dir("tests", remote_path="/root/tests")
 )
 
