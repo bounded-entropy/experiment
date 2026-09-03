@@ -12,6 +12,39 @@ from rlstack.policy.siteschema import (
 )
 
 
+class TestLlamaFamilyCompiler(unittest.TestCase):
+    """The real compiler's pure half: a Llama-family config compiles; a
+    config from another family is refused by name (found on metal: Pythia's
+    GPT-NeoX config has no num_key_value_heads and died two calls deep)."""
+
+    def test_a_llama_family_config_compiles_the_full_catalog(self) -> None:
+        from types import SimpleNamespace
+
+        from rlstack.policy.siteschema import llama_family_schema
+
+        config = SimpleNamespace(hidden_size=64, num_attention_heads=4,
+                                 num_key_value_heads=2, intermediate_size=128,
+                                 num_hidden_layers=2, head_dim=16)
+        schema = llama_family_schema("toy/llama", config)
+        self.assertEqual(len(schema.sites), 2 * 8 + 2)
+        (k,) = schema.resolve("layers.1.self_attn.k_proj")
+        self.assertEqual(k.shape, (64, 32))          # GQA: 2 kv heads x 16
+
+    def test_another_family_is_refused_by_name(self) -> None:
+        from types import SimpleNamespace
+
+        from rlstack.policy.siteschema import llama_family_schema
+
+        neox = SimpleNamespace(model_type="gpt_neox", hidden_size=2048,
+                               num_attention_heads=8, intermediate_size=8192,
+                               num_hidden_layers=16)
+        with self.assertRaises(ValueError) as refused:
+            llama_family_schema("EleutherAI/pythia-1b", neox)
+        self.assertIn("num_key_value_heads", str(refused.exception))
+        self.assertIn("Llama family", str(refused.exception))
+        self.assertIn("gpt_neox", str(refused.exception))
+
+
 class TestFakeQwenSchema(unittest.TestCase):
     def setUp(self) -> None:
         self.schema = fake_qwen_schema(4, base="Qwen/Qwen3-0.6B")

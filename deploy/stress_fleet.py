@@ -625,16 +625,19 @@ def probe_base(base: str) -> dict:
 
         async def measure():
             got: dict = {}
-            got["zero_engine_max_delta"] = max(
+            # list comprehensions, not generator expressions: a generator
+            # expression holding an `await` is an async generator, which
+            # max() cannot consume (found on the first matrix run)
+            got["zero_engine_max_delta"] = max([
                 worst(await scored("zero", p, a), await scored("base", p, a))
-                for p, a in pairs)
-            got["zero_trainer_max_delta"] = max(
+                for p, a in pairs])
+            got["zero_trainer_max_delta"] = max([
                 worst(replayed(banks["zero"][0], p, a), replayed({}, p, a))
-                for p, a in pairs)
+                for p, a in pairs])
             for name in ("base", "lora", "steer"):
-                got[f"{name}_gap"] = max(
+                got[f"{name}_gap"] = max([
                     gap(await scored(name, p, a), replayed(banks[name][0], p, a))
-                    for p, a in pairs)
+                    for p, a in pairs])
             prompt, answer = pairs[1]
             n = len(engine.tokenize(prompt))
             windowed = await scored("steer", prompt, answer,

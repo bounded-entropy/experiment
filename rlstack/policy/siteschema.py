@@ -18,6 +18,7 @@ import fnmatch
 import re
 from collections.abc import Sequence
 from dataclasses import dataclass
+from typing import Any
 
 from rlstack.spec.canonical import content_hash
 
@@ -171,7 +172,37 @@ def hf_schema(base: str) -> SiteSchema:
     """
     from transformers import AutoConfig  # deferred: engine/trainer images only
 
-    config = AutoConfig.from_pretrained(base)
+    return llama_family_schema(base, AutoConfig.from_pretrained(base))
+
+
+# The geometry this compiler reads, and the module tree it names: a decoder
+# of `model.layers.<n>` blocks with `self_attn.{q,k,v,o}_proj` and
+# `mlp.{gate,up,down}_proj`, `model.norm`, `lm_head` — the Llama family
+# (Llama, Qwen2/3, Mistral, Gemma, OLMo 2, SmolLM, ...). A checkpoint whose
+# config lacks one of these fields has a different tree (GPT-NeoX's
+# `gpt_neox.layers.<n>.attention.query_key_value`, say) and is refused by
+# name rather than compiled into sites that do not exist (found on metal:
+# pythia-1b died on an attribute error two calls deep).
+LLAMA_FAMILY_FIELDS = ("hidden_size", "num_attention_heads",
+                       "num_key_value_heads", "intermediate_size",
+                       "num_hidden_layers")
+
+
+def llama_family_schema(base: str, config: Any) -> SiteSchema:
+    """The pure compiler: a Llama-family config in, its site catalog out.
+
+    Refuses a config missing any field the family's geometry needs, naming
+    the field and the family — the honest answer for an architecture whose
+    module tree this schema does not know.
+    """
+    missing = [f for f in LLAMA_FAMILY_FIELDS if getattr(config, f, None) is None]
+    if missing:
+        model_type = getattr(config, "model_type", type(config).__name__)
+        raise ValueError(
+            f"hf_schema compiles the Llama family (model.layers.<n>.self_attn."
+            f"{{q,k,v,o}}_proj + mlp.{{gate,up,down}}_proj, GQA); {base!r} "
+            f"({model_type}) lacks {missing} — its module tree is not one this "
+            f"schema names, so no site of it can be addressed")
     hidden = int(config.hidden_size)
     head_dim = int(getattr(config, "head_dim",
                            hidden // int(config.num_attention_heads)))
