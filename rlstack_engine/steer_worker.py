@@ -96,7 +96,9 @@ class SteerWorker(Worker):
     the hooks' nothing-to-do path before any request arrives.
     """
 
-    def compile_or_warm_up_model(self, *args, **kwargs) -> None:
+    def compile_or_warm_up_model(self, *args, **kwargs):
+        """Probe, install, then the stock warm-up — whose reply (the
+        compilation-time record the executor reads) is returned as it came."""
         self.routing: SteerRouting | None = None
         self.steer = SteerPlugin(
             max_slots=int(self.vllm_config.scheduler_config.max_num_seqs),
@@ -112,7 +114,7 @@ class SteerWorker(Worker):
                 f"in {type(self.model_runner.model).__name__}: the steer hook "
                 f"has nowhere to stand on this model family")
         self.steer.install(ModelSeam(self))
-        super().compile_or_warm_up_model(*args, **kwargs)
+        return super().compile_or_warm_up_model(*args, **kwargs)
 
     # ---- the hooks -----------------------------------------------------------
 
