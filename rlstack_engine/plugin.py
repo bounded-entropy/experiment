@@ -6,9 +6,15 @@ RE-EARN each of those at a seam the engine never promised to keep stable, so
 each earned property is one named method: probe (the seams exist on THIS build,
 so a failure lands at boot and never mid-run), install (claim the seam),
 load/evict (payloads into per-slot banks, multi-tenant from day one — banks
-plus a per-token slot index, never a global singleton), cache_salt (a plugin
-that changes hidden states MUST make bundle identity visible to the prefix
-cache), and attend (the per-layer merge, written against BatchView only).
+plus a per-token slot index, never a global singleton), and cache_salt (a
+plugin that changes hidden states MUST make bundle identity visible to the
+prefix cache).
+
+The PER-FORWARD verb is the mechanism's own (ADR 0004, Q9): side attention
+ATTENDS (`SideAttention.attend`, an LSE merge), a residual plugin ADDS
+(`SteerPlugin.add`). What they share is the law, not the signature: written
+against BatchView only — the one version-pinned view of a batch — never
+against engine internals.
 
 That a plugin's rollout lowering agrees numerically with its adapter type's
 replay lowering is the parity certificate's job, keyed by build fingerprint.
@@ -22,8 +28,6 @@ from dataclasses import dataclass
 from typing import ClassVar
 
 from rlstack import Mechanism
-
-from rlstack_engine.batch_view import BatchView
 
 
 @dataclass(frozen=True)
@@ -45,7 +49,8 @@ class ProbeError(RuntimeError):
 
 class Seam(ABC):
     """Where a plugin attaches to the engine. A vLLM seam claims via
-    register_backend; the fake seam records the claim for tests."""
+    register_backend or by hooking the loaded model; the fake seam records the
+    claim for tests."""
 
     @abstractmethod
     def claim(self, plugin: "EnginePlugin") -> None:
@@ -56,7 +61,7 @@ class EnginePlugin(ABC):
     """Subclass per mechanism; one shared instance per engine process."""
 
     mechanism: ClassVar[Mechanism]
-    consumes: ClassVar[tuple[str, ...]]              # adapter KINDS it serves
+    consumes: ClassVar[tuple[str, ...]]              # adapter TYPES it serves
     required_symbols: ClassVar[frozenset[str]] = frozenset()
 
     def probe(self, build: EngineBuild) -> None:
@@ -85,8 +90,3 @@ class EnginePlugin(ABC):
         Default: the bundle itself — correct for any plugin whose math changes
         hidden states. Return None ONLY from a numerics-neutral plugin."""
         return bundle_id
-
-    @abstractmethod
-    def attend(self, view: BatchView, q: object, out: object, lse: object) -> None:
-        """Merge this mechanism's contribution into `out` in place, reading
-        per-token slots from `view` — never from engine internals."""

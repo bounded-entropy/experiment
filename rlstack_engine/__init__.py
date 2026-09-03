@@ -7,6 +7,10 @@ bookkeeping, and the certificate vocabulary. Its charter is narrow on purpose â€
 only code that patches engine internals belongs here. The import direction is
 one-way and enforced (tests/test_architecture.py): this package may import
 rlstack types; rlstack refers to plugins by string and never imports back.
+
+The two plugins that carry metal (steer.py: the RESIDUAL mechanism, torch;
+steer_worker.py: its vLLM worker) are NOT imported here â€” they load in the
+engine image only, by the string an adapter type's demands() names.
 """
 
 from rlstack_engine.plugin import EngineBuild, EnginePlugin, ProbeError, Seam

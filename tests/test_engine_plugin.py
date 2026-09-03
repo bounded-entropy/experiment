@@ -16,7 +16,7 @@ from rlstack_engine import (
     BatchView, Certificate, CertificateKey, FakeSeam, InMemoryCertificates,
     ProbeError, SideAttention, SlotTable, SlotsFull, fake_build,
 )
-from rlstack_engine.batch_view import BatchViewError
+from rlstack_engine.batch_view import BatchViewError, view_of
 from rlstack_engine.plugin import EnginePlugin
 
 GOOD_BUILD = fake_build(*sorted(SideAttention.required_symbols))
@@ -163,9 +163,34 @@ class BatchViewTest(unittest.TestCase):
         with self.assertRaises(BatchViewError):
             BatchView(token_slot=(0, 1), layer_idx=0, is_decode=(True,))
 
-    def test_the_vllm_shim_is_b3(self) -> None:
-        with self.assertRaises(NotImplementedError):
-            BatchView.from_vllm(None, 0, {})
+    def test_the_pure_builder_maps_requests_to_tokens(self) -> None:
+        """Two requests in one forward: the first prefilling three tokens of
+        a fresh sequence, the second decoding its ninth. Slots, positions
+        and the decode flag come out per token; the extras stay per request
+        and every token knows its request row."""
+        view = view_of(query_start_loc=(0, 3, 4), seq_lens=(3, 9),
+                       request_slots=(2, -1),
+                       request_extra=({"rlstack_steer": "f"}, {}),
+                       layer_idx=5)
+        self.assertEqual(view.token_slot, (2, 2, 2, -1))
+        self.assertEqual(view.position, (0, 1, 2, 8))
+        self.assertEqual(view.is_decode, (False, False, False, True))
+        self.assertEqual(view.token_request, (0, 0, 0, 1))
+        self.assertEqual(view.request_extra[view.token_request[3]], {})
+        self.assertEqual(view.layer_idx, 5)
+
+    def test_a_chunked_prefill_continues_its_positions(self) -> None:
+        """A request whose prompt is split across forwards: the second chunk
+        starts where the sequence already is, not at zero."""
+        view = view_of((0, 4), (10,), (0,), ({},), 0)
+        self.assertEqual(view.position, (6, 7, 8, 9))
+
+    def test_the_builder_refuses_misaligned_columns(self) -> None:
+        with self.assertRaises(BatchViewError):
+            view_of((0, 3), (3, 9), (0, 1), ({}, {}), 0)
+        with self.assertRaises(BatchViewError):
+            BatchView(token_slot=(0, 1), layer_idx=0, is_decode=(True, True),
+                      token_request=(0, 1), request_extra=({},))
 
 
 class CertificateTest(unittest.TestCase):
