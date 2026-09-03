@@ -3,7 +3,7 @@
 | | |
 |---|---|
 | **Date** | 2026-09-02 |
-| **Status** | Answered (2026-09-02: Q1, Q3, Q4, Q6, Q7, Q9, Q10 agreed; Q5 and Q11 resolved by the agent at Samarth's delegation; Q8 deferred to a later ADR, its question answered below; Q2 REFOLDED — positions are a per-request directive — which opens **Q2a**, the one question still open before Accepted) |
+| **Status** | Accepted (2026-09-02: Q1, Q3, Q4, Q6, Q7, Q9, Q10 agreed; Q5 and Q11 resolved by the agent at Samarth's delegation; Q8 deferred to a later ADR, its question answered below; Q2 REFOLDED — positions are a per-request directive, recorded and salted — and Q2a agreed, with "steer constantly on decode" folded as the default) |
 | **Author** | Claude Fable 5.1 (session: the vLLM-Hook assessment, 2026-09-02) |
 | **Touches** | `policy/adapters/` (one new adapter type, three files: `steer.py`, `steer_torch.py`, `steer_vllm.py`), `policy/adapters/base.py` (one `Mechanism` member), `policy/adapters/rollout.py` (two `Levers` fields), `runner/engines/vllm_engine.py` (the bus pays the two new levers, and builds `Request` with `occupied` and the directives), `client.py` + `runner/interfaces.py` + `runner/traffic.py` + `runner/remote.py` (Q2: one keyword, `directives`, on `sample` and `score`, carried over the wire), `runner/fakes.py` (the fake engine's inventory and the keyword), `rlstack_engine/` (the first real plugin: `steer.py`, and `BatchView.from_vllm` built), `spec/validate.py` (one check, Q7), `spec/specs.py` (sugar), `deploy/steer_l4.py` (the metal proof, through the desk), `tests/` |
 | **Invariants** | I2 (an adapter type ships both lowerings — this one's rollout half is the first on a plugin), I7 (the plugin probes at boot and refuses the build it cannot serve), I8 (per-request selection inside one fused batch, on a lever the engine does not natively index), I12 (the check ends by the desk's `release`, never the venue's timer) |
@@ -563,7 +563,19 @@ but a static window would not be runtime, which is the ask.
 If the other branch: the window lives in the spec, hashes into run identity,
 and no client verb changes — and changing it means a new experiment.
 
-> **Samarth:**
+> **Samarth:** agree — "yea Q2a makes sense. just make sure that its possible
+> to do stuff like steer constnatly on decode, etc. (this should interface
+> nicely). by steer constnatly on decode, i mean whatever vllm lens did (i
+> think, or the other one). go ahead and implement"
+
+**Folded.** Steering constantly on decode is vllm-lens's behavior (every
+position, prefill and decode; IBM's is last-token only) and it is this
+design's DEFAULT: no directive means every position of the request, each
+generated token included, at every decode step. A `SteerWindow(start=
+len(prompt))` is the completion-only form of the same thing, and any window
+with `end=None` runs to the end of generation. The hook applies at every
+forward the request appears in — prefill and each decode step — inside the
+recorded window, so "constantly on decode" needs no second mode.
 
 **Q3. The prefix cache.** A steered prompt's KV under bundle A is wrong for
 bundle B, and vLLM's block hash does not know a hook ran (LoRA and prompt
