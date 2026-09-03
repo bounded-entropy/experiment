@@ -728,6 +728,77 @@ def up() -> None:
     print(json.dumps(wait_for_metal(), indent=2))
 
 
+def submit_two_tenants(master: int) -> tuple[dict[str, str], bool]:
+    """Promise 3's first half: the two specs through the desk. Returns the
+    run ids by bank name and whether the second JOINED the first's listings."""
+    import asyncio
+
+    from rlstack.runner.remote import spec_from_json
+
+    rows = build_specs.remote(master)
+    runs: dict[str, str] = {}
+    hosts: dict[str, dict] = {}
+    for name in ("lora", "steer"):
+        reply = asyncio.run(desk().submit(spec_from_json(rows[name]),
+                                          subdir="steer"))
+        print(f"[submit] {name}: {json.dumps(reply, default=str)[:400]}", flush=True)
+        if not reply.get("accepted"):
+            raise SystemExit(f"{name} was not accepted: {reply}")
+        runs[name] = reply["run_id"]
+        hosts[name] = reply["pools"]
+    joined = hosts["lora"] == hosts["steer"]
+    print(f"[join] lora on {hosts['lora']} / steer on {hosts['steer']} -> "
+          f"{'ONE serving host, ONE learner' if joined else 'NOT joined'}", flush=True)
+    return runs, joined
+
+
+def await_runs(runs: dict[str, str], timeout_s: float = 3600.0) -> dict:
+    """Promise 3's second half: both ledgers reach UPDATES; the rails per
+    update, reported."""
+    deadline = time.time() + timeout_s
+    while time.time() < deadline:
+        progress = ledgers.remote(list(runs.values()))
+        line = {name: progress[rid]["committed"] for name, rid in runs.items()}
+        print(f"[ledger] {json.dumps(line)}", flush=True)
+        if all(n >= UPDATES for n in line.values()):
+            break
+        time.sleep(30)
+    else:
+        raise SystemExit("the runs did not finish within the deadline")
+    rails = {}
+    for name, rid in runs.items():
+        gaps = [round(t.get("logprob_gap", -1.0), 4) for t in progress[rid]["train"]]
+        losses = [round(t.get("loss", 0.0), 4) for t in progress[rid]["train"]]
+        print(f"[{name}] {rid}: logprob_gap per update {gaps}, loss {losses}",
+              flush=True)
+        rails[name] = {"run_id": rid, "logprob_gap": gaps, "loss": losses}
+    return rails
+
+
+def take_down(call, reason: str) -> dict:
+    """Promises 4 and 5: the desk hands the metal back, the shift ends, and
+    the plane is asserted empty."""
+    verdict: dict = {"released": release_everything(reason)}
+    status = desk().status()
+    row = status.get("metal", {}).get(METAL, {})
+    verdict["desk_says_released"] = bool(row.get("released")) and not row.get("plane")
+    verdict["listings_left"] = sorted(status.get("listings", {}))
+    if call is not None:
+        started = time.time()
+        try:
+            shift = call.get(timeout=600)
+            verdict["keepalive_returned"] = shift
+            print(f"[shift] the keepalive returned {json.dumps(shift)} "
+                  f"{time.time() - started:.1f}s after the release", flush=True)
+        except Exception as still:
+            verdict["keepalive_returned"] = f"NOT within 600s: {still}"
+    verdict["plane_empty"] = plane_is_empty()
+    print(json.dumps(verdict, indent=1), flush=True)
+    if not (verdict["desk_says_released"] and verdict["plane_empty"]):
+        raise SystemExit("metal left standing after the check")
+    return verdict
+
+
 @app.local_entrypoint()
 def check(master: int = 11) -> None:
     """THE CHECK: up, two tenants through the desk, their ledgers, then the
@@ -738,66 +809,32 @@ def check(master: int = 11) -> None:
     are blocking Modal calls on a worker thread, which deadlock under an
     entrypoint's own event loop; the async verbs (submit, release) are
     awaited explicitly, one loop each."""
-    import asyncio
-
-    from rlstack.runner.remote import spec_from_json
-
     call = metal_handle().serve.spawn()
-    print(f"[check] {METAL} serving: call {call.object_id}")
-    verdict: dict = {"keepalive": call.object_id}
+    print(f"[check] {METAL} serving: call {call.object_id}", flush=True)
     try:
-        print(json.dumps(wait_for_metal(), indent=1))
-        rows = build_specs.remote(master)
-        runs: dict[str, str] = {}
-        hosts: dict[str, dict] = {}
-        for name in ("lora", "steer"):
-            reply = asyncio.run(desk().submit(spec_from_json(rows[name]),
-                                              subdir="steer"))
-            print(f"[submit] {name}: {json.dumps(reply, default=str)[:400]}")
-            if not reply.get("accepted"):
-                raise SystemExit(f"{name} was not accepted: {reply}")
-            runs[name] = reply["run_id"]
-            hosts[name] = reply["pools"]
-        verdict["runs"] = runs
-        verdict["joined"] = hosts["lora"] == hosts["steer"]
-        print(f"[join] lora on {hosts['lora']} / steer on {hosts['steer']} "
-              f"-> {'ONE serving host, ONE learner' if verdict['joined'] else 'NOT joined'}")
-
-        deadline = time.time() + 3600
-        while time.time() < deadline:
-            progress = ledgers.remote(list(runs.values()))
-            line = {name: progress[rid]["committed"] for name, rid in runs.items()}
-            print(f"[ledger] {json.dumps(line)}")
-            if all(n >= UPDATES for n in line.values()):
-                break
-            time.sleep(30)
-        else:
-            raise SystemExit("the two runs did not finish within the hour")
-        for name, rid in runs.items():
-            gaps = [round(t.get("logprob_gap", -1.0), 4) for t in progress[rid]["train"]]
-            losses = [round(t.get("loss", 0.0), 4) for t in progress[rid]["train"]]
-            print(f"[{name}] {rid}: logprob_gap per update {gaps}, loss {losses}")
-            verdict[f"{name}_logprob_gap"] = gaps
+        print(json.dumps(wait_for_metal(), indent=1), flush=True)
+        runs, joined = submit_two_tenants(master)
+        rails = await_runs(runs)
+        print(json.dumps({"joined": joined, "rails": rails}, indent=1), flush=True)
     finally:
-        # promise 4 and 5: the desk hands the metal back and the shift ends
-        released = release_everything("steer check done")
-        verdict["released"] = released
-        status = desk().status()
-        row = status.get("metal", {}).get(METAL, {})
-        verdict["desk_says_released"] = bool(row.get("released")) and not row.get("plane")
-        verdict["listings_left"] = sorted(status.get("listings", {}))
-        started = time.time()
-        try:
-            shift = call.get(timeout=600)
-            verdict["keepalive_returned"] = shift
-            print(f"[shift] the keepalive returned {shift} "
-                  f"{time.time() - started:.1f}s after the release")
-        except Exception as still:
-            verdict["keepalive_returned"] = f"NOT within 600s: {still}"
-        verdict["plane_empty"] = plane_is_empty()
-        print(json.dumps(verdict, indent=1))
-        if not (verdict["desk_says_released"] and verdict["plane_empty"]):
-            raise SystemExit("metal left standing after the check")
+        take_down(call, "steer check done")
+
+
+@app.local_entrypoint()
+def finish(call_id: str = "") -> None:
+    """The check's second half, for runs already delivered (a driver that
+    died mid-check): the runs off the desk's placements, their ledgers, then
+    the takedown — with the keepalive's call id, its return observed."""
+    placed = desk().placements()
+    runs = {rid[:12]: rid for rid in sorted(placed)}
+    print(f"[finish] runs on the desk: {runs}", flush=True)
+    call = modal.FunctionCall.from_id(call_id) if call_id else None
+    try:
+        if runs:
+            rails = await_runs(runs)
+            print(json.dumps({"rails": rails}, indent=1), flush=True)
+    finally:
+        take_down(call, "steer check finished")
 
 
 @app.local_entrypoint()
