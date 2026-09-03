@@ -17,6 +17,7 @@ from rlstack.data.stores.base import Store
 from rlstack.data.tasks import load_tasks
 from rlstack.data.trajectory import Group, Message, Role, Task, Trajectory, Turn, Wave
 from rlstack.registry import ENVS
+from rlstack.policy.adapters.base import Directive
 from rlstack.policy.compile import Bundle
 from rlstack.runner.interfaces import Engine, FinishEvent
 from rlstack.runner.seeds import derive
@@ -49,15 +50,18 @@ class EnginePoolClient:
                                   name, self._counter)
 
     async def score(self, messages: Sequence[Message],
-                    token_ids: Sequence[int]) -> tuple[float, ...]:
+                    token_ids: Sequence[int], *,
+                    directives: Sequence[Directive] = ()) -> tuple[float, ...]:
         """Score given tokens under this pool's pinned bundle. Deterministic:
         consumes NO seed from the episode's sequence (scoring draws nothing),
         so adding a scoring processor never shifts sampling seeds."""
         return await self._engine.score_tokens(
-            messages, tuple(token_ids), self._bundle.bundle_id)
+            messages, tuple(token_ids), self._bundle.bundle_id,
+            tuple(directives))
 
     async def sample(self, messages: Sequence[Message],
-                     stop: tuple[str, ...] = ()) -> Turn:
+                     stop: tuple[str, ...] = (), *,
+                     directives: Sequence[Directive] = ()) -> Turn:
         seed = derive(self._episode_seed, "call", self._counter[0])
         self._counter[0] += 1
 
@@ -68,7 +72,8 @@ class EnginePoolClient:
         finish: FinishEvent | None = None
 
         stream = self._engine.sample_tokens(
-            messages, self._sampling, stop, self._bundle.bundle_id, seed)
+            messages, self._sampling, stop, self._bundle.bundle_id, seed,
+            tuple(directives))
         async for event in stream:
             if isinstance(event, FinishEvent):
                 finish = event

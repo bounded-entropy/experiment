@@ -150,12 +150,13 @@ class InterleavingEngine(FakeEngine):
         self.launched: list[int] = []
         self.finished: list[int] = []
 
-    async def sample_tokens(self, messages, sampling, stop, bundle_id, seed):
+    async def sample_tokens(self, messages, sampling, stop, bundle_id, seed,
+                            directives=()):
         self.launched.append(seed)
         for _ in range(seed % 7):
             await asyncio.sleep(0)
         async for event in super().sample_tokens(messages, sampling, stop,
-                                                 bundle_id, seed):
+                                                 bundle_id, seed, directives):
             if isinstance(event, FinishEvent):
                 self.finished.append(seed)
             yield event

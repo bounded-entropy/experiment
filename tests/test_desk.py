@@ -53,10 +53,11 @@ class GatedEngine(FakeEngine):
         super().__init__(**kwargs)
         self.gate = gate
 
-    async def sample_tokens(self, messages, sampling, stop, bundle_id, seed):
+    async def sample_tokens(self, messages, sampling, stop, bundle_id, seed,
+                            directives=()):
         await self.gate.wait()
         async for event in FakeEngine.sample_tokens(
-                self, messages, sampling, stop, bundle_id, seed):
+                self, messages, sampling, stop, bundle_id, seed, directives):
             yield event
 
 

@@ -19,7 +19,8 @@ from collections.abc import AsyncIterator, Mapping, Sequence
 
 from rlstack.data.flatten import TokenBatch
 from rlstack.data.trajectory import Message
-from rlstack.policy.adapters.base import Mechanism
+from rlstack.policy.adapters.base import Directive, Mechanism
+from rlstack.policy.adapters.rollout import Request
 from rlstack.policy.compile import Bundle
 from rlstack.policy.siteschema import SiteMeta
 from rlstack.registry import ADAPTER_TYPES
@@ -68,6 +69,10 @@ class FakeEngine:
         self.plugins = plugins
         self.bundle_log: list[str] = []       # every add_bundle, in order
         self._known: set[str] = set()
+        # bundle -> the adapter types its payloads carry: what a request's
+        # directives are recorded against (record_directives below)
+        self._carries: dict[str, tuple[str, ...]] = {}
+        self.directives_seen: list[tuple[Directive, ...]] = []
         # the same traffic seam the real engine has, so the whole emission
         # plane is exercisable without a GPU. Token counts stay a pure
         # function of the inputs; only the TTFT gap is wall clock, and it
@@ -116,6 +121,26 @@ class FakeEngine:
             return  # additive AND idempotent (the invariant)
         self.bundle_log.append(bundle.bundle_id)
         self._known.add(bundle.bundle_id)
+        self._carries[bundle.bundle_id] = tuple(
+            dict.fromkeys(bundle.adapter_types[name]
+                          for name in sorted(bundle.adapter_types)))
+
+    def record_directives(self, bundle_id: str, token_ids: tuple[int, ...],
+                          seed: int | None,
+                          directives: Sequence[Directive]) -> dict:
+        """The recording half of the real bus's apply, adapter-blind: every
+        adapter type the bundle carries is asked what it records about this
+        request's directive (its own, or none), exactly as VllmEngine asks
+        each attached lowering — so a directive round-trips to the seal with
+        no GPU, and the fact replay reads is the real adapter type's."""
+        request = Request(token_ids=token_ids, seed=seed, occupied=0,
+                          directives=tuple(directives))
+        facts: dict = {}
+        for name in self._carries.get(bundle_id, ()):
+            adapter_type = ADAPTER_TYPES.get(name).instance
+            facts.update(adapter_type.record_directive(
+                adapter_type.directive_for(request), request))
+        return facts
 
     def knows_bundle(self, bundle_id: str) -> bool:
         """The fake never evicts — it has no residency to bound — so this is
@@ -124,12 +149,19 @@ class FakeEngine:
 
     async def score_tokens(self, messages: Sequence[Message],
                            token_ids: Sequence[int],
-                           bundle_id: str) -> tuple[float, ...]:
+                           bundle_id: str,
+                           directives: Sequence[Directive] = (),
+                           ) -> tuple[float, ...]:
         """Deterministic scoring: a pure function of (bundle, context, token,
-        position) — no RNG state, so scoring never perturbs sampling."""
+        position) — no RNG state, so scoring never perturbs sampling. A
+        directive is validated (one per adapter type) and records nothing:
+        score traffic seals no turn."""
         if bundle_id not in self._known:
             raise RuntimeError(f"bundle {bundle_id!r} was never registered")
+        self.directives_seen.append(tuple(directives))
         context = "".join(m.content for m in messages)
+        self.record_directives(bundle_id, tuple(ord(c) for c in context),
+                               None, directives)
         self.meter.opened_request(len(context) + len(token_ids))
         return tuple(
             -0.2 - 0.5 * (int(content_hash({
@@ -144,17 +176,22 @@ class FakeEngine:
         stop: tuple[str, ...],
         bundle_id: str,
         seed: int,
+        directives: Sequence[Directive] = (),
     ) -> AsyncIterator[TokenEvent | FinishEvent]:
         if bundle_id not in self._known:
             raise RuntimeError(f"bundle {bundle_id!r} was never registered")
+        self.directives_seen.append(tuple(directives))
         rng = random.Random(seed)
         text = self._completion(messages[-1].content, rng)
         # char-level metal: one token per character, so the prompt's token
         # count is its length — known before the first token, as on real metal
-        self.meter.opened_request(sum(len(m.content) for m in messages))
+        prompt_ids = tuple(ord(c) for m in messages for c in m.content)
+        self.meter.opened_request(len(prompt_ids))
         submitted = time.time()
 
-        turn_extras = self.latent_draw(seed)
+        turn_extras = {**self.latent_draw(seed),
+                       **self.record_directives(bundle_id, prompt_ids, seed,
+                                                directives)}
 
         emitted = ""
         for ch in text:

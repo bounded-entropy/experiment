@@ -19,7 +19,7 @@ from typing import Any, Protocol
 
 from rlstack.data.flatten import TokenBatch
 from rlstack.data.trajectory import Message
-from rlstack.policy.adapters.base import Mechanism
+from rlstack.policy.adapters.base import Directive, Mechanism
 from rlstack.policy.compile import Bundle
 from rlstack.policy.siteschema import SiteMeta
 from rlstack.runner.meters import TrafficMeter
@@ -173,9 +173,13 @@ class Engine(Protocol):
         stop: tuple[str, ...],
         bundle_id: str,
         seed: int,
+        directives: Sequence[Directive] = (),
     ) -> AsyncIterator[TokenEvent | FinishEvent]:
         """Stream tokens for one request, pinned to `bundle_id`, ending with a
-        FinishEvent. Registering new bundles never affects requests in flight."""
+        FinishEvent. Registering new bundles never affects requests in flight.
+        `directives` are the caller's per-request instructions to the bundle's
+        adapter types (ADR 0004); what they did is in the FinishEvent's
+        turn_extras."""
         ...
 
     async def score_tokens(
@@ -183,6 +187,7 @@ class Engine(Protocol):
         messages: Sequence[Message],
         token_ids: Sequence[int],
         bundle_id: str,
+        directives: Sequence[Directive] = (),
     ) -> tuple[float, ...]:
         """Logprob of each given token continuing `messages`, pinned to
         `bundle_id` — ONE prefill pass over context + tokens, no decode loop,

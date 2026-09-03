@@ -31,13 +31,15 @@ from __future__ import annotations
 import base64
 import json
 from collections.abc import AsyncIterator, Mapping, Sequence
+from dataclasses import asdict
 from typing import TYPE_CHECKING, Protocol
 
 from rlstack.data.flatten import TokenBatch
 from rlstack.data.trajectory import Message, Role
-from rlstack.policy.adapters.base import Mechanism
+from rlstack.policy.adapters.base import Directive, Mechanism
 from rlstack.policy.compile import Bundle
 from rlstack.policy.siteschema import SiteMeta
+from rlstack.registry import ADAPTER_TYPES
 from rlstack.runner.interfaces import (
     Emitted, Engine, EntryInstall, FinishEvent, Learner, OptimSettings,
     Parameterization, TokenEvent, TrainStats,
@@ -104,6 +106,29 @@ def decode_events(rows: Sequence[dict]) -> tuple[TokenEvent | FinishEvent, ...]:
         else FinishEvent(finish=r["finish"], stop_hit=r["stop_hit"],
                          turn_extras=r["turn_extras"])
         for r in rows)
+
+
+def encode_directives(directives: Sequence[Directive]) -> list[dict]:
+    """A directive crosses as its adapter type's name plus its own fields —
+    the adapter type is the closed table the other end decodes against."""
+    return [{"adapter_type": d.adapter_type, **asdict(d)} for d in directives]
+
+
+def decode_directives(rows: Sequence[dict]) -> tuple[Directive, ...]:
+    """Dispatch by adapter type: the registered class declares the record it
+    accepts (AdapterType.directive), and a row naming an adapter type that
+    accepts none is refused rather than guessed at."""
+    out = []
+    for row in rows:
+        fields = dict(row)
+        name = fields.pop("adapter_type")
+        record = ADAPTER_TYPES.get(name).instance.directive
+        if record is None:
+            raise ValueError(
+                f"adapter type {name!r} accepts no directive, yet one crossed "
+                f"the wire addressed to it")
+        out.append(record(**fields))
+    return tuple(out)
 
 
 def encode_bundle(bundle: Bundle) -> dict:
@@ -425,12 +450,14 @@ class EngineService:
                 decode_messages(payload["messages"]),
                 decode_sampling(payload["sampling"]),
                 tuple(payload["stop"]), payload["bundle_id"],
-                payload["seed"])]
+                payload["seed"],
+                decode_directives(payload.get("directives", ())))]
             return {"events": encode_events(events)}
         if verb == "score_tokens":
             scores = await self.engine.score_tokens(
                 decode_messages(payload["messages"]),
-                tuple(payload["token_ids"]), payload["bundle_id"])
+                tuple(payload["token_ids"]), payload["bundle_id"],
+                decode_directives(payload.get("directives", ())))
             return {"logprobs": list(scores)}
         raise ValueError(f"unknown engine verb {verb!r}")
 
@@ -540,19 +567,23 @@ class RemotePool:
         return {"base": self.base, "tp": self.tp}
 
     async def sample_tokens(self, messages, sampling, stop, bundle_id,
-                            seed) -> AsyncIterator[TokenEvent | FinishEvent]:
+                            seed, directives: Sequence[Directive] = (),
+                            ) -> AsyncIterator[TokenEvent | FinishEvent]:
         reply = await self._transport.call("sample_tokens", {
             **self._address(), "messages": encode_messages(messages),
             "sampling": encode_sampling(sampling), "stop": list(stop),
-            "bundle_id": bundle_id, "seed": seed})
+            "bundle_id": bundle_id, "seed": seed,
+            "directives": encode_directives(directives)})
         for event in decode_events(reply["events"]):
             yield event
 
-    async def score_tokens(self, messages, token_ids,
-                           bundle_id) -> tuple[float, ...]:
+    async def score_tokens(self, messages, token_ids, bundle_id,
+                           directives: Sequence[Directive] = (),
+                           ) -> tuple[float, ...]:
         reply = await self._transport.call("score_tokens", {
             **self._address(), "messages": encode_messages(messages),
-            "token_ids": list(token_ids), "bundle_id": bundle_id})
+            "token_ids": list(token_ids), "bundle_id": bundle_id,
+            "directives": encode_directives(directives)})
         return tuple(reply["logprobs"])
 
     def add_bundle(self, bundle: Bundle) -> None:

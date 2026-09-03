@@ -33,9 +33,10 @@ from collections.abc import AsyncIterator, Mapping, Sequence
 from pathlib import Path
 
 from rlstack.data.trajectory import Message
-from rlstack.policy.adapters.base import Mechanism
+from rlstack.policy.adapters.base import Directive, Mechanism
 from rlstack.policy.adapters.rollout import (
-    Levers, Request, RolloutLowering, ServingBuild, check_levers_compose,
+    BuildDemands, Levers, Request, RolloutLowering, ServingBuild,
+    check_levers_compose,
 )
 from rlstack.policy.compile import Bundle, group_by_adapter_type
 from rlstack.registry import ADAPTER_TYPES
@@ -117,7 +118,28 @@ class VllmEngine:
                 f"adapter type {lowering.adapter_type!r} demands the engine plugin "
                 f"{demands.plugin!r}; this build installs none, so it cannot "
                 f"serve it (reachability stays NONE and Phase 0 refuses)")
+        self.check_demand_fits(lowering.adapter_type, demands)
         return demands.engine_args
+
+    def check_demand_fits(self, adapter_type: str, demands: BuildDemands) -> None:
+        """A demand that CHANGES an argument the build already carries is a
+        refusal, never an override (ADR 0004, Q6).
+
+        The build's own arguments are facts the deploy chose — eager mode,
+        the worker class — and an earlier adapter type's paid demands are
+        facts too; an adapter type whose demand contradicts either cannot be
+        served on this build, and says so at construction (I7) rather than
+        silently rebuilding the engine under everyone else's feet. Two adapter
+        types demanding the same worker class is the same refusal: one plugin
+        claims the seam.
+        """
+        for key, value in demands.engine_args.items():
+            if key in self._engine_args and self._engine_args[key] != value:
+                raise NotImplementedError(
+                    f"adapter type {adapter_type!r} demands {key}={value!r}, "
+                    f"but this build carries {key}={self._engine_args[key]!r}; "
+                    f"a demand never overrides a build fact, so this build "
+                    f"cannot serve it")
 
     def _ensure_llm(self):
         """AsyncLLMEngine wants a running event loop; the runner has one by
@@ -213,6 +235,7 @@ class VllmEngine:
         stop: tuple[str, ...],
         bundle_id: str,
         seed: int,
+        directives: Sequence[Directive] = (),
     ) -> AsyncIterator[TokenEvent | FinishEvent]:
         if not self._residency.knows(bundle_id):
             raise RuntimeError(
@@ -224,14 +247,14 @@ class VllmEngine:
         # Each message tokenized separately, then concatenated — the EXACT
         # ids flatten reproduces for injected spans (no template drift).
         prompt_ids = [tid for m in messages for tid in self.tokenize(m.content)]
-        params = SamplingParams(
-            temperature=sampling.temperature, top_p=sampling.top_p,
-            max_tokens=sampling.max_tokens, stop=list(stop), seed=seed,
-            logprobs=0)
         self._request_count += 1
         request_id = f"rlstack-{self._request_count}-{seed}"
         with self._residency.pinned(bundle_id):
-            levers = self._levers_for(prompt_ids, bundle_id, seed)
+            levers = self._levers_for(prompt_ids, bundle_id, seed, directives)
+            params = SamplingParams(
+                temperature=sampling.temperature, top_p=sampling.top_p,
+                max_tokens=sampling.max_tokens, stop=list(stop), seed=seed,
+                logprobs=0, extra_args=dict(levers.extra_args) or None)
             # the prefill is known BEFORE the request leaves, and the clock for
             # time-to-first-token starts on the same line
             self.meter.opened_request(len(prompt_ids))
@@ -241,7 +264,7 @@ class VllmEngine:
             text_len = 0
             final = None
             async for output in self._ensure_llm().generate(
-                    levers.prompt, params, request_id, **levers.kwargs):
+                    _salted(levers), params, request_id, **levers.kwargs):
                 completion = output.outputs[0]
                 new_ids = list(completion.token_ids)[emitted:]
                 if new_ids and not emitted:
@@ -266,7 +289,9 @@ class VllmEngine:
 
     async def score_tokens(self, messages: Sequence[Message],
                            token_ids: Sequence[int],
-                           bundle_id: str) -> tuple[float, ...]:
+                           bundle_id: str,
+                           directives: Sequence[Directive] = (),
+                           ) -> tuple[float, ...]:
         """ONE prefill over context + tokens with prompt_logprobs: vLLM
         returns each prompt position's logprob under the pinned bundle, and we
         read off the scored suffix. max_tokens=1 because vLLM must generate
@@ -282,22 +307,23 @@ class VllmEngine:
 
         context_ids = [tid for m in messages for tid in self.tokenize(m.content)]
         full_ids = context_ids + [int(t) for t in token_ids]
-        params = SamplingParams(max_tokens=1, temperature=0.0,
-                                prompt_logprobs=0)
         self._request_count += 1
         request_id = f"rlstack-score-{self._request_count}"
         with self._residency.pinned(bundle_id):
             # score traffic is SEEDLESS by contract — it draws nothing and must
             # be deterministic, so an adapter type that chooses per request is
             # told there is no seed rather than handed one
-            levers = self._levers_for(full_ids, bundle_id, None)
+            levers = self._levers_for(full_ids, bundle_id, None, directives)
+            params = SamplingParams(max_tokens=1, temperature=0.0,
+                                    prompt_logprobs=0,
+                                    extra_args=dict(levers.extra_args) or None)
             # one prefill of known length, no decode loop: it costs the metal a
             # prefill and the window says so
             self.meter.opened_request(len(full_ids))
 
             final = None
             async for output in self._ensure_llm().generate(
-                    levers.prompt, params, request_id, **levers.kwargs):
+                    _salted(levers), params, request_id, **levers.kwargs):
                 final = output
             assert final is not None and final.prompt_logprobs is not None
             # the scored suffix sits after the context — and after everything the
@@ -369,7 +395,8 @@ class VllmEngine:
     # ---- one unit of work ---------------------------------------------------
 
     def _levers_for(self, prompt_ids: list[int], bundle_id: str,
-                    seed: int | None) -> Levers:
+                    seed: int | None,
+                    directives: Sequence[Directive] = ()) -> Levers:
         """Every attached adapter type's apply(), merged into ONE request —
         where a bundle becomes USED (I8).
 
@@ -381,11 +408,16 @@ class VllmEngine:
 
         The request's seed travels with it because an adapter type may have a
         per-request CHOICE to make; None says this is score traffic, which is
-        seedless and deterministic by contract.
+        seedless and deterministic by contract. So do the caller's directives,
+        and the positions the bundle's adapter types occupy in front of the
+        real tokens — so an adapter type placing itself by position speaks
+        real-token coordinates and lands where the engine's slice has it.
         """
         from vllm import TokensPrompt
 
-        request = Request(token_ids=tuple(prompt_ids), seed=seed)
+        request = Request(token_ids=tuple(prompt_ids), seed=seed,
+                          occupied=self._occupied(bundle_id),
+                          directives=tuple(directives))
         levers = Levers(prompt=TokensPrompt(prompt_token_ids=prompt_ids))
         for adapter_type, attached in self._residency.attached(bundle_id).items():
             levers = levers.merged_with(
@@ -399,6 +431,17 @@ class VllmEngine:
         return sum(self._lowerings[adapter_type].align(attached).positions
                    for adapter_type, attached
                    in self._residency.attached(bundle_id).items())
+
+
+def _salted(levers: Levers):
+    """The request's prompt form, carrying its prefix-cache identity when an
+    adapter type contributed one (Levers.cache_salt): vLLM folds `cache_salt`
+    into the first block's hash and every later block chains on it, so reuse
+    lives within one salt and dies across two. Every prompt form vLLM accepts
+    is a dict, so the salt rides whichever form the bank produced."""
+    if levers.cache_salt is None:
+        return levers.prompt
+    return {**levers.prompt, "cache_salt": levers.cache_salt}
 
 
 def _finish_event(completion, turn_extras: Mapping[str, object]) -> FinishEvent:

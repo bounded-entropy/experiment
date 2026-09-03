@@ -23,7 +23,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, ClassVar
 
-from rlstack.policy.adapters.base import Mechanism
+from rlstack.policy.adapters.base import Directive, Mechanism
 from rlstack.policy.siteschema import SiteMeta
 
 
@@ -79,10 +79,19 @@ class Request:
     adapter type that must CHOOSE something per request draws it from here —
     the same seed tree the rest of the run derives from — so the choice is
     reproducible and the seedless case is a stated branch, never a silent RNG.
+
+    `occupied` is how many prompt positions the bundle's OTHER adapter types
+    put in front of the real tokens (the bus sums their alignments), so an
+    adapter type that places itself by position can speak in the request's
+    real-token coordinates and still land where the engine's slice has it.
+    `directives` are the caller's per-request instructions (ADR 0004, Q2);
+    an adapter type picks its own by type (AdapterType.directive_for).
     """
 
     token_ids: tuple[int, ...]
     seed: int | None = None
+    occupied: int = 0
+    directives: tuple[Directive, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -92,8 +101,17 @@ class Levers:
     `prompt` is the request's prompt FORM when this adapter type shapes it (one
     that adds positions must, because the positions are in the prompt);
     `kwargs` are the generate() keywords that select this adapter type's state
-    per request. An adapter type contributes one or the other or neither, never
-    a bag of untyped extras.
+    per request; `extra_args` are the SamplingParams.extra_args the engine
+    image's own code reads per request (a plugin's selection, where vLLM has
+    no keyword for it). An adapter type contributes what it needs of these,
+    never a bag of untyped extras.
+
+    `cache_salt` is prefix-cache IDENTITY the engine cannot hash for itself:
+    an adapter type that changes hidden states through a seam vLLM's block
+    hash does not see (a hook) names the bundle — and whatever else its
+    per-request choice was — here, so a block prefilled under one is never
+    reused under another (ADR 0004, Q3). Native levers leave it None; vLLM
+    already salts for them.
 
     `turn_extras` is the RECORDING half of the same answer: the sampling-time
     facts this adapter type's choice for this request produced, which the
@@ -104,20 +122,33 @@ class Levers:
 
     prompt: Any | None = None
     kwargs: Mapping[str, Any] = field(default_factory=dict)
+    extra_args: Mapping[str, Any] = field(default_factory=dict)
+    cache_salt: str | None = None
     turn_extras: Mapping[str, Any] = field(default_factory=dict)
 
     def merged_with(self, other: "Levers") -> "Levers":
         """Fold one adapter type's contribution into the request so far.
 
         A later adapter type's prompt form replaces the earlier one, and its
-        keywords and recorded facts JOIN — which is only ever unambiguous
-        because add_bundle already refused a bundle whose adapter types claim
-        the same lever (check_levers_compose below), so this fold never has to
-        choose a winner.
+        keywords, extra args and recorded facts JOIN — which is only ever
+        unambiguous because add_bundle already refused a bundle whose adapter
+        types claim the same lever (check_levers_compose below), so this fold
+        never has to choose a winner. A salt is one string per request: two
+        adapter types naming different ones is the one collision `claims`
+        cannot pre-empt by name, and it is refused here rather than resolved.
         """
+        if (self.cache_salt is not None and other.cache_salt is not None
+                and self.cache_salt != other.cache_salt):
+            raise ValueError(
+                f"two adapter types salt one request differently "
+                f"({self.cache_salt!r} vs {other.cache_salt!r}); a request "
+                f"carries one prefix-cache identity")
         return Levers(
             prompt=self.prompt if other.prompt is None else other.prompt,
             kwargs={**self.kwargs, **other.kwargs},
+            extra_args={**self.extra_args, **other.extra_args},
+            cache_salt=(other.cache_salt if other.cache_salt is not None
+                        else self.cache_salt),
             turn_extras={**self.turn_extras, **other.turn_extras})
 
 

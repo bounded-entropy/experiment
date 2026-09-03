@@ -20,14 +20,16 @@ from __future__ import annotations
 from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import StrEnum
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, ClassVar
 
 from rlstack.policy.siteschema import SiteMeta
 from rlstack.registry import ADAPTER_TYPES, source_hash
 from rlstack.spec.specs import AdapterSpec
 
 if TYPE_CHECKING:                       # the seam imports this module back
-    from rlstack.policy.adapters.rollout import RolloutLowering, ServingBuild
+    from rlstack.policy.adapters.rollout import (
+        Request, RolloutLowering, ServingBuild,
+    )
 
 
 class Mechanism(StrEnum):
@@ -47,6 +49,23 @@ class Mechanism(StrEnum):
     NONE = "none"                     # inventory answer only: not reachable
 
 
+@dataclass(frozen=True)
+class Directive:
+    """A per-request instruction to ONE adapter type, passed by the CALLER of
+    `sample` / `score` (ADR 0004, Q2).
+
+    A spec fixes what an adapter IS; a directive says what it does for THIS
+    request — which positions a steering vector covers, say. It is a typed
+    record the adapter type declares (`AdapterType.directive`), never a
+    mapping: the wire encodes it by adapter type name and the adapter type
+    decodes its own. What a directive made the rollout do is RECORDED at the
+    seal (`record_directive`), so replay reproduces it from the turn's facts
+    rather than from the caller's memory (I6).
+    """
+
+    adapter_type: ClassVar[str]
+
+
 class AdapterType:
     """The registered class: one ADAPTER TYPE. Subclass, set the class
     attributes, implement the methods, register with @adapter_type. Subclasses
@@ -56,6 +75,7 @@ class AdapterType:
     engine_plugin: str | None = None          # module the engine image must carry
     records: tuple[str, ...] = ()             # per-token columns the rollout writes
     serving: Mechanism | None = None          # None: trainer-only, never served
+    directive: type[Directive] | None = None  # the per-request record it accepts
 
     provides: frozenset[str] = frozenset()
     """Training-forward tensors this adapter type computes, by name.
@@ -81,6 +101,34 @@ class AdapterType:
         have (a soft prompt exports its prompt[:n] positions). Phase-0
         resolution runs against schema ∪ every entry's exports."""
         return ()
+
+    def directive_for(self, request: "Request") -> Directive | None:
+        """THIS adapter type's directive among the request's, or None.
+
+        A request carries at most one per adapter type — two would be two
+        instructions for one lever — so a second is refused here, by the
+        adapter type that would have had to choose.
+        """
+        if self.directive is None:
+            return None
+        mine = [d for d in request.directives if isinstance(d, self.directive)]
+        if len(mine) > 1:
+            raise ValueError(
+                f"a request carries {len(mine)} {self.directive.__name__} "
+                f"directives; one adapter type takes at most one per request")
+        return mine[0] if mine else None
+
+    def record_directive(self, directive: Directive | None,
+                         request: "Request") -> Mapping[str, Any]:
+        """What the rollout RECORDS about this request's directive — the
+        turn facts replay reads back (I6), the same on every engine.
+
+        Called per attached adapter type per request, directive or not: an
+        adapter type whose behavior has a default worth recording (a window
+        that defaults to "every position") records it here too, so replay
+        never has to know what the default was. Default: nothing.
+        """
+        return {}
 
     def params(self, sites: tuple[SiteMeta, ...], init: dict) -> Any:
         """Build the trainable parameterization for the matched sites."""
