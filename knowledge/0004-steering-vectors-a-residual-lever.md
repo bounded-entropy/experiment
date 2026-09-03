@@ -3,7 +3,7 @@
 | | |
 |---|---|
 | **Date** | 2026-09-02 |
-| **Status** | Accepted (2026-09-02: Q1, Q3, Q4, Q6, Q7, Q9, Q10 agreed; Q5 and Q11 resolved by the agent at Samarth's delegation; Q8 deferred to a later ADR, its question answered below; Q2 REFOLDED — positions are a per-request directive, recorded and salted — and Q2a agreed, with "steer constantly on decode" folded as the default) |
+| **Status** | Implemented (2026-09-03; CONTEXT #77) — Accepted 2026-09-02: Q1, Q3, Q4, Q6, Q7, Q9, Q10 agreed; Q5 and Q11 resolved by the agent at Samarth's delegation; Q8 deferred to a later ADR, its question answered below; Q2 REFOLDED — positions are a per-request directive, recorded and salted — and Q2a agreed, with "steer constantly on decode" folded as the default |
 | **Author** | Claude Fable 5.1 (session: the vLLM-Hook assessment, 2026-09-02) |
 | **Touches** | `policy/adapters/` (one new adapter type, three files: `steer.py`, `steer_torch.py`, `steer_vllm.py`), `policy/adapters/base.py` (one `Mechanism` member), `policy/adapters/rollout.py` (two `Levers` fields), `runner/engines/vllm_engine.py` (the bus pays the two new levers, and builds `Request` with `occupied` and the directives), `client.py` + `runner/interfaces.py` + `runner/traffic.py` + `runner/remote.py` (Q2: one keyword, `directives`, on `sample` and `score`, carried over the wire), `runner/fakes.py` (the fake engine's inventory and the keyword), `rlstack_engine/` (the first real plugin: `steer.py`, and `BatchView.from_vllm` built), `spec/validate.py` (one check, Q7), `spec/specs.py` (sugar), `deploy/steer_l4.py` (the metal proof, through the desk), `tests/` |
 | **Invariants** | I2 (an adapter type ships both lowerings — this one's rollout half is the first on a plugin), I7 (the plugin probes at boot and refuses the build it cannot serve), I8 (per-request selection inside one fused batch, on a lever the engine does not natively index), I12 (the check ends by the desk's `release`, never the venue's timer) |
@@ -805,4 +805,40 @@ against rollouts that steered some requests and not others, undetectably.
 
 ## Outcome
 
-Filled at implementation.
+**Landed** (CONTEXT #77), 2026-09-02/03, in the commit order the ADR set:
+the `site-overlap` gate first and alone; the directive and the two levers;
+the adapter type on `Mechanism.RESIDUAL`; the engine-image half
+(`SteerPlugin`, `SteerWorker`, `BatchView.from_vllm` built, the contract's
+per-forward verb per mechanism); the deploy; then what metal taught.
+
+- **The answers changed the shape twice.** Q2 (Samarth: positions at
+  runtime) became the `Directive` — typed, per adapter type, carried on the
+  sample and score verbs and the wire, recorded at the seal by
+  `record_directive` — with `SteerWindow` as the steer's and "every position,
+  every decode step" as the default (Q2a). Q6's demand grew a third form on
+  metal: `BuildDemands.env`, because vllm 0.28.0 chooses the model runner by
+  environment variable alone and boots V2 by default; `check_demand_fits`
+  is the pure rule that refuses a demand contradicting a build fact.
+- **What metal found that the fakes could not.** A steer wrapping a decoder
+  layer hid the layer's children from the walk to a lora inside it
+  (`leaf_module` walks through a wrapper on the way); the V2 runner; the
+  worker's boot step must return the warm-up's reply. On the venue: a host
+  reaching a pool on its own metal by a Modal self-call wedges the container
+  (same-metal addresses are in-process now), a killed driver kills the metal
+  (a cancellation propagates), and drivers must print unbuffered.
+- **Promises, checked.** 1: the L4 probe's zero-tolerance control passed on
+  both sides (max |Δ| 0.00e+00). 2: gaps 0.042–0.059 at three magnitudes,
+  0.052 beside a lora (the lora alone: 0.067), shift control 20–30× the gap;
+  the window replays as recorded; the cache never aliased; decode is steered
+  under an open window and not under a closed one. 3: two tenants through
+  `RemoteDesk.submit`, the second joined the first's listings, two updates
+  each, rails 0.017–0.023. 4: `RemoteDesk.release` told, the keepalive
+  returned 0.1 s later after a 248 s shift — the first observed release on
+  Modal. 5: the plane asserted empty. The window round trip, the resume case
+  with a steer bank, the plugin lifecycle and the demand refusals are pinned
+  in the fakes. Tests: 889 locally from 835 (+54; 111 torch-gated skips),
+  885 green in the image.
+- **Unproven, as the non-promises said:** TP above 1 (one flag away),
+  pipeline parallel, the knock back after release (`::knock` written, not
+  run), the throughput cost of eager plus hooks, mid-layer sites (Q8's later
+  ADR).

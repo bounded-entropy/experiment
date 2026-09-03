@@ -108,14 +108,19 @@ sessions read. Cross-reference each in the other, fold into
 ## Quick commands
 
 ```
-python3.13 -m unittest discover -s tests        # fakes suite (~1s)
-modal run deploy/modal_app.py::run_tests        # same suite inside the image
-modal run deploy/modal_app.py::run_arith        # small real run via the Host
-modal run deploy/modal_app.py::hosts            # observer views on the volume
-modal deploy deploy/modal_app.py                # + the observer UI beside the
-                                                #   volume (…--rlstack-ui.modal.run)
-python3.13 -m rlstack ui <store-root>           # the same UI over a local store
-modal run deploy/stress_l4.py                   # the full stress matrix (~1h)
-modal run deploy/opd_l4.py                      # OPD 8B←32B, three hosts (~15m)
-modal run deploy/fsdp_l4.py                     # the FSDP ladder on 2xL4
+python3.13 -m unittest discover -s tests        # fakes suite (~7s; torch-gated cases skip)
+PYTHONUNBUFFERED=1 modal run deploy/steer_l4.py::run_tests   # the same suite inside the image
+modal run deploy/steer_l4.py::probe             # the steer's parity exam on one L4 (~4m)
+modal deploy deploy/steer_l4.py && \
+PYTHONUNBUFFERED=1 modal run deploy/steer_l4.py::check       # two tenants through the desk,
+                                                #   released by the desk (~10m; ADR 0004)
+modal run deploy/steer_l4.py::sweep             # release every metal the desk still holds
+modal run deploy/plora_l4.py::shakeout          # plora, three hosts on one L4
+modal run deploy/dapo_grpo.py                   # the DAPO GRPO run
+python3.13 -m rlstack ui <store-root>           # the observer UI over a local store
 ```
+
+The campaign deploys (gsm/dsl/sweeps) left the tree with the gsm campaign;
+recover one from history (`git show 6703274^:deploy/gsm_a100.py`) when a venue
+needs its shape. Never stop a `modal run` driver mid-call: the cancellation
+propagates into the metal container and kills it (memory: CONTEXT #77).

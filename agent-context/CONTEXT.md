@@ -3736,6 +3736,127 @@ specs; backends (local/modal/skypilot) and GPU topology are semantics-neutral.
       an idle metal actually sits past 30 minutes on the gsm venues — the
       reaper's journal will now say, since `release` events are on the record.
 
+77. **A STEERING VECTOR IS AN ADAPTER TYPE ON A RESIDUAL LEVER, SERVED BY A
+    HOOK IN THE ENGINE IMAGE (ADR 0004).** Samarth's prompt: "could you look
+    into vLLM hook? ... if I implemented it along with multi-tenant in my
+    repo, it could interface very nicely" — then "would you be able to insert
+    a custom residual at any part of the model? would it be mergable easily
+    ... a range of layers" — then "the check should be a real deployment onto
+    modal (along with a takedown of the metal, by calling the desk". Eleven
+    questions plus one opened by the answers (Q2a); all answered, two at
+    Samarth's delegation. Implemented 2026-09-02/03 in nine commits on main
+    and PROVEN ON AN L4 through the desk. The two libraries the prompt meant
+    (IBM's vLLM-Hook, arXiv 2603.06588; UK AISI's vllm-lens) were read, not
+    depended on: both hook the decoder layers on the V1 runner and slice the
+    batch per request off `query_start_loc`, neither speaks bundles, neither
+    salts the prefix cache for tenancy, and one patches the engine globally.
+    - **THE LEVER.** `Mechanism.RESIDUAL` (`policy/adapters/base.py`): a
+      per-slot vector ADDED to the residual stream at a boundary, per token,
+      inside one fused batch. The closed set's third tier finally has an
+      instance that exists — a hook at a module boundary, the cheapest seam
+      there is, where side attention (#46) needed the kernel's LSE and stays
+      refused. `steer` is the adapter type (`steer.py`, `steer_torch.py`,
+      `steer_vllm.py`; sugar `steer(site, d, tie, init_std)`): one `d`-wide
+      vector per matched boundary (`resid_pre.8-20` is one entry with
+      thirteen vectors, `tie=True` shares one), zero as its exact identity.
+      Replay: `SteerSite`, a `SiteWrapper` at the boundary that adds each
+      routed row's vector inside the window that row's turns RECORDED and
+      leaves every other row alone. Rollout: demands OUR worker class
+      (`worker_cls`), eager mode, and the V1 model runner; attaches a
+      bundle's entries as ONE content-addressed file under the workdir (the
+      LoRARequest precedent: a path the worker loads on first sight into a
+      bounded bank); applies by naming the file and the resolved window in
+      `SamplingParams.extra_args`; salts the prefix cache with bundle AND
+      window; records the window as the turn fact. `rlstack_engine/steer.py`
+      is the first real `EnginePlugin` (probe / install / load / evict /
+      cache_salt, plus its own per-forward verb `add` — Q9: the contract's
+      per-forward verb is the mechanism's own), `steer_worker.py` is the vLLM
+      worker (probe and install at `compile_or_warm_up_model`, the last boot
+      step, where the runner's request table exists), and
+      `BatchView.from_vllm` is BUILT — `view_of` is the pure builder from
+      any engine's columns (query offsets, sequence lengths, per-request
+      extras), tested with no engine.
+    - **THE DIRECTIVE (Q2, refolded).** Which positions is a property of the
+      REQUEST: `Directive` is a typed record an adapter type declares
+      (`AdapterType.directive`), `PoolClient.sample`/`score` and the Engine
+      verbs take `directives`, the wire carries them by adapter type name,
+      `Request` carries them with `occupied` (what other adapter types put in
+      front). What a directive made the rollout do is RECORDED
+      (`record_directive`, the same rule on the vLLM bus and the fake engine)
+      so replay reads the fact, never the caller's memory. `SteerWindow(start,
+      end)` in real-token coordinates; no directive = every position, prompt
+      and completion, at every decode step — vllm-lens's "steer constantly on
+      decode", the default. A trajectory whose turns recorded different
+      windows is refused at replay (plora's one-draw rule).
+    - **THE LEVERS.** `Levers.extra_args` (per-request selection the engine
+      image reads) and `Levers.cache_salt` (prefix-cache identity vLLM cannot
+      hash itself; two adapter types salting differently are refused at the
+      fold). `BuildDemands.env`: a demand may name an environment variable
+      the engine's process must carry — found on metal: vllm 0.28.0 boots
+      the V2 model runner by default and exposes the choice as
+      `VLLM_USE_V2_MODEL_RUNNER` only — and `check_demand_fits` (rollout.py)
+      refuses a demand that would change a build fact (an argument, the
+      process environment, an earlier adapter type's paid demand): a
+      graph-captured build refuses `steer` at construction.
+    - **THE BANK RULE IS A GATE NOW (Q7).** `site-overlap`: two entries
+      resolving to one site in one bank are refused at Phase 0, for every
+      adapter type. It had been stated at the replay seam since #44 and
+      enforced nowhere — two loras overlapping at one q_proj validated clean
+      and were silently summed.
+    - **WHAT METAL PROVED (deploy/steer_l4.py, one L4, vllm 0.28.0 / torch
+      2.13.0+cu130 / transformers 5.16.1).** `probe`, 28/28: the build
+      reaches `resid_pre.*` and `final_hidden` through the hook, punica on
+      weighted sites, logits NONE; a lora+steer bank attaches to both
+      lowerings; ZERO STEER IS THE BASE BIT FOR BIT on both sides (max |Δ| =
+      0.00e+00, engine and trainer, three prompts); parity gap (mean
+      |trainer − engine| per token, worst prompt) 0.042 / 0.052 / 0.059 at
+      init_std 0.01 / 0.05 / 0.2, 0.052 for lora+steer, against 0.067 for the
+      lora alone — the #28 kernel floor, not the lever; the shift control is
+      20-30x the aligned gap; a completion-only window replays as recorded
+      and changes the answer (max |Δ| 0.505); the prefix cache NEVER ALIASES
+      across bundles or windows (a repeat after base, lora and a windowed
+      request in between is bit-identical); the turn records the resolved
+      window; the first generated token (off the last prompt position) is
+      identical under an open and a closed window and the first DECODE step
+      differs (−0.863 vs −0.424). `check`, through the desk: a lora-only
+      spec and a steer-only spec submitted by `RemoteDesk.submit`, the
+      second JOINED the first's listings — one serving host, one learner —
+      two updates each, `logprob_gap` per update lora 0.020 / 0.019, steer
+      0.017 / 0.023; then `RemoteDesk.release` answered told=True, the
+      keepalive input RETURNED 0.1 s later with shift_s 248 (the container
+      served four minutes and ended because the desk said so — ADR 0003's
+      Modal half, SEEN for the first time), the listings gone, the plane
+      asserted empty. Suite: 889 locally (111 torch-gated skips), 885 in the
+      image with the torch cases running.
+    - **FOUND ON METAL, FIXED.** (1) A steer wrapping `model.layers.8` hid
+      the layer's children from the path walk to `model.layers.8.self_attn.
+      q_proj`: `leaf_module` now walks THROUGH a wrapper on the way (a
+      wrapper wraps a forward, not children), pinned in both install orders.
+      (2) The V2 runner default (above). (3) The worker's boot-step override
+      must return the stock warm-up's reply (the executor reads it).
+    - **FOUND ON THE VENUE, FIXED (deploy only).** A resident host reaching
+      the pool on its OWN metal through a Modal call to its own container
+      wedges that container: the adoption runs on the container's loop and
+      asks reachability through the transport's SYNC verb, so the loop waits
+      on an input it must itself dispatch — a delivered tenant sat an hour at
+      zero updates and the desk's next submit hung until its input timed out.
+      Same-metal addresses now resolve to `LocalTransport` over the sibling
+      host's service (the plora venue's shape). Two operator lessons, in
+      memory: a `modal run` driver must never be killed mid-call (Modal
+      propagates the cancellation into the metal's input and kills the
+      container after 30 s — it looked like a preempt), and drivers print
+      block-buffered into a file (`PYTHONUNBUFFERED=1`). Python-source-only
+      images ship no `observe/web`, so the suite in the image asserted the
+      UI's absence until the deploy added the directory.
+    - **NOT PROVEN, STATED.** Tensor parallel above 1 (the add is replicated
+      per rank by construction; `RLSTACK_STEER_GPU=L4:2 RLSTACK_STEER_TP=2
+      modal deploy` is the one flag). Pipeline parallel. The knock back after
+      a release (`::knock` exists; not run in this session). The throughput
+      cost of eager plus hooks (unmeasured). Mid-layer boundary sites (Q8, a
+      later ADR: a `resid_mid` is a steer, not an attention bias — a vector
+      added after attention cannot re-weight the softmax). The parity
+      certificate stays unwired, as for every adapter type.
+
 ## Open threads (do NOT treat as settled; flag when your answer touches them)
 
 - TODO (Samarth, settled intent — future, nothing now): BUNDLE LRU EVICTION
