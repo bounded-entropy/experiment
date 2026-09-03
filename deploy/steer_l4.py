@@ -628,7 +628,10 @@ def probe() -> dict:
         check("...and the base is still the base afterwards",
               worst(base_first, await scored("base", prompt, answer)) == 0.0)
         # 5. the record, and steering on decode: a greedy sample under an
-        #    open window and under one closed at the prompt's end
+        #    open window and under one closed at the prompt's end. The FIRST
+        #    generated token comes off the last prompt position, inside both
+        #    windows; the SECOND is the first decode step, at position n —
+        #    steered only under the open window.
         async def greedy(directives):
             events = [e async for e in engine.sample_tokens(
                 [Message(Role.USER, prompt)],
@@ -640,11 +643,16 @@ def probe() -> dict:
         check("the turn records the resolved window",
               open_events[-1].turn_extras[STEER_RECORD] == [0, None]
               and closed_events[-1].turn_extras[STEER_RECORD] == [0, n])
-        first_open = open_events[0].logprob
-        first_closed = closed_events[0].logprob
-        check("decode is steered under an open window and not under a closed one",
-              abs(first_open - first_closed) > 1e-4,
-              f"{first_open:.4f} vs {first_closed:.4f}")
+        check("the first token, off the last prompt position, is the same "
+              "under both windows",
+              open_events[0].token_id == closed_events[0].token_id
+              and abs(open_events[0].logprob - closed_events[0].logprob) < 1e-6)
+        second_open = open_events[1].logprob
+        second_closed = closed_events[1].logprob
+        check("the first DECODE step is steered under an open window and not "
+              "under a closed one",
+              abs(second_open - second_closed) > 1e-4,
+              f"{second_open:.4f} vs {second_closed:.4f}")
         return report
 
     report = asyncio.run(measure())
