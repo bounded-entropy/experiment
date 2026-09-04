@@ -48,10 +48,12 @@ class MeasureFixture(unittest.TestCase):
             task_ids=tuple(sorted(self.tasks)), samples=2, every=2,
             post=("verifier",), seed=17)
 
-    def measure(self, pool=None, max_inflight: int = 64) -> list[int]:
+    def measure(self, pool=None, max_inflight: int = 64,
+                pools: dict | None = None) -> list[int]:
         return go(measure_run(self.store, self.report.run_id,
                               self.measurement, pool or self.engine,
-                              self.tasks, max_inflight=max_inflight))
+                              self.tasks, max_inflight=max_inflight,
+                              pools=pools or {}))
 
 
 class MeasureRunTest(MeasureFixture):
@@ -102,6 +104,47 @@ class MeasureRunTest(MeasureFixture):
         after = {key: self.store._read(key)
                  for key in self.store._list(prefix)}
         self.assertEqual(after, before)
+
+
+class SecondPoolTest(MeasureFixture):
+    """ADR 0005: a measurement may address more than the policy. Every extra
+    name routes to its engine under a PAYLOAD-FREE base bundle — the loop's
+    rule for a non-policy pool — so "how far is the student from the
+    teacher" is a measurement like any other."""
+
+    TEACHER_BASE = "Qwen/Qwen3-32B"
+
+    def scoring_measurement(self):
+        from dataclasses import replace
+        return replace(self.measurement, name="distill",
+                       post=("conditioned_teacher_logprobs", "reverse_kl"))
+
+    def measure_through(self, pools: dict) -> list[int]:
+        return go(measure_run(self.store, self.report.run_id,
+                              self.scoring_measurement(), self.engine,
+                              self.tasks, pools=pools))
+
+    def test_a_pipeline_that_scores_through_teacher_runs(self) -> None:
+        teacher = FakeEngine(base=self.TEACHER_BASE)
+        self.assertEqual(self.measure_through({"teacher": teacher}), [2, 4])
+        told = self.store.read_measurements(self.report.run_id)["distill"]
+        point = told["points"][0]
+        self.assertIn("reverse_kl", point["means"])
+        self.assertIn("teacher_logprobs", point["means"])
+        # the teacher served its BARE BASE: payload-free, so no delta of the
+        # measured run ever reached it
+        self.assertEqual(teacher.bundle_log, ["bundle:base:teacher"])
+
+    def test_without_the_pool_it_fails_by_name(self) -> None:
+        with self.assertRaises(KeyError) as missing:
+            self.measure_through({})
+        self.assertIn("teacher", str(missing.exception))
+
+    def test_one_engine_may_back_both_names(self) -> None:
+        """The Routes contract already says so: naming "teacher" on the same
+        engine object as "main" is one dict entry and no second resident."""
+        self.assertEqual(self.measure_through({"teacher": self.engine}), [2, 4])
+        self.assertIn("bundle:base:teacher", self.engine.bundle_log)
 
 
 class EraBoundaryTest(unittest.TestCase):
