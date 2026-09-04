@@ -9,4 +9,7 @@ this package root stays free to import.
 from rlstack.data.tasks.base import (
     draw_for, load_tasks, split_tasks, write_tasks,
 )
+from rlstack.data.tasks.concept_prompts import (
+    concept_prompt_tasks, prompt_splits,
+)
 from rlstack.data.tasks.dapo_math import dapo_math_tasks

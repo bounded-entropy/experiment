@@ -29,7 +29,9 @@ import os
 
 from rlstack.data.stores.base import Store
 from rlstack.data.stores.retention import DEFAULT_RETENTION, RetentionPolicy
-from rlstack.data.tasks import dapo_math_tasks, split_tasks, write_tasks
+from rlstack.data.tasks import (
+    concept_prompt_tasks, dapo_math_tasks, split_tasks, write_tasks,
+)
 from rlstack.observe import (
     render_gpu, render_hosts, render_runs, roots_for, store_for,
 )
@@ -38,7 +40,8 @@ from rlstack.observe.ui import serve as serve_ui
 VIEWS = {"hosts": render_hosts, "runs": render_runs, "gpu": render_gpu}
 
 # dataset name -> the one function turning that dataset into Task rows
-BUILDERS = {"dapo_math": dapo_math_tasks}
+BUILDERS = {"concept_prompts": concept_prompt_tasks,
+            "dapo_math": dapo_math_tasks}
 
 
 def main(argv: list[str] | None = None) -> None:

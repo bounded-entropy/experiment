@@ -13,6 +13,10 @@ from pathlib import Path
 
 from rlstack import LocalStore, Task, load_tasks, split_tasks, write_tasks
 from rlstack.data.tasks import draw_for
+from rlstack.data.tasks.concept_prompts import (
+    PROSE_CATEGORIES, SYSTEM_PROMPT, check_hint_concatenates, is_prose,
+    prompt_splits, renderer, system_block, task_from_row, user_prompt,
+)
 
 
 def tasks(n: int, prefix: str = "t") -> list[Task]:
@@ -133,6 +137,141 @@ class TestSplit(unittest.TestCase):
         self.assertTrue(all(0.0 <= d < 1.0 for d in draws))
         self.assertEqual(len(set(draws)), len(draws))
         self.assertAlmostEqual(sum(draws) / len(draws), 0.5, delta=0.03)
+
+
+class FakeTokenizer:
+    """Qwen3's template in the two respects this builder depends on: a
+    message renders as its own block, and NO default system block is emitted
+    when none is given. `enable_thinking=False` closes the think block, which
+    is what makes the generation prompt longer than a bare header."""
+
+    def __init__(self, default_system: str | None = None) -> None:
+        self.default_system = default_system
+
+    def apply_chat_template(self, messages, tokenize, add_generation_prompt,
+                            enable_thinking):
+        assert tokenize is False and enable_thinking is False
+        rendered = ""
+        roles = [m["role"] for m in messages]
+        if self.default_system is not None and "system" not in roles:
+            rendered += f"<|im_start|>system\n{self.default_system}<|im_end|>\n"
+        for message in messages:
+            rendered += (f"<|im_start|>{message['role']}\n"
+                         f"{message['content']}<|im_end|>\n")
+        if add_generation_prompt:
+            rendered += "<|im_start|>assistant\n<think>\n\n</think>\n\n"
+        return rendered
+
+
+ROW = {"prompt_id": "abc123", "prompt": "Write a haiku about rain.",
+       "category": "Generation"}
+
+
+class ConceptPromptsTest(unittest.TestCase):
+    """The pure half of ADR 0005's corpus builder — the network path is not
+    run here, and nothing in it is: a row becomes a Task, the categories
+    filter, and the concatenation refusal is the builder's own gate."""
+
+    def setUp(self) -> None:
+        self.render = renderer(FakeTokenizer())
+        self.system = SYSTEM_PROMPT.format(concept="happiness")
+        self.hint = system_block(self.render, self.system)
+
+    def task(self, row=None, render=None):
+        return task_from_row(row or ROW, render or self.render, self.hint,
+                             self.system, "happiness")
+
+    def test_the_prose_categories_are_kept_and_the_others_dropped(self) -> None:
+        for category in ("Generation", "Open QA", "Brainstorm", "Chat",
+                         "Rewrite", "Summarize"):
+            self.assertTrue(is_prose(category))
+        for category in ("Coding", "Classify", "Closed QA", "Extract"):
+            self.assertFalse(is_prose(category))
+            self.assertIsNone(self.task({**ROW, "category": category}))
+        self.assertEqual(len(PROSE_CATEGORIES), 6)
+
+    def test_a_row_becomes_a_task_carrying_the_hint(self) -> None:
+        task = self.task()
+        self.assertEqual(task.id, "no-robots/abc123")
+        self.assertEqual(task.prompt, user_prompt(self.render, ROW["prompt"]))
+        self.assertEqual(task.meta["hint"], self.hint)
+        self.assertEqual(task.meta["concept"], "happiness")
+        self.assertEqual(task.meta["category"], "Generation")
+
+    def test_the_prompt_carries_no_system_block(self) -> None:
+        """The student is asked the instruction ALONE; everything the teacher
+        knew that the student does not is in the hint."""
+        task = self.task()
+        self.assertNotIn("system", task.prompt)
+        self.assertNotIn("happiness", task.prompt)
+        self.assertIn("<|im_start|>system", task.meta["hint"])
+
+    def test_the_hint_plus_the_prompt_is_the_templated_conversation(self) -> None:
+        task = self.task()
+        self.assertEqual(
+            task.meta["hint"] + task.prompt,
+            self.render([{"role": "system", "content": self.system},
+                         {"role": "user", "content": ROW["prompt"]}]))
+
+    def test_hint_for_reads_it_back(self) -> None:
+        """The convention the environment and the processors share."""
+        from rlstack import hint_for
+
+        self.assertEqual(hint_for(self.task()).content, self.hint)
+
+    def test_a_template_with_a_default_system_block_refuses(self) -> None:
+        """The failure the check exists for: a template that injects its own
+        system block when none is given makes the prompt carry one, so
+        hint + prompt would carry two — silently conditioning the teacher on
+        text no chat model was trained to read."""
+        render = renderer(FakeTokenizer(default_system="You are Qwen."))
+        with self.assertRaises(ValueError) as refused:
+            task_from_row(ROW, render, system_block(render, self.system),
+                          self.system, "happiness")
+        self.assertIn("concatenate", str(refused.exception))
+
+    def test_the_check_is_the_one_named_rule(self) -> None:
+        check_hint_concatenates(self.render, self.hint,
+                                user_prompt(self.render, "hi"),
+                                self.system, "hi")
+        with self.assertRaises(ValueError):
+            check_hint_concatenates(self.render, self.hint + "x",
+                                    user_prompt(self.render, "hi"),
+                                    self.system, "hi")
+
+    def test_the_concept_is_the_one_substitution(self) -> None:
+        other = SYSTEM_PROMPT.format(concept="melancholy")
+        self.assertIn("melancholy", other)
+        self.assertNotIn("happiness", other)
+        # and it reaches the task's identity: another concept is another set
+        first = self.task()
+        render = self.render
+        second = task_from_row(ROW, render, system_block(render, other), other,
+                               "melancholy")
+        self.assertEqual(first.prompt, second.prompt)   # the ask is the same
+        self.assertNotEqual(first.meta, second.meta)    # the telling is not
+
+    def test_the_splits_are_the_asked_sizes_as_fractions(self) -> None:
+        splits = prompt_splits(8850, train=2048, heldout=128)
+        self.assertAlmostEqual(sum(splits.values()), 1.0, places=12)
+        self.assertAlmostEqual(splits["train"], 2048 / 8850, places=12)
+        self.assertAlmostEqual(splits["heldout"], 128 / 8850, places=12)
+        self.assertEqual(sorted(splits), ["heldout", "rest", "train"])
+
+    def test_the_counts_are_drawn_not_dealt(self) -> None:
+        """split_tasks places each task by h(seed, id), so the sizes land
+        near the fractions and never on them."""
+        corpus = [Task(id=f"no-robots/{i:05d}", prompt="p") for i in range(8850)]
+        drawn = split_tasks(corpus, prompt_splits(8850), seed=5)
+        self.assertAlmostEqual(len(drawn["train"]) / 8850, 2048 / 8850,
+                               delta=0.02)
+        self.assertAlmostEqual(len(drawn["heldout"]) / 8850, 128 / 8850,
+                               delta=0.02)
+        self.assertEqual(sum(len(v) for v in drawn.values()), 8850)
+
+    def test_more_prompts_than_the_corpus_holds_is_refused(self) -> None:
+        with self.assertRaises(ValueError):
+            prompt_splits(100, train=2048, heldout=128)
 
 
 if __name__ == "__main__":
