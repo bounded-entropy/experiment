@@ -47,6 +47,23 @@ class Task:
     meta: Mapping[str, Any] = field(default_factory=dict)
 
 
+def hint_for(task: Task) -> Message:
+    """THE HINT A TASK CARRIES, as a message: `meta["hint"]` verbatim when
+    present, else "The answer is {meta['answer']}. " — the demo teacher for
+    verifier-style tasks.
+
+    One convention, three readers, and they live in different worlds: the
+    hinted and conditioned-teacher processors (training/) prepend it to a
+    scoring context, and the conditioned-teacher environment (inference/)
+    puts it in front of the prompt it samples under. It lives beside Task
+    because that is where the convention IS — what a task says about itself
+    — and because `data/` is the one package both worlds may import
+    (STYLE rule 8).
+    """
+    meta = task.meta
+    return Message(Role.USER, meta.get("hint") or f"The answer is {meta['answer']}. ")
+
+
 @dataclass(frozen=True)
 class Turn:
     """One request inside a trajectory, and everything recorded at the seal (I6).

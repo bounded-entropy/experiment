@@ -59,7 +59,7 @@ from rlstack.spec.validate import (
     validate, validate_or_raise,
 )
 from rlstack.data.trajectory import (
-    DataError, Group, Message, Role, Task, Trajectory, Turn, Wave,
+    DataError, Group, Message, Role, Task, Trajectory, Turn, Wave, hint_for,
     trajectory_from_row, trajectory_to_row, wave_from_rows, wave_to_rows,
 )
 from rlstack.data.flatten import Flat, TokenBatch, broadcast, flatten, pack
