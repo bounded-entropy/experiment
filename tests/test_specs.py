@@ -174,16 +174,19 @@ class TestIdentity(unittest.TestCase):
 
 
 class TestVocabularies(unittest.TestCase):
-    def test_a_ref_accepts_the_three_locations(self) -> None:
+    def test_a_ref_accepts_the_four_locations(self) -> None:
         """Where an already-sealed trajectory lives — the vocabulary a plan's
         Replay leaf speaks (runner/refs.py), and the one TrajectorySource's
         "live" / "store://" / "cas://" grammar became when live/replay/static
-        stopped being kinds of RUN and became kinds of LEAF (#59). Three
-        locations, plus an optional `#index` picking one row out of a wave."""
+        stopped being kinds of RUN and became kinds of LEAF (#59). Four
+        locations, plus an optional `#index` picking one row out of a wave —
+        another run's ROLLOUTS joined at ADR 0006 Part B, because a
+        generation-only run seals those and never writes waves/."""
         for ref, location, index in (
             ("self://rollouts/3", "self://rollouts/3", None),
             ("self://rollouts/3#2", "self://rollouts/3", 2),
             ("store://a1b2c3/waves/7#0", "store://a1b2c3/waves/7", 0),
+            ("store://a1b2c3/rollouts/7#0", "store://a1b2c3/rollouts/7", 0),
             ("cas://3fa9/anchors.jsonl#41", "cas://3fa9/anchors.jsonl", 41),
         ):
             with self.subTest(ref=ref):
@@ -193,6 +196,7 @@ class TestVocabularies(unittest.TestCase):
         # and only this run's own rollouts may still answer "not yet"
         self.assertTrue(parse("self://rollouts/3#2").pending_allowed)
         self.assertFalse(parse("store://a1b2c3/waves/7#0").pending_allowed)
+        self.assertFalse(parse("store://a1b2c3/rollouts/7#0").pending_allowed)
 
     def test_a_ref_rejects_anything_else(self) -> None:
         """An unknown location, and a row index that is not a row number."""
