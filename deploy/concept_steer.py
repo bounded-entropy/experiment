@@ -2,12 +2,13 @@
 
     modal run deploy/concept_steer.py::prompts                   # the corpus -> cas uris
     modal deploy deploy/concept_steer.py                         # the desk and the metal, standing
-    modal run deploy/concept_steer.py::distill_set               # the teacher's rollouts (one run_id)
+    modal run deploy/concept_steer.py::distill_set --train-tasks cas://<sha>
     modal run deploy/concept_steer.py::train --layer 10 --teacher-run <rid>
-    modal run deploy/concept_steer.py::measure --run-id <rid>    # reverse KL, outside the run
+    modal run deploy/concept_steer.py::measure --run-id <rid> --heldout-tasks cas://<sha>
     modal run deploy/concept_steer.py::export --run-id <rid> --version 64
     modal run deploy/concept_steer.py::status                    # the desk's inventory
     modal run deploy/concept_steer.py::sweep                     # release every metal it holds
+    modal run deploy/concept_steer.py::run_tests                 # the fakes suite in the image
 
 NOTHING IN THIS FILE HAS RUN. It is written against ADR 0005's answered
 questions and left for Samarth's metal: no number below has been observed, the
