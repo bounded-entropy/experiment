@@ -16,6 +16,14 @@ initialized so that KL(q||p) is EXACTLY zero and every core is EXACTLY zero
 base model, whatever z is drawn — the same identity element lora has, kept for
 the same reason.
 
+The prior's scale is the run's to choose, or the run's to LEARN. `prior="fixed"`
+keeps N(0, prior_std^2 I) where the spec put it; `prior="learned"` makes
+log(prior_std) a parameter of its own (init at the spec's prior_std, small),
+moved only by the KL — empirical Bayes over the latent: the prior widens to
+wherever the posterior's mass actually sits, so the KL prices the posterior's
+CONCENTRATION rather than its distance from a scale nobody chose. Its current
+value is a provided tensor (`plora_prior_std`), so the ledger watches it move.
+
 The two halves of the recording contract meet here. At rollout the engine draws
 a member and RECORDS the noise that made it (`plora_eps`, `plora_member`);
 at replay the trainer recomputes z = mu + sigma * eps with the CURRENT
@@ -40,12 +48,20 @@ MEMBER_RECORD = "plora_member"    # which ensemble member served it
 KL_PROVIDED = "latent_kl"                  # KL(q||p), what a latent-KL loss prices
 SIGMA_PROVIDED = "plora_sigma_mean"       # mean posterior scale: nothing consumes
 #                                           it; it is here to be WATCHED
+PRIOR_PROVIDED = "plora_prior_std"        # the prior's scale — a constant when
+#                                           fixed, a trajectory when learned
+
+# The prior's two recipes, by name: the spec's init says which (validated at
+# the gate), the torch half builds the matching tensor.
+FIXED_PRIOR = "fixed"
+LEARNED_PRIOR = "learned"
+PRIORS = (FIXED_PRIOR, LEARNED_PRIOR)
 
 
 @adapter_type("plora")
 class Plora(AdapterType):
     serving = Mechanism.PUNICA
-    provides = frozenset({KL_PROVIDED, SIGMA_PROVIDED})
+    provides = frozenset({KL_PROVIDED, SIGMA_PROVIDED, PRIOR_PROVIDED})
     records = (EPS_RECORD, MEMBER_RECORD)
 
     def site_ok(self, meta: SiteMeta) -> bool:
@@ -73,15 +89,18 @@ class Plora(AdapterType):
         plora_torch.uninstall(model, params)
 
     def provide(self, params) -> Mapping[str, Any]:
-        """The latent's KL to its prior, and the posterior's mean scale.
+        """The latent's KL to its prior, the posterior's mean scale, and the
+        prior's scale.
 
-        The KL is a pure function of (mu, log_std) — no data, no batch — which
-        is exactly why it is a PROVIDED tensor rather than a postdata column: it
-        is recomputed by the forward and differentiable, and a loss that wants
-        to price it just requires it by name. The sigma mean is required by
-        nothing and exists to be watched: a posterior collapsing to zero is
-        this adapter type turning back into a plain LoRA, and it should be
-        visible in the ledger the update it starts happening.
+        The KL is a pure function of (mu, log_std, prior_log_std) — no data, no
+        batch — which is exactly why it is a PROVIDED tensor rather than a
+        postdata column: it is recomputed by the forward and differentiable,
+        and a loss that wants to price it just requires it by name. The other
+        two are required by nothing and exist to be watched: a posterior
+        collapsing to zero is this adapter type turning back into a plain
+        LoRA, and a learned prior's scale is the empirical-Bayes answer to
+        "how wide is the distribution over adapters" — both should be visible
+        in the ledger the update they start moving.
         """
         from rlstack.policy.adapters import plora_torch
         return plora_torch.provide(params)
@@ -91,7 +110,10 @@ class Plora(AdapterType):
         hypernet trunk and the per-site heads) is an ordinary network that may
         be weight-decayed, while `posterior` (mu, log_std) is a distribution's
         parameters, where decay would be an unstated second prior pulling
-        log_std toward zero — a scale of 1, which is nothing anyone meant."""
+        log_std toward zero — a scale of 1, which is nothing anyone meant. A
+        LEARNED prior is a third group, `prior` (its log-scale alone), so its
+        learning rate can be its own: one scalar chased by the KL alone has no
+        reason to move at the hypernet's pace."""
         from rlstack.policy.adapters import plora_torch
         return plora_torch.param_groups(params)
 

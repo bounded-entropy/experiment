@@ -31,7 +31,8 @@ import torch
 
 from rlstack.policy.adapters import plora_factors
 from rlstack.policy.adapters.plora import (
-    EPS_RECORD, KL_PROVIDED, SIGMA_PROVIDED,
+    EPS_RECORD, FIXED_PRIOR, KL_PROVIDED, LEARNED_PRIOR, PRIOR_PROVIDED,
+    PRIORS, SIGMA_PROVIDED,
 )
 from rlstack.policy.adapters.replay import (
     ReplayRows, SiteWrapper, join_site, leaf_module, leave_site,
@@ -105,20 +106,26 @@ class PloraState:
     they are resolved once at install and shipped to the engine as a
     content-addressed artifact instead (plora_factors). `version` is the noise
     counter — see emit().
+
+    `prior_log_std` is the prior's log-scale, log(prior_std) at build: a
+    Parameter when `prior` is "learned" (build_prior), a plain tensor when it
+    is "fixed" — one field either way, and `prior` says which trains.
     """
 
     k: int
     latent: int
     members: int
-    prior_std: float
+    prior_std: float                        # the prior's scale at build
     hidden: int
     factors: str                            # "cas://<sha>": the frozen half
     seed: int                               # this entry's init seed
     paths: tuple[str, ...]                  # matched sites, in resolution order
     mu: torch.nn.Parameter                  # [latent]
     log_std: torch.nn.Parameter             # [latent]
+    prior_log_std: torch.Tensor             # [] — see build_prior
     trunk: Hypernet
     heads: dict[str, torch.nn.Parameter]    # path -> [k*k, hidden], zero-init
+    prior: str = FIXED_PRIOR                # "fixed" | "learned"
     basis: str = "svd"                      # "svd" | "random": the frozen
     basis_seed: int = 0                     # directions' recipe + its seed
     u: dict[str, torch.Tensor] = field(default_factory=dict)   # path -> [out, k]
@@ -126,17 +133,41 @@ class PloraState:
     version: int = 0
 
     def parameters(self) -> list[torch.nn.Parameter]:
-        return [self.mu, self.log_std, *self.mapper()]
+        """What trains: the posterior, a learned prior, the mapper."""
+        return [self.mu, self.log_std, *self.prior_parameters(), *self.mapper()]
 
     def mapper(self) -> list[torch.nn.Parameter]:
         """The deterministic half: everything that turns a latent into cores."""
         return [*self.trunk.parameters(), *self.heads.values()]
+
+    def prior_parameters(self) -> list[torch.nn.Parameter]:
+        """The prior's log-scale when it is LEARNED; nothing when it is fixed."""
+        return [self.prior_log_std] if self.prior == LEARNED_PRIOR else []
 
 
 def _draw_seed(seed: int, path: str) -> int:
     """The per-draw-site seed, same shape as every other adapter type's."""
     digest = hashlib.sha256(f"{seed}:{path}".encode()).digest()
     return int.from_bytes(digest[:8], "big")
+
+
+def build_prior(prior_std: float, prior: str) -> torch.Tensor:
+    """The prior's log-scale, log(prior_std), as the tensor its recipe needs:
+    a PARAMETER when the prior is learned, a plain tensor when it is fixed.
+
+    A learned prior is empirical Bayes over the latent — the one scalar the
+    KL may move, so the prior's width is estimated from the posterior rather
+    than declared. It starts where the fixed one would sit (the spec's
+    prior_std, small), so the KL is exactly zero at init under either recipe
+    and version 0 is the same identity element. The recipe is a registered
+    name (plora.PRIORS) and the gate validates it; this refuses anything else
+    rather than silently freezing it.
+    """
+    if prior not in PRIORS:
+        raise ValueError(
+            f"a latent prior is one of {PRIORS}, got {prior!r}")
+    scale = torch.tensor(math.log(prior_std), dtype=torch.float32)
+    return torch.nn.Parameter(scale) if prior == LEARNED_PRIOR else scale
 
 
 def build(sites: tuple[SiteMeta, ...], init: dict) -> PloraState:
@@ -146,12 +177,15 @@ def build(sites: tuple[SiteMeta, ...], init: dict) -> PloraState:
     Delta = U 0 A = 0 and version 0 IS the base for EVERY latent — the same
     starting point lora's B = 0 gives. mu = 0 with log_std = log(prior_std)
     makes q equal p exactly, so KL(q||p) starts at 0 and the loss's KL term
-    begins as a term that is not yet pushing anything. Only the trunk is drawn,
-    once, off the entry's seed.
+    begins as a term that is not yet pushing anything — and a learned prior
+    starts at that same scale (build_prior), so nothing about init depends on
+    which recipe the spec chose. Only the trunk is drawn, once, off the
+    entry's seed.
     """
     k, latent = int(init["k"]), int(init["latent"])
     hidden, members = int(init["hidden"]), int(init["members"])
     prior_std = float(init["prior_std"])
+    prior = str(init.get("prior", FIXED_PRIOR))
     seed = int(init.get("seed", 0))
     for meta in sites:
         if meta.shape is None:
@@ -160,13 +194,14 @@ def build(sites: tuple[SiteMeta, ...], init: dict) -> PloraState:
         _draw_seed(seed, "plora.trunk")))
     return PloraState(
         k=k, latent=latent, members=members, prior_std=prior_std, hidden=hidden,
-        factors=str(init["factors"]), seed=seed,
+        factors=str(init["factors"]), seed=seed, prior=prior,
         basis=str(init.get("basis", "svd")),
         basis_seed=int(init.get("basis_seed", 0)),
         paths=tuple(meta.path for meta in sites),
         mu=torch.nn.Parameter(torch.zeros(latent, dtype=torch.float32)),
         log_std=torch.nn.Parameter(
             torch.full((latent,), math.log(prior_std), dtype=torch.float32)),
+        prior_log_std=build_prior(prior_std, prior),
         trunk=trunk,
         heads={meta.path: torch.nn.Parameter(
             torch.zeros(k * k, hidden, dtype=torch.float32)) for meta in sites})
@@ -219,31 +254,46 @@ def materialize_b(state: PloraState,
 
 
 def analytic_kl(mu: torch.Tensor, log_std: torch.Tensor,
-                prior_std: float) -> torch.Tensor:
-    """KL(N(mu, diag(sigma^2)) || N(0, prior_std^2 I)), in closed form:
+                prior_log_std: torch.Tensor) -> torch.Tensor:
+    """KL(N(mu, diag(sigma^2)) || N(0, prior_std^2 I)), in closed form, with
+    prior_std = exp(prior_log_std):
     sum_i [ log(prior_std/sigma_i) + (sigma_i^2 + mu_i^2)/(2 prior_std^2) - 1/2 ].
 
     Analytic, not sampled, because it can be: both sides are diagonal Gaussians,
     so the estimator would only add variance to a quantity we can write down.
     Exactly 0 at init (mu = 0, sigma = prior_std), which is what makes the KL
     term in a loss start at zero rather than at an arbitrary offset.
+
+    The prior's scale is a TENSOR so that a learned prior is on the gradient
+    path: its derivative in prior_log_std is d - sum_i (sigma_i^2 + mu_i^2) /
+    prior_std^2, zero exactly where prior_std^2 is the posterior's mean second
+    moment — the empirical-Bayes fixed point. A fixed prior passes the same
+    tensor without grad and the expression does not change.
     """
     variance = torch.exp(2.0 * log_std)
-    return (math.log(prior_std) - log_std
-            + (variance + mu.pow(2)) / (2.0 * prior_std ** 2)
+    prior_variance = torch.exp(2.0 * prior_log_std)
+    return (prior_log_std - log_std
+            + (variance + mu.pow(2)) / (2.0 * prior_variance)
             - 0.5).sum()
 
 
 def provide(state: PloraState) -> dict[str, Any]:
     """The declared provided tensors, recomputed by this forward."""
-    return {KL_PROVIDED: analytic_kl(state.mu, state.log_std, state.prior_std),
-            SIGMA_PROVIDED: torch.exp(state.log_std).mean()}
+    return {KL_PROVIDED: analytic_kl(state.mu, state.log_std,
+                                     state.prior_log_std),
+            SIGMA_PROVIDED: torch.exp(state.log_std).mean(),
+            PRIOR_PROVIDED: torch.exp(state.prior_log_std)}
 
 
 def param_groups(state: PloraState) -> dict[str, list]:
     """`mapper` and `posterior` — the two halves an OptimSpec may address
-    separately (torch_learner._group_settings reads "entry.mapper")."""
-    return {"mapper": state.mapper(), "posterior": [state.mu, state.log_std]}
+    separately (torch_learner._group_settings reads "entry.mapper") — plus
+    `prior` when the prior is learned, so its one scalar can carry its own
+    learning rate ("entry.prior")."""
+    groups = {"mapper": state.mapper(), "posterior": [state.mu, state.log_std]}
+    if state.prior == LEARNED_PRIOR:
+        groups["prior"] = state.prior_parameters()
+    return groups
 
 
 # ---------------------------------------------------------------------------
@@ -455,8 +505,9 @@ def _site_weight(inner: torch.nn.Module, path: str) -> torch.Tensor:
 
 def _place(state: PloraState, device: torch.device) -> None:
     """Move the trained half beside the base, before any optimizer or load
-    exists (the same rule lora's install keeps)."""
-    for parameter in state.parameters():
+    exists (the same rule lora's install keeps) — and the prior's scale with
+    it, trained or not, because the KL reads it beside mu."""
+    for parameter in (*state.parameters(), state.prior_log_std):
         parameter.data = parameter.data.to(device)
 
 
@@ -507,6 +558,7 @@ def emit(state: PloraState) -> bytes:
     """
     tensors = {"posterior.mu": state.mu.data.cpu(),
                "posterior.log_std": state.log_std.data.cpu(),
+               "prior.log_std": state.prior_log_std.data.cpu(),
                "noise": noise_for(state.seed, state.version, state.members,
                                   state.latent)}
     for key, value in state.trunk.state_dict().items():
@@ -515,7 +567,8 @@ def emit(state: PloraState) -> bytes:
         tensors[f"heads.{path}"] = head.data.cpu()
     payload = plora_factors.pack_artifact({
         "k": state.k, "latent": state.latent, "members": state.members,
-        "prior_std": state.prior_std, "hidden": state.hidden,
+        "prior_std": state.prior_std, "prior": state.prior,
+        "hidden": state.hidden,
         "factors": state.factors, "paths": list(state.paths),
         "version": state.version}, tensors)
     state.version += 1
@@ -537,12 +590,14 @@ def resident(payload: bytes,
     meta, _ = plora_factors.unpack_artifact(payload)
     latent, hidden, k = int(meta["latent"]), int(meta["hidden"]), int(meta["k"])
     paths = tuple(meta["paths"])
+    prior_std, prior = float(meta["prior_std"]), str(meta["prior"])
     state = PloraState(
         k=k, latent=latent, members=int(meta["members"]),
-        prior_std=float(meta["prior_std"]), hidden=hidden,
+        prior_std=prior_std, hidden=hidden, prior=prior,
         factors=str(meta["factors"]), seed=0, paths=paths,
         mu=torch.nn.Parameter(torch.zeros(latent, dtype=torch.float32)),
         log_std=torch.nn.Parameter(torch.zeros(latent, dtype=torch.float32)),
+        prior_log_std=build_prior(prior_std, prior),
         trunk=Hypernet(latent, hidden, torch.Generator().manual_seed(0)),
         heads={path: torch.nn.Parameter(
             torch.zeros(k * k, hidden, dtype=torch.float32)) for path in paths})
@@ -607,6 +662,7 @@ def load(state: PloraState, payload: bytes) -> None:
             f"latent={state.latent}")
     state.mu.data.copy_(tensors["posterior.mu"])
     state.log_std.data.copy_(tensors["posterior.log_std"])
+    state.prior_log_std.data.copy_(tensors["prior.log_std"])
     state.trunk.load_state_dict(
         {key[len("trunk."):]: value for key, value in tensors.items()
          if key.startswith("trunk.")})

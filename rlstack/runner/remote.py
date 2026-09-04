@@ -268,7 +268,8 @@ def encode_token_batch(batch: TokenBatch) -> dict:
             "token_extras": {k: list(v) for k, v in batch.token_extras.items()},
             "doc_turn_extras": [[dict(m) for m in doc]
                                 for doc in batch.doc_turn_extras],
-            "microbatches_in_update": batch.microbatches_in_update}
+            "microbatches_in_update": batch.microbatches_in_update,
+            "documents_in_update": batch.documents_in_update}
 
 
 def decode_token_batch(row: Mapping) -> TokenBatch:
@@ -280,7 +281,8 @@ def decode_token_batch(row: Mapping) -> TokenBatch:
         postdata={k: tuple(v) for k, v in row["postdata"].items()},
         token_extras={k: tuple(v) for k, v in row["token_extras"].items()},
         doc_turn_extras=tuple(tuple(doc) for doc in row["doc_turn_extras"]),
-        microbatches_in_update=int(row["microbatches_in_update"]))
+        microbatches_in_update=int(row["microbatches_in_update"]),
+        documents_in_update=int(row["documents_in_update"]))
 
 
 def encode_train_stats(stats: TrainStats) -> dict:

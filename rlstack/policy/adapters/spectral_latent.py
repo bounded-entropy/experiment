@@ -21,6 +21,10 @@ recorded noise, exactly plora's reparameterization contract (I6).
 The frozen spectrum (U, sigma, V per site) is recomputed at install from the
 weight the trainer already holds and never ships — no factors artifact, as
 with plain spectral.
+
+The prior is plora's, recipe and all: `prior="fixed"` keeps the spec's
+prior_std, `prior="learned"` makes its log-scale a parameter the KL alone
+moves (empirical Bayes over the latent), watched as `spectral_prior_std`.
 """
 
 from __future__ import annotations
@@ -40,12 +44,14 @@ MEMBER_RECORD = "slatent_member"    # which ensemble member served it
 # lets one latent-KL loss price either adapter unchanged.
 KL_PROVIDED = "latent_kl"
 SIGMA_PROVIDED = "spectral_sigma_mean"    # posterior scale: here to be WATCHED
+PRIOR_PROVIDED = "spectral_prior_std"     # the prior's scale: constant when
+#                                           fixed, a trajectory when learned
 
 
 @adapter_type("spectral_latent")
 class SpectralLatent(AdapterType):
     serving = Mechanism.PUNICA
-    provides = frozenset({KL_PROVIDED, SIGMA_PROVIDED})
+    provides = frozenset({KL_PROVIDED, SIGMA_PROVIDED, PRIOR_PROVIDED})
     records = (EPS_RECORD, MEMBER_RECORD)
 
     def site_ok(self, meta: SiteMeta) -> bool:
@@ -76,7 +82,8 @@ class SpectralLatent(AdapterType):
 
     def param_groups(self, params) -> Mapping[str, list]:
         """`mapper` (trunk + heads, decayable) and `posterior` (mu, log_std,
-        never decayed) — plora's two groups, for plora's reason."""
+        never decayed) — plora's two groups, for plora's reason — plus
+        `prior` when the prior is learned, plora's third."""
         from rlstack.policy.adapters import spectral_latent_torch
         return spectral_latent_torch.param_groups(params)
 
@@ -90,10 +97,13 @@ class SpectralLatent(AdapterType):
 
 
 def spectral_latent(site: str, k: int = 16, latent: int = 32, members: int = 4,
-                    prior_std: float = 0.05, hidden: int = 128):
+                    prior_std: float = 0.05, hidden: int = 128,
+                    prior: str = "fixed"):
     """Sugar, beside spectral()/plora(): a distribution over spectral gains,
-    served as `members` ordinary rank-k adapters plus the mean."""
+    served as `members` ordinary rank-k adapters plus the mean. `prior` is
+    "fixed" (N(0, prior_std^2) as declared) or "learned" (prior_std is where
+    a learned scale STARTS; the KL moves it from there)."""
     from rlstack.spec.specs import AdapterSpec
     return AdapterSpec(adapter_type="spectral_latent", site=site, init={
         "k": k, "latent": latent, "members": members,
-        "prior_std": prior_std, "hidden": hidden})
+        "prior_std": prior_std, "hidden": hidden, "prior": prior})

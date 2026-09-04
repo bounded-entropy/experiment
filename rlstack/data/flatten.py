@@ -151,6 +151,12 @@ class TokenBatch:
     (a KL over parameters, which every microbatch would otherwise count again)
     is divided by this. pack() stamps it once the split is known; a
     hand-built batch is the degenerate single microbatch.
+
+    `documents_in_update` is how many documents the whole update holds, across
+    every microbatch — the count of OBSERVATIONS an evidence bound is taken
+    over (grpo_elbo prices a per-update KL once per document). pack() stamps
+    it beside the microbatch count; a hand-built batch (0, unstamped) is the
+    whole update, so it resolves to its own document count.
     """
 
     token_ids: tuple[int, ...]
@@ -162,8 +168,11 @@ class TokenBatch:
     token_extras: Mapping[str, tuple] = field(default_factory=dict)
     doc_turn_extras: tuple[tuple[Mapping[str, Any], ...], ...] = ()
     microbatches_in_update: int = 1
+    documents_in_update: int = 0
 
     def __post_init__(self) -> None:
+        if self.documents_in_update == 0:
+            object.__setattr__(self, "documents_in_update", len(self.doc_starts))
         n = len(self.token_ids)
         lengths = {
             "loss_mask": len(self.loss_mask),
@@ -202,8 +211,9 @@ def pack(items: Sequence[Doc], microbatch_tokens: int) -> list[TokenBatch]:
     logprob 0.0 (flatten).
 
     The split is only known once it is done, so every batch is STAMPED with the
-    final count afterwards: a loss adding a per-update term needs to know how
-    many times it is about to be asked (TokenBatch.microbatches_in_update).
+    final counts afterwards: a loss adding a per-update term needs to know how
+    many times it is about to be asked (TokenBatch.microbatches_in_update) and
+    how many observations the update holds (TokenBatch.documents_in_update).
     """
     if microbatch_tokens <= 0:
         raise DataError(f"microbatch_tokens must be positive, got {microbatch_tokens}")
@@ -224,7 +234,9 @@ def pack(items: Sequence[Doc], microbatch_tokens: int) -> list[TokenBatch]:
         used += flat.doc_len
     if current:
         batches.append(_concatenate(current))
-    return [replace(batch, microbatches_in_update=len(batches))
+    documents = sum(len(batch.doc_starts) for batch in batches)
+    return [replace(batch, microbatches_in_update=len(batches),
+                    documents_in_update=documents)
             for batch in batches]
 
 

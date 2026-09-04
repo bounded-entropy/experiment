@@ -20,6 +20,7 @@ from dataclasses import dataclass
 from typing import Sequence
 
 from rlstack.policy.adapters.base import Mechanism
+from rlstack.policy.adapters.plora import FIXED_PRIOR, PRIORS
 from rlstack.policy.siteschema import SiteMeta, SiteSchema, resolve
 from rlstack.registry import (
     ADAPTER_TYPES,
@@ -332,6 +333,36 @@ def check_plora_shapes_are_positive(
                 f"plora entry {name!r} declares prior_std={prior_std!r}; the "
                 f"prior is N(0, prior_std^2) and a non-positive scale has no "
                 f"KL to the posterior"))
+    return issues
+
+
+# The adapter types whose latent carries a prior — the ones the recipe check
+# reads. Registered strings, so the gate names them without importing torch.
+LATENT_ADAPTER_TYPES = ("plora", "spectral_latent")
+
+
+def _latent_entries(spec: ExperimentSpec) -> list[tuple[str, Mapping]]:
+    """Every bank entry whose adapter type carries a latent with a prior —
+    plora and its spectral twin — as (name, init). By adapter type, for
+    _plora_entries' reason."""
+    return [(name, adapter.init) for name, adapter in spec.policy.bank.items()
+            if adapter.adapter_type in LATENT_ADAPTER_TYPES]
+
+
+def check_latent_priors_are_a_recipe(
+        spec: ExperimentSpec, schema: SiteSchema) -> list[ValidationIssue]:
+    """A latent's prior is "fixed" or "learned" and nothing else (plora.PRIORS):
+    the word decides whether the prior's scale is a parameter, so an unknown
+    one would be silently frozen or silently trained. Absent means fixed —
+    the recipe an entry declared before there were two."""
+    issues = []
+    for name, init in _latent_entries(spec):
+        prior = init.get("prior", FIXED_PRIOR)
+        if prior not in PRIORS:
+            issues.append(_issue(
+                "latent-prior-unknown", f"policy.bank.{name}.init.prior",
+                f"entry {name!r} declares prior={prior!r}; a latent's prior "
+                f"is one of {PRIORS}"))
     return issues
 
 
@@ -687,6 +718,7 @@ CHECKS = (
     check_sites_do_not_overlap,
     check_plora_entries_name_their_factors,
     check_plora_shapes_are_positive,
+    check_latent_priors_are_a_recipe,
     check_hosts_exist,
     check_pool_names_are_unique,
     check_alternation_implies_zero_lag,

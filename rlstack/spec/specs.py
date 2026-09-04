@@ -315,7 +315,7 @@ def lora(site: str, r: int, tie: bool = False) -> AdapterSpec:
 def plora(site: str, k: int, latent: int = 32, members: int = 8,
           prior_std: float = 0.05, hidden: int = 128,
           factors: str | None = None, basis: str = "svd",
-          basis_seed: int = 0) -> AdapterSpec:
+          basis_seed: int = 0, prior: str = "fixed") -> AdapterSpec:
     """Probabilistic LoRA: a rank-k delta whose k x k core is GENERATED from a
     latent draw, so the policy is a distribution over adapters rather than one.
 
@@ -331,11 +331,17 @@ def plora(site: str, k: int, latent: int = 32, members: int = 8,
     VALUES steering random orthonormal directions drawn off `basis_seed`, so
     the two arms differ in the basis and nothing else. The artifact named by
     `factors` must be built with the same recipe (build_factors takes both).
+
+    `prior` picks the prior's recipe: "fixed" keeps N(0, prior_std^2) where
+    it was declared; "learned" makes the prior's scale a parameter the KL
+    alone moves — empirical Bayes over the latent, with `prior_std` as where
+    it starts (small) — so an ELBO-shaped loss (grpo_elbo) fits the posterior
+    and the prior together.
     """
     return AdapterSpec(adapter_type="plora", site=site, init={
         "k": k, "latent": latent, "members": members,
         "prior_std": prior_std, "hidden": hidden, "factors": factors,
-        "basis": basis, "basis_seed": basis_seed})
+        "basis": basis, "basis_seed": basis_seed, "prior": prior})
 
 
 def soft_prompt(site: str, n: int, d: int) -> AdapterSpec:

@@ -5,6 +5,6 @@ from rlstack.training.losses.base import (  # noqa: F401
     LossResult, PolicyOutputs, rails, token_tensors,
 )
 from rlstack.training.losses import (  # noqa: F401  (registers builtins)
-    grpo, grpo_latent_kl, gspo, opd, opsd, ppo, replay_distill, sdft,
+    grpo, grpo_elbo, grpo_latent_kl, gspo, opd, opsd, ppo, replay_distill, sdft,
     self_anchor, sft,
 )

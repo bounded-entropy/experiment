@@ -39,7 +39,7 @@ from rlstack import (
     plora, run_experiment, validate,
 )
 from rlstack.policy.adapters.plora import (
-    EPS_RECORD, KL_PROVIDED, MEMBER_RECORD, SIGMA_PROVIDED,
+    EPS_RECORD, KL_PROVIDED, MEMBER_RECORD, PRIOR_PROVIDED, SIGMA_PROVIDED,
 )
 from rlstack.policy.adapters.rollout import Levers, Request, ServingBuild
 from rlstack.registry import ADAPTER_TYPES
@@ -55,6 +55,7 @@ except ImportError:                                  # the client environment
 if torch is not None:
     from rlstack.policy.adapters import plora_factors, plora_torch
     from rlstack.policy.adapters.replay import ReplayRows, row_plan
+    from rlstack.training.losses.grpo_elbo import grpo_elbo
     from rlstack.training.losses.grpo_latent_kl import BETA, grpo_latent_kl
     from rlstack.training.losses import PolicyOutputs
 
@@ -93,7 +94,7 @@ class DeclarationTest(unittest.TestCase):
         self.assertEqual(entry.init, {
             "k": 16, "latent": 32, "members": 8, "prior_std": 0.05,
             "hidden": 128, "factors": FACTORS,
-            "basis": "svd", "basis_seed": 0})
+            "basis": "svd", "basis_seed": 0, "prior": "fixed"})
 
     def test_the_registry_holds_the_declaration_half(self) -> None:
         """Everything Phase 0 needs to reason about plora is reachable without
@@ -101,7 +102,8 @@ class DeclarationTest(unittest.TestCase):
         instance = ADAPTER_TYPES.get("plora").instance
         self.assertEqual(instance.serving, "punica")
         self.assertEqual(instance.records, (EPS_RECORD, MEMBER_RECORD))
-        self.assertEqual(instance.provides, {KL_PROVIDED, SIGMA_PROVIDED})
+        self.assertEqual(instance.provides,
+                         {KL_PROVIDED, SIGMA_PROVIDED, PRIOR_PROVIDED})
 
     def test_it_lives_only_at_a_weighted_site(self) -> None:
         """The frozen half IS the matrix's own singular directions, so a
@@ -178,18 +180,21 @@ class FlowTest(unittest.TestCase):
         self.assertTrue(stat.stored)
 
     def test_a_provide_nothing_requires_is_still_emitted(self) -> None:
-        """THE observability ruling, pinned: plora_sigma_mean feeds no loss and
-        has no consumer, and it STILL gets both nodes — so it reaches the
-        ledger per update and the run's dictionary describes it. An adapter
-        type declares what a reader should watch, not only what a loss eats."""
-        forward, stat = sorted(self.nodes(SIGMA_PROVIDED),
-                               key=lambda n: n.phase)
-        for node in (forward, stat):
-            self.assertFalse(node.feeds_loss)
-            self.assertEqual(node.consumers, ())
-        self.assertEqual(forward.phase, "forward")
-        self.assertEqual((stat.phase, stat.kind, stat.granularity),
-                         ("train", "stat", "update"))
+        """THE observability ruling, pinned: plora_sigma_mean (and the prior's
+        scale beside it) feeds no loss and has no consumer, and it STILL gets
+        both nodes — so it reaches the ledger per update and the run's
+        dictionary describes it. An adapter type declares what a reader
+        should watch, not only what a loss eats."""
+        for name in (SIGMA_PROVIDED, PRIOR_PROVIDED):
+            with self.subTest(provided=name):
+                forward, stat = sorted(self.nodes(name),
+                                       key=lambda n: n.phase)
+                for node in (forward, stat):
+                    self.assertFalse(node.feeds_loss)
+                    self.assertEqual(node.consumers, ())
+                self.assertEqual(forward.phase, "forward")
+                self.assertEqual((stat.phase, stat.kind, stat.granularity),
+                                 ("train", "stat", "update"))
 
     def test_the_forward_node_is_what_the_loss_resolves_against(self) -> None:
         """A stat twin is a report, not a column a loss may require: only the
@@ -225,6 +230,12 @@ class ValidateTest(unittest.TestCase):
 
     def test_the_prior_must_have_a_scale(self) -> None:
         self.assertIn("plora-bad-shape", self.codes(prior_std=0.0))
+
+    def test_the_prior_is_fixed_or_learned(self) -> None:
+        """The word decides whether the prior's scale trains, so an unknown
+        one is refused at the gate rather than silently frozen."""
+        self.assertEqual(self.codes(prior="learned"), [])
+        self.assertIn("latent-prior-unknown", self.codes(prior="flat"))
 
 
 # ---------------------------------------------------------------------------
@@ -269,6 +280,25 @@ class TurnExtrasTest(unittest.TestCase):
         self.assertTrue(all(b.microbatches_in_update == 2 for b in batches))
         one, = pack(docs[:1], microbatch_tokens=1000)
         self.assertEqual(one.microbatches_in_update, 1)
+
+    def test_pack_stamps_the_updates_document_count_on_every_batch(self) -> None:
+        """An evidence bound counts observations across the WHOLE update, so
+        every microbatch carries the update's document count — and a
+        hand-built batch, unstamped, is its own update."""
+        from rlstack import TokenBatch
+
+        docs = [(flatten(sealed("t", "abcd"), char_tokenize), {})
+                for _ in range(4)]
+        budget = 2 * docs[0][0].doc_len                 # exactly two per batch
+        batches = pack(docs, microbatch_tokens=budget)
+        self.assertEqual([len(b.doc_starts) for b in batches], [2, 2])
+        self.assertTrue(all(b.documents_in_update == 4 for b in batches))
+        one, = pack(docs[:1], microbatch_tokens=1000)
+        self.assertEqual(one.documents_in_update, 1)
+        by_hand = TokenBatch(token_ids=(1, 2), loss_mask=(1, 1),
+                             behavior_logprobs=(0.0, 0.0), segment_ids=(0, 1),
+                             doc_starts=(0, 1))
+        self.assertEqual(by_hand.documents_in_update, 2)
 
     def test_a_partial_per_document_tuple_is_refused(self) -> None:
         from rlstack.data.trajectory import DataError
@@ -350,6 +380,7 @@ class EmissionTest(unittest.TestCase):
         for entry in run.read_ledger():
             self.assertIn(KL_PROVIDED, entry["train"])
             self.assertIn(SIGMA_PROVIDED, entry["train"])
+            self.assertIn(PRIOR_PROVIDED, entry["train"])
 
     def test_the_run_describes_both_provides_to_a_reader(self) -> None:
         """dictionary.json is how a UI renders a run without a registry (I11),
@@ -486,10 +517,11 @@ def a_site_meta():
 
 
 def a_state(seed: int = 1, k: int = 3, latent: int = 4, hidden: int = 8,
-            members: int = 2, prior_std: float = 0.05):
+            members: int = 2, prior_std: float = 0.05, prior: str = "fixed"):
     return plora_torch.build(a_site_meta(), {
         "k": k, "latent": latent, "hidden": hidden, "members": members,
-        "prior_std": prior_std, "factors": FACTORS, "seed": seed})
+        "prior_std": prior_std, "prior": prior, "factors": FACTORS,
+        "seed": seed})
 
 
 def a_live_state(seed: int = 1, **kwargs):
@@ -537,7 +569,7 @@ class IdentityTest(unittest.TestCase):
         state = a_state()
         self.assertEqual(
             float(plora_torch.analytic_kl(state.mu, state.log_std,
-                                          state.prior_std)), 0.0)
+                                          state.prior_log_std)), 0.0)
 
     def test_the_kl_matches_the_closed_form(self) -> None:
         mu = torch.tensor([0.5, -0.25])
@@ -548,16 +580,20 @@ class IdentityTest(unittest.TestCase):
             + (math.exp(2 * float(ls)) + float(m) ** 2) / (2 * prior ** 2) - 0.5
             for m, ls in zip(mu, log_std))
         self.assertAlmostEqual(
-            float(plora_torch.analytic_kl(mu, log_std, prior)), expected,
+            float(plora_torch.analytic_kl(
+                mu, log_std, torch.tensor(math.log(prior)))), expected,
             places=5)
 
     def test_provide_returns_the_declared_tensors(self) -> None:
         state = a_live_state()
         provided = ADAPTER_TYPES.get("plora").instance.provide(state)
-        self.assertEqual(sorted(provided), sorted([KL_PROVIDED, SIGMA_PROVIDED]))
+        self.assertEqual(sorted(provided),
+                         sorted([KL_PROVIDED, SIGMA_PROVIDED, PRIOR_PROVIDED]))
         self.assertAlmostEqual(
             float(provided[SIGMA_PROVIDED].detach()),
             float(torch.exp(state.log_std).mean().detach()), places=6)
+        self.assertAlmostEqual(float(provided[PRIOR_PROVIDED].detach()),
+                               state.prior_std, places=6)
         self.assertGreater(float(provided[KL_PROVIDED].detach()), 0.0)
 
     def test_param_groups_split_the_mapper_from_the_posterior(self) -> None:
@@ -569,6 +605,77 @@ class IdentityTest(unittest.TestCase):
         self.assertEqual(
             sum(p.numel() for group in groups.values() for p in group),
             sum(p.numel() for p in state.parameters()))
+
+    def test_a_fixed_prior_trains_nothing(self) -> None:
+        """The default recipe: the prior's scale is a plain tensor — not a
+        parameter, in no group, off every gradient path — so a run that never
+        asked for empirical Bayes is the run it always was."""
+        state = a_live_state()
+        self.assertEqual(state.prior, "fixed")
+        self.assertNotIsInstance(state.prior_log_std, torch.nn.Parameter)
+        self.assertNotIn(id(state.prior_log_std),
+                         [id(p) for p in state.parameters()])
+        plora_torch.provide(state)[KL_PROVIDED].backward()
+        self.assertIsNone(state.prior_log_std.grad)
+
+    def test_a_learned_prior_is_its_own_group(self) -> None:
+        """Empirical Bayes: the prior's log-scale is ONE parameter, in a
+        third group so the spec can give it its own learning rate, and every
+        trainable tensor is still in exactly one group."""
+        state = a_state(prior="learned")
+        self.assertIsInstance(state.prior_log_std, torch.nn.Parameter)
+        groups = ADAPTER_TYPES.get("plora").instance.param_groups(state)
+        self.assertEqual(sorted(groups), ["mapper", "posterior", "prior"])
+        self.assertEqual([id(p) for p in groups["prior"]],
+                         [id(state.prior_log_std)])
+        self.assertEqual(
+            sum(p.numel() for group in groups.values() for p in group),
+            sum(p.numel() for p in state.parameters()))
+
+    def test_a_learned_prior_starts_where_the_fixed_one_sits(self) -> None:
+        """Nothing about init depends on the recipe: same scale, KL exactly
+        zero, so version 0 is the same identity element either way."""
+        fixed, learned = a_state(), a_state(prior="learned")
+        self.assertTrue(torch.equal(fixed.prior_log_std.detach(),
+                                    learned.prior_log_std.detach()))
+        self.assertEqual(float(plora_torch.provide(learned)[KL_PROVIDED]), 0.0)
+        self.assertAlmostEqual(
+            float(plora_torch.provide(learned)[PRIOR_PROVIDED]), 0.05)
+
+    def test_the_kl_is_stationary_in_the_prior_at_the_empirical_bayes_point(self) -> None:
+        """The KL's derivative in the prior's log-scale vanishes exactly where
+        prior_std^2 is the posterior's mean second moment — the fixed point a
+        learned prior is pulled to, and the reason the recipe is empirical
+        Bayes rather than a free scalar."""
+        state = a_live_state(prior="learned")
+        moment = (torch.exp(2 * state.log_std) + state.mu.pow(2)).mean()
+        state.prior_log_std.data = 0.5 * torch.log(moment.detach())
+        plora_torch.provide(state)[KL_PROVIDED].backward()
+        self.assertAlmostEqual(float(state.prior_log_std.grad), 0.0, places=5)
+        state.prior_log_std.grad = None
+        state.prior_log_std.data -= 1.0              # narrower than the mass
+        plora_torch.provide(state)[KL_PROVIDED].backward()
+        self.assertLess(float(state.prior_log_std.grad), 0.0)   # so: widen
+
+    def test_a_learned_prior_rides_the_payload_and_resumes(self) -> None:
+        """The prior's scale is trained state when learned, so emit ships it
+        and load restores it — and a serving side rebuilds the recipe."""
+        state = a_live_state(prior="learned")
+        state.prior_log_std.data += 0.7
+        payload = plora_torch.emit(state)
+        head, tensors = plora_factors.unpack_artifact(payload)
+        self.assertEqual(head["prior"], "learned")
+        self.assertIn("prior.log_std", tensors)
+        resumed = a_state(prior="learned")
+        plora_torch.load(resumed, payload)
+        self.assertTrue(torch.equal(resumed.prior_log_std.detach(),
+                                    state.prior_log_std.detach()))
+        plora_torch.install(a_model(), state)
+        served = plora_torch.resident(payload, {PATH: (state.u[PATH],
+                                                       state.a[PATH])})
+        self.assertEqual(served.prior, "learned")
+        self.assertTrue(torch.equal(served.prior_log_std.detach(),
+                                    state.prior_log_std.detach()))
 
     def test_the_hypernet_is_bias_free(self) -> None:
         """A bias would let a nonzero core survive z = 0 — a mean delta the KL
@@ -804,7 +911,7 @@ class LatentKlLossTest(unittest.TestCase):
         whole = grpo_latent_kl(self.outputs(state, logprobs), self.a_batch(1))
         split = grpo_latent_kl(self.outputs(state, logprobs), self.a_batch(4))
         kl = float(plora_torch.analytic_kl(state.mu, state.log_std,
-                                           state.prior_std))
+                                           state.prior_log_std))
         self.assertAlmostEqual(float(whole.loss) - float(split.loss),
                                BETA * kl * (1 - 1 / 4), places=6)
 
@@ -842,6 +949,78 @@ class LatentKlLossTest(unittest.TestCase):
             with self.subTest(parameter=name):
                 self.assertIsNotNone(parameter.grad)
                 self.assertGreater(float(parameter.grad.abs().sum()), 0.0)
+
+
+@needs_torch
+class ElboLossTest(unittest.TestCase):
+    def a_batch(self, documents: int = 1, microbatches: int = 1):
+        """One document's tokens, stamped as one of `documents` in an update
+        of `microbatches` — the stamps are what the loss reads."""
+        from rlstack import TokenBatch
+        return TokenBatch(
+            token_ids=(1, 2, 3, 4), loss_mask=(1, 1, 1, 1),
+            behavior_logprobs=(-0.5,) * 4, segment_ids=(0, 0, 0, 0),
+            doc_starts=(0,), postdata={"advantage": (1.0, 1.0, -1.0, -1.0)},
+            microbatches_in_update=microbatches,
+            documents_in_update=documents)
+
+    def outputs(self, state, logprobs):
+        return PolicyOutputs(
+            logprobs=logprobs,
+            provided=ADAPTER_TYPES.get("plora").instance.provide(state))
+
+    def test_the_surrogate_is_grpos_verbatim(self) -> None:
+        from rlstack.training.losses.grpo import grpo
+
+        state = a_state()                       # KL is exactly 0 at init
+        logprobs = torch.full((4,), -0.5)
+        plain = grpo(PolicyOutputs(logprobs=logprobs), self.a_batch())
+        both = grpo_elbo(self.outputs(state, logprobs), self.a_batch())
+        self.assertAlmostEqual(float(plain.loss), float(both.loss), places=7)
+        self.assertEqual(plain.mean_ratio, both.mean_ratio)
+        self.assertEqual(plain.logprob_gap, both.logprob_gap)
+
+    def test_the_kl_is_priced_once_per_observation(self) -> None:
+        """The bound's scale is the update's DOCUMENT count, not its
+        microbatch count: a microbatch holding one of four observations adds
+        KL/4, however the wave was split."""
+        state = a_live_state()
+        logprobs = torch.full((4,), -0.5)
+        kl = float(plora_torch.analytic_kl(state.mu, state.log_std,
+                                           state.prior_log_std))
+        alone = grpo_elbo(self.outputs(state, logprobs), self.a_batch(1, 1))
+        of_four = grpo_elbo(self.outputs(state, logprobs), self.a_batch(4, 2))
+        self.assertAlmostEqual(float(alone.loss) - float(of_four.loss),
+                               kl * (1 - 1 / 4), places=6)
+        split = grpo_elbo(self.outputs(state, logprobs), self.a_batch(4, 4))
+        self.assertAlmostEqual(float(of_four.loss), float(split.loss),
+                               places=7)
+
+    def test_there_is_no_beta(self) -> None:
+        """At one observation the KL enters whole: the bound at temperature
+        one, and the only weight it ever gets is 1 / documents."""
+        state = a_live_state()
+        logprobs = torch.full((4,), -0.5)
+        from rlstack.training.losses.grpo import grpo
+
+        plain = grpo(PolicyOutputs(logprobs=logprobs), self.a_batch())
+        whole = grpo_elbo(self.outputs(state, logprobs), self.a_batch(1))
+        kl = float(plora_torch.provide(state)[KL_PROVIDED])
+        self.assertAlmostEqual(float(whole.loss) - float(plain.loss), kl,
+                               places=6)
+
+    def test_the_gradient_reaches_a_learned_prior_and_not_a_fixed_one(self) -> None:
+        """Empirical Bayes through the bound: the KL is the prior's whole
+        gradient, so a learned prior moves under this loss and a fixed prior
+        stays exactly where the spec put it."""
+        logprobs = torch.full((4,), -0.5)
+        learned = a_live_state(prior="learned")
+        grpo_elbo(self.outputs(learned, logprobs), self.a_batch()).loss.backward()
+        self.assertIsNotNone(learned.prior_log_std.grad)
+        self.assertNotEqual(float(learned.prior_log_std.grad), 0.0)
+        fixed = a_live_state()
+        grpo_elbo(self.outputs(fixed, logprobs), self.a_batch()).loss.backward()
+        self.assertIsNone(fixed.prior_log_std.grad)
 
 
 @needs_torch

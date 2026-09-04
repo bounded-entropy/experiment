@@ -9,7 +9,9 @@ straight-through gains (spectral_torch's contract: the VALUE is exactly the
 k-sparse served delta, the GRADIENT is dense so every direction competes).
 
 Zero heads + mu = 0 + log_std = log(prior_std) make version 0 the base for
-EVERY latent, and KL(q||p) exactly zero — the identity element, again.
+EVERY latent, and KL(q||p) exactly zero — the identity element, again. The
+prior's scale is plora's build_prior: fixed, or a learned scalar in its own
+optimizer group.
 
 torch is imported at module scope — this file loads only from the adapter
 type's methods (STYLE rule 7).
@@ -27,12 +29,15 @@ import torch
 from safetensors.torch import load as st_load
 from safetensors.torch import save as st_save
 
-from rlstack.policy.adapters.plora_torch import Hypernet, analytic_kl
+from rlstack.policy.adapters.plora import FIXED_PRIOR, LEARNED_PRIOR
+from rlstack.policy.adapters.plora_torch import (
+    Hypernet, analytic_kl, build_prior,
+)
 from rlstack.policy.adapters.replay import (
     ReplayRows, SiteWrapper, join_site, leaf_module, leave_site,
 )
 from rlstack.policy.adapters.spectral_latent import (
-    EPS_RECORD, KL_PROVIDED, SIGMA_PROVIDED,
+    EPS_RECORD, KL_PROVIDED, PRIOR_PROVIDED, SIGMA_PROVIDED,
 )
 from rlstack.policy.adapters.spectral_torch import FROZEN_DTYPE, full_spectrum
 from rlstack.policy.siteschema import SiteMeta
@@ -51,24 +56,31 @@ class SlatentState:
     k: int
     latent: int
     members: int
-    prior_std: float
+    prior_std: float                        # the prior's scale at build
     hidden: int
     seed: int
     paths: tuple[str, ...]
     mu: torch.nn.Parameter                  # [latent]
     log_std: torch.nn.Parameter             # [latent]
+    prior_log_std: torch.Tensor             # [] — plora's build_prior
     trunk: Hypernet
     heads: dict[str, torch.nn.Parameter]    # path -> [m, hidden], zero-init
+    prior: str = FIXED_PRIOR                # "fixed" | "learned"
     u: dict[str, torch.Tensor] = field(default_factory=dict)      # [out, m]
     v: dict[str, torch.Tensor] = field(default_factory=dict)      # [in, m]
     sigma: dict[str, torch.Tensor] = field(default_factory=dict)  # [m]
     version: int = 0
 
     def parameters(self) -> list[torch.nn.Parameter]:
-        return [self.mu, self.log_std, *self.mapper()]
+        """What trains: the posterior, a learned prior, the mapper."""
+        return [self.mu, self.log_std, *self.prior_parameters(), *self.mapper()]
 
     def mapper(self) -> list[torch.nn.Parameter]:
         return [*self.trunk.parameters(), *self.heads.values()]
+
+    def prior_parameters(self) -> list[torch.nn.Parameter]:
+        """The prior's log-scale when it is LEARNED; nothing when it is fixed."""
+        return [self.prior_log_std] if self.prior == LEARNED_PRIOR else []
 
 
 def _draw_seed(seed: int, tag: str) -> int:
@@ -84,6 +96,7 @@ def build(sites: tuple[SiteMeta, ...], init: dict) -> SlatentState:
     k, latent = int(init["k"]), int(init["latent"])
     members, hidden = int(init["members"]), int(init["hidden"])
     prior_std = float(init["prior_std"])
+    prior = str(init.get("prior", FIXED_PRIOR))
     seed = int(init.get("seed", 0))
     heads: dict[str, torch.nn.Parameter] = {}
     for meta in sites:
@@ -100,9 +113,11 @@ def build(sites: tuple[SiteMeta, ...], init: dict) -> SlatentState:
     return SlatentState(
         k=k, latent=latent, members=members, prior_std=prior_std,
         hidden=hidden, seed=seed, paths=tuple(meta.path for meta in sites),
+        prior=prior,
         mu=torch.nn.Parameter(torch.zeros(latent, dtype=torch.float32)),
         log_std=torch.nn.Parameter(
             torch.full((latent,), math.log(prior_std), dtype=torch.float32)),
+        prior_log_std=build_prior(prior_std, prior),
         trunk=Hypernet(latent, hidden, torch.Generator().manual_seed(
             _draw_seed(seed, "slatent.trunk"))),
         heads=heads)
@@ -214,14 +229,21 @@ def _one_noise(noise: torch.Tensor) -> torch.Tensor | None:
 
 
 def provide(state: SlatentState) -> dict[str, Any]:
-    """The latent's KL to its prior (the shared latent_kl channel a gated
-    loss prices) and the posterior's mean scale, to be watched."""
-    return {KL_PROVIDED: analytic_kl(state.mu, state.log_std, state.prior_std),
-            SIGMA_PROVIDED: torch.exp(state.log_std).mean()}
+    """The latent's KL to its prior (the shared latent_kl channel a latent
+    loss prices), the posterior's mean scale, and the prior's scale — the
+    last two to be watched."""
+    return {KL_PROVIDED: analytic_kl(state.mu, state.log_std,
+                                     state.prior_log_std),
+            SIGMA_PROVIDED: torch.exp(state.log_std).mean(),
+            PRIOR_PROVIDED: torch.exp(state.prior_log_std)}
 
 
 def param_groups(state: SlatentState) -> dict[str, list]:
-    return {"mapper": state.mapper(), "posterior": [state.mu, state.log_std]}
+    """plora's groups: `mapper`, `posterior`, and `prior` when learned."""
+    groups = {"mapper": state.mapper(), "posterior": [state.mu, state.log_std]}
+    if state.prior == LEARNED_PRIOR:
+        groups["prior"] = state.prior_parameters()
+    return groups
 
 
 # ---------------------------------------------------------------------------
@@ -245,7 +267,7 @@ def install(model: torch.nn.Module, state: SlatentState) -> None:
         state.u[path] = u.to(weight.device, FROZEN_DTYPE)
         state.v[path] = v.to(weight.device, FROZEN_DTYPE)
         state.sigma[path] = sigma.to(weight.device)
-        for parameter in state.parameters():
+        for parameter in (*state.parameters(), state.prior_log_std):
             parameter.data = parameter.data.to(weight.device)
         join_site(model, path, SlatentSite, state)
 
@@ -302,6 +324,7 @@ def emit(state: SlatentState) -> bytes:
     tensors: dict[str, torch.Tensor] = {
         "posterior.mu": state.mu.data.cpu(),
         "posterior.log_std": state.log_std.data.cpu(),
+        "prior.log_std": state.prior_log_std.data.cpu(),
         "noise": noise.cpu(),
     }
     for key, value in state.trunk.state_dict().items():
@@ -316,7 +339,8 @@ def emit(state: SlatentState) -> bytes:
         tensors.update(member_peft(state, "mean", state.mu))
     head = json.dumps({
         "k": state.k, "latent": state.latent, "members": state.members,
-        "prior_std": state.prior_std, "hidden": state.hidden,
+        "prior_std": state.prior_std, "prior": state.prior,
+        "hidden": state.hidden,
         "paths": list(state.paths), "version": state.version},
         sort_keys=True, separators=(",", ":")).encode("utf-8")
     state.version += 1
@@ -337,6 +361,7 @@ def load(state: SlatentState, payload: bytes) -> None:
             f"the entry declares k={state.k}, latent={state.latent}")
     state.mu.data.copy_(tensors["posterior.mu"])
     state.log_std.data.copy_(tensors["posterior.log_std"])
+    state.prior_log_std.data.copy_(tensors["prior.log_std"])
     state.trunk.load_state_dict(
         {key[len("trunk."):]: value for key, value in tensors.items()
          if key.startswith("trunk.")})
