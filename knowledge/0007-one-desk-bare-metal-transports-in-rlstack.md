@@ -3,7 +3,7 @@
 | | |
 |---|---|
 | **Date** | 2026-09-04 |
-| **Status** | Proposed |
+| **Status** | Accepted (2026-09-04 review: Q2, Q3, Q4, Q4a, Q8, Q9 agreed; Q6 agreed with a rider, folded; Q1, Q5, Q7, Q10, Q11 stand on their recommendations) — in implementation |
 | **Author** | Claude Fable 5.1 (session: the SPAR introspection paper, 2026-09-04) |
 | **Touches** | `rlstack/runner/transports/` (NEW region: one file per wire substrate, `modal_cls.py` first), `rlstack/runner/remote.py` (a transport factory keyed by address scheme; `LocalTransport` stays), `rlstack/runner/desk.py` (`MetalService` boots BARE; the recipe is a desk-held, journaled row; `knock` refuses loudly without `boot_for`), `rlstack/data/stores/` (the observer's read-only Modal view folded in or retired), `deploy/desk.py` (NEW: the one standing desk and its doors), `deploy/modal_venue.py` (NEW: the metal container chassis and the campaign helpers), `deploy/concept_steer.py` (rewritten minimal — the proof of concept), `deploy/steer_l4.py` + `deploy/stress_fleet.py` (rewritten onto the chassis; their probes are the regression proof), `deploy/dapo_grpo.py` + `deploy/plora_l4.py` (retired, Q8), `deploy/ui.py`, `STYLE.md` rule 8 (one line: the new region; Samarth's edit), `ARCHITECTURE.md` (Wire, Desk, Builds, MetalService entries), `tests/test_architecture.py` (the region, and rule 7 pinned), `tests/` |
 | **Invariants** | I5 (topology is semantics-neutral: a venue owns addresses and images, never a recipe or a builder), I7 (the substrate is certified: a transport is a build-side implementation behind a protocol), I12 (a metal's capability is a birth fact — measured; its RECIPE becomes the desk's declaration, not the container's), I10 (the fleet journal is one record for one fleet) |
@@ -51,7 +51,7 @@
 - **Bare metal, the desk's recipe (Q4).** `MetalService.__init__`'s `builds` becomes optional: a metal with no recipe has an empty carve-able set until a carve request delivers one (`adopt_recipe` already exists). The desk holds the recipe as a journaled `recipe` event per metal name — set by the `deploy/desk.py::recipe` door (the operator's declaration: `--metal concept-a100 --engine max_model_len=4096,serves=steer,enforce_eager,enable_sleep_mode --learner checkpoint_activations`) or carried by `register_metal` when a metal file chooses to declare one — and the carve carries it, as today. ARCHITECTURE's "declared at bring-up from the deploy's constants — the metal's FIRST declaration" becomes "declared at the desk; a metal's constants are at most a proposal the desk journals". Q4a asks whether the recipe's adapter-type half should be DERIVED from demands instead.
 - **The metal chassis.** `deploy/modal_venue.py`: `metal_class(app, name, gpus, scheme)` returning the Modal class that `concept_steer.py`'s `MetalS` is today — bring-up (measure, store, the same-metal `LocalTransport` rule from #77), announce (register with the ONE desk, carrying `idle_s` and, optionally, a recipe), duties (stats, volume commit), the keepalive `serve` as the shift (ADR 0003 Q3), rebirth on a released container (ADR 0003 Q4), teardown. A venue's metal file is `MetalS = metal_class(APP, "concept-a100", ["A100-80GB:2", "H100:2"], …)` plus images. Also in the chassis: the campaign helpers — `submit_and_follow(spec, subdir)` (submit through the desk; follow `run_progress` to the extent), `progress`, `export_blob`, `wait_for_metal`.
 - **The knock (Q5).** The Modal chassis supplies `boot_for(name)` — `spawn()` the metal's keepalive, which is what `::up` does by hand today — so the desk's knock is explicit on every venue, and `Desk.knock` REFUSES loudly (a journaled `knock-refused` event and a returned reason) when neither `boot_for` nor a plane address exists, instead of returning `False` silently.
-- **Doors under a standing desk (Q6).** A campaign door submits and follows; it never releases. Idle metal is the desk's to release (ADR 0003). The CHECK venues (`steer_l4`, `stress_fleet`) keep an explicit `release` at the end of each door because "this metal released, the plane empty of MY metal" is their promise — but they assert emptiness of the metals they registered, not of the whole plane, which under one desk may hold other people's metal.
+- **Doors under a standing desk (Q6).** A campaign door submits and follows; it never releases. Idle metal is the desk's to release (ADR 0003). The CHECK venues (`steer_l4`, `stress_fleet`) keep an explicit `release` at the end of each door because "this metal released, the plane empty of MY metal" is their promise — but they assert emptiness of the metals they registered, not of the whole plane, which under one desk may hold other people's metal. **And an explicit release from a door is GUARDED (Q6, Samarth's rider):** like `decommission`, it is refused — journaled and returned with the running work NAMED — when any tenancy that is not the door's own is running on, or routing through, that metal; `force` stays an operator's verb at `deploy/desk.py` alone. A door tearing down metal it acquired never takes another experiment with it.
 - **The observer's store (Q7).** `deploy/ui.py`'s `VolumeReadStore` is retired: the UI container mounts the volume and runs `python -m rlstack ui /store` over `LocalStore` (the audit's finding that on a POSIX mount the class collapses to that). If a read-only Modal view is still wanted, it lives in `data/stores/modal_volume.py` behind `open_store`, covered by the fakes — never in `deploy/`.
 - **The hand-built venues (Q8).** `deploy/dapo_grpo.py` and `deploy/plora_l4.py` bypass the desk and construct hosts by hand in the driver's container. They are retired (deleted; history keeps them, their CONTEXT entries stand); the desk-shaped venues cover both shapes (#77 the plora problem, #78 tp+fsdp).
 - **The proof (Q9).** `deploy/concept_steer.py` rewritten to its constants, its recipe proposal, its images, `MetalS = metal_class(…)`, its four spec/plan/measurement functions, and its doors (`prompts`, `distill_set`, `train`, `measure`, `export`) — target ≤ 220 lines, every line either science or a door. `steer_l4.py` and `stress_fleet.py` rewritten the same way, and their metal doors (`steer_l4::probe`, `::check`; `stress_fleet::topology`, `::latejoin`, `::learner_sleep`) are the regression proof Samarth runs.
@@ -64,13 +64,13 @@
 
 ### Promises / non-promises
 
-- **Promises** — (1) `deploy/concept_steer.py` ≤ 220 lines with every remaining line science or a door; `steer_l4.py` and `stress_fleet.py` each lose their transport, desk and metal blocks (≥ 350 lines each). (2) Exactly ONE `Transport` implementation for Modal exists in the tree, under `rlstack/runner/transports/`; `git grep "class .*Transport" -- deploy` is empty. (3) `import rlstack` and the fakes suite stay stdlib-only, pinned by the new architecture test. (4) One desk app, one journal: `deploy/desk.py` is the only file defining a desk container; the three per-venue `Desk` classes and `FLEET_LOG`s are gone. (5) A metal constructed with no recipe registers, is listed, and carves correctly once the desk delivers a recipe — on fakes (`tests/test_desk.py`), with the recipe row journaled and rebuilt by `from_journal`. (6) `Desk.knock` on a metal with neither `boot_for` nor an address journals a refusal and returns it; on the Modal chassis `boot_for` spawns the keepalive (tested with a fake boot). (7) Every spec value in the rewritten venues canonicalizes to the same row as before the rewrite (a test compares `canonical_json` of `concept_steer.teacher_spec` / `student_spec` before and after, via a fixture of the pre-rewrite rows). (8) The fakes suite is green.
+- **Promises** — (1) `deploy/concept_steer.py` ≤ 220 lines with every remaining line science or a door; `steer_l4.py` and `stress_fleet.py` each lose their transport, desk and metal blocks (≥ 350 lines each). (2) Exactly ONE `Transport` implementation for Modal exists in the tree, under `rlstack/runner/transports/`; `git grep "class .*Transport" -- deploy` is empty. (3) `import rlstack` and the fakes suite stay stdlib-only, pinned by the new architecture test. (4) One desk app, one journal: `deploy/desk.py` is the only file defining a desk container; the three per-venue `Desk` classes and `FLEET_LOG`s are gone. (5) A metal constructed with no recipe registers, is listed, and carves correctly once the desk delivers a recipe — on fakes (`tests/test_desk.py`), with the recipe row journaled and rebuilt by `from_journal`. (6) `Desk.knock` on a metal with neither `boot_for` nor an address journals a refusal and returns it; on the Modal chassis `boot_for` spawns the keepalive (tested with a fake boot). (7) Every spec value in the rewritten venues canonicalizes to the same row as before the rewrite (a test compares `canonical_json` of `concept_steer.teacher_spec` / `student_spec` before and after, via a fixture of the pre-rewrite rows). (8) The fakes suite is green. (9) A door's release of a metal that carries another run's tenancy is refused with that run named, on fakes; the same release with only the door's own tenancy finished proceeds.
 - **Non-promises** — No metal is run by this ADR; the check venues' doors are the regression proof and Samarth runs them. Nothing here makes a second venue exist: `transport_for` has one real scheme, and `open_store` still has two backends. S3-as-a-store and multi-node FSDP are not touched (their own ADRs). The recipe's derivation from demands (Q4a) is asked, not built. Old per-venue journals are not migrated: a run placed by an old desk is resubmitted to the new one, which is a resume by identity.
 
 ### Interfaces
 
 - **`Transport`** (`remote.py`): unchanged. **`transport_for(address)`**: the one factory; a venue never constructs a transport by class again. **Addresses**: `modal://<app>/<cls>[#<host>]`, `local://<host>`; the grammar lives in `remote.py` beside the frames.
-- **The desk's doors**: `register_metal(name, gpu, devices, vram_gb, address, idle_s, builds=None)`; `recipe(name, builds)` (new, journaled); `release`, `status`, `liveness` as today. **`Desk.knock`**: `boot_for` or a loud refusal.
+- **The desk's doors**: `register_metal(name, gpu, devices, vram_gb, address, idle_s, builds=None)`; `recipe(name, builds)` (new, journaled); `release(name, reason, force=False)` — GUARDED by dependents like `decommission` (Q6); `status`, `liveness` as today. **`covers`** consults the listing's recipe `serves` against the spec's adapter types (Q4a). **`Desk.knock`**: `boot_for` or a loud refusal.
 - **`MetalService(metal, store, address_of, schema_for, transport_for, builds=None)`**: bare until the first carve or a registration reply carrying the desk's recipe.
 - **The chassis** (`deploy/modal_venue.py`): `metal_class(app, name, gpus, scheme, images)`, `desk()`, `submit_and_follow(spec, subdir, timeout_s)`, `wait_for_metal(name)`, `export_blob(run_id, section, name, version)`. Nothing semantics-bearing: it constructs specs it is handed and never builds one.
 - **`observe/`**: nothing new to render; the fleet view reads ONE journal.
@@ -137,71 +137,71 @@ def train(layer: int, teacher_run: str):
 Recommendation: yes to both. A transport is a wire substrate, one file per substrate with its heavy import at module scope and lazy loading from the package root — `engines/` and `learners/`' rule, and the place an `aws.py` or `runpod.py` lands later. `LocalTransport` is the protocol's enforcement (`json_roundtrip`), not a substrate, and the repo keeps fakes beside their protocol. `modal_cls.py`, not `modal.py`, so the module never shadows the package it imports (the `modal_volume.py` precedent).
 If the other branch (`deploy/modal_transport.py`): the venue folder keeps a protocol implementation and every new venue copies it in; rule 8's "nothing semantics-bearing lives in deploy/" is honored only nominally.
 
-> **Samarth:**
+> **Samarth:** not raised in the 2026-09-04 review; the recommendation stands unless Samarth objects.
 
 **Q2. ONE desk: the app `rlstack-desk`, one journal, every venue's metal registering with it, every campaign submitting to it; the per-venue desks and journals deleted, old journals left as history.**
 Recommendation: yes — it is #68's stated design. The cost is that the CHECK venues' "plane empty" promise becomes "MY metal released": under one desk the plane may hold someone else's metal, so `steer_l4::check` asserts that the metals it registered are released, not that nothing stands.
 If the other branch (keep per-venue desks, share only the chassis): the transports and metal chassis still deduplicate, but "how do multiple deploy scripts work" keeps its answer — they do not share metal — and #68 stays unbuilt.
 
-> **Samarth:**
+> **Samarth:** agree — one desk (2026-09-04).
 
 **Q3. Addresses carry the venue: `modal://<app>/<cls>[#<host>]`, and one `transport_for(address)` factory in `remote.py` replaces every per-venue `host_for` / `metal_for` / `transport_for` closure.**
 Recommendation: yes. One desk serving many metal apps must find the app in the address; today it is baked into each venue's transport class, which is exactly why one desk could not serve two venues. The journal's `address` fields become self-describing; old journals' `<scheme>://<host>` addresses are unreadable by the new desk, which is the "left as history" in Q2.
 If the other branch (keep `<scheme>://<host>` and a per-scheme registry the desk is configured with): the desk file grows a table of scheme → app, which is the same information in a worse place.
 
-> **Samarth:**
+> **Samarth:** agree (2026-09-04).
 
 **Q4. The recipe is the desk's: `MetalService` boots bare, `Desk.recipe(metal, builds)` is a journaled declaration set through a desk door (or carried by a registration that chooses to propose one), and a carve to a metal with no recipe is refused by name.**
 Recommendation: yes. The desk's row is already canon (ADR 0001 Q5c) and the metal already adopts it on every carve; making `builds` optional at construction and adding the `recipe` event is the whole change. The refusal is the honest fallback: a bare metal with no declared recipe cannot know what to serve.
 If the other branch (the metal keeps declaring at bring-up): `bring_up_metal` stays in every venue with its `serves=`, and the desk's canon is a copy of a venue constant.
 
-> **Samarth:**
+> **Samarth:** agree — desk-held, declared (2026-09-04).
 
 **Q4a. Should the recipe's adapter-type half be DERIVED from demands rather than declared?** `serves=("steer",)`, `enforce_eager`, the worker class, the V1 runner are exactly what a spec's adapter types DEMAND (`RolloutLowering.demands`, #77); only capacity knobs (`max_model_len`, `max_bundles`, `max_rank`, sleep mode) are genuinely declarations. Today `covers` (`desk.py:1274`) matches capability, base and shape and ignores `serves`, so a steer spec can be JOINED onto a listing whose engine does not serve steer and be refused late, at Phase 0 on the host.
 Recommendation: not in this ADR — declare now, and make `covers` consult the listing's recipe `serves` against the spec's adapter types so the join refuses EARLY (a one-rule change with a test). Derivation is a follow-up once a second adapter type's demands conflict with a first's on one build.
 If the other branch (derive now): the desk learns adapter types, which breaks its workload-blindness (#69) unless the campaign layer projects demands into the demand rows first — a bigger change than this ADR.
 
-> **Samarth:**
+> **Samarth:** agree — declare now; `covers` checks `serves` so the join refuses early; derivation is a follow-up (2026-09-04).
 
 **Q5. The Modal chassis supplies `boot_for` (spawn the keepalive), and `Desk.knock` refuses LOUDLY (journaled, returned) when it has neither `boot_for` nor an address.**
 Recommendation: yes. F3: the lazy-boot fallback is a Modal semantic hiding in the desk, and on a venue whose containers do not boot on a call the supervision loop fails as a no-op. Explicit on Modal, loud everywhere else.
 If the other branch: keep the fallback as the Modal default and document it; the first non-lazy venue discovers the silence in production.
 
-> **Samarth:**
+> **Samarth:** not raised in the 2026-09-04 review; the recommendation stands unless Samarth objects.
 
 **Q6. A campaign door never releases metal; the desk's idle rule does (ADR 0003). Only the check venues' doors end in an explicit release, scoped to their own metals.**
 Recommendation: yes. `concept_steer`'s `distill_set` / `train` / `measure` copy the check venues' take-down ceremony, which would tear down a standing fleet after every arm; under one desk that is wrong by construction. The operator's backstop is `deploy/desk.py::sweep`.
 If the other branch (every door releases what it acquired): a campaign of three arms boots the 32B three times, and two campaigns sharing a metal race each other's teardown.
 
-> **Samarth:**
+> **Samarth:** "Agree, but an experiment tearing down metal it acquired should obviously not tear it down if other experiments are still running on it" (2026-09-04). *Folded: an explicit release from a door is guarded by dependents like `decommission` — refused with the running work named; `force` is the desk's own door only (Decision, promise 9).*
 
 **Q7. `deploy/ui.py`'s `VolumeReadStore` is retired: the UI container mounts the volume and serves `python -m rlstack ui /store` over `LocalStore`.**
 Recommendation: yes. F4: a second Modal store backend outside `data/stores/`, uncovered by the fakes. On a mount the class is `LocalStore` with a locator. If a read-only SDK view is ever needed again (a UI host without a mount), it goes in `data/stores/modal_volume.py` behind `open_store`, with fakes coverage.
 If the other branch: keep it and file it under `data/stores/` now, which is more code for a case no venue has.
 
-> **Samarth:**
+> **Samarth:** not raised in the 2026-09-04 review; the recommendation stands unless Samarth objects.
 
 **Q8. `deploy/dapo_grpo.py` and `deploy/plora_l4.py` are retired (deleted; history and CONTEXT keep them).**
 Recommendation: yes. Both bypass the desk and hand-build hosts in the driver's container — the "campaigns carrying the architecture" shape Samarth ruled against on the a69 worktree ("Clean slate: delete every deploy script"). Their science is recorded (#61, #62, #64, #77) and their shapes are covered by the desk venues. The DAPO task-set builder (`tasks_dapo.py`) stays: it is content, not a venue.
 If the other branch (rewrite them onto the chassis): two more ~200-line venue files whose experiments are finished.
 
-> **Samarth:**
+> **Samarth:** agree — retire them (2026-09-04).
 
 **Q9. The proof is `concept_steer.py` at ≤ 220 lines on the chassis, a fakes-backed chassis test, and the check venues' doors re-run on metal by Samarth.**
 Recommendation: yes. The chassis test: a `FakeMetal` process-free stand-in (the `FakeEngineBuild` precedent) registered with a `Desk` over `LocalTransport` through `transport_for("local://…")`, a bare metal receiving its recipe, a spec submitted and followed to its extent — all on fakes, no Modal import. The metal re-runs (`steer_l4::probe` and `::check`, `stress_fleet::topology`, `::latejoin`, `::learner_sleep`) are the regression proof that the rewrite changed no number; they are Samarth's to run and this ADR is not Implemented until at least `steer_l4::check` has passed through the ONE desk.
 If the other branch (rewrite only `concept_steer`): three copies become two and the check venues keep their own desks, which is Q2's other branch by the back door.
 
-> **Samarth:**
+> **Samarth:** agree — all three venues on the chassis; the check venues' doors on metal before Implemented (2026-09-04).
 
 **Q10. Rule 7 is pinned by a test: no module-scope import of `torch`, `vllm`, `modal`, or of the heavy regions, anywhere in `rlstack/` outside those regions and `rlstack_engine/`.**
 Recommendation: yes — ten lines in `test_architecture.py`'s existing AST idiom (F5). `fsdp_torch.py`'s imports of `torch_learner` and `ranks` are inside the region and stay legal.
 If the other branch: the discipline holds by hand, and the first stray import in `transports/` is found by the image suite, not the local one.
 
-> **Samarth:**
+> **Samarth:** not raised in the 2026-09-04 review; the recommendation stands unless Samarth objects.
 
 **Q11. Byte-identity and the crash states, stated once.** No run identity changes: every spec value is unchanged (promise 7) and nothing here is hashed. The fleet journal moves to ONE file for NEW registrations; a desk restart rebuilds from it exactly as today (`from_journal` gains one event type, `recipe`, the latest per metal winning). A metal that boots while the desk is down registers on its next announce, as today. A carve that arrives at a bare metal before the desk has a recipe for it is refused, journaled, and retried on the next registration event like every parked placement — never a half-built host. A run placed by an old per-venue desk is not visible to the new desk; resubmitting the same spec to the new desk is a resume by identity (I3), which is the migration. Agree these are the obligations?
 
-> **Samarth:**
+> **Samarth:** not raised in the 2026-09-04 review; the obligations stand as stated.
 
 ## Outcome
 
