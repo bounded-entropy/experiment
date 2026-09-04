@@ -7,13 +7,16 @@ import tempfile
 import unittest
 from dataclasses import replace
 
-from common import arith_spec, arith_store
+from common import arith_spec, arith_store, cas_uri, generation_spec
 from rlstack import (
-    Topology, HostSpec, learner, pool, run_experiment,
+    Topology, GroupPlan, HostSpec, Plans, Replay, RunPlan, WavePlan,
+    encode, learner, pool, run_experiment,
     Seeds,
     FakeEngine, FakeLearner, PolicySpec, WarmStart, flatten, lora,
     fake_qwen_schema, run_experiment, trajectory_from_row,
 )
+from rlstack.data.stores.base import RunProgress, run_done, run_progress
+from rlstack.runner.loop import needs_of
 
 SCHEMA = fake_qwen_schema(4, base="Qwen/Qwen3-0.6B")
 
@@ -269,3 +272,97 @@ class BaseBindingTest(unittest.TestCase):
             arith_spec(self.train), SCHEMA, self.store,
             FakeEngine(base="Qwen/Qwen3-0.6B"), FakeLearner())
         self.assertEqual((report.completed, report.extent), (4, "train"))
+
+
+class GenerationOnlyTest(unittest.TestCase):
+    """ADR 0006 Part B: a run is daemons with resources, and the smallest run
+    is a Generator alone — no algo, no learner, no Trainer, no ledger."""
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.store, self.train, _ = arith_store(self._tmp.name)
+
+    def generate(self, **overrides):
+        """The teacher run: seals one rollout per planned wave, with no
+        learner handed to it at all."""
+        spec = generation_spec(self.train, **overrides)
+        return run_experiment(spec, SCHEMA, self.store, FakeEngine(), None), spec
+
+    def test_it_runs_and_seals_a_rollout_per_planned_wave(self) -> None:
+        report, spec = self.generate()
+        self.assertEqual((report.completed, report.extent), (4, "rollout"))
+        self.assertIsNone(report.resumed_from)
+
+        run = self.store.open_run(report.run_id)
+        self.assertEqual(run.read_ledger(), [])          # nothing commits
+        for index in range(1, 5):
+            self.assertEqual(len(run.read_rollout(index)), 4)
+        with self.assertRaises(FileNotFoundError):
+            run.read_rollout(5)
+        # ...and it is self-describing: manifest, dictionary, its own plan
+        self.assertEqual(
+            self.store.peek_manifest(report.run_id)["run_id"], report.run_id)
+        self.assertIsNotNone(self.store.peek_dictionary(report.run_id))
+        self.assertIsNotNone(self.store.peek_plan(report.run_id, "rollout"))
+        self.assertIsNone(self.store.peek_plan(report.run_id, "train"))
+
+    def test_the_store_says_it_is_done_without_a_ledger(self) -> None:
+        """The obligation the reaper rests on (Q8): done-ness is readable off
+        a run that never committed anything."""
+        report, _ = self.generate()
+        self.assertTrue(run_done(self.store, report.run_id))
+        self.assertEqual(run_progress(self.store, report.run_id),
+                         RunProgress("rollout", 4, 4))
+
+    def test_it_needs_a_generator_and_nothing_else(self) -> None:
+        _, spec = self.generate()
+        needs = needs_of(spec)
+        self.assertEqual([need.daemon.__name__ for need in needs], ["Generator"])
+        self.assertEqual((needs[0].plan, needs[0].pools), ("rollout", ("main",)))
+        self.assertFalse(needs[0].learner)
+        self.assertIsNone(needs[0].buffer)      # unpaced: nothing consumes it
+
+    def test_a_training_spec_plans_exactly_what_it_always_planned(self) -> None:
+        """The other half of the same promise: needs_of over a training spec
+        is the Trainer + Generator it has always been, paced by the lag."""
+        needs = needs_of(arith_spec(self.train))
+        self.assertEqual([need.daemon.__name__ for need in needs],
+                         ["Trainer", "Generator"])
+        self.assertTrue(needs[0].learner)
+        self.assertEqual(needs[1].buffer, 0)
+
+    def test_a_spec_that_needs_a_trainer_refuses_a_missing_learner(self) -> None:
+        with self.assertRaises(ValueError) as caught:
+            run_experiment(arith_spec(self.train), SCHEMA, self.store,
+                           FakeEngine(), None)
+        self.assertIn("learner", str(caught.exception))
+
+    def test_a_student_trains_by_replaying_the_teachers_rollouts(self) -> None:
+        """ADR 0005's shape, on fakes: an empty-bank teacher generates, and a
+        lora student's train plan replays `store://<teacher>/rollouts/<r>#<i>`
+        — both runs in one store, the student never sampling anything."""
+        teacher, _ = self.generate()
+        rows = self.store.open_run(teacher.run_id).read_rollout(1)
+
+        sft_plan = RunPlan(tuple(
+            WavePlan((GroupPlan(f"g{u}", tuple(
+                Replay(f"store://{teacher.run_id}/rollouts/{u}#{i}")
+                for i in range(len(rows)))),))
+            for u in range(1, 5)))
+        self.store.cas_put(encode(sft_plan))
+        student = arith_spec(
+            self.train, gen=None,
+            plans=Plans(train=cas_uri(encode(sft_plan))))
+
+        report = run_experiment(student, SCHEMA, self.store, FakeEngine(),
+                                FakeLearner())
+        self.assertEqual((report.completed, report.extent), (4, "train"))
+        run = self.store.open_run(report.run_id)
+        self.assertEqual([e["update"] for e in run.read_ledger()], [1, 2, 3, 4])
+        # the student sampled NOTHING: every trajectory it trained on is the
+        # teacher's, realized into its own waves under its own group keys
+        self.assertEqual([row["task"]["id"] for row in run.read_wave(1)],
+                         [row["task"]["id"] for row in rows])
+        with self.assertRaises(FileNotFoundError):
+            run.read_rollout(1)

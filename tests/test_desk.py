@@ -852,6 +852,30 @@ class ReapTest(DeskFixture):
         self.assertEqual([e for e in self.store.read_fleet_log()
                           if e.get("event") == "parked"], [])
 
+    def test_a_finished_generation_only_run_is_not_reparked(self) -> None:
+        """ADR 0006 Part B, Q8 — the one obligation the shape adds: a run with
+        NO LEDGER must read as finished off its sealed rollouts, or the reaper
+        would strand and re-deliver it forever once its host died."""
+        serving = self.stand_up("serve-a", "fleet://a", serves_pool=True,
+                                trains=False)
+        desk = self.desk()
+        desk.list_host("serve-a", serving.regimes, "fleet://a")
+
+        async def drive():
+            reply = await Campaigns(desk).submit(generation_spec(self.train))
+            await serving._adoptions[reply["run_id"]]
+            return reply
+        reply = go(drive())
+        self.assertTrue(desk.finished(reply["run_id"]))
+
+        self.transports["fleet://a"] = self.Dead()
+        verdicts = go(desk.reap(probes=1))
+        self.assertEqual(verdicts["listings"], {"serve-a": "reaped"})
+        self.assertEqual(verdicts["runs"], {})        # not work, not stranded
+        self.assertEqual(desk.parked(), {})
+        self.assertEqual([e for e in self.store.read_fleet_log()
+                          if e.get("event") == "parked"], [])
+
     def test_reap_rides_the_wire(self) -> None:
         dead = self.Dead()
         self.transports["fleet://gone"] = dead

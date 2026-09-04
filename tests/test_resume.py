@@ -16,7 +16,7 @@ import unittest
 from pathlib import Path
 from typing import Any
 
-from common import arith_spec, arith_store
+from common import arith_spec, arith_store, generation_spec
 from rlstack import (
     FakeEngine, FakeLearner, FinishEvent, LocalStore, fake_qwen_schema,
     run_experiment,
@@ -120,6 +120,48 @@ class ResumeEquivalenceTest(unittest.TestCase):
                                          FakeLearner())
                 self.assertEqual(resumed.run_id, run_id)
                 self.assertIsNotNone(resumed.resumed_from)
+                self.assertEqual(snapshot(LocalStore(tmp.name), run_id), reference)
+
+
+class GenerationOnlyResumeTest(unittest.TestCase):
+    """The same claim for a run with NO ledger (ADR 0006 Part B): a rollout is
+    sealed or absent, never half, so resume is "skip what is on disk" and the
+    directory a killed-and-resumed generation-only run leaves is the one a
+    straight run leaves."""
+
+    def straight(self) -> tuple[LocalStore, str]:
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        store, train, _ = arith_store(tmp.name)
+        report = run_experiment(generation_spec(train), SCHEMA, store,
+                                FakeEngine(), None)
+        return store, report.run_id
+
+    def test_crash_mid_generation_then_resume_is_byte_identical(self) -> None:
+        reference_store, run_id = self.straight()
+        reference = snapshot(reference_store, run_id)
+
+        for after in (0, 2):
+            with self.subTest(crash=f"write_rollout@{after}"):
+                tmp = tempfile.TemporaryDirectory()
+                self.addCleanup(tmp.cleanup)
+                _, train, _ = arith_store(tmp.name)
+                crashing = CrashingStore(tmp.name, "write_rollout", after, False)
+
+                with self.assertRaises(SimulatedCrash):
+                    run_experiment(generation_spec(train), SCHEMA, crashing,
+                                   FakeEngine(), None)
+
+                # fresh store handle, fresh engine: nothing survives but disk
+                resumed = run_experiment(generation_spec(train), SCHEMA,
+                                         LocalStore(tmp.name), FakeEngine(),
+                                         None)
+                self.assertEqual(resumed.run_id, run_id)
+                self.assertEqual((resumed.completed, resumed.extent),
+                                 (4, "rollout"))
+                # no ledger, so nothing to resume FROM: the Generator skips
+                # what is already sealed and the bytes still match
+                self.assertIsNone(resumed.resumed_from)
                 self.assertEqual(snapshot(LocalStore(tmp.name), run_id), reference)
 
 

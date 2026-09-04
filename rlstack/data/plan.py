@@ -60,11 +60,12 @@ class Sample:
 class Replay:
     """Take this trajectory: one already sealed, named by ref.
 
-    Three ref shapes, one resolver: `self://rollouts/<r>#<i>` (this run's own
+    Four ref shapes, one resolver: `self://rollouts/<r>#<i>` (this run's own
     generated wave), `store://<run_id>/waves/<u>#<i>` (another run's sealed
-    wave), `cas://<sha>#<i>` (a fixed trajectory file). Only the first can
-    answer "not yet" — the other two exist before the run starts, which is why
-    the submit gate can check them.
+    wave), `store://<run_id>/rollouts/<r>#<i>` (another run's sealed ROLLOUT —
+    what a generation-only run leaves), `cas://<sha>#<i>` (a fixed trajectory
+    file). Only the first can answer "not yet" — the others exist before the
+    run starts, which is why the submit gate can check them.
     """
 
     ref: str
