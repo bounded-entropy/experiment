@@ -13,13 +13,18 @@ scores the same walk with the hint at the head of the context, and
 from __future__ import annotations
 
 import asyncio
+import tempfile
 import unittest
 
 from common import char_tokenize, make_turn
+from test_resume import CrashingStore, SimulatedCrash, snapshot
 from rlstack import (
-    POST, Bundle, EnginePoolClient, FakeEngine, Group, HostSpec, Message,
-    Role, Rollout, SamplingSpec, Task, Topology, Wave, learner, pool,
-    run_pipeline,
+    POST, AlgoSpec, Bundle, EnginePoolClient, ExperimentSpec, FakeEngine,
+    FakeLearner, GenSpec, Group, GroupPlan, HostSpec, LocalStore, Mechanism,
+    Message, OptimSpec, Plans, PolicySpec, Replay, Role, Rollout, RunPlan,
+    Sample, SamplingSpec, Schedule, Seeds, Task, Topology, Wave, WavePlan,
+    encode, fake_qwen_schema, learner, pool, run_experiment, run_pipeline,
+    steer, write_tasks,
 )
 
 BUNDLE = Bundle(bundle_id="bundle:teacher0", policy_version={})
@@ -282,6 +287,163 @@ class SplitOrderTest(unittest.TestCase):
         self.assertEqual(part["teacher_logprobs"], whole["teacher_logprobs"])
         self.assertEqual(rest["reverse_kl"], whole["reverse_kl"])
         self.assertNotIn("teacher_logprobs", rest)     # only its own produces
+
+
+# ---------------------------------------------------------------------------
+# the shape end to end: the teacher's set, then a steer distilled from it
+# ---------------------------------------------------------------------------
+
+SCHEMA = fake_qwen_schema(4, base="Qwen/Qwen3-0.6B")
+RESIDUAL = frozenset({Mechanism.RESIDUAL})
+WAVES, ROWS = 4, 2
+STEER_RECORD = "steer_window"
+
+
+def concept_tasks(n: int = 4) -> list[Task]:
+    """A small corpus in `concept_prompts`' shape: the ask in the prompt, the
+    telling in meta["hint"]."""
+    return [Task(id=f"no-robots/{i:04d}", prompt=f"What is {i}+{i}?",
+                 meta={"hint": HINT, "concept": "happiness",
+                       "category": "Generation"})
+            for i in range(n)]
+
+
+def teacher_seeded(root: str) -> tuple[LocalStore, str, str]:
+    """A store holding the corpus and the teacher's rollout plan."""
+    store = LocalStore(root)
+    tasks = concept_tasks()
+    plan = RunPlan(tuple(
+        WavePlan((GroupPlan(f"w{u}", tuple(
+            Sample(tasks[(u * ROWS + i) % len(tasks)].id,
+                   "conditioned_teacher") for i in range(ROWS))),))
+        for u in range(WAVES)))
+    return (store, write_tasks(store, tasks),
+            store.cas_put(encode(plan)))
+
+
+def teacher_spec(tasks_uri: str, rollout_uri: str) -> ExperimentSpec:
+    """The teacher: a generation-only run with an EMPTY bank, so `main` is
+    the bare base and the hint is the whole of the conditioning (ADR 0005,
+    Q4). Its sealed rollouts ARE the trajectory set and its run_id is the
+    set's identity."""
+    return ExperimentSpec(
+        policy=PolicySpec(base="Qwen/Qwen3-0.6B", bank={}),
+        gen=GenSpec(envs=("conditioned_teacher",), tasks=(tasks_uri,),
+                    sampling=SamplingSpec(temperature=1.0, max_tokens=32)),
+        plans=Plans(train=None, rollout=rollout_uri),
+        algo=None,
+        topology=Topology(hosts=(HostSpec((pool("main"),)),)),
+        seeds=Seeds(master=5))
+
+
+def student_spec(train_uri: str) -> ExperimentSpec:
+    """One arm: the same base with ONE steer entry, SFT over the teacher's
+    rows, sampling nothing of its own."""
+    return ExperimentSpec(
+        policy=PolicySpec(base="Qwen/Qwen3-0.6B",
+                          bank={"v": steer("resid_pre.1", d=64)}),
+        gen=None,
+        plans=Plans(train=train_uri, rollout=None),
+        algo=AlgoSpec(loss="sft", post=(), optim=OptimSpec("adamw", lr=5e-3),
+                      schedule=Schedule(microbatch_tokens=64,
+                                        max_policy_lag=0)),
+        topology=Topology(hosts=(HostSpec((pool("main"),)),
+                                 HostSpec((learner(),)))),
+        seeds=Seeds(master=11))
+
+
+def sft_plan(teacher_run: str) -> RunPlan:
+    """Every row of the teacher's rollout u, replayed as update u's wave."""
+    return RunPlan(tuple(
+        WavePlan((GroupPlan(f"g{u}", tuple(
+            Replay(f"store://{teacher_run}/rollouts/{u}#{i}")
+            for i in range(ROWS))),))
+        for u in range(1, WAVES + 1)))
+
+
+class DistillEndToEndTest(unittest.TestCase):
+    """ADR 0005's two runs on fakes: an empty-bank teacher generates under
+    the hint, and a steer is SFT'd on what it sealed — in one store, the
+    student sampling nothing."""
+
+    def generate(self, root: str) -> tuple[LocalStore, str]:
+        store, tasks_uri, rollout_uri = teacher_seeded(root)
+        report = run_experiment(teacher_spec(tasks_uri, rollout_uri), SCHEMA,
+                                store, FakeEngine(), None)
+        return store, report.run_id
+
+    def distill(self, root: str, store: LocalStore, teacher_run: str,
+                write: LocalStore | None = None):
+        plan = encode(sft_plan(teacher_run))
+        store.cas_put(plan)
+        from common import cas_uri
+        return run_experiment(student_spec(cas_uri(plan)), SCHEMA,
+                              write or store, FakeEngine(plugins=RESIDUAL),
+                              FakeLearner())
+
+    def both(self, root: str):
+        store, teacher_run = self.generate(root)
+        return store, teacher_run, self.distill(root, store, teacher_run)
+
+    def test_the_teacher_seals_a_set_and_the_student_trains_on_it(self) -> None:
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        store, teacher_run, report = self.both(tmp.name)
+
+        teacher = store.open_run(teacher_run)
+        self.assertEqual(teacher.read_ledger(), [])        # nothing commits
+        rows = teacher.read_rollout(1)
+        self.assertEqual(len(rows), ROWS)
+        # the hint conditioned the sampling and is OUT of the record
+        for row in rows:
+            self.assertEqual(row["env_extras"]["hint"], HINT)
+            self.assertNotIn(HINT, "".join(m["content"] for m in row["messages"]))
+            self.assertEqual(row["task"]["meta"]["hint"], HINT)
+
+        run = store.open_run(report.run_id)
+        self.assertEqual((report.completed, report.extent), (WAVES, "train"))
+        self.assertEqual([e["update"] for e in run.read_ledger()],
+                         list(range(1, WAVES + 1)))
+        self.assertEqual([row["task"]["id"] for row in run.read_wave(1)],
+                         [row["task"]["id"] for row in rows])
+        with self.assertRaises(FileNotFoundError):
+            run.read_rollout(1)                            # it sampled nothing
+
+    def test_the_replayed_rows_carry_no_steer_window(self) -> None:
+        """The case the steer's default exists for (ADR 0005, Q3): the
+        teacher's bank was empty, so nothing recorded a window, and the
+        student's replay steers at every position rather than refusing."""
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        store, _, report = self.both(tmp.name)
+        rows = store.open_run(report.run_id).read_wave(1)
+        self.assertTrue(rows)
+        for row in rows:
+            for turn in row["turns"]:
+                self.assertNotIn(STEER_RECORD, turn["turn_extras"])
+
+    def test_crash_then_resume_is_byte_identical(self) -> None:
+        """The SFT run's obligation (ADR 0005, promise 2): the plan is
+        Replay leaves into sealed content and the window is a pure function
+        of the rows, so a killed-and-resumed run leaves a straight run's
+        bytes."""
+        straight = tempfile.TemporaryDirectory()
+        self.addCleanup(straight.cleanup)
+        _, _, report = self.both(straight.name)
+        reference = snapshot(LocalStore(straight.name), report.run_id)
+
+        crashed = tempfile.TemporaryDirectory()
+        self.addCleanup(crashed.cleanup)
+        store, teacher_run = self.generate(crashed.name)
+        with self.assertRaises(SimulatedCrash):
+            self.distill(crashed.name, store, teacher_run,
+                         write=CrashingStore(crashed.name, "append_ledger", 2))
+        resumed = self.distill(crashed.name, LocalStore(crashed.name),
+                               teacher_run)
+        self.assertEqual(resumed.run_id, report.run_id)
+        self.assertIsNotNone(resumed.resumed_from)
+        self.assertEqual(snapshot(LocalStore(crashed.name), resumed.run_id),
+                         reference)
 
 
 if __name__ == "__main__":
