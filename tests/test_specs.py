@@ -193,10 +193,12 @@ class TestVocabularies(unittest.TestCase):
                 parsed = parse(ref)
                 self.assertEqual((parsed.location, parsed.index),
                                  (location, index))
-        # and only this run's own rollouts may still answer "not yet"
+        # this run's own rollouts may answer "not yet", and so may another
+        # run's while it is still running (refs.py decides that); bytes cannot
         self.assertTrue(parse("self://rollouts/3#2").pending_allowed)
-        self.assertFalse(parse("store://a1b2c3/waves/7#0").pending_allowed)
-        self.assertFalse(parse("store://a1b2c3/rollouts/7#0").pending_allowed)
+        self.assertTrue(parse("store://a1b2c3/waves/7#0").pending_allowed)
+        self.assertTrue(parse("store://a1b2c3/rollouts/7#0").pending_allowed)
+        self.assertFalse(parse("cas://3fa9/anchors.jsonl#41").pending_allowed)
 
     def test_a_ref_rejects_anything_else(self) -> None:
         """An unknown location, and a row index that is not a row number."""

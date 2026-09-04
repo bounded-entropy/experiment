@@ -115,9 +115,11 @@ async def sample_wave(plan: WavePlan, *, index: int, tasks: Mapping[str, Task],
 def realize(entry: Waves, reader: RefReader) -> list[dict[str, Any]] | None:
     """One planned wave as sealed rows — or None while a leaf is still pending.
 
-    None is the trainer's whole await condition, and only a `self://` ref can
-    produce it: everything else was sealed before this run began and the submit
-    gate proved it resolvable. The rows come back tagged with THIS plan's group
+    None is the trainer's whole await condition. A `self://` ref produces it
+    while this run's Generator is still sealing; a `store://` ref produces it
+    while the run it names is still running (refs.py) — a consumer paces on
+    its source either way. A cas ref never does. The rows come back tagged
+    with THIS plan's group
     keys, never the keys they were sealed under, because a group is assigned at
     assembly (data/trajectory.py) — which is what lets one run regroup another
     run's trajectories without copying them.

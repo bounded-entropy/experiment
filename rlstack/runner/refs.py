@@ -25,7 +25,7 @@ import json
 from dataclasses import dataclass
 
 from rlstack.data.plan import PlanError
-from rlstack.data.stores.base import RunHandle, Store
+from rlstack.data.stores.base import RunHandle, Store, run_done
 
 SELF = "self://rollouts/"
 STORE = "store://"
@@ -46,9 +46,13 @@ class Ref:
 
     @property
     def pending_allowed(self) -> bool:
-        """Whether "not yet" is a legal answer here — true only for this run's
-        own rollouts, which a Generator is still producing."""
-        return self.location.startswith(SELF)
+        """May this ref answer "not yet"? This run's own rollouts, always: the
+        Generator is still making them. ANOTHER run's waves or rollouts, while
+        that run exists and its extent is unfinished: a consumer paces on its
+        source exactly as a Trainer paces on its own Generator (the Trainer's
+        one await polls the store, so nothing here needs to be woken). A cas
+        blob, never — it is bytes or it is not."""
+        return self.location.startswith((SELF, STORE))
 
 
 def parse(ref: str) -> Ref:
@@ -111,7 +115,16 @@ class RefReader:
         Both are sealed forever, so the read is a PEEK: opening the parent
         would attach to it, and attaching sweeps work its ledger has not
         committed — which a reader has no business doing to another run.
-        "Not yet" is not an answer here; only `self://` may say that.
+
+        "NOT YET" IS AN ANSWER HERE TOO, on one condition: the source run
+        exists and its extent is not done, so the row can still arrive. Then
+        None, and the Trainer's await polls for it — which is how a student
+        arm paces on a teacher run that is still generating, on other metal,
+        instead of failing at the first unsealed wave (found on the venue:
+        ADR 0005's arms could only start once the teacher had finished). A
+        run that does not exist names nothing, and a run that FINISHED
+        without that row never will have it; both stay plan errors, said
+        by name.
         """
         run_id, _, tail = location[len(STORE):].partition("/")
         section, _, index = tail.partition("/")
@@ -122,13 +135,17 @@ class RefReader:
                 f"{STORE}<run_id>/rollouts/<r>")
         rows = (self._store.peek_wave(run_id, int(index)) if section == "waves"
                 else self._store.peek_rollout(run_id, int(index)))
-        if rows is None:
+        if rows is not None:
+            return rows
+        if self._store.peek_manifest(run_id) is None:
             raise PlanError(
-                f"{location!r}: run {run_id!r} has sealed no {section[:-1]} "
-                f"{int(index)} — a store ref names data that already exists, "
-                f"which is what lets a plan naming it be checked before this "
-                f"run starts")
-        return rows
+                f"{location!r}: no run {run_id!r} exists in this store — a "
+                f"store ref names a run that was at least created")
+        if run_done(self._store, run_id):
+            raise PlanError(
+                f"{location!r}: run {run_id!r} reached its extent and sealed "
+                f"no {section[:-1]} {int(index)} — it never will")
+        return None                    # not yet: the source is still running
 
     def row(self, ref: str) -> dict | None:
         """One sealed row, or None when its wave is not sealed yet."""
