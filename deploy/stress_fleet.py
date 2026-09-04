@@ -3,7 +3,8 @@ that can show each: TP and FSDP with every adapter type, a tenant joining a
 learner mid-run, and bases that are not Qwen.
 
     modal run deploy/stress_fleet.py::bases           # five bases on single L4s, in parallel, no desk
-    modal deploy deploy/stress_fleet.py               # the desk and one L4:2 metal (tp=2, fsdp=2)
+    modal deploy deploy/desk.py                       # THE desk, once, for every venue
+    modal deploy deploy/stress_fleet.py               # one L4:2 metal (tp=2, fsdp=2)
     PYTHONUNBUFFERED=1 modal run deploy/stress_fleet.py::topology   # three tenants (lora / steer /
                                                       #   soft_prompt) through the desk, released
     PYTHONUNBUFFERED=1 modal run deploy/stress_fleet.py::latejoin   # A runs; B joins A's learner mid-run
@@ -11,15 +12,19 @@ learner mid-run, and bases that are not Qwen.
                                                       #   the learner on the other listing (ADR 0006 A)
     PYTHONUNBUFFERED=1 modal run deploy/stress_fleet.py::learner_sleep   # UNRUN: the fsdp=2 learner
                                                       #   hands both cards back and comes back (#82)
-    modal run deploy/stress_fleet.py::status / ::sweep / ::down --call-id <id>
+    modal run deploy/stress_fleet.py::down --call-id <id>
+    modal run deploy/desk.py::status / ::sweep        # the fleet, at the desk
 
     RLSTACK_STRESS_GPU=L4 RLSTACK_STRESS_TP=1 RLSTACK_STRESS_FSDP=1 modal deploy ...   # the 1x1 shape
     RLSTACK_HF_SECRET=huggingface modal run deploy/stress_fleet.py::bases                # gated bases
         (after: modal secret create huggingface HF_TOKEN=hf_...)
 
-Every door that acquires metal ends by releasing every metal through the desk
-and asserting the plane is empty (ADR 0004, promise 5). Everything
-semantics-bearing is in the specs; everything else here is venue (I5).
+Every door that acquires metal ends by releasing ITS OWN metal through the
+desk and asserting that metal is freed (ADR 0004 promise 5, scoped by ADR
+0007 Q2: one desk serves every venue, so the plane may hold someone else's
+card). The releases are GUARDED — this venue never tears down a run that is
+not its check's (Q6). Everything semantics-bearing is in the specs;
+everything else here is the chassis' (I5).
 """
 
 from __future__ import annotations
@@ -30,11 +35,14 @@ import time
 
 import modal
 
+from modal_venue import (
+    a_store, cpu_image_for, desk, gpu_image_for, hf_cache, metal_class,
+    metal_handle, progress_function, store_volume, submit_spec, take_down,
+    wait_for_metal,
+)
+
 APP = "rlstack-stress-fleet"
 app = modal.App(APP)
-
-store_volume = modal.Volume.from_name("rlstack-store", create_if_missing=True)
-hf_cache = modal.Volume.from_name("rlstack-hf-cache", create_if_missing=True)
 
 # The shape, as three flags read at deploy time on the client and inside the
 # container: the card(s) the metal is deployed on, the engine's width, the
@@ -45,29 +53,12 @@ FSDP = int(os.environ.get("RLSTACK_STRESS_FSDP", "2"))
 HF_SECRET = os.environ.get("RLSTACK_HF_SECRET", "")
 SECRETS = [modal.Secret.from_name(HF_SECRET)] if HF_SECRET else []
 
-cpu_image = (
-    modal.Image.debian_slim(python_version="3.12")
-    .pip_install("safetensors", "numpy")
-    .add_local_python_source("rlstack", "rlstack_engine")
-)
-
-gpu_image = (
-    modal.Image.debian_slim(python_version="3.12")
-    .pip_install("vllm==0.28.0", "torch==2.13.0", "transformers==5.16.1",
-                 "safetensors", "numpy")
-    .env({"VLLM_USE_FLASHINFER_SAMPLER": "0",
-          "VLLM_WORKER_MULTIPROC_METHOD": "spawn",
-          "OMP_NUM_THREADS": "1",
-          "HF_HOME": "/hf",
-          "PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:True",
-          "RLSTACK_STRESS_TP": str(TP), "RLSTACK_STRESS_FSDP": str(FSDP)})
-    .add_local_python_source("rlstack", "rlstack_engine")
-    .add_local_dir("rlstack/observe/web", remote_path="/root/rlstack/observe/web")
-)
+cpu_image = cpu_image_for()
+gpu_image = gpu_image_for({"RLSTACK_STRESS_TP": str(TP),
+                           "RLSTACK_STRESS_FSDP": str(FSDP)})
 
 BASE = "Qwen/Qwen3-0.6B"        # the fleet's base
 HIDDEN = 1024
-STORE = "modal://rlstack-store"
 TRAIN_TASKS = "cas://09499d32b51e5e1b2a644b1c65e01b44aa42ff1a5bfac78ead41f98f89f09c93"
 EVAL_TASKS = "cas://82ae4626dbb59a2c50e2b13cbe7250c5f1ddd02dfb81edc7495efb77759d420b"
 SCREENED_TASK = "dapo-math-17k/a6d38312-86c7-4022-b8d2-adcf19fa0c3a"
@@ -89,9 +80,9 @@ MAIN_GB = 7.2                   # per device; the spec declares the TOTAL across
 LEARNER_GB = 9.6
 
 METAL = "stress-l4"
-SCHEME = "stress"
+SUBDIR = "stress"
 IDLE_S = 1800.0
-FLEET_LOG = "fleet/stress.jsonl"
+MINE = (METAL,)                 # the metals THIS venue registers, and the only ones it releases
 
 # The base matrix (single L4 each, no desk). Gated bases need RLSTACK_HF_SECRET.
 BASES = (
@@ -103,267 +94,22 @@ BASES = (
 )
 
 
-# ---------------------------------------------------------------------------
-# the venue's transports (I5)
-# ---------------------------------------------------------------------------
-
-def blocking_ask(fn):
-    import concurrent.futures
-
-    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as one:
-        return one.submit(fn).result()
-
-
-class DeskTransport:
-    def __init__(self) -> None:
-        self._handle = None
-
-    def handle(self):
-        if self._handle is None:
-            self._handle = modal.Cls.from_name(APP, "Desk")()
-        return self._handle
-
-    async def call(self, verb: str, payload: dict) -> dict:
-        return await self.handle().desk.remote.aio(verb, payload)
-
-    def ask(self, verb: str, payload: dict) -> dict:
-        return blocking_ask(lambda: self.handle().desk_ask.remote(verb, payload))
-
-
-def metal_handle():
-    return modal.Cls.from_name(APP, "MetalS")()
-
-
-class MetalTransport:
-    def __init__(self, address: str) -> None:
-        self.address = address
-        self._handle = None
-
-    def handle(self):
-        if self._handle is None:
-            self._handle = metal_handle()
-        return self._handle
-
-    async def call(self, verb: str, payload: dict) -> dict:
-        return await self.handle().host.remote.aio(self.address, verb, payload)
-
-    def ask(self, verb: str, payload: dict) -> dict:
-        return blocking_ask(lambda: self.handle().host_ask.remote(
-            self.address, verb, payload))
-
-
-class MetalPlaneTransport:
-    def __init__(self, address: str) -> None:
-        self.address = address
-        self._handle = None
-
-    def handle(self):
-        if self._handle is None:
-            self._handle = metal_handle()
-        return self._handle
-
-    async def call(self, verb: str, payload: dict) -> dict:
-        return await self.handle().metal.remote.aio(verb, payload)
-
-    def ask(self, verb: str, payload: dict) -> dict:
-        return blocking_ask(lambda: self.handle().metal_ask.remote(verb, payload))
-
-
-def same_metal_transport(address: str):
-    """A host reaching a pool on its OWN metal goes in-process — LocalTransport
-    over the sibling host's own service (json both ways, admission at that
-    host's arbiter; the plora venue's shape, proven by the steer venue). Never
-    a Modal self-call: a host adopts on the container's loop and asks
-    reachability through the transport's SYNC verb, so a self-call would wait
-    on the loop it is blocking. A foreign scheme is another metal's."""
-    from rlstack.runner.remote import LocalTransport
-
-    if address.startswith(f"{SCHEME}://"):
-        return LocalTransport(_METAL_SERVICE["service"].service_for(address))
-    return MetalTransport(address)
-
-
-_METAL_SERVICE: dict = {}
-
-
-# ---------------------------------------------------------------------------
-# the desk
-# ---------------------------------------------------------------------------
-
-def a_store():
-    from rlstack import ModalVolumeStore
-
-    class StressDeskStore(ModalVolumeStore):
-        def append_fleet_event(self, entry) -> None:
-            self._append_line(FLEET_LOG, json.dumps(
-                entry, sort_keys=True, separators=(",", ":")))
-
-        def read_fleet_log(self):
-            try:
-                raw = self._read(FLEET_LOG).decode()
-            except FileNotFoundError:
-                return []
-            out = []
-            for line in raw.strip().splitlines():
-                try:
-                    out.append(json.loads(line))
-                except ValueError:
-                    continue
-            return out
-
-    return StressDeskStore("/store", volume=store_volume, locator=STORE)
-
-
-@app.cls(image=cpu_image, volumes={"/store": store_volume},
-         timeout=3600, min_containers=1, max_containers=1,
-         scaledown_window=1200)
-@modal.concurrent(max_inputs=32)
-class Desk:
-    @modal.enter()
-    def bring_up(self) -> None:
-        from rlstack.runner.campaign import Campaigns
-        from rlstack.runner.desk import Desk
-        from rlstack.runner.remote import RemoteHost, RemoteMetal
-
-        self.desk = Desk.from_journal(
-            a_store(),
-            host_for=lambda address: RemoteHost(MetalTransport(address)),
-            metal_for=lambda address: RemoteMetal(MetalPlaneTransport(address)),
-            idle_s=IDLE_S)
-        self.door = Campaigns(self.desk)
-        print(f"[desk] rebuilt from journal: {sorted(self.desk.listings)} "
-              f"/ metal plane: {sorted(self.desk.metal_remotes)} "
-              f"/ released: {sorted(self.desk.released)}", flush=True)
-
-    @modal.method()
-    async def desk(self, verb: str, payload: dict) -> dict:
-        return await self.door.serve(verb, payload)
-
-    @modal.method()
-    def desk_ask(self, verb: str, payload: dict) -> dict:
-        return self.door.answer(verb, payload)
-
-
-# ---------------------------------------------------------------------------
-# the metal: one container, tp=TP engines and fsdp=FSDP learners, released by the desk
-# ---------------------------------------------------------------------------
-
-def bring_up_metal():
-    from rlstack.policy.siteschema import hf_schema
-    from rlstack.runner.desk import MetalService
+def proposed_recipe():
+    """WHAT THIS METAL IS FOR, PROPOSED (ADR 0007, Q4): an engine that SERVES
+    all three adapter types this file stresses, at eager mode, and a plain
+    learner. The desk journals it as its own declaration; `deploy/desk.py::
+    recipe` can overwrite it, and whichever came last rides the carve."""
     from rlstack.runner.residents import Builds, EngineBuild, LearnerBuild
 
-    service = MetalService(
-        MetalService.measure(METAL), store=a_store(),
-        builds=Builds(
-            engine=EngineBuild(max_model_len=2048, max_bundles=8, max_rank=RANK,
-                               serves=("lora", "steer", "soft_prompt"),
-                               enforce_eager=True),
-            learner=LearnerBuild()),
-        address_of=lambda host_name: f"{SCHEME}://{host_name}",
-        schema_for=hf_schema,
-        transport_for=same_metal_transport)
-    _METAL_SERVICE["service"] = service
-    print(f"[{METAL}] up, bare: {service.metal.gpu} x{service.metal.devices} "
-          f"at {service.metal.vram_gb:g} GB; residual {service.residual()}",
-          flush=True)
-    return service
+    return Builds(
+        engine=EngineBuild(max_model_len=2048, max_bundles=8, max_rank=RANK,
+                           serves=("lora", "steer", "soft_prompt"),
+                           enforce_eager=True),
+        learner=LearnerBuild())
 
 
-async def announce(service) -> None:
-    from rlstack.runner.remote import RemoteDesk
-
-    metal = service.metal
-    told = await RemoteDesk(DeskTransport()).register_metal(
-        metal.name, metal.gpu, metal.devices, metal.vram_gb,
-        f"{SCHEME}://metal", builds=service.builds.row(), idle_s=IDLE_S)
-    print(f"[{METAL}] registered on the metal plane: {json.dumps(told)}", flush=True)
-
-
-async def metal_duties(service) -> None:
-    import asyncio
-
-    try:
-        await announce(service)
-    except Exception as refused:
-        print(f"[{METAL}] REGISTRATION REFUSED: {refused}", flush=True)
-    stats: dict[str, asyncio.Task] = {}
-    tick = 0
-    try:
-        while not service.released.is_set():
-            for host_service in list(service.services.values()):
-                host = host_service.host
-                if host.name not in stats:
-                    stats[host.name] = asyncio.create_task(host.run_stats())
-            await asyncio.sleep(30)
-            tick += 1
-            if tick % 2 == 0:
-                await store_volume.commit.aio()
-    finally:
-        for task in stats.values():
-            task.cancel()
-        await store_volume.commit.aio()
-
-
-@app.cls(image=gpu_image, gpu=GPU,
-         volumes={"/store": store_volume, "/hf": hf_cache},
-         timeout=86400, scaledown_window=int(IDLE_S), max_containers=1)
-@modal.concurrent(max_inputs=64)
-class MetalS:
-    @modal.enter()
-    async def bring_up(self) -> None:
-        self.stand_up()
-
-    def stand_up(self) -> None:
-        import asyncio
-
-        self.born = time.time()
-        self.metal_service = bring_up_metal()
-        self.duties = asyncio.create_task(metal_duties(self.metal_service))
-
-    def live(self):
-        """Reborn first if the desk RELEASED the metal standing here (a
-        released container is a zombie until the venue's scaledown)."""
-        if self.metal_service.released.is_set():
-            print(f"[{METAL}] reborn on a released container", flush=True)
-            self.stand_up()
-        return self.metal_service
-
-    @modal.method()
-    async def host(self, address: str, verb: str, payload: dict) -> dict:
-        return await self.live().service_for(address).serve(verb, payload)
-
-    @modal.method()
-    def host_ask(self, address: str, verb: str, payload: dict) -> dict:
-        return self.live().service_for(address).answer(verb, payload)
-
-    @modal.method()
-    async def metal(self, verb: str, payload: dict) -> dict:
-        return await self.live().serve(verb, payload)
-
-    @modal.method()
-    def metal_ask(self, verb: str, payload: dict) -> dict:
-        return self.live().answer(verb, payload)
-
-    @modal.method()
-    async def serve(self) -> dict:
-        """THE KEEPALIVE, as the shift (ADR 0003, Q3)."""
-        service = self.live()
-        await service.until_released()
-        try:
-            from modal.experimental import stop_fetching_inputs
-            stop_fetching_inputs()
-        except ImportError:
-            pass
-        return {"released": True, "metal": METAL,
-                "shift_s": round(time.time() - self.born, 1)}
-
-    @modal.exit()
-    def bring_down(self) -> None:
-        self.duties.cancel()
-        for teardown in self.metal_service.shutdown():
-            if not teardown.graceful:
-                print(teardown.line(), flush=True)
+MetalS = metal_class(app, APP, METAL, GPU, gpu_image, idle_s=IDLE_S,
+                     recipe=proposed_recipe(), secrets=SECRETS)
 
 
 # ---------------------------------------------------------------------------
@@ -446,23 +192,16 @@ def build_specs(names: list[str], updates: list[int], masters: list[int]) -> dic
     return rows
 
 
-@app.function(image=cpu_image, volumes={"/store": store_volume}, timeout=600)
-def ledgers(run_ids: list[str]) -> dict:
-    store_volume.reload()
-    store = a_store()
-    out = {}
-    for run_id in run_ids:
-        entries = store.peek_ledger(run_id)
-        out[run_id] = {"committed": int(entries[-1]["update"]) if entries else 0,
-                       "train": [dict(e.get("train", {})) for e in entries]}
-    return out
+ledgers = progress_function(app, cpu_image, name="ledgers", tail=8)
+"""Each run's committed updates and its train blocks — the chassis' one
+extent reader."""
 
 
 @app.function(image=cpu_image, timeout=300)
 def host_status(address: str) -> dict:
     """A listed host's own status — its roster, its residents — over the wire."""
-    from rlstack.runner.remote import RemoteHost
-    return RemoteHost(MetalTransport(address)).status()
+    from rlstack.runner.remote import RemoteHost, transport_for
+    return RemoteHost(transport_for(address)).status()
 
 
 @app.function(image=cpu_image, volumes={"/store": store_volume}, timeout=300)
@@ -714,14 +453,12 @@ def learner_sleep() -> None:
     """Can a SHARDED learner hand its devices back (#82)? — WRITTEN, UNRUN.
 
     Needs the fsdp=2 shape: `RLSTACK_STRESS_GPU=L4:2 RLSTACK_STRESS_FSDP=2`,
-    which is this venue's default. Takes no metal through the desk, so the
-    plane check at the end is a check on everything ELSE this venue has been
-    running — a door that leaves metal standing is what ADR 0003 is for.
+    which is this venue's default. It takes NO metal through the desk — the
+    probe runs on its own GPU function — so it releases nothing: there is
+    nothing of this door's to release, and under one desk a blanket sweep
+    would be someone else's outage (ADR 0007, Q6).
     """
-    report = sleep_probe.remote()
-    print(json.dumps(report, indent=1), flush=True)
-    if not plane_is_empty():
-        raise SystemExit("metal left standing")
+    print(json.dumps(sleep_probe.remote(), indent=1), flush=True)
 
 
 # ---------------------------------------------------------------------------
@@ -979,52 +716,10 @@ def bases(only: str = "") -> None:
 # the fleet doors
 # ---------------------------------------------------------------------------
 
-def desk():
-    from rlstack.runner.remote import RemoteDesk
-    return RemoteDesk(DeskTransport())
-
-
-def wait_for_metal(timeout_s: float = 900.0) -> dict:
-    deadline = time.time() + timeout_s
-    while time.time() < deadline:
-        held = desk().status().get("metal", {})
-        if METAL in held and held[METAL].get("plane"):
-            return held[METAL]
-        time.sleep(10)
-    raise SystemExit(f"{METAL} did not register within {timeout_s:.0f}s")
-
-
-def plane_is_empty() -> bool:
-    held = desk().status().get("metal", {})
-    standing = [name for name, row in held.items() if row.get("plane")]
-    print(f"[plane] standing: {standing or 'none'}", flush=True)
-    return not standing
-
-
-def release_everything(reason: str) -> list[str]:
-    import asyncio
-
-    held = desk().status().get("metal", {})
-    released = []
-    for name, row in sorted(held.items()):
-        if row.get("plane"):
-            told = asyncio.run(desk().release(name, reason=reason))
-            print(f"[release] {name}: {json.dumps(told)}", flush=True)
-            released.append(name)
-    return released
-
-
 def submit(name: str, row: dict, anchor: str | None = None) -> dict:
-    import asyncio
-
-    from rlstack.runner.remote import spec_from_json
-
-    reply = asyncio.run(desk().submit(spec_from_json(row), subdir="stress",
-                                      anchor=anchor))
-    print(f"[submit] {name}: {json.dumps(reply, default=str)[:400]}", flush=True)
-    if not reply.get("accepted"):
-        raise SystemExit(f"{name} was not accepted: {reply}")
-    return reply
+    """One spec through THE desk, named in the log line."""
+    print(f"[submit] {name}:", flush=True)
+    return submit_spec(row, SUBDIR, anchor)
 
 
 def await_runs(runs: dict[str, str], targets: dict[str, int],
@@ -1055,28 +750,6 @@ def report_rails(runs: dict[str, str], progress: dict) -> dict:
     return rails
 
 
-def take_down(call, reason: str) -> dict:
-    verdict: dict = {"released": release_everything(reason)}
-    status = desk().status()
-    row = status.get("metal", {}).get(METAL, {})
-    verdict["desk_says_released"] = bool(row.get("released")) and not row.get("plane")
-    verdict["listings_left"] = sorted(status.get("listings", {}))
-    if call is not None:
-        started = time.time()
-        try:
-            shift = call.get(timeout=600)
-            verdict["keepalive_returned"] = shift
-            print(f"[shift] the keepalive returned {json.dumps(shift)} "
-                  f"{time.time() - started:.1f}s after the release", flush=True)
-        except Exception as still:
-            verdict["keepalive_returned"] = f"NOT within 600s: {still}"
-    verdict["plane_empty"] = plane_is_empty()
-    print(json.dumps(verdict, indent=1), flush=True)
-    if not (verdict["desk_says_released"] and verdict["plane_empty"]):
-        raise SystemExit("metal left standing")
-    return verdict
-
-
 @app.local_entrypoint()
 def topology(master: int = 41) -> None:
     """Three tenants — lora, steer, soft_prompt — through the desk onto ONE
@@ -1084,11 +757,11 @@ def topology(master: int = 41) -> None:
     release. What this shows: every adapter type's rollout lowering on a
     sharded engine and its replay lowering on a sharded learner, three
     tenants deep."""
-    call = metal_handle().serve.spawn()
+    call = metal_handle(APP).serve.spawn()
     print(f"[topology] {METAL} serving: call {call.object_id} "
           f"(gpu {GPU}, tp {TP}, fsdp {FSDP})", flush=True)
     try:
-        print(json.dumps(wait_for_metal(), indent=1), flush=True)
+        print(json.dumps(wait_for_metal(METAL), indent=1), flush=True)
         names = ["lora", "steer", "soft_prompt"]
         rows = build_specs.remote(names, [UPDATES] * 3,
                                   [master, master + 1, master + 2])
@@ -1105,7 +778,7 @@ def topology(master: int = 41) -> None:
         print(json.dumps({"joined": joined, "tp": TP, "fsdp": FSDP,
                           "rails": rails}, indent=1), flush=True)
     finally:
-        take_down(call, "topology check done")
+        take_down(MINE, call, "topology check done")
 
 
 @app.local_entrypoint()
@@ -1115,10 +788,10 @@ def latejoin(master: int = 51) -> None:
     learner mid-run. What this shows: additive install on a learner that is
     training, requests of two tenants batching on one engine, A's rails
     undisturbed by B's arrival, both plans finishing."""
-    call = metal_handle().serve.spawn()
+    call = metal_handle(APP).serve.spawn()
     print(f"[latejoin] {METAL} serving: call {call.object_id}", flush=True)
     try:
-        print(json.dumps(wait_for_metal(), indent=1), flush=True)
+        print(json.dumps(wait_for_metal(METAL), indent=1), flush=True)
         rows = build_specs.remote(["lora", "steer"], [UPDATES_A, UPDATES],
                                   [master, master + 1])
         a = submit("A=lora", rows["lora"])
@@ -1141,7 +814,7 @@ def latejoin(master: int = 51) -> None:
                           "roster_after_b": roster, "rails": rails}, indent=1),
               flush=True)
     finally:
-        take_down(call, "latejoin check done")
+        take_down(MINE, call, "latejoin check done")
 
 
 @app.local_entrypoint()
@@ -1163,10 +836,10 @@ def remote_learner(master: int = 61) -> None:
 
     Samarth runs metal; this has never been run.
     """
-    call = metal_handle().serve.spawn()
+    call = metal_handle(APP).serve.spawn()
     print(f"[remote_learner] {METAL} serving: call {call.object_id}", flush=True)
     try:
-        print(json.dumps(wait_for_metal(), indent=1), flush=True)
+        print(json.dumps(wait_for_metal(METAL), indent=1), flush=True)
         rows = build_specs.remote(["lora"], [UPDATES], [master])
         reply = submit("anchored-on-main", rows["lora"], anchor="main")
         runs = {"anchored-on-main": reply["run_id"]}
@@ -1197,30 +870,12 @@ def remote_learner(master: int = 61) -> None:
             raise SystemExit("the learner host did not journal this tenancy's "
                              "two ends")
     finally:
-        take_down(call, "remote-learner check done")
-
-
-@app.local_entrypoint()
-def status() -> None:
-    told = desk().status()
-    print(json.dumps({"listings": told["listings"], "metal": told["metal"],
-                      "liveness": desk().liveness()}, indent=2))
-
-
-@app.local_entrypoint()
-def sweep() -> None:
-    release_everything("sweep")
-    if not plane_is_empty():
-        raise SystemExit("metal still standing after the sweep")
+        take_down(MINE, call, "remote-learner check done")
 
 
 @app.local_entrypoint()
 def down(call_id: str = "") -> None:
-    started = time.time()
-    release_everything("released by hand")
-    if call_id:
-        shift = modal.FunctionCall.from_id(call_id).get(timeout=600)
-        print(f"[shift] the keepalive returned {json.dumps(shift)} "
-              f"{time.time() - started:.1f}s after the release")
-    if not plane_is_empty():
-        raise SystemExit("metal still standing")
+    """Hand THIS venue's metal back by hand and, given the keepalive's call
+    id, watch it return."""
+    take_down(MINE, modal.FunctionCall.from_id(call_id) if call_id else None,
+              "released by hand")

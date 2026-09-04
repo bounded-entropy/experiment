@@ -57,6 +57,7 @@ from rlstack.runner.residents import (
 from rlstack.runner.remote import (
     DESK_DEFAULT, RemoteLearner, RemotePool,
     HostService, LocalTransport, RemoteHost, RemotePool, Transport, Undeclared,
+    serve_in_process, stop_serving_in_process,
 )
 
 # The desk's default idle limit, in seconds (ADR 0003): metal that nothing has
@@ -1595,7 +1596,7 @@ class MetalService:
             raise DeskError(f"host {host.name!r} is already on this metal")
         self.hosts[host.name] = host
         self.addresses[host.name] = address
-        self.services[address] = HostService(host)
+        self.route(address, HostService(host))
 
     def residual(self) -> list[float]:
         """Free GB per device, counting BUILT partitions (their fraction of
@@ -1682,7 +1683,7 @@ class MetalService:
             self.hosts[name] = host
             address = self.address_of(name)
             self.addresses[name] = address
-            self.services[address] = HostService(host)
+            self.route(address, HostService(host))
             # the host is in the books: an exit from here on finds it (Q7)
             loop = asyncio.get_running_loop()
             for resident in host.residents:
@@ -1754,7 +1755,7 @@ class MetalService:
             return {"decarved": False,
                     "error": f"no host {name!r} on metal {self.metal.name!r}"}
         address = self.addresses.pop(name)
-        self.services.pop(address, None)
+        self.unroute(address)
         teardowns = self.end_residents(host)
         return {"decarved": True, "host": name,
                 "partition": host.partition.row(),
@@ -1816,7 +1817,8 @@ class MetalService:
         teardowns = self.shutdown()
         self.hosts.clear()
         self.addresses.clear()
-        self.services.clear()
+        for address in list(self.services):
+            self.unroute(address)
         self.pending.clear()
         self.released.set()
         return {"released": True, "metal": self.metal.name,
@@ -1832,6 +1834,28 @@ class MetalService:
         await self.released.wait()
 
     # ---- routing and the Transport surface ----------------------------------
+
+    def route(self, address: str, service: HostService) -> None:
+        """A host on this metal becomes REACHABLE, two ways at once.
+
+        In this container's router, which is how a venue's door forwards an
+        addressed frame; and on the IN-PROCESS switchboard, which is how
+        anything inside this container reaching that address gets a
+        LocalTransport instead of a call to the container it is already in
+        (#77 — an hour of silence on the venue, because a host adopts on this
+        loop and asks reachability through the transport's SYNC verb). That
+        rule used to be a closure copied into every venue file; publishing it
+        here is what lets `transport_for` be the one factory everywhere (ADR
+        0007, Q3)."""
+        self.services[address] = service
+        serve_in_process(address, service)
+
+    def unroute(self, address: str) -> None:
+        """Nothing answers there any more: a decarve, a release, a teardown.
+        The switchboard entry goes with it, so a stale address never routes
+        to a host that has come down."""
+        self.services.pop(address, None)
+        stop_serving_in_process(address)
 
     def service_for(self, address: str) -> HostService:
         """The venue's router: host frames arrive addressed, and an address
