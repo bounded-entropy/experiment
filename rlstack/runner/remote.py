@@ -29,6 +29,15 @@ anywhere may join a standing learner and the learner's alternation is honored
 where the learner lives. The two hops are unchanged: admission at the host,
 then the resident.
 
+ADDRESSES ARE READ HERE AND NOWHERE ELSE (ADR 0007). `parse_address` is the
+grammar's one reader and `transport_for` the one factory: an address names its
+venue (`modal://<app>/<cls>[#<host>]`) or the in-process wire (`local://<host>`),
+and every resolver in the fleet — a desk's `host_for`/`metal_for`, a host's
+`transport_for` — is that single function. Real substrates live one per file
+under runner/transports/ and are imported inside the branch that names them;
+LocalTransport stays here because it is the contract's enforcement, not a
+substrate.
+
 Costs, stated: sample replies are non-streamed (one reply carries the whole
 event list), add_bundle ships payload bytes as base64, and a routed learner
 puts one frame on the wire per microbatch and per update (the TokenBatch out,
@@ -45,7 +54,7 @@ import json
 import threading
 import time
 from collections.abc import AsyncIterator, Mapping, Sequence
-from dataclasses import asdict
+from dataclasses import asdict, dataclass
 from typing import TYPE_CHECKING, Protocol
 
 from rlstack.data.flatten import TokenBatch
@@ -600,13 +609,28 @@ def json_roundtrip(frame: dict) -> dict:
 _json_roundtrip = json_roundtrip
 
 
+class Service(Protocol):
+    """The SERVER end of the wire: what a transport carries frames to.
+
+    Two verbs, mirroring the Transport's own: `serve` for the admitted ones
+    and `answer` for the admission-free ones. HostService, EngineService and
+    LearnerService wear it here; Desk, Campaigns and MetalService wear it on
+    the fleet plane, which is why one LocalTransport and one address grammar
+    reach all five."""
+
+    async def serve(self, verb: str, payload: dict) -> dict:
+        ...
+
+    def answer(self, verb: str, payload: dict) -> dict:
+        ...
+
+
 class LocalTransport:
     """Same-process transport that still crosses the serialization boundary
     (json round-trip both ways), so a fleet whose hosts share one process is
     indistinguishable, from above, from one whose hosts do not."""
 
-    def __init__(self, service: "HostService | EngineService | LearnerService"
-                 ) -> None:
+    def __init__(self, service: Service) -> None:
         self.service = service
 
     async def call(self, verb: str, payload: dict) -> dict:
@@ -616,6 +640,108 @@ class LocalTransport:
     def ask(self, verb: str, payload: dict) -> dict:
         return _json_roundtrip(
             self.service.answer(verb, _json_roundtrip(payload)))
+
+
+# ---------------------------------------------------------------------------
+# the address grammar, and the one factory that reads it
+# ---------------------------------------------------------------------------
+
+@dataclass(frozen=True)
+class Address:
+    """A wire address in parts. The grammar, stated once (ADR 0007, Q3):
+
+        modal://<app>/<cls>#<host>   one host's door inside a Modal class
+        modal://<app>/<cls>          that container's own plane (a desk, a
+                                     metal)
+        local://<host>               the IN-PROCESS wire: a service standing
+                                     in this very process under that name
+
+    THE VENUE IS IN THE ADDRESS. One desk serves metal in many apps, so the
+    app a frame goes to cannot be baked into a transport class the way each
+    venue's own transports baked it before this ADR — the journal's `address`
+    fields become self-describing, and a desk rebuilt from them can reach
+    every metal it ever registered."""
+
+    scheme: str
+    app: str = ""
+    cls: str = ""
+    host: str = ""
+
+
+def parse_address(address: str) -> Address:
+    """An address string as its parts — the grammar's ONE reader.
+
+    A `modal://` address that names no class is refused here, because a
+    half-address is a venue bug and the frame that would ride it is a lost
+    hour. An unfamiliar scheme parses (everything after `://` is its host)
+    and is refused by `transport_for`, which is where the closed set of
+    substrates actually lives."""
+    scheme, sep, rest = address.partition("://")
+    if not sep or not scheme or not rest:
+        raise ValueError(
+            f"{address!r} is not an address: the grammar is "
+            f"modal://<app>/<cls>[#<host>] or local://<host>")
+    if scheme != "modal":
+        return Address(scheme=scheme, host=rest)
+    path, _, host = rest.partition("#")
+    app, slash, cls = path.partition("/")
+    if not slash or not app or not cls:
+        raise ValueError(
+            f"{address!r} names no Modal class: a modal address is "
+            f"modal://<app>/<cls>[#<host>] — the app and the class are what "
+            f"one desk needs to reach metal in another venue's app")
+    return Address(scheme="modal", app=app, cls=cls, host=host)
+
+
+IN_PROCESS: dict[str, Service] = {}
+"""THE IN-PROCESS SWITCHBOARD: address -> the service standing HERE.
+
+An address answered inside this very process is answered IN-PROCESS, never
+over the wire. On Modal that is not an optimization but the difference
+between working and wedging: a host adopts on the container's event loop and
+asks reachability through the transport's SYNC verb, so a Modal self-call
+would wait on the loop it is itself blocking (#77, an hour of silence found
+on the venue). A metal publishes each host it carves here (MetalService.route)
+and a venue publishes its own plane; the factory below is the one reader."""
+
+
+def serve_in_process(address: str, service: Service) -> None:
+    """Publish `service` as the answer to `address` in this process."""
+    IN_PROCESS[address] = service
+
+
+def stop_serving_in_process(address: str) -> None:
+    """The inverse: nothing answers here any more (a decarve, a release)."""
+    IN_PROCESS.pop(address, None)
+
+
+def transport_for(address: str) -> Transport:
+    """THE ONE FACTORY: an address in, the transport that reaches it out.
+
+    Every resolver in the fleet is this function — a desk's `host_for` and
+    `metal_for`, a host's `transport_for`, a campaign's door — so a venue
+    never constructs a transport by class and never writes a scheme rule of
+    its own. The in-process switchboard is consulted FIRST (#77's rule, said
+    once), then the scheme names the substrate; the heavy region is imported
+    inside its branch, so `import rlstack` never imports a venue SDK
+    (STYLE rule 7)."""
+    standing = IN_PROCESS.get(address)
+    if standing is not None:
+        return LocalTransport(standing)
+    parsed = parse_address(address)
+    if parsed.scheme == "modal":
+        from rlstack.runner.transports.modal_cls import ModalClsTransport
+
+        return ModalClsTransport(parsed.app, parsed.cls, parsed.host)
+    if parsed.scheme == "local":
+        raise ValueError(
+            f"nothing answers {address!r} in this process: a local:// address "
+            f"IS the in-process wire, so it is reachable only where the "
+            f"service stands. Serving here: {sorted(IN_PROCESS)}")
+    raise ValueError(
+        f"no transport for scheme {parsed.scheme!r} ({address!r}): the wire "
+        f"substrates are one file each under rlstack/runner/transports/, and "
+        f"this fleet speaks 'modal' and 'local'")
 
 
 # ---------------------------------------------------------------------------
