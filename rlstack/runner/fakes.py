@@ -331,9 +331,14 @@ class FakeLearner:
     v0 with, so the two agree by construction (ADR 0006 Part B, Q6).
     """
 
-    def __init__(self, fsdp: int = 1, sleeps: bool = False) -> None:
+    def __init__(self, fsdp: int = 1, sleeps: bool = False,
+                 sleep_refusal: str = "") -> None:
         self.fsdp = fsdp            # build fact: a fake 2-shard learner is fsdp=2
         self.sleeps = sleeps        # build fact: see FakeEngine.sleeps
+        # and why not, when not: the real sharded learner's is a fact about
+        # its torch (fsdp_torch.probe_sharded_sleep), so a fake carries the
+        # string rather than deriving one
+        self.sleep_refusal = sleep_refusal
         self.naps: list[str] = []
         self.down = False
         self._tenants: dict[str, _FakeTenant] = {}

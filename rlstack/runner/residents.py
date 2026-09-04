@@ -332,6 +332,10 @@ def hello_of(birth: ResidentBirth, obj: Engine | Learner,
         row["tp"] = obj.tp
     else:
         row["fsdp"] = obj.fsdp
+        # why a learner will not sleep, when it will not: at fsdp > 1 that is
+        # a fact about the pinned torch, not about the width (#82), and the
+        # only place it is ever visible is this frame.
+        row["sleep_refusal"] = obj.sleep_refusal
     return row
 
 

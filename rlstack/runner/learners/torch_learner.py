@@ -59,10 +59,13 @@ class TorchLearner:
         self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
         self.dtype = dtype
         self.grad_clip = grad_clip
-        # build fact, mirrored from VllmEngine.sleeps: an unsharded learner can
-        # hand its device back (sleep/wake below). A resident's hello reports
-        # it and the host wires the alternation hooks only when it says so.
+        # build fact, mirrored from VllmEngine.sleeps: this learner can hand
+        # its device back (sleep/wake below). A resident's hello reports it and
+        # the host wires the alternation hooks only when it says so. The
+        # SHARDED build probes its torch for the hook a shard's move needs and
+        # may report false with a reason (fsdp_torch.probe_sharded_sleep).
         self.sleeps = True
+        self.sleep_refusal = ""
         self._asleep = False
         self.checkpoint_activations = checkpoint_activations
         self.fsdp = 1               # build fact: this build is unsharded
@@ -222,21 +225,32 @@ class TorchLearner:
         moments go to host RAM and the allocator's cache is returned — the
         learner's twin of vLLM's level-1 sleep (ADR 0002, Q8a). On an
         alternating host this is what keeps ONE base copy resident at a time.
-        Idempotent, and quiet on a learner that holds no base yet.
 
-        Best-effort on what it moves: the module tree (which every installed
-        replay half is wired into), each params object's `parameters()`, and
-        each optimizer's state tensors. An adapter type holding device tensors
-        outside those three is a stated gap, proven only on metal."""
+        ASYNC because the arbiter's evict/wake hooks are (ADR 0002, Q8), and
+        for no other reason: the move itself is synchronous, and lives in
+        `hand_the_device_back` so that the sharded build's chorus — whose
+        followers hear verbs on a blocking wire, not on a loop — can run the
+        SAME body rank 0 runs."""
+        self.hand_the_device_back()
+
+    async def wake(self) -> None:
+        """The inverse. The arbiter switches only at zero in-flight work, so
+        no forward meets a half-woken learner."""
+        self.take_the_device_back()
+
+    def hand_the_device_back(self) -> None:
+        """sleep's body, on whichever rank runs it. Idempotent, and quiet on a
+        learner that holds no base yet — which is what lets a host evict a
+        learner it has not yet installed a tenant on."""
         if self._model is None or self._asleep:
             return
         self._move_everything("cpu")
         torch.cuda.empty_cache()
         self._asleep = True
 
-    async def wake(self) -> None:
-        """The inverse. The arbiter switches only at zero in-flight work, so
-        no forward meets a half-woken learner."""
+    def take_the_device_back(self) -> None:
+        """wake's body, on whichever rank runs it. Idempotent, and quiet on a
+        learner that never slept."""
         if self._model is None or not self._asleep:
             return
         self._move_everything(self.device)
@@ -247,7 +261,34 @@ class TorchLearner:
         its own, so there is nothing to end; the sharded build overrides."""
 
     def _move_everything(self, device: str) -> None:
+        self.move_the_base(device)
+        self.move_the_tenants(device)
+
+    def move_the_base(self, device: str) -> None:
+        """The frozen base and its buffers across the bus, in one `Module.to`.
+
+        Nothing trainable rides along, by design: a tenant's deltas hang off
+        the site wrappers in a PLAIN LIST and are never registered as the
+        base's own parameters (`soft_prompt_torch.PromptBoundary` states the
+        rule for its boundary; `replay.SiteWrapper.installed` is the same list
+        for every module-replacing family). So this moves the base alone and
+        `move_the_tenants` moves the rest.
+
+        The SHARDED build overrides this: a shard's storage may not be swapped
+        without re-aliasing FSDP's own view of it (fsdp_torch.move_the_base).
+        """
         self._model.to(device)
+
+    def move_the_tenants(self, device: str) -> None:
+        """Every installed tenant's deltas, their grads, and their optimizer
+        moments — PER TENSOR and in place (`parameter.data = ...`), never
+        `Module.to`, because the optimizer holds these Parameter objects by
+        identity and a rebind would leave it stepping tensors nobody reads.
+
+        Best-effort on what it reaches: each params object's `parameters()`
+        and each optimizer's state tensors. An adapter type holding device
+        tensors outside those two is a stated gap, proven only on metal.
+        """
         for state in self._tenants.values():
             for params in state.params.values():
                 for parameter in params.parameters():
