@@ -130,8 +130,13 @@ def ui_app(roots: Sequence[Store | Root],
                     if len(memo) > 256:
                         del memo[min(memo, key=lambda k: memo[k][0])]
             return _json(start_response, payload, status)
-        # every page is the same document; the modules route on the pathname
-        start_response("200 OK", [("Content-Type", "text/html; charset=utf-8")])
+        # Every page is the same document; the modules route on the pathname.
+        # no-cache like the assets above, and for the same reason said the
+        # other way round: the document and the modules are ONE deployment,
+        # so a browser must never pair a held document with fetched modules —
+        # index.html names the elements the modules write into.
+        start_response("200 OK", [("Content-Type", "text/html; charset=utf-8"),
+                                  ("Cache-Control", "no-cache")])
         return [document()]
 
     return app
