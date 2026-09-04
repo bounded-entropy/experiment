@@ -5,9 +5,9 @@
 | **Date** | 2026-09-04 |
 | **Status** | Proposed |
 | **Author** | Claude Fable 5.1 (session: the SPAR introspection paper, 2026-09-04) |
-| **Touches** | `data/tasks/` (one new dataset file, one new content verb), `inference/environments/` (two one-file environments), `training/post/` (two processors in the existing shape), `policy/adapters/steer.py` + `steer_torch.py` + `steer_vllm.py` (the window: a symbolic edge, a bank-declared default), `policy/adapters/rollout.py` (`Request.prompt_len`), `policy/adapters/replay.py` (`ReplayRows.prompt_lens`), `runner/learners/torch_learner.py` (threads it, adapter-blind), `runner/engines/vllm_engine.py` + `runner/fakes.py` (fill `prompt_len`), `runner/measure.py` (a measurement may route to a second pool), `spec/specs.py` (sugar), `deploy/concept_steer.py` (the venue), `tests/` |
+| **Touches** | `data/tasks/` (one new dataset file), `inference/environments/` (two one-file environments), `training/post/` (two processors in the existing shape), `policy/adapters/steer.py` + `steer_torch.py` + `steer_vllm.py` (the window: a symbolic edge, a bank-declared default), `policy/adapters/rollout.py` (`Request.prompt_len`), `policy/adapters/replay.py` (`ReplayRows.prompt_lens`), `runner/learners/torch_learner.py` (threads it, adapter-blind), `runner/engines/vllm_engine.py` + `runner/fakes.py` (fill `prompt_len`), `runner/measure.py` (a measurement may route to a second pool), `spec/specs.py` (sugar), `deploy/concept_steer.py` (the venue), `tests/` |
 | **Invariants** | I3 (the hint and the window are content and spec, so they hash), I6 (a replayed row the policy never sampled has no record — what fills it is declared, never guessed), I9 (a processor scores through a declared pool under privileged conditioning — hinted + teacher, combined), I5 (a 32B student is new metal territory; the spec says nothing about where) |
-| **CONTEXT** | extends #40 (the scoring verb, hinted logprobs), #47 (the teacher is a pool), #60 (a dataset becomes content), #70 (measurement outside the run), #77 / ADR 0004 (the steer; Q2's "no directive = every position" becomes "no directive = the bank entry's window, default every position") |
+| **CONTEXT** | extends #40 (the scoring verb, hinted logprobs), #47 (the teacher is a pool), #60 (a dataset becomes content), #70 (measurement outside the run), #77 / ADR 0004 (the steer; Q2's "no directive = every position" becomes "no directive = the bank entry's window, default every position"). DEPENDS ON ADR 0006 (a run is daemons with resources): the teacher's trajectory set is a generation-only RUN, not a content file |
 
 ## Original prompt
 
@@ -65,13 +65,15 @@ nothing". Measurement lives outside the run (#70, `runner/measure.py`). A
 
 **What does not exist, file and line.**
 
-1. *Nothing writes a trajectory set.* `refs.py:97` reads `cas://<sha>` as
-   jsonl rows and `write_tasks` (`data/tasks/base.py:27`) writes a TASK set,
-   but no verb turns a sealed `Wave` into the cas file a Replay leaf reads —
-   the inverse of the reader was never needed, because every replay so far
-   pointed into another run's `waves/`. A generation-only run cannot make
-   one either: `loop.py:115` refuses `algo=None` (the Sealer daemon is an
-   open thread).
+1. *The teacher cannot sample as a RUN of its own.* The right shape for
+   the trajectory set is a generation-only run — a spec with `algo=None`, a
+   rollout plan, an empty bank — whose sealed `rollouts/` the SFT runs
+   replay by ref. The spec allows it and the store keeps it (attach never
+   sweeps rollouts), but nine places in the runner hard-code the experiment
+   shape — the `algo=None` refusal at `loop.py:115` is only the first —
+   and the ref grammar cannot name another run's rollouts. That audit and
+   its fix are ADR 0006, which this ADR depends on; no Sealer is needed,
+   because `write_rollout` is already atomic and never refused.
 2. *No environment samples from a non-policy pool under a hint and seals the
    hint OUT.* `math_single_turn` samples the policy; `teacher_logprobs` and
    `hinted_logprobs` SCORE. The teacher's completions have to be sampled
@@ -111,17 +113,19 @@ many teacher samples a 5120-wide vector needs to saturate.
 ## Decision
 
 Two runs of machinery, in the repo's vocabulary. First, **the teacher's
-trajectory set becomes content**: a `concept_prompts` task set whose tasks
-carry the user prompt (chat-templated, no system block, thinking off) and the
-happiness system block as `meta["hint"]`; a `conditioned_teacher` environment
-that samples the "teacher" pool under hint + prompt and seals prompt + turn;
-`write_trajectories` putting the sealed wave in the CAS as the jsonl the ref
-reader already reads; a venue door that runs `sample_wave` over the corpus
-through a bare Qwen3-32B and prints the uri. Second, **the student is an
-ordinary SFT run**: `Plans.rollout=None`, a train plan of `Replay` leaves into
-that uri, loss `sft`, an empty post pipeline, a bank of ONE steer entry at ONE
-anchor boundary (`resid_pre.10` / `.32` / `.54`, `d=5120`), one run per anchor,
-the same plan bytes in all three so only the bank differs. The steer gains
+trajectory set is a generation-only run** (ADR 0006): a `concept_prompts`
+task set whose tasks carry the user prompt (chat-templated, no system block,
+thinking off) and the happiness system block as `meta["hint"]`; a
+`conditioned_teacher` environment that samples the "teacher" pool under hint
++ prompt and seals prompt + turn; a spec with `algo=None`, an empty bank, a
+rollout plan of `Sample` leaves over the corpus, `main` and `teacher` both
+declared on the bare Qwen3-32B, submitted through the desk like any run —
+its sealed `rollouts/` are the set, and its `run_id` is the set's identity.
+Second, **the student is an ordinary SFT run**: `Plans.rollout=None`, a train
+plan of `Replay("store://<teacher_run>/rollouts/<r>#<i>")` leaves, loss
+`sft`, an empty post pipeline, a bank of ONE steer entry at ONE anchor
+boundary (`resid_pre.10` / `.32` / `.54`, `d=5120`), one run per anchor, the
+same plan bytes in all three so only the bank differs. The steer gains
 what item 3–4 above need: a **bank-declared window** (`init["window"]`, one of
 `all` / `prompt` / `completion`, default `all` — absent from `init` when
 default, so every existing steer spec keeps its identity), which the rollout
@@ -153,10 +157,6 @@ the fallback if SFT's target proves too loose.
   tokenizer, so hint + prompt concatenated raw (the engine's v0 prompt rule,
   #60) is byte-for-byte what the chat template would have produced. Heavy
   imports inside the function (rule 7); registered in `__main__.BUILDERS`.
-- **Touched** — `rlstack/data/tasks/base.py`: `write_trajectories(store,
-  wave) -> str` beside `write_tasks` — `wave_to_rows` as canonical jsonl,
-  `cas_put`, the sha is the set's identity. The reader is `refs.py`'s CAS
-  branch, unchanged (Q4 asks whether the verb is filed right).
 - **Touched** — `rlstack/inference/environments/conditioned_teacher.py`
   (new): `sample` the "teacher" pool with `[hint_for(task), prompt]`, return
   `Rollout(task, messages=[prompt, turn.message], turns=[turn],
@@ -210,9 +210,10 @@ the fallback if SFT's target proves too loose.
   "teacher" on the same engine as "main" is one dict entry. `Measurement`
   gains nothing.
 - **Touched** — `deploy/concept_steer.py` (new venue, `stress_fleet.py`'s
-  desk shape): doors `prompts` (build the task set), `distill_set` (the
-  teacher's trajectory set through the standing serving host, prints the
-  uri), `train --layer --window` (submit one arm through the desk), `measure`
+  desk shape): doors `prompts` (build the task set), `distill_set` (submit
+  the teacher's generation-only spec through the desk and print its run_id;
+  the SFT specs name it), `train --layer --window` (submit one arm through
+  the desk), `measure`
   (one `measure_run` pass, by hand or cron), `export --run_id --version`
   (the vector's safetensors to the volume for the paper's harness), and
   `sweep` / `status` as every venue has. Everything semantics-bearing is in
@@ -222,13 +223,13 @@ the fallback if SFT's target proves too loose.
   to the teacher (see non-promises), and `opd` requires the column the new
   processor produces. `training/post/teacher_logprobs.py` and
   `hinted_logprobs.py`: the new processor is beside them, not inside them.
-  `data/plan.py`, `runner/refs.py`, `runner/assemble.py`: the Replay leaf
-  and the CAS ref were built for this and need nothing. `runner/loop.py`,
-  `runner/daemons/*`: an SFT run with no rollout plan and an empty post
-  pipeline plans a Trainer alone, byte-for-byte the daemon it was; the loop
-  still requires a "main" engine (reachability, `tokenize` for injected
-  spans, `add_bundle`), which is why the topology declares one even though
-  the SFT run never samples. `rlstack_engine/steer.py` + `steer_worker.py`:
+  `data/plan.py`, `runner/assemble.py`: the Replay leaf was built for this
+  and needs nothing (`runner/refs.py` gains the rollouts location under ADR
+  0006, not here). `runner/loop.py`, `runner/daemons/*`: an SFT run with no
+  rollout plan and an empty post pipeline plans a Trainer alone, byte-for-
+  byte the daemon it was; the loop still requires a "main" engine
+  (reachability, `tokenize` for injected spans, `add_bundle`), which is why
+  the topology declares one even though the SFT run never samples. `rlstack_engine/steer.py` + `steer_worker.py`:
   the hook reads `[start, end)` from `extra_args` and does not care who
   resolved them. `spec/validate.py`: no new gate — the window enum is
   refused where it is parsed, in the adapter type. `data/flatten.py`: the
@@ -249,17 +250,19 @@ the fallback if SFT's target proves too loose.
   `SteerSite`. (4) The parity probe on Qwen3-0.6B (`steer_l4::probe`)
   reproduces #77's numbers with the default window, and a `PROMPT`-window
   bank agrees engine-vs-trainer within the kernel floor on a windowed
-  prompt. (5) A trajectory set's uri is its identity: rebuilding the SAME
-  rows returns the same uri; the SFT spec pins it by uri, so the fingerprint
-  names what was trained on (I3). (6) The measurement writes
+  prompt. (5) The teacher run's `run_id` is the set's identity — its spec,
+  its code, its corpus — and the SFT plans name its rollouts by ref, so the
+  fingerprint names what was trained on (I3) and the submit gate refuses a
+  rollout that is not sealed yet. (6) The measurement writes
   `measurements/<run_id>/distill/` and the run directory gains not one byte
   (#70's rule, pinned). (7) Every venue door that acquires metal ends with
   the desk's `release` and the plane asserted empty (ADR 0003 / #77).
-- **Non-promises** — The trajectory set is NOT byte-reproducible across
-  engine batch compositions: vLLM's seeded sampling is deterministic per
-  request only up to batch noise (#46 saw it), so regenerating the set may
-  give different text; the uri pins what WAS sampled, which is what identity
-  needs. The SFT ledger's `logprob_gap` on foreign rows is NOT a parity
+- **Non-promises** — The teacher run's rollouts are NOT byte-reproducible
+  across engine batch compositions: vLLM's seeded sampling is deterministic
+  per request only up to batch noise (#46 saw it), so a second teacher run
+  of the same spec (a second store, say) may seal different text; within
+  ONE store the run resumes by skipping sealed rollouts and never re-samples
+  one, which is what identity needs. The SFT ledger's `logprob_gap` on foreign rows is NOT a parity
   alarm: `behavior_logprobs` are the TEACHER's under the hint, so the rail
   reads mean |student − teacher| — the distillation distance, which is
   useful, and the observer will still label it as the parity rail (stated,
@@ -274,9 +277,10 @@ the fallback if SFT's target proves too loose.
 ### Interfaces
 
 - **Content:** `cas://<sha>` for the task set (declared in `GenSpec.tasks`
-  only by runs that sample — the SFT run declares `gen=None`); `cas://<sha>`
-  for the trajectory set, named by `Replay("cas://<sha>#<i>")` leaves in the
-  train plan, checked resolvable at the submit gate as every CAS ref is.
+  by the teacher run; the SFT runs declare `gen=None`); the teacher run's
+  `rollouts/<r>`, named by `Replay("store://<run_id>/rollouts/<r>#<i>")`
+  leaves in the SFT train plan (ADR 0006's ref), checked resolvable at the
+  submit gate as every store ref is.
 - **Pools:** the SFT run declares `main` (idle but required); the
   measurement and the on-policy arm route `main` (the student's bundle) and
   `teacher` (`bundle:base:teacher`, payload-free) to ONE engine object — the
@@ -341,10 +345,15 @@ class ReplayRows:
     facts: tuple[tuple[Mapping[str, Any], ...], ...] | None = None
     prompt_lens: tuple[int, ...] | None = None   # row r's first generated position
 
-# data/tasks/base.py — the trajectory set, write_tasks' sibling
-def write_trajectories(store: Store, wave: Wave) -> str:
-    """Put a sealed wave in the CAS as the jsonl a Replay("cas://<sha>#<i>")
-    leaf reads; the sha IS the set's identity."""
+# the teacher: a generation-only run (ADR 0006) — its rollouts ARE the set
+ExperimentSpec(
+    policy=PolicySpec(base="Qwen/Qwen3-32B", bank={}),
+    gen=GenSpec(envs=("conditioned_teacher",), tasks=(<corpus>,),
+                sampling=SamplingSpec(temperature=1.0, top_p=1.0, max_tokens=1024)),
+    plans=Plans(train=None, rollout=<cas: 64 waves x 32 Sample(task, "conditioned_teacher")>),
+    algo=None,
+    topology=Topology(hosts=(HostSpec((pool("main", tp=2), pool("teacher", tp=2))),)),
+    seeds=Seeds(master=5))
 
 # inference/environments/conditioned_teacher.py
 @environment("conditioned_teacher")
@@ -360,7 +369,8 @@ ExperimentSpec(
     policy=PolicySpec(base="Qwen/Qwen3-32B",
                       bank={"v": steer("resid_pre.10", d=5120, window=Window.PROMPT)}),
     gen=None,
-    plans=Plans(train=<cas: 64 waves x 32 Replay("cas://<set>#i") leaves>, rollout=None),
+    plans=Plans(train=<cas: 64 waves x 32 Replay("store://<teacher_run>/rollouts/<r>#<i>") leaves>,
+                rollout=None),
     algo=AlgoSpec(loss="sft", post=(), optim=OptimSpec("adamw", lr=5e-3),
                   schedule=Schedule(microbatch_tokens=4096, max_policy_lag=0)),
     topology=Topology(hosts=(HostSpec((pool("main", tp=2), learner(fsdp=2))),)),
@@ -389,8 +399,8 @@ the student's own draws. The on-policy arm is one spec edit away and needs
 no new machinery beyond the conditioned-teacher processor this ADR builds
 for the measurement anyway; it is the fallback if the SFT vectors' measured
 reverse KL stalls well above the scoring floor (~0.02 nats, #47).
-If the other branch: build the on-policy arm first; the trajectory-set verb
-and the `conditioned_teacher` environment are then not needed, and the
+If the other branch: build the on-policy arm first; the teacher run and the
+`conditioned_teacher` environment are then not needed, and the
 replay-window fallback (Q2) is not needed either, since the student samples
 its own rows and records its window.
 
@@ -428,23 +438,22 @@ on-policy arm only (Q1's other branch).
 
 > **Samarth:**
 
-**Q4. Is the trajectory set filed and made right — `write_trajectories` beside
-`write_tasks`, made by a venue door over `sample_wave`?**
-Recommendation: yes. The ref grammar and reader exist; the missing verb is
-the writer, and a task set and a trajectory set are the two kinds of content
-a plan names (by id, by ref), so `data/tasks/base.py` is the honest home even
-though the folder's name says tasks (a rename to `data/content/` is a
-separate, cheap decision). The door is `deploy/concept_steer.py::distill_set`
-— `sample_wave` over the corpus with routes `{"main": (engine, base_bundle),
-"teacher": (engine, base_bundle)}` (the client is constructed for "main" even
-when the env only addresses "teacher"), then `write_trajectories`, then the
-uri printed; the same shape as `measure_run` and the campaign `evaluate`
-doors, i.e. any process against a pool. The generation-only run (a Sealer
-daemon) stays an open thread.
-If the other branch (build the Sealer now): a run with `algo=None` gets a
-committing daemon and the set becomes `store://<run_id>/waves/<u>#<i>` refs —
-a bigger change whose value is identity for generation runs, which this
-experiment does not need.
+**Q4. The teacher's trajectory set is a generation-only RUN (ADR 0006), and
+this ADR waits on that one.**
+Recommendation: yes. A run gives the set what a content file cannot: a
+manifest naming the corpus, the environment and the hint by hash; a
+dictionary; resume by `already_sealed`; the desk's supervision; and a place
+in the observer. The SFT plans then name `store://<run_id>/rollouts/<r>#<i>`
+— a ref the gate checks before the student starts. The teacher spec declares
+`main` and `teacher` on the same bare base (both bind to one engine; the
+client is constructed for "main" even though the env addresses "teacher"),
+an empty bank, `algo=None`, and a rollout plan whose length is the run's
+extent. The cost is sequencing: ADR 0006 lands first.
+If the other branch (do not wait): a content verb `write_trajectories` beside
+`write_tasks` and a venue door over `sample_wave` — the shape `measure_run`
+and the old `evaluate` doors already have — with `Replay("cas://<sha>#<i>")`
+leaves; about forty lines, no supervision, no resume, and a second way of
+making trajectories that ADR 0006 would then retire.
 
 > **Samarth:**
 
@@ -563,10 +572,11 @@ The SFT run: the train plan is Replay leaves into content, `realize` is a
 pure function, the row plan is one slot with `prompt_lens` derived from the
 batch, and the window is the entry's declaration — so resume-equivalence
 holds by the same argument as every replay run, and `tests/test_resume.py`
-gains the shape (promise 2). The trajectory set: `distill_set` is a door,
-not a run; a crash mid-way leaves no cas object (the write is the last
-step) and a rerun samples again — possibly different text (non-promises),
-and a different uri if so, which is honest. The measurement: idempotent by
+gains the shape (promise 2). The teacher run: a generation-only run under
+ADR 0006's obligations — atomic rollouts, resume by skipping sealed ones,
+done when the last rollout is sealed — and an SFT run submitted before the
+teacher finishes is refused at the gate for the rollouts it names, never
+left waiting. The measurement: idempotent by
 `measure_run`'s contract; a crash between a point's sampling and its append
 loses only that point, backfilled next pass. The identity of EXISTING steer
 runs: unchanged, because `init` gains no key at the default (promise 1) and
