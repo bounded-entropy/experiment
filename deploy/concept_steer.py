@@ -73,9 +73,9 @@ import os
 import modal
 
 from modal_venue import (
-    a_store, cpu_image_for, desk, export_blob, gpu_image_for, hf_cache,
-    metal_class, metal_handle, progress_function, run_suite, store_volume,
-    submit_and_follow, wait_for_metal,
+    a_store, cpu_image_for, desk, export_blob, follow, gpu_image_for,
+    hf_cache, metal_class, metal_handle, progress_function, run_suite,
+    store_volume, submit_and_follow, wait_for_metal,
 )
 
 APP = "rlstack-concept-steer"
@@ -322,7 +322,7 @@ def canonical(kind: str, train_tasks: str = "", teacher_run: str = "",
     return json.loads(canonical_json(spec))
 
 
-progress = progress_function(app, cpu_image)
+progress = progress_function(app, cpu_image, module=__name__)
 """Each run's extent progress, off the store — the chassis' one reader."""
 
 
@@ -417,6 +417,18 @@ def train(layer: int = 0, teacher_run: str = "",
         progress, canonical.remote("student", "", teacher_run, layer),
         SUBDIR, timeout_s)
     print(f"[arm] resid_pre.{layer} trained as run {run_id}", flush=True)
+
+
+@app.local_entrypoint()
+def follow_run(run_id: str = "", timeout_s: float = 14400.0) -> None:
+    """RE-ATTACH to a run already on the metal and follow it to its extent.
+    A driver that died (this venue's first teacher run lost its follower to
+    a chassis bug) leaves the run untouched: the tenancy is the desk's and
+    the daemons are the host's, and only the watching stopped."""
+    if not run_id:
+        raise SystemExit("--run-id <rid>")
+    print(f"[follow] {follow(progress, run_id, timeout_s)} reached its extent",
+          flush=True)
 
 
 @app.local_entrypoint()

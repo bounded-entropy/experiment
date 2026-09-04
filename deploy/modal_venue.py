@@ -249,7 +249,8 @@ def follow(progress_fn, run_id: str, timeout_s: float,
     raise SystemExit(f"{run_id} did not finish within {timeout_s:.0f}s")
 
 
-def progress_function(app, image, name: str = "progress", tail: int = 3):
+def progress_function(app, image, *, module: str, name: str = "progress",
+                      tail: int = 3):
     """THE EXTENT READER, one copy: a venue's `@app.function` that reports how
     far each run has got, plus the tail of its train blocks.
 
@@ -276,6 +277,7 @@ def progress_function(app, image, name: str = "progress", tail: int = 3):
         return out
 
     progress.__name__ = progress.__qualname__ = name
+    progress.__module__ = module    # the container imports it from the VENUE
     return app.function(image=image, volumes={STORE_MOUNT: store_volume},
                         timeout=600)(progress)
 

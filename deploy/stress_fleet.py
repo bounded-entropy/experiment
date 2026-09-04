@@ -192,7 +192,8 @@ def build_specs(names: list[str], updates: list[int], masters: list[int]) -> dic
     return rows
 
 
-ledgers = progress_function(app, cpu_image, name="ledgers", tail=8)
+ledgers = progress_function(app, cpu_image, module=__name__, name="ledgers",
+                            tail=8)
 """Each run's committed updates and its train blocks — the chassis' one
 extent reader."""
 
