@@ -276,8 +276,10 @@ def render_runs(roots: Sequence[Store | Root], grep: str = "") -> str:
     for folder in sorted({row["folder"] for row in rows}):
         if folder:
             lines.append(f"folder {folder}")
+        # "done/planned" of whatever the run's EXTENT counts: updates
+        # committed, or rollouts sealed for a run that only generates
         lines.append(f"{'run':<14} {'name':<18} {'tags':<16} {'status':<8} "
-                     f"{'committed':>9}  {'host(s)':<20} {'last event':<15} store")
+                     f"{'progress':>9}  {'host(s)':<20} {'last event':<15} store")
         mine = [row for row in rows if row["folder"] == folder]
         seen_dir: str | None = None
         for row in sorted(mine, key=lambda r: (r.get("subdir", ""), r["t"])):

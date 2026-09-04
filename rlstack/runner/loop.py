@@ -438,6 +438,9 @@ def plan_daemons(spec: ExperimentSpec, *, run, store, engine_map, learner,
     # no train plan nothing consumes anything, and the Generator is unpaced
     due_at = rollouts_needed(plans["train"].waves) if "train" in plans else {}
     daemons: list[Daemon] = []
+    # three needs, three daemons — the closed set needs_of produces; each is
+    # built with what only it takes (the Trainer its learner and journal, the
+    # Generator its tasks and pacing)
     for need in (needs_of(spec) if needs is None else needs):
         residents = pool_residents(need.pools, engine_map)
         if need.daemon is Trainer:
