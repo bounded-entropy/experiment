@@ -217,7 +217,7 @@ class AnchorTest(unittest.TestCase):
 
     def hosts_for(self, store) -> tuple[Host, Host]:
         """A serving host and a training host in one little world, each able
-        to reach the other's door — anchored where `anchor` says."""
+        to reach the other's door — so either may be the anchor."""
         serving = Host("serve", engines=(FakeEngine(),), learner=None,
                        store=store,
                        schema_for=lambda base: fake_qwen_schema(4, base=base),
@@ -257,6 +257,9 @@ class AnchorTest(unittest.TestCase):
         there, store_there = self.run_anchored("main")
         self.assertEqual(here, there)
         self.assertEqual(snapshot(store_here, here), snapshot(store_there, there))
+        # ...and both actually ran the plan: an empty run dir matches an empty
+        # run dir, which would prove nothing
+        self.assertEqual(len(store_there.peek_ledger(there)), 4)
 
     def test_the_anchor_host_uninstalls_its_tenant_when_the_run_ends(self) -> None:
         """A learner shared by runs anchored elsewhere must not accumulate
