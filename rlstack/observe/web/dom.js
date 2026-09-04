@@ -5,9 +5,11 @@
 // happens under the cursor.
 "use strict";
 
-export const C = {feed: "#5fb2ff", eval: "#ffb86b", rail: "#9de08f",
-                  derived: "#c792ea", dim: "#8494a4", warn: "#e07a7a",
-                  teal: "#6fd6c4", line: "#2a323c"};
+// The data palette, and the chrome greys the charts need as attribute values.
+// This list and style.css's :root are ONE palette: change them together.
+export const C = {feed: "#5AA9F0", eval: "#F0AE5A", rail: "#79D67F",
+                  derived: "#B98FE0", warn: "#E5716E", teal: "#5FD3C4",
+                  ink: "#E8E8E8", dim: "#767676", line: "#1B1D1F"};
 export const WHEEL = [C.feed, C.rail, C.eval, C.derived, C.warn, C.teal];
 export const STATUS_COLOR = {running: C.rail, done: C.feed,
                              failed: C.warn, stalled: C.eval};
@@ -81,6 +83,15 @@ export function dur(seconds) {
   if (seconds < 90) return seconds.toFixed(0) + "s";
   if (seconds < 5400) return (seconds / 60).toFixed(1) + "m";
   return (seconds / 3600).toFixed(1) + "h";
+}
+
+export function storeTail(path) {
+  // A store is ADDRESSED by its whole locator, but a page says the last
+  // segment and hangs the rest on the hover: the same absolute path repeated
+  // down a column is noise, not information.
+  const parts = String(path === null || path === undefined ? "" : path)
+      .replace(/\/+$/, "").split("/");
+  return parts[parts.length - 1] || String(path || "");
 }
 
 export function gib(mib) {                  // MiB is journaled; GiB reads better

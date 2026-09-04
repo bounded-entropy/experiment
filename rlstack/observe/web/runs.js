@@ -11,7 +11,8 @@
 // the cursor.
 "use strict";
 
-import {ago, drawnOnce, el, esc, lostTick, okTick} from "./dom.js";
+import {ago, drawnOnce, el, esc, lostTick, okTick, storeTail}
+  from "./dom.js";
 import {ctx, hostPath, legend, runPath, runsIndex} from "./nav.js";
 
 let needle = "";
@@ -167,10 +168,13 @@ function dirBlocks(rows, inFolder, folderKey) {
 }
 
 function table(rows, inFolder) {
-  // inside a folder block the store column is the folder said twice
+  // inside a folder block the store column is the folder said twice — and
+  // with ONE root it is the same absolute path on every row, which is a
+  // column that carries no information. It appears when it distinguishes.
+  const showStore = !inFolder && new Set(latest.map(r => r.store)).size > 1;
   const node = el("table", {}, "<tr><th>experiment</th><th>tags</th>"
       + "<th>status</th><th>committed</th><th>host(s)</th><th>last</th>"
-      + (inFolder ? "" : "<th>store</th>") + "</tr>");
+      + (showStore ? "<th>store</th>" : "") + "</tr>");
   for (const r of rows.slice().reverse()) {
     const folder = inFolder ? r.folder : null;
     const row = el("tr", {});
@@ -190,9 +194,12 @@ function table(rows, inFolder) {
     row.append(el("td", {}, `${r.committed}/${esc(r.target)}`));
     row.append(el("td", {}, r.hosts.map(h =>
         `<a href="${hostPath(h, folder)}">${esc(h)}</a>`).join(" + ")));
-    row.append(el("td", {class: "k", title: esc(new Date(r.t * 1000).toLocaleString())},
+    row.append(el("td", {class: "k when",
+                         title: esc(new Date(r.t * 1000).toLocaleString())},
                   esc(ago(r.t, serverNow))));
-    if (!inFolder) row.append(el("td", {class: "k"}, esc(r.store)));
+    if (showStore)
+      row.append(el("td", {class: "k", title: esc(r.store)},
+                    esc(storeTail(r.store))));
     node.append(row);
   }
   return node;

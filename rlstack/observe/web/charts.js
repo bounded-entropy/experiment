@@ -49,6 +49,7 @@ function stretches(points, breakGaps) {
 
 function drawPlot(box, o, series) {
   const drawn = (series || []).filter(s => s.points && s.points.length);
+  box.classList.toggle("empty", !drawn.length);
   if (!drawn.length) {
     box.innerHTML = `<svg viewBox="0 0 ${o.W} ${o.H}" style="height:${o.H}px"></svg>`;
     return;
@@ -143,37 +144,53 @@ function drawPlot(box, o, series) {
   });
 }
 
+// ---- the three pieces every card is made of -------------------------------
+// THE HEAD is the panel's name and its producer; THE READOUT is one number,
+// large, with its label and unit said quietly beside it — a wall of cards is
+// meant to be scannable without reading any of them; THE WHY is the prose a
+// card falls back to when there is no number to show.
+
+export function head(title, who) {
+  return el("div", {class: "head"}, `<span class="name">${esc(title)}</span>`
+                                  + `<span class="who">${esc(who)}</span>`);
+}
+
+function readout(label, value, unit) {
+  return el("div", {class: "now"},
+      `<span class="k">${esc(label)}</span><b>${esc(value)}</b>`
+    + (unit ? `<span class="k">${esc(unit)}</span>` : ""));
+}
+
+function why(text) {
+  return el("div", {class: "why"}, esc(text));
+}
+
 export function card(title, who, series, opts) {
   const node = el("div", {class: "card"});
-  node.append(el("div", {}, `<span class="name">${esc(title)}</span>`
-                          + `<span class="who">${esc(who)}</span>`));
+  node.append(head(title, who));
   node.append(plot(series, opts));
   const primary = (series || []).find(s => s.points && s.points.length);
   const last = primary ? primary.points[primary.points.length - 1] : null;
+  if (last === null) { node.append(why("no data yet")); return node; }
   // "now" is a claim about the present: on a time axis it holds only while
   // the last point is fresh against the server clock (opts.asOf); a stale
   // tail reads "last … Xh ago", and NOTHING recent reads as the truth it is
-  let label = "no data yet";
-  if (last !== null) {
-    const value = brief(last[1]) + ((opts && opts.unit) || "");
-    if (opts && opts.asOf) {
-      const age = opts.asOf - last[0];
-      const fresh = age < Math.max(120, (opts.freshS || 0) * 3);
-      label = fresh ? "now " + value
-                    : "last " + value + " · " + ago(last[0], opts.asOf);
-    } else {
-      label = "now " + value;
-    }
+  const value = brief(last[1]), unit = (opts && opts.unit) || "";
+  if (opts && opts.asOf) {
+    const age = opts.asOf - last[0];
+    const fresh = age < Math.max(120, (opts.freshS || 0) * 3);
+    node.append(readout(fresh ? "now" : "last", value,
+        fresh ? unit : unit + " · " + ago(last[0], opts.asOf)));
+  } else {
+    node.append(readout("now", value, unit));
   }
-  node.append(el("div", {class: "now"}, label));
   return node;
 }
 
-export function emptyCard(title, who, why) {
+export function emptyCard(title, who, reason) {
   const node = el("div", {class: "card"});
-  node.append(el("div", {}, `<span class="name">${esc(title)}</span>`
-                          + `<span class="who">${esc(who)}</span>`));
-  node.append(el("div", {class: "now"}, esc(why)));
+  node.append(head(title, who));
+  node.append(why(reason));
   return node;
 }
 
@@ -187,6 +204,7 @@ export function stacked(rows, keys, opts) {
 }
 
 function drawStacked(box, o, rows, keys) {
+  box.classList.toggle("empty", !rows.length);
   if (!rows.length) {
     box.innerHTML = `<svg viewBox="0 0 ${o.W} ${o.H}" style="height:${o.H}px"></svg>`;
     return;
@@ -226,7 +244,7 @@ function drawStacked(box, o, rows, keys) {
     <line x1="${o.pad}" y1="${o.H - 18}" x2="${o.W - 8}" y2="${o.H - 18}"
           stroke="${C.dim}33"/>
     <rect class="hi" y="4" height="${o.H - 22}" width="${step.toFixed(1)}"
-          fill="#dde5ec" opacity="0"/>
+          fill="${C.ink}" opacity="0"/>
     ${body}
     <rect x="0" y="0" width="${o.W}" height="${o.H}" fill="transparent"/></svg>`;
 
@@ -256,14 +274,14 @@ function drawStacked(box, o, rows, keys) {
 
 export function stackedCard(title, who, rows, keys, opts) {
   const node = el("div", {class: "card"});
-  node.append(el("div", {}, `<span class="name">${esc(title)}</span>`
-                          + `<span class="who">${esc(who)}</span>`));
+  node.append(head(title, who));
   node.append(stacked(rows, keys, opts));
   node.append(el("div", {class: "rail"}, keys.map(key =>
-      `<span style="color:${key.color}">■</span> ${esc(key.name)}`).join(" ")));
+      `<span style="color:${key.color}">\u25a0</span> ${esc(key.name)}`).join(" ")));
   const last = rows.length ? rows[rows.length - 1] : null;
-  node.append(el("div", {class: "now"}, last
-      ? "now " + brief(last.total) + ((opts && opts.unit) || "") : "no data yet"));
+  node.append(last
+      ? readout("now", brief(last.total), (opts && opts.unit) || "")
+      : why("no data yet"));
   return node;
 }
 
@@ -272,12 +290,11 @@ export function stackedCard(title, who, rows, keys, opts) {
 export function histogramCard(panel) {
   const node = el("div", {class: "card"});
   const h = panel.histogram;
-  node.append(el("div", {}, `<span class="name">${esc(panel.name)}</span>`
-                          + `<span class="who">${esc(panel.source || "")}</span>`));
+  node.append(head(panel.name, panel.source || ""));
   node.append(measured((box, width) => drawHistogram(box, width, h, panel)));
-  node.append(el("div", {class: "now"}, h.n
-      ? `n ${h.n} · mean ${brief(h.mean)}${esc(panel.unit || "")}`
-      : "no values in this wave"));
+  node.append(h.n
+      ? readout("mean", brief(h.mean) + (panel.unit || ""), `n ${h.n}`)
+      : why("no values in this wave"));
   return node;
 }
 
@@ -352,10 +369,12 @@ function drawTimeline(box, W, lanes, window_, describe) {
   let body = "";
   lanes.forEach((lane, row) => {
     const y = row * ROW + 6;
+    // a lane label that links takes its fill from .tl a text (style.css), so
+    // the chrome stays greyscale and only the BARS carry status colour
     const label = lane.href
-      ? `<a href="${esc(lane.href)}"><text x="4" y="${y + 13}" fill="${C.feed}"
+      ? `<a href="${esc(lane.href)}"><text x="4" y="${y + 13}"
            font-size="11">${esc(lane.name)}</text></a>`
-      : `<text x="4" y="${y + 13}" fill="#dde5ec" font-size="11">${esc(lane.name)}</text>`;
+      : `<text x="4" y="${y + 13}" fill="${C.ink}" font-size="11">${esc(lane.name)}</text>`;
     body += label + `<line x1="${PAD}" y1="${y + 16}" x2="${W - 14}" y2="${y + 16}"
                        stroke="${C.dim}22"/>`;
     for (const bar of (lane.bars || [])) {

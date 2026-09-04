@@ -6,7 +6,8 @@
 "use strict";
 
 import {C, WHEEL, ago, brief, clock, drawnOnce, el, esc, getAnswer, gib,
-        lostTick, note, okTick, pulseDot, section, when} from "./dom.js";
+        lostTick, note, okTick, pulseDot, section, storeTail, when}
+  from "./dom.js";
 import {card, plot, residencyTip, timeline} from "./charts.js";
 import {ctx, legend, query, route, runPath, withHours} from "./nav.js";
 
@@ -36,7 +37,9 @@ export async function drawHost() {
         ? `<span class="k">${esc(host.folders.filter(f => f).join(" "))}</span>` : "")
     + `<span class="meta">engines ${esc(host.engines.join(", ") || "?")}`
     + ` · ${host.boots.length} boot${host.boots.length === 1 ? "" : "s"}`
-    + ` · ${host.events} events · ${esc(host.journal_stores.map(esc).join(" "))}</span>`
+    + ` · ${host.events} events</span>`
+    + `<span class="meta" title="${host.journal_stores.map(esc).join(" ")}">`
+    + `${host.journal_stores.map(s => esc(storeTail(s))).join(" ")}</span>`
     + `<span class="${resident ? "live" : "meta"}">${resident} resident</span>`);
 
   drawBirth(host);

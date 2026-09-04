@@ -9,7 +9,7 @@
 "use strict";
 
 import {C, brief, el, esc, getAnswer, getJSON, note, raw, section} from "./dom.js";
-import {histogramCard} from "./charts.js";
+import {head, histogramCard} from "./charts.js";
 import {apiRun, ctx, drawAmbiguity, legend, route, runPath, syncSwitcher}
   from "./nav.js";
 
@@ -25,7 +25,7 @@ export async function drawWave() {
   if (wave && wave.ambiguous) { drawAmbiguity(route.runId, wave.ambiguous); return; }
   syncSwitcher(runs || []);
   if (!wave) {
-    ctx(`<a href="${runPath(route.runId, route.folder)}" class="nav">`
+    ctx(`<a href="${runPath(route.runId, route.folder)}">`
       + `${esc(route.runId)}</a>`);
     // a sealed wave never polls — so a DOWN wire retries itself; only the
     // server's own "no" (a positive 404) stands as the answer
@@ -35,7 +35,7 @@ export async function drawWave() {
     return;
   }
   const s = wave.summary;
-  ctx(`<a href="${runPath(route.runId, route.folder)}" style="color:#5fb2ff">${esc(route.runId)}</a>`
+  ctx(`<a href="${runPath(route.runId, route.folder)}">${esc(route.runId)}</a>`
     + `<span>${wave.extent === "rollout" ? "rollout" : "wave"} ${wave.update}</span>`
     + `<span class="meta">${s.trajectories} trajectories · ${s.groups} groups`
     + ` · ${s.tokens} generated tokens</span>`
@@ -66,10 +66,9 @@ function drawDistributions(s) {
 function finishCard(finish) {
   const node = el("div", {class: "card"});
   const total = Object.values(finish).reduce((a, b) => a + b, 0);
-  node.append(el("div", {}, `<span class="name">finish reason</span>`
-      + `<span class="who">per generated turn</span>`));
+  node.append(head("finish reason", "per generated turn"));
   const bar = el("div", {style: "display:flex; height:14px; border-radius:3px; "
-      + "overflow:hidden; margin:10px 0 8px; background:#141a21"});
+      + "overflow:hidden; margin:10px 0 8px; background:var(--panel-2)"});
   for (const [reason, count] of Object.entries(finish)) {
     if (!count) continue;
     bar.append(el("div", {
@@ -81,8 +80,8 @@ function finishCard(finish) {
   node.append(el("div", {class: "mix"}, Object.entries(finish).map(([reason, count]) =>
       `<span><span style="color:${FINISH_COLOR[reason] || C.dim}">■</span> `
       + `${esc(reason)} <b>${count}</b></span>`).join("")));
-  node.append(el("div", {class: "now"}, total
-      ? `${total} turn${total === 1 ? "" : "s"}` : "no turns"));
+  node.append(el("div", {class: total ? "now" : "why"}, total
+      ? `<span class="k">turns</span><b>${total}</b>` : "no turns"));
   return node;
 }
 

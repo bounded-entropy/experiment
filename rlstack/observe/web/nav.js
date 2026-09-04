@@ -44,12 +44,13 @@ export function withHours(url) {
 }
 
 function rangeLinks() {
+  // ONE segmented control, not three loose links loose in the bar
   const current = new URLSearchParams(location.search).get("hours") ?? "24";
   const mk = (hours, label) => {
     const params = new URLSearchParams(location.search);
     params.set("hours", hours);
-    return `<a class="nav${current === hours ? " on" : ""}"` +
-           ` href="${location.pathname}?${params.toString()}">${label}</a>`;
+    return `<a${current === hours ? ' class="on"' : ""}`
+         + ` href="${location.pathname}?${params.toString()}">${label}</a>`;
   };
   return `<span class="win">` + mk("1", "hour") + mk("24", "day")
        + mk("0", "all") + `</span>`;
@@ -79,22 +80,32 @@ export function keepHours(path) {
   return h === null ? path : path + "?hours=" + encodeURIComponent(h);
 }
 
+// THE BAR IS NAVIGATION ONLY: a wordmark, three tabs, and the two controls
+// that steer a reading (the window, the switcher). It holds nothing about the
+// thing being looked at, so it never reflows when a run is selected — that is
+// the SUBJECT BAR's job (ctx below), one line underneath.
+//
+// Each tab lights for its OWN family and no other: runs/run/wave light "runs",
+// fleet/host light "hosts", charts lights "charts".
 export function nav() {
-  const runs = route.page === "runs" || route.page === "run" || route.page === "wave";
   const hdr = document.getElementById("hdr");
+  const runs = route.page === "runs" || route.page === "run" || route.page === "wave";
   const fleetish = route.page === "fleet" || route.page === "host";
-  hdr.innerHTML = `<a href="${keepHours("/")}">rlstack</a>`
-    + `<a class="nav${runs ? " on" : ""}" href="${keepHours("/")}">runs</a>`
-    + `<a class="nav${runs ? "" : " on"}${route.page === "charts" ? "" : ""}" href="${keepHours("/hosts")}">hosts</a>`
-    + `<a class="nav${route.page === "charts" ? " on" : ""}" href="${keepHours("/charts")}">charts</a>`
-    + (fleetish ? rangeLinks() : "")
-    + `<span id="ctx"></span>`;
+  const tab = (href, label, on) =>
+      `<a${on ? ' class="on"' : ""} href="${keepHours(href)}">${label}</a>`;
+  hdr.innerHTML = `<a class="brand" href="${keepHours("/")}">rlstack</a>`
+    + `<nav class="tabs">`
+    +   tab("/", "runs", runs)
+    +   tab("/hosts", "hosts", fleetish)
+    +   tab("/charts", "charts", route.page === "charts")
+    + `</nav>`
+    + `<span class="tools">${fleetish ? rangeLinks() : ""}</span>`;
   if (route.runId) {
     const sel = el("select", {id: "switch", title: "switch experiment"});
     sel.addEventListener("change", () => {
       if (sel.value && sel.value !== here()) location.href = sel.value;
     });
-    hdr.append(sel);
+    hdr.querySelector(".tools").append(sel);
   }
 }
 
@@ -102,8 +113,10 @@ function here() {
   return runPath(route.runId, route.folder);
 }
 
+// THE SUBJECT BAR: what is being looked at, said once, under the nav. A page
+// with no subject writes nothing and the bar is not there at all (#subject:empty).
 export function ctx(html) {
-  document.getElementById("ctx").innerHTML = html;
+  document.getElementById("subject").innerHTML = html;
 }
 
 let switcherSignature = null;

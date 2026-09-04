@@ -4,7 +4,7 @@
 "use strict";
 
 import {C, WHEEL, ago, brief, clock, drawnOnce, el, esc, getJSON, lostTick,
-        okTick, pulseDot, raw, section, when} from "./dom.js";
+        okTick, pulseDot, raw, section, storeTail, when} from "./dom.js";
 import {card, emptyCard, residencyTip, timeline} from "./charts.js";
 import {ctx, hostPath, legend, withHours} from "./nav.js";
 
@@ -30,8 +30,9 @@ export async function drawFleet() {
   const label = h => shared.has(h.host) ? `${h.folder || "(top)"}/${h.host}` : h.host;
   const link = h => hostPath(h.host, shared.has(h.host) ? h.folder : null);
   ctx(`<span class="meta">${fleet.hosts.length} host${fleet.hosts.length === 1 ? "" : "s"}
-     · ${fleet.runs.length} experiment${fleet.runs.length === 1 ? "" : "s"}
-     · ${fleet.stores.map(esc).join(" ")}</span>`);
+     · ${fleet.runs.length} experiment${fleet.runs.length === 1 ? "" : "s"}</span>`
+    + `<span class="meta" title="${fleet.stores.map(esc).join(" ")}">`
+    + `${fleet.stores.map(s => esc(storeTail(s))).join(" ")}</span>`);
   if (!fleet.hosts.length) {
     holder.append(el("p", {style: "padding:22px"},
         "no hosts journaled in this store yet"));
@@ -80,7 +81,7 @@ export async function drawFleet() {
       + (stalled ? `<span class="stall">${stalled} stalled</span> ` : "")
       + `<span class="k">${h.done} done, ${h.failed} failed</span>`));
     row.append(el("td", {class: "k"}, String(h.boots)));
-    row.append(el("td", {class: "k", title: esc(when(h.last_seen))},
+    row.append(el("td", {class: "k when", title: esc(when(h.last_seen))},
                   esc(ago(h.last_seen, fleet.now))));
     table.append(row);
   }
@@ -88,10 +89,10 @@ export async function drawFleet() {
   document.getElementById("page").append(table);
   legend("facts are host journals; ● liveness is a fleet-service PROBE where one"
     + " is connected, a journal-heartbeat PRESUMPTION otherwise (hover the dot)"
-    + " · <span style='color:#9de08f'>green = resident</span>,"
-    + " <span style='color:#5fb2ff'>blue = done</span>,"
-    + " <span style='color:#ffb86b'>orange = stalled (running, host has no pulse)</span>,"
-    + " <span style='color:#e07a7a'>red = failed</span> · aggregates sum per"
+    + ` · <span style="color:${C.rail}">green = resident</span>,`
+    + ` <span style="color:${C.feed}">blue = done</span>,`
+    + ` <span style="color:${C.eval}">orange = stalled (running, host has no pulse)</span>,`
+    + ` <span style="color:${C.warn}">red = failed</span> · aggregates sum per`
     + " bucket · hover anything for raw values");
   okTick();
 }

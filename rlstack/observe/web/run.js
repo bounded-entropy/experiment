@@ -53,7 +53,7 @@ export async function drawRun() {
      ${data.committed}/${esc(data.target ?? "?")}
      ${data.extent === "rollout" ? "rollouts sealed" : "committed"}</span>`)
     + (mine ? `<span class="meta">on ${mine.hosts.map(h =>
-        `<a href="${hostPath(h, folder)}" style="color:${C.feed}">${esc(h)}</a>`
+        `<a href="${hostPath(h, folder)}">${esc(h)}</a>`
       ).join(" + ") || "?"}</span>` : ""));
   document.getElementById("page").innerHTML = "";
 
@@ -136,7 +136,7 @@ export async function drawRun() {
             [{label: "eval", color: C.eval, dash: true, points: evalOf(c.name)}]));
   }
   drawWaves(waves, data.extent);
-  legend("solid = training · <span style='color:#ffb86b'>dashed = held-out eval</span>"
+  legend(`solid = training · <span style="color:${C.eval}">dashed = held-out eval</span>`
     + " · hover any chart for the raw values · refreshes every 3s"
     + " · panels & priority from the run's own dictionary.json"
     + " · a sealed wave is read from the store, never from a live run");
