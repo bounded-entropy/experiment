@@ -221,7 +221,7 @@ details.group > summary .k { font-size:11.5px; }
 
 #tree > details.group { margin:8px var(--gut) 10px; }
 #tree > table { margin-top:10px; }
-details.group table { width:100%; margin:0; }   /* inside a panel: fill it */
+details.group table { width:auto; max-width:100%; margin:0; }
 details.group th:first-child, details.group td:first-child { padding-left:14px; }
 details.group th:last-child, details.group td:last-child { padding-right:14px; }
 
