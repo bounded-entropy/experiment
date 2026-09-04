@@ -20,7 +20,10 @@ from rlstack import (
     Demand, DeskError, Topology, HostSpec, Metal, Regime, demands_of,
     fraction_for_gb, learner, pool,
 )
-from rlstack.runner.desk import covers, placement_units, unit_gb
+from rlstack.runner.desk import (
+    matches_capability, placement_units, recipe_serves, unit_gb,
+)
+from rlstack.runner.residents import Builds, EngineBuild, LearnerBuild
 
 import tempfile
 
@@ -131,11 +134,41 @@ class CoversTest(unittest.TestCase):
         return Demand(**base)
 
     def test_coverage_is_capability_equality(self) -> None:
-        self.assertTrue(covers(self.REGIMES, self.demand()))
-        self.assertFalse(covers(self.REGIMES, self.demand(shape=1)))
-        self.assertFalse(covers(self.REGIMES, self.demand(base="other/model")))
-        self.assertFalse(covers(self.REGIMES,
-                                self.demand(capability="training")))
+        """The join rule's FIRST half: a listing wears the demand's exact
+        capability, base and shard shape, or it does not cover it."""
+        self.assertTrue(matches_capability(self.REGIMES, self.demand()))
+        self.assertFalse(matches_capability(self.REGIMES, self.demand(shape=1)))
+        self.assertFalse(
+            matches_capability(self.REGIMES, self.demand(base="other/model")))
+        self.assertFalse(
+            matches_capability(self.REGIMES,
+                               self.demand(capability="training")))
+
+    @staticmethod
+    def recipe(*serves: str) -> Builds:
+        """A recipe whose engine serves exactly these adapter types."""
+        return Builds(engine=EngineBuild(serves=serves),
+                      learner=LearnerBuild())
+
+    def test_the_second_half_is_what_the_metals_recipe_serves(self) -> None:
+        """ADR 0007, Q4a: a steer spec joined onto an engine built for lora
+        alone used to be refused LATE, at Phase 0 on the host. It is refused
+        at the join now, where the placement can still go somewhere else."""
+        steer = self.demand(adapter_types=("steer",))
+        self.assertTrue(recipe_serves(self.recipe("steer"), steer))
+        self.assertTrue(recipe_serves(self.recipe("lora", "steer"), steer))
+        self.assertFalse(recipe_serves(self.recipe("lora"), steer))
+
+    def test_unknown_is_never_a_refusal(self) -> None:
+        """A rule refuses on EVIDENCE or not at all: a demand naming no
+        adapter type, a training demand (a learner builds any type), and a
+        metal that declared no recipe all pass."""
+        self.assertTrue(recipe_serves(self.recipe("lora"), self.demand()))
+        self.assertTrue(recipe_serves(
+            self.recipe("lora"),
+            self.demand(capability="training", adapter_types=("steer",))))
+        self.assertTrue(recipe_serves(None, self.demand(
+            adapter_types=("steer",))))
 
 
 if __name__ == "__main__":

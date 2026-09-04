@@ -51,7 +51,8 @@ from rlstack.data.stores.base import Store, run_done
 from rlstack.policy.siteschema import SiteSchema
 from rlstack.runner.host import LEARNER_ROUTE, Host, Partition, Regime
 from rlstack.runner.residents import (
-    GRACE_S, SIGNAL_GRACE_S, Builds, Resident, ResidentBirth, Teardown,
+    GRACE_S, SIGNAL_GRACE_S, Builds, EngineBuild, Resident, ResidentBirth,
+    Teardown,
 )
 from rlstack.runner.remote import (
     DESK_DEFAULT, RemoteLearner, RemotePool,
@@ -134,6 +135,12 @@ class Demand:
     # a CHOICE the campaign layer makes — ADR 0006 Part A — but that rule
     # lives with whoever built the demands, not here).
     anchor: bool = False
+    # the adapter types this demand's workload NAMES — the strings the
+    # campaign layer read off the spec's bank (ADR 0007, Q4a). The desk
+    # compares them against a metal recipe's `serves` and never interprets
+    # them: it is the join rung's second half, not knowledge of a workload
+    # (#69). Empty is "nothing named", which refuses nothing.
+    adapter_types: tuple[str, ...] = ()
 
     def name(self) -> str:
         """The key this demand's ADDRESS rides under — in a placement reply
@@ -153,7 +160,8 @@ def demand_rows(demands: Sequence[Demand]) -> list[dict]:
     """Demands as wire rows — the desk's whole input vocabulary."""
     return [{"pool": d.pool, "capability": d.capability, "base": d.base,
              "shape": d.shape, "vram_gb": d.vram_gb, "group": d.group,
-             "anchor": d.anchor} for d in demands]
+             "anchor": d.anchor, "adapter_types": list(d.adapter_types)}
+            for d in demands]
 
 
 def demands_from(rows: Sequence[Mapping]) -> tuple[Demand, ...]:
@@ -163,7 +171,21 @@ def demands_from(rows: Sequence[Mapping]) -> tuple[Demand, ...]:
         shape=int(row["shape"]),
         vram_gb=None if row.get("vram_gb") is None else float(row["vram_gb"]),
         group=int(row["group"]),
-        anchor=bool(row.get("anchor", False))) for row in rows)
+        anchor=bool(row.get("anchor", False)),
+        adapter_types=tuple(row.get("adapter_types", ()))) for row in rows)
+
+
+def builds_proposed(payload: Mapping) -> Builds | None:
+    """The recipe a registration PROPOSES, read off the wire (ADR 0007, Q4).
+
+    THE WIRE SPEAKS ROWS AND THE DESK SPEAKS RECORDS, and this is the one
+    place between them: a metal file that chose to say what it is for sends
+    `Builds.row()`, and the desk holds the typed record it journals and
+    carves from. A registration that proposes nothing is the normal case —
+    the metal boots bare and the declaration comes from the desk's own
+    door."""
+    row = payload.get("builds")
+    return Builds.from_row(dict(row)) if row else None
 
 
 def placement_units(demands: Sequence[Demand]) -> tuple[tuple[Demand, ...], ...]:
@@ -294,12 +316,15 @@ class Desk:
         self.metal: dict[str, Metal] = {}
         self.metal_addresses: dict[str, str | None] = {}
         self.metal_remotes: dict[str, "RemoteMetal"] = {}
-        # name -> the metal's build recipe row (Builds.row()): the CANON a
-        # carve is built from (ADR 0001, Q5c — it rides every carve request,
-        # so a reborn container is rebuilt from the desk's row, and its own
-        # constants are only its first declaration), journaled so the record
-        # of HOW a host was built survives the desk. The desk never builds.
-        self.metal_builds: dict[str, dict] = {}
+        # name -> the metal's RECIPE: the CANON a carve is built from (ADR
+        # 0001, Q5c — it rides every carve request, so a reborn container is
+        # rebuilt from the desk's row and never from its own constants),
+        # journaled as `recipe` events so the record of HOW a host was built
+        # survives the desk. Since ADR 0007 the recipe is DECLARED HERE (a
+        # metal boots bare and a registration only PROPOSES one), and a carve
+        # to a metal this table has no row for is refused: the desk never
+        # builds, but it is the one that says what to build.
+        self.metal_builds: dict[str, Builds] = {}
         # THE IDLE POLICY (ADR 0003). `idle_s` is this desk's default limit in
         # seconds; `metal_idle_s` holds the metals whose registration declared
         # their own (None there PINS that metal — never released), and a name
@@ -333,14 +358,16 @@ class Desk:
         """The desk, rebuilt from its own record: every `list` event resolves
         its address again, and so does every addressed `metal` event — the
         latest `metal` event per name wins, so a re-registration's measured
-        facts, recipe and idle declaration replay exactly as they landed. A
-        `release` event takes its metal off the carve-able set and leaves the
-        row as inventory; a LATER `metal` event for the same name clears the
-        release, because registering is what re-acquires (ADR 0003). Kill -9
-        the desk and nothing was lost but a process — the same recovery shape
-        as attach, on the fleet plane. The idle CLOCK is not replayed: it
-        lives in memory by ruling (Q2), so a rebuilt desk starts every
-        metal's clock again."""
+        facts and idle declaration replay exactly as they landed. Every
+        `recipe` event replays too, latest per metal winning, which is how a
+        declaration made at the desk's own door outlives the desk (ADR 0007,
+        Q4). A `release` event takes its metal off the carve-able set and
+        leaves the row as inventory; a LATER `metal` event for the same name
+        clears the release, because registering is what re-acquires (ADR
+        0003). Kill -9 the desk and nothing was lost but a process — the same
+        recovery shape as attach, on the fleet plane. The idle CLOCK is not
+        replayed: it lives in memory by ruling (Q2), so a rebuilt desk starts
+        every metal's clock again."""
         desk = cls(store, host_for, metal_for, boot_for, idle_s=idle_s)
         for event in store.read_fleet_log():
             if event.get("event") == "list":
@@ -356,19 +383,41 @@ class Desk:
                 desk.metal_addresses[event["name"]] = address
                 if address and metal_for is not None:
                     desk.metal_remotes[event["name"]] = metal_for(address)
-                if event.get("builds"):
-                    desk.metal_builds[event["name"]] = dict(event["builds"])
                 desk.declare_idle(
                     event["name"],
                     event["idle_s"] if "idle_s" in event else DESK_DEFAULT)
                 desk.released.discard(event["name"])
+            elif event.get("event") == "recipe":
+                desk.metal_builds[event["metal"]] = Builds.from_row(
+                    event["builds"])
             elif event.get("event") == "release":
                 desk.released.add(event["metal"])
                 desk.metal_remotes.pop(event["metal"], None)
         return desk
 
+    # ---- the recipe: declared at the desk, journaled, carried by the carve --
+
+    def recipe(self, metal: str, builds: Builds) -> None:
+        """WHAT THIS METAL BUILDS, DECLARED HERE (ADR 0007, Q4). A metal boots
+        BARE — measuring a card and mounting a store are the container's, but
+        what to serve is a declaration, and the desk's row was already the
+        canon every carve carried (ADR 0001, Q5c). Journaled, so the
+        declaration outlives the desk process; the latest per metal wins, so
+        an operator's door and a registration's proposal are the same event
+        and the last one said is the one that rides."""
+        self.metal_builds[metal] = builds
+        self.store.append_fleet_event({
+            "event": "recipe", "t": time.time(), "metal": metal,
+            "builds": builds.row()})
+
+    def recipe_for(self, metal: str) -> Builds | None:
+        """This metal's declared recipe, or None — a metal nothing has
+        declared for cannot be carved on, and the join rung will not offer
+        its listings for adapter types it never said it serves."""
+        return self.metal_builds.get(metal)
+
     def register_metal(self, metal: Metal, address: str | None = None,
-                       builds: Mapping | None = None,
+                       builds: Builds | None = None,
                        idle_s: float | None | Undeclared = DESK_DEFAULT,
                        ) -> list[str]:
         """The acquire rung, recorded at the desk: what the fleet OWNS and may
@@ -376,12 +425,16 @@ class Desk:
         inventory too. `address` is where that metal's own container answers
         the metal plane (carve/decarve/residual) — with it and a resolver the
         desk can command the standing carve; without it the row is inventory
-        only and misses still answer with boot instructions. `builds` is the
-        metal's recipe row: kept as the desk's canon, journaled.
+        only and misses still answer with boot instructions. `builds` is a
+        PROPOSAL (ADR 0007, Q4): a metal file that wants to say what it is
+        for may, and the desk journals it as the same `recipe` event its own
+        door writes — but a metal that proposes nothing registers, lists and
+        knocks just the same and simply cannot be carved on until something
+        declares for it.
 
         A KNOWN NAME AT THE SAME ADDRESS IS THE CONTAINER GENERATION TURNING
         OVER (ADR 0001, Q5): the row is overwritten with the frame's measured
-        facts (and its recipe, if it carries one — a redeploy is a human's
+        facts (and its recipe, if it proposes one — a redeploy is a human's
         act and updates the canon), journaled as a fresh `metal` event so the
         rebuilt desk replays last-write-wins, and that metal's listings are
         RECONCILED by probe at once (reconcile_metal) — the metal itself just
@@ -407,18 +460,17 @@ class Desk:
         self.metal_addresses[metal.name] = address
         if address and self.metal_for is not None:
             self.metal_remotes[metal.name] = self.metal_for(address)
-        if builds:
-            self.metal_builds[metal.name] = dict(builds)
         self.declare_idle(metal.name, idle_s)
         self.released.discard(metal.name)
         self.idle_since.pop(metal.name, None)
         row = {"event": "metal", "t": time.time(), "name": metal.name,
                "gpu": metal.gpu, "devices": metal.devices,
-               "vram_gb": metal.vram_gb, "address": address,
-               "builds": self.metal_builds.get(metal.name)}
+               "vram_gb": metal.vram_gb, "address": address}
         if not isinstance(idle_s, Undeclared):
             row["idle_s"] = idle_s          # absent = the desk's own default
         self.store.append_fleet_event(row)
+        if builds is not None:
+            self.recipe(metal.name, builds)
         return self.reconcile_metal(metal.name) if known else []
 
     def declare_idle(self, name: str, idle_s: float | None | Undeclared) -> None:
@@ -494,18 +546,20 @@ class Desk:
 
     def find_listing(self, unit: tuple[Demand, ...],
                      avoid: frozenset[str] = frozenset()) -> Listing | None:
-        """Rung one over listings: sorted-name order, coverage by capability
-        equality (covers(), the one join rule, matched against descriptions),
-        solo-and-occupied skipped — and so is a listing whose container no
-        longer ANSWERS: placement must never offer a host it cannot reach,
-        and a dead listing is a fact discovered here, reported by the boot
-        refusal, and cured by a delist or a reboot. Names in `avoid` are off
-        the table — a reroute excluding the listing being torn down."""
+        """Rung one over listings: sorted-name order, coverage by `covers()`
+        — the one join rule, capability equality plus the metal recipe's
+        `serves`, matched against descriptions — solo-and-occupied skipped,
+        and so is a listing whose container no longer ANSWERS: placement must
+        never offer a host it cannot reach, and a dead listing is a fact
+        discovered here, reported by the boot refusal, and cured by a delist
+        or a reboot. Names in `avoid` are off the table — a reroute excluding
+        the listing being torn down."""
         for name in sorted(self.listings):
             if name in avoid:
                 continue
             listing = self.listings[name]
-            if not all(covers(listing.regimes, d) for d in unit):
+            recipe = self.recipe_for(listing.metal)
+            if not all(covers(listing, d, recipe) for d in unit):
                 continue
             if not listing.alive():
                 continue
@@ -599,6 +653,20 @@ class Desk:
             return None
         need_devices = max(demand.shape for demand in unit)
         for metal_name in sorted(self.metal_remotes):
+            recipe = self.recipe_for(metal_name)
+            if recipe is None:
+                self.refuse_carve(metal_name,
+                                  "no recipe is declared for this metal at "
+                                  "this desk (desk.recipe): a bare metal "
+                                  "cannot know what to build")
+                continue
+            if not all(recipe_serves(recipe, demand) for demand in unit):
+                self.refuse_carve(
+                    metal_name,
+                    f"its recipe serves {sorted(serves_of(recipe))} and the "
+                    f"unit names "
+                    f"{sorted({a for d in unit for a in d.adapter_types})}")
+                continue
             remote = self.metal_remotes[metal_name]
             need_gb = unit_gb(unit, self.metal[metal_name])
             request = self.carve_request(unit, metal_name, need_gb)
@@ -637,20 +705,30 @@ class Desk:
             return self.listings[born["host"]]
         return None
 
+    def refuse_carve(self, metal_name: str, reason: str) -> None:
+        """A metal PASSED OVER before it was ever commanded, journaled. The
+        loud half of ADR 0007's recipe rule: a carve that cannot be built is
+        refused HERE, with the reason on the record, rather than half-built
+        at a bare metal or refused late at the host's Phase 0."""
+        self.store.append_fleet_event({
+            "event": "carve-refused", "t": time.time(), "metal": metal_name,
+            "reason": reason})
+
     def carve_request(self, unit: tuple[Demand, ...], metal_name: str,
                       need_gb: float) -> dict:
         """The carve command as the metal verb speaks it: the regimes the
         host will wear, the per-device GB its partition must hold, and the
-        recipe it builds from — this desk's journaled `builds` row for that
-        metal, the canon a reborn container is rebuilt from (Q5c). A metal
-        registered without a recipe is carved from its own."""
+        recipe it builds from — this desk's journaled recipe for that metal,
+        the canon a reborn container is rebuilt from (Q5c) and, since ADR
+        0007, the only recipe there is: the metal boots bare."""
+        recipe = self.recipe_for(metal_name)
         return {
             "regimes": [{"name": regime_of(d).name,
                          "capability": d.capability,
                          "base": d.base, "shape": d.shape} for d in unit],
             "base": unit[0].base,
             "vram_gb": need_gb,
-            "builds": self.metal_builds.get(metal_name),
+            "builds": recipe.row() if recipe is not None else None,
         }
 
     # ---- place and submit: demands in, addresses (and one delivery) out -----
@@ -757,10 +835,28 @@ class Desk:
 
     def dependents(self, name: str) -> list[str]:
         """Running runs whose LATEST journaled placement routes through
-        listing `name` — the guard decommission refuses over. Occupancy
-        alone would miss half of them: a serve host's roster is empty (a
-        tenancy lives at its anchor), but every placement journaled the
-        pools it landed on, and the rosters say which runs still run."""
+        listing `name` — the guard decommission refuses over."""
+        return self.dependents_on([name])
+
+    def metal_dependents(self, name: str) -> list[str]:
+        """Running runs routing through ANY listing on metal `name` — the
+        guard an explicit RELEASE refuses over (ADR 0007, Q6): a door that
+        acquired metal must not tear it down under another experiment, and a
+        release takes every host on the metal at once, so the question is
+        asked of the whole metal rather than of one host."""
+        return self.dependents_on([host for host, listing
+                                   in sorted(self.listings.items())
+                                   if listing.metal == name])
+
+    def dependents_on(self, hosts: Sequence[str]) -> list[str]:
+        """THE GUARD, one body: running runs whose LATEST journaled placement
+        routes through any of `hosts`. Occupancy alone would miss half of
+        them — a serve host's roster is empty (a tenancy lives at its
+        anchor), but every placement journaled the pools it landed on, and
+        the rosters say which runs still run."""
+        wanted = set(hosts)
+        if not wanted:
+            return []
         placed = {rid: row["pools"]
                   for rid, row in self.placements().items()}
         running: set[str] = set()
@@ -772,7 +868,7 @@ class Desk:
             running.update(rid for rid, told in tenants.items()
                            if told.get("status") == "running")
         return sorted(rid for rid, pools in placed.items()
-                      if rid in running and name in pools.values())
+                      if rid in running and wanted & set(pools.values()))
 
     async def stop_anchored(self, run_id: str) -> dict:
         """Stop a tenancy WHEREVER it runs: probe the listings' rosters for
@@ -981,19 +1077,36 @@ class Desk:
         what a knock is for. Off the loop, because a boot is seconds to
         minutes and the reborn container's own registration must be able to
         reach this desk meanwhile. A knock that fails is a metal that stays
-        down; the queue waits for the next registration event."""
+        down; the queue waits for the next registration event.
+
+        A KNOCK WITH NO WAY TO KNOCK REFUSES LOUDLY (ADR 0007, Q5): neither
+        a `boot_for` nor a plane address is not a metal that failed to wake
+        but a venue that never said how to wake it, and the reap → knock →
+        re-register → reroute loop degrading into a silent no-op is how that
+        bug hides for an hour. It is journaled and named instead."""
         address = self.metal_addresses.get(name)
         if self.boot_for is not None:
             boot = lambda: self.boot_for(name)          # noqa: E731
         elif address and self.metal_for is not None:
             boot = self.metal_for(address).describe
         else:
-            return False
+            return self.refuse_knock(
+                name, "this desk has no boot_for and this metal's row has no "
+                      "plane address: nothing here knows how to wake it")
         try:
             await asyncio.to_thread(boot)
         except Exception:
             return False
         return True
+
+    def refuse_knock(self, name: str, reason: str) -> bool:
+        """A knock nobody could make, journaled and returned false (Q5). The
+        loud half: a venue that supplies no way to boot its metal is a venue
+        bug, and the record is where it stops being a silence."""
+        self.store.append_fleet_event({
+            "event": "knock-refused", "t": time.time(), "metal": name,
+            "reason": reason})
+        return False
 
     # ---- the recontinue: strand, the queue, retry --------------------------
 
@@ -1132,10 +1245,17 @@ class Desk:
                if self.idle_limit(name) is not None
                and now - since >= self.idle_limit(name)]
         for name in due:
-            await self.release(name, reason="released: idle")
+            # UNGUARDED BY RULING (ADR 0007, Q6): the guard below is about a
+            # DOOR tearing down metal under another experiment. The idle rule
+            # is the desk's own clock and its evidence is stronger than the
+            # guard's — it released this metal because nothing has been busy
+            # on it for its whole limit, which is ADR 0003's promise and must
+            # not be weakened into "unless a journal row still says running".
+            await self.release(name, reason="released: idle", force=True)
         return due
 
-    async def release(self, name: str, reason: str = "released") -> dict:
+    async def release(self, name: str, reason: str = "released",
+                      force: bool = False) -> dict:
         """THE ACQUIRE RUNG INVERTED, desk-issued (ADR 0003). The departure
         is journaled FIRST — the intent on the record, as `strand` writes it
         — then every listing on the metal is delisted with `reason`, and the
@@ -1148,9 +1268,22 @@ class Desk:
         A silent metal is as released as it gets — the container is already
         gone, which is the goal state — so the wire's refusal is not this
         verb's problem. Idempotent: releasing already-released metal
-        re-journals and changes nothing."""
+        re-journals and changes nothing.
+
+        GUARDED LIKE DECOMMISSION (ADR 0007, Q6): under ONE desk a venue door
+        that tears down the metal it acquired would take every other
+        experiment on that metal with it, so running work routing through ANY
+        listing on this metal is NAMED and the release refused. `force` says
+        you mean it, and belongs at the desk's own operator door — a venue's
+        door never sends it."""
         if name not in self.metal:
             raise DeskError(f"metal {name!r} is not registered with this desk")
+        holding = self.metal_dependents(name)
+        if holding and not force:
+            return {"released": False, "metal": name, "running": holding,
+                    "error": f"metal {name!r} carries or serves running work "
+                             f"({', '.join(holding)}) — release with force to "
+                             f"hand it back anyway"}
         listings = sorted(host for host, listing in self.listings.items()
                           if listing.metal == name)
         self.store.append_fleet_event({
@@ -1169,7 +1302,7 @@ class Desk:
         self.released.add(name)
         self.idle_since.pop(name, None)
         return {"released": True, "metal": name, "listings": listings,
-                "told": told}
+                "told": told, "running": holding}
 
     async def reacquire(self, name: str) -> bool:
         """A RELEASED METAL BROUGHT BACK, with no human in it (ADR 0003, Q4):
@@ -1179,13 +1312,16 @@ class Desk:
         by the time the knock returns, the desk registers the row itself
         from the facts and address it never forgot, so the carve can proceed
         in the same breath; the container's own announce then supersedes it
-        with MEASURED facts. A metal that does not answer stays released."""
+        with MEASURED facts. A metal that does not answer stays released.
+
+        The recipe is NOT re-proposed here: since ADR 0007 it is the desk's
+        own declaration, journaled and still in this desk's table, and the
+        carve that follows reads it there."""
         if not await self.knock(name):
             return False
         if name not in self.metal_remotes:
             self.register_metal(
                 self.metal[name], self.metal_addresses.get(name),
-                builds=self.metal_builds.get(name),
                 idle_s=self.metal_idle_s.get(name, DESK_DEFAULT))
         return name in self.metal_remotes
 
@@ -1204,8 +1340,15 @@ class Desk:
                              "plane": name in self.metal_remotes,
                              "released": name in self.released,
                              "idle_s": self.idle_limit(name),
-                             "builds": self.metal_builds.get(name)}
+                             "builds": self.recipe_row(name)}
                       for name, m in sorted(self.metal.items())}}
+
+    def recipe_row(self, metal: str) -> dict | None:
+        """This metal's declared recipe as a WIRE ROW, or None where nothing
+        has declared for it yet — what `status()` shows an operator deciding
+        whether a bare metal still needs its `recipe` door called."""
+        recipe = self.recipe_for(metal)
+        return recipe.row() if recipe is not None else None
 
     # ---- the Transport surface (HostService's contract, fleet-addressed) ----
 
@@ -1248,7 +1391,7 @@ class Desk:
                       devices=int(payload.get("devices", 1)),
                       vram_gb=float(payload.get("vram_gb", 24.0))),
                 address=payload.get("address"),
-                builds=payload.get("builds"))
+                builds=builds_proposed(payload))
             retried = await self.retry_parked()
             return {"registered": payload["name"], "reaped": reaped,
                     "retried": retried}
@@ -1257,9 +1400,12 @@ class Desk:
                                    wait=float(payload.get("wait", 0.0)))
         if verb == "release":
             # the same verb the idle sweep issues, by hand: an operator who
-            # knows a metal is done need not wait out its clock
-            return await self.release(payload["metal"],
-                                      reason=payload.get("reason", "released"))
+            # knows a metal is done need not wait out its clock. `force` is
+            # the operator's alone (Q6) — a venue door leaves it unsaid and
+            # is refused when another experiment is still running there
+            return await self.release(
+                payload["metal"], reason=payload.get("reason", "released"),
+                force=bool(payload.get("force", False)))
         raise ValueError(f"unknown fleet verb {verb!r}")
 
     def answer(self, verb: str, payload: dict) -> dict:
@@ -1279,12 +1425,47 @@ class Desk:
                 for name, listing in sorted(self.listings.items())}
 
 
-def covers(regimes: Sequence[Regime], demand: Demand) -> bool:
-    """THE join rule, the only copy: coverage is capability equality."""
+def covers(listing: Listing, demand: Demand, recipe: Builds | None) -> bool:
+    """THE JOIN RULE, the only copy, in two halves: this listing's regimes
+    must MATCH the demand's capability, and the metal it lives on must have
+    been built to SERVE what the demand names (ADR 0007, Q4a)."""
+    return (matches_capability(listing.regimes, demand)
+            and recipe_serves(recipe, demand))
+
+
+def matches_capability(regimes: Sequence[Regime], demand: Demand) -> bool:
+    """The join rule's first half: coverage is capability equality."""
     return any(regime.capability == demand.capability
                and regime.base == demand.base
                and regime.shape == demand.shape
                for regime in regimes)
+
+
+def recipe_serves(recipe: Builds | None, demand: Demand) -> bool:
+    """The join rule's second half (ADR 0007, Q4a): an INFERENCE demand may
+    land on a metal only if that metal's engine recipe SERVES every adapter
+    type the demand names. The strings were read off the spec's bank by the
+    campaign layer and are compared here, never interpreted — the desk stays
+    workload-blind (#69), and the refusal moves off the host's Phase 0 and
+    onto the join, where a placement can still go somewhere else.
+
+    UNKNOWN IS NOT A REFUSAL, three ways: a demand naming no adapter type (a
+    pure client's) passes, a TRAINING demand passes (a learner builds any
+    adapter type — LearnerBuild declares no `serves`), and a listing whose
+    metal declared no engine recipe passes, because a rule refuses on
+    evidence or not at all."""
+    if demand.capability != "inference" or not demand.adapter_types:
+        return True
+    if recipe is None or not isinstance(recipe.engine, EngineBuild):
+        return True                 # a fake engine build declares no `serves`
+    return set(demand.adapter_types) <= set(serves_of(recipe))
+
+
+def serves_of(recipe: Builds) -> tuple[str, ...]:
+    """The adapter types this recipe's ENGINE was built to serve. A fakes
+    recipe declares none, which is why the rule above passes over it."""
+    return (recipe.engine.serves if isinstance(recipe.engine, EngineBuild)
+            else ())
 
 
 def _listing_from(event: Mapping,
@@ -1337,17 +1518,24 @@ class MetalService:
     always, because they are each host's own.
     """
 
-    def __init__(self, metal: Metal, *, store: Store, builds: Builds,
+    def __init__(self, metal: Metal, *, store: Store,
                  address_of: Callable[[str], str],
+                 builds: Builds | None = None,
                  schema_for: Callable[[str], SiteSchema] | None = None,
                  transport_for: Callable[[str], Transport] | None = None,
                  spawn: Callable[[ResidentBirth], Resident] = Resident.spawn
                  ) -> None:
         self.metal = metal
         self.store = store
-        # the recipe: what a venue declares and everything a partition cannot
-        # tell you; re-declared at every bring-up from the deploy's constants,
-        # so a restarted container carves the same residents unattended
+        # THE METAL BOOTS BARE (ADR 0007, Q4). The recipe is everything a
+        # partition cannot tell you — and it is a DECLARATION, which is the
+        # desk's to make: the desk's journaled row was already the canon
+        # every carve carried (ADR 0001, Q5c) and `adopt_recipe` already
+        # replaced whatever the container booted with. So None is the normal
+        # state, a carve delivers the recipe, and a carve that delivers none
+        # to a bare metal is refused by name rather than half-built. A venue
+        # may still pass one, and it is a PROPOSAL: its first word, which the
+        # desk journals and the next carve overwrites.
         self.builds = builds
         # address formats are venue (I5): the venue mints a born host's
         # address. schema_for/transport_for are the adoption birth facts every
@@ -1458,7 +1646,16 @@ class MetalService:
         born partition has replaced it on the books in the same tick; on
         failure the GB is free again and the refusal says what the residual
         is NOW, so the desk's next deduction is current. A request carrying
-        the desk's `builds` row is built from it (Q5c)."""
+        the desk's `builds` row is built from it (Q5c) — and a BARE metal
+        handed a request that carries none is refused here by name (ADR 0007,
+        Q4), because a container that was never told what to serve cannot
+        guess, and half-building is the one outcome worse than refusing."""
+        if not request.get("builds") and self.builds is None:
+            return {"carved": False, "residual": self.residual(),
+                    "error": f"metal {self.metal.name!r} is BARE: no recipe "
+                             f"was declared for it at the desk and this carve "
+                             f"carries none — declare one (desk.recipe) and "
+                             f"the next carve will carry it"}
         regimes = tuple(
             Regime(r["name"], r["capability"], r["base"],
                    int(r.get("shape", 1)))
@@ -1650,11 +1847,13 @@ class MetalService:
 
     def describe(self) -> dict:
         """The registration row plus the books — what a phone-home ships and
-        what an observer renders."""
+        what an observer renders. `builds` is null on a metal that is still
+        BARE, which is what a container that has never been carved on looks
+        like since ADR 0007."""
         return {"name": self.metal.name, "gpu": self.metal.gpu,
                 "devices": self.metal.devices, "vram_gb": self.metal.vram_gb,
                 "residual": self.residual(),
-                "builds": self.builds.row(),
+                "builds": None if self.builds is None else self.builds.row(),
                 "hosts": {name: {"address": self.addresses[name],
                                  "partition": host.partition.row(),
                                  "residents": [r.row() for r in host.residents]}

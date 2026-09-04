@@ -299,7 +299,7 @@ class ProcessFixture(unittest.TestCase):
             host_for=lambda addr: RemoteHost(self.Lazy(service, addr)),
             metal_for=lambda addr: RemoteMetal(LocalTransport(service)))
         desk.register_metal(service.metal, address="metal://proc",
-                            builds=service.builds.row())
+                            builds=service.builds)
         return desk
 
     @staticmethod
@@ -333,11 +333,12 @@ class ProcessResidentTest(ProcessFixture):
         self.assertTrue(all(r.alive() for r in host.residents))
         self.assertTrue(all(r.hello["sleeps"] for r in host.residents))
         self.assertEqual(host.status()["residents"][0]["kind"], "inference")
-        # the metal's recipe travelled: journaled with the registration, and
+        # the metal's recipe travelled: journaled as the desk's own `recipe`
+        # event (ADR 0007, Q4 — the registration only proposed it), and
         # visible in describe()
-        registered = [e for e in self.store.read_fleet_log()
-                      if e.get("event") == "metal"][-1]
-        self.assertEqual(registered["builds"]["engine"]["type"], "FakeEngineBuild")
+        declared = [e for e in self.store.read_fleet_log()
+                    if e.get("event") == "recipe"][-1]
+        self.assertEqual(declared["builds"]["engine"]["type"], "FakeEngineBuild")
         self.assertEqual(service.describe()["builds"], service.builds.row())
         self.assertEqual(
             [r["label"] for r in service.describe()["hosts"][host.name]["residents"]],

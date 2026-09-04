@@ -17,6 +17,7 @@ import contextlib
 import dataclasses
 import io
 import tempfile
+import time
 import unittest
 
 import json
@@ -31,13 +32,16 @@ from rlstack.runner.host import Partition
 from rlstack.spec.canonical import canonical_json
 from rlstack.runner.campaign import Campaigns, demands_of
 from rlstack.runner.desk import (
-    IDLE_S, Demand, Desk, DeskError, Listing, MetalService, demand_rows,
+    IDLE_S, Demand, Desk, DeskError, Listing, MetalService, covers,
+    demand_rows,
 )
 from rlstack.runner.remote import (
     DESK_DEFAULT, HostService, LocalTransport, RemoteDesk, RemoteHost,
     RemoteMetal,
 )
-from rlstack.runner.residents import Builds, Resident, ResidentBirth
+from rlstack.runner.residents import (
+    Builds, EngineBuild, LearnerBuild, Resident, ResidentBirth,
+)
 
 BASE = "Qwen/Qwen3-0.6B"
 SCHEMA = fake_qwen_schema(4, base=BASE)
@@ -191,7 +195,7 @@ class DeskFixture(unittest.TestCase):
         for name in names:
             desk.register_metal(self.metal_services[name].metal,
                                 address=f"metal://{name}",
-                                builds=self.metal_services[name].builds.row(),
+                                builds=self.metal_services[name].builds,
                                 idle_s=declares)
         return desk
 
@@ -1328,12 +1332,14 @@ class ReRegistrationTest(DeskFixture):
                                 "retried": {}})
         self.assertEqual(desk.metal["fake-metal"].vram_gb, 80.0)
         self.assertEqual(desk.status()["metal"]["fake-metal"]["gpu"], "H100")
-        self.assertTrue(desk.metal_builds["fake-metal"]["engine"]["sleeps"])
+        # a redeploy's PROPOSAL lands as a `recipe` event of its own (ADR
+        # 0007, Q4) — the same event the desk's own door writes
+        self.assertTrue(desk.recipe_row("fake-metal")["engine"]["sleeps"])
         reborn = Desk.from_journal(
             self.store, host_for=lambda addr: RemoteHost(self._transport(addr)),
             metal_for=lambda addr: RemoteMetal(self.LazyPlane(self, addr)))
         self.assertEqual(reborn.metal["fake-metal"].vram_gb, 80.0)   # last write wins
-        self.assertTrue(reborn.metal_builds["fake-metal"]["engine"]["sleeps"])
+        self.assertTrue(reborn.recipe_row("fake-metal")["engine"]["sleeps"])
         self.assertEqual(reborn.metal_addresses["fake-metal"], "metal://fake-metal")
 
     def test_a_different_address_is_a_collision_and_refused(self) -> None:
@@ -1830,3 +1836,275 @@ class MeasureTest(unittest.TestCase):
         with self.assertRaises(DeskError) as caught:
             MetalService.measure("laptop")
         self.assertIn("measured, never declared", str(caught.exception))
+
+
+class BareMetalTest(DeskFixture):
+    """ADR 0007, Q4: THE RECIPE IS THE DESK'S. A metal container boots
+    knowing what card it has and what store it mounted; what it should BUILD
+    is a declaration, and a declaration belongs where the fleet's other
+    declarations live. The claims: a bare metal registers and lists exactly
+    like a declared one; a carve to it is refused BY NAME and journaled, at
+    the desk and again at the metal; a recipe declared at the desk's own door
+    is journaled, rides the next carve, and survives a kill -9."""
+
+    def bare_metal(self, name: str = "fake-metal",
+                   devices: int = 2) -> MetalService:
+        """A metal service with NO recipe — what `metal_class` builds now."""
+        service = MetalService(
+            Metal(name, "L4", devices, 24.0), store=self.store,
+            spawn=lambda birth: Resident.in_process(
+                birth,
+                FakeLearner() if birth.regime.capability == "training"
+                else FakeEngine(base=birth.regime.base)),
+            address_of=lambda host_name: f"fleet://carved/{host_name}",
+            schema_for=lambda base: fake_qwen_schema(4, base=base),
+            transport_for=lambda address: self._transport(address))
+        self.metal_services[name] = service
+        self.metal_transports[f"metal://{name}"] = LocalTransport(service)
+        return service
+
+    def bare_desk(self) -> Desk:
+        """That metal registered, proposing nothing."""
+        desk = self.desk()
+        desk.register_metal(self.bare_metal().metal,
+                            address="metal://fake-metal")
+        return desk
+
+    def test_a_bare_metal_registers_and_is_inventory_like_any_other(self) -> None:
+        """Registration is the ACQUIRE rung and says nothing about recipes:
+        the row is there, the plane is reachable, and `status` shows a null
+        recipe — which is precisely the operator's cue to declare one."""
+        desk = self.bare_desk()
+        row = desk.status()["metal"]["fake-metal"]
+        self.assertTrue(row["plane"])
+        self.assertIsNone(row["builds"])
+        self.assertIsNone(desk.recipe_for("fake-metal"))
+
+    def test_a_carve_to_a_bare_metal_is_refused_by_name_and_journaled(self) -> None:
+        """The desk passes the metal OVER rather than commanding a build it
+        cannot describe — journaled, so the reason is on the record — and the
+        placement falls through to the boot instructions it would give if no
+        metal existed at all."""
+        desk = self.bare_desk()
+        reply = go(Campaigns(desk).submit(self.split_spec()))
+        self.assertFalse(reply["accepted"], reply)
+        refusals = [e for e in self.store.read_fleet_log()
+                    if e.get("event") == "carve-refused"]
+        self.assertTrue(refusals)
+        self.assertEqual(refusals[0]["metal"], "fake-metal")
+        self.assertIn("no recipe", refusals[0]["reason"])
+        self.assertEqual(desk.listings, {})
+
+    def test_the_metal_refuses_the_same_carve_from_its_own_side(self) -> None:
+        """Both ends hold the rule. A carve request that reaches a bare metal
+        carrying no recipe — a desk from an older journal, a hand-built
+        request — is refused at the door, never half-built."""
+        service = self.bare_metal()
+        reply = go(service.carve({
+            "regimes": [{"name": "serve", "capability": "inference",
+                         "base": BASE, "shape": 1}],
+            "base": BASE, "vram_gb": 12.0}))
+        self.assertFalse(reply["carved"], reply)
+        self.assertIn("BARE", reply["error"])
+        self.assertEqual(service.hosts, {})
+        self.assertEqual(service.pending, [])       # the booking came back
+
+    def test_a_recipe_declared_at_the_desk_rides_the_next_carve(self) -> None:
+        """The door's whole job: declare, and the metal that could not be
+        carved on carves. The recipe reaches the container through the carve
+        request — the desk never builds — and `describe()` reports it."""
+        service = self.bare_metal()
+        desk = self.desk()
+        desk.register_metal(service.metal, address="metal://fake-metal")
+        desk.recipe("fake-metal", Builds.fakes(engine_sleeps=True))
+
+        async def drive():
+            reply = await Campaigns(desk).submit(self.split_spec())
+            await service.hosts[reply["host"]]._adoptions[reply["run_id"]]
+            return reply
+        reply = go(drive())
+        self.assertTrue(reply["accepted"], reply)
+        self.assertTrue(service.builds.engine.sleeps)
+        self.assertTrue(service.describe()["builds"]["engine"]["sleeps"])
+
+    def test_the_declaration_outlives_the_desk(self) -> None:
+        """`recipe` is a journaled event and `from_journal` replays it,
+        latest per metal winning — so an operator declares once and a desk
+        restarted an hour later carves from the same row."""
+        self.bare_metal()
+        desk = self.desk()
+        desk.register_metal(self.metal_services["fake-metal"].metal,
+                            address="metal://fake-metal")
+        desk.recipe("fake-metal", Builds.fakes())
+        desk.recipe("fake-metal", Builds.fakes(engine_sleeps=True))
+        events = [e for e in self.store.read_fleet_log()
+                  if e.get("event") == "recipe"]
+        self.assertEqual(len(events), 2)
+        reborn = self.rebuilt_desk()
+        self.assertTrue(reborn.recipe_for("fake-metal").engine.sleeps)
+
+
+class ServesJoinTest(DeskFixture):
+    """ADR 0007, Q4a: the join rule's SECOND half. A spec whose bank names an
+    adapter type its would-be host's engine was not built to serve used to be
+    joined anyway and refused at Phase 0, on the host, after the placement
+    had committed. The desk compares two sets of strings it does not
+    interpret, and the refusal happens where a placement can still go
+    somewhere else."""
+
+    STEER = ("steer",)
+
+    def listing(self) -> Listing:
+        """One listing wearing an inference regime for BASE at shape 1."""
+        self.stand_up("serve-a", "fleet://a", serves_pool=True, trains=False)
+        desk = self.desk()
+        desk.list_host("serve-a", (Regime("serve-a", "inference", BASE, 1),),
+                       "fleet://a", metal="fake-metal")
+        self.desk_under_test = desk
+        return desk.listings["serve-a"]
+
+    def demand(self, *adapter_types: str) -> Demand:
+        return Demand(pool="main", capability="inference", base=BASE,
+                      shape=1, vram_gb=None, group=0,
+                      adapter_types=adapter_types)
+
+    @staticmethod
+    def serving(*serves: str) -> Builds:
+        return Builds(engine=EngineBuild(serves=serves),
+                      learner=LearnerBuild())
+
+    def test_a_recipe_that_does_not_serve_the_type_does_not_cover(self) -> None:
+        listing = self.listing()
+        self.assertTrue(covers(listing, self.demand(*self.STEER),
+                               self.serving("steer", "lora")))
+        self.assertFalse(covers(listing, self.demand(*self.STEER),
+                                self.serving("lora")))
+
+    def test_the_spec_is_what_names_the_adapter_types(self) -> None:
+        """The campaign layer reads the bank; the desk only compares. An
+        arithmetic spec's bank is lora, so its demands name lora."""
+        demands = demands_of(self.split_spec())
+        inference = [d for d in demands if d.capability == "inference"]
+        self.assertEqual(inference[0].adapter_types, ("lora",))
+        self.assertEqual(demand_rows(demands)[0]["adapter_types"],
+                         list(demands[0].adapter_types))
+
+    def test_a_join_the_recipe_refuses_falls_through_to_the_next(self) -> None:
+        """The rule is a JOIN rule, so a refusal is not an error: the unit
+        simply is not covered here, and find_listing keeps looking."""
+        listing = self.listing()
+        desk = self.desk_under_test
+        desk.recipe("fake-metal", self.serving("lora"))
+        self.assertIsNone(desk.find_listing((self.demand(*self.STEER),)))
+        desk.recipe("fake-metal", self.serving("steer"))
+        self.assertEqual(desk.find_listing((self.demand(*self.STEER),)),
+                         listing)
+
+
+class LoudKnockTest(DeskFixture):
+    """ADR 0007, Q5: a knock with no way to knock is a VENUE bug, and the
+    supervision loop degrading into a silent no-op is how it stays hidden."""
+
+    def test_a_knock_with_neither_boot_nor_address_is_journaled(self) -> None:
+        desk = self.desk()
+        desk.register_metal(Metal("no-plane", "L4", 1, 24.0), address=None)
+        self.assertFalse(go(desk.knock("no-plane")))
+        refusals = [e for e in self.store.read_fleet_log()
+                    if e.get("event") == "knock-refused"]
+        self.assertEqual(len(refusals), 1)
+        self.assertEqual(refusals[0]["metal"], "no-plane")
+        self.assertIn("no boot_for", refusals[0]["reason"])
+
+    def test_a_metal_with_a_plane_still_knocks_silently(self) -> None:
+        """The refusal is about having NO way, not about failing: a metal
+        with an address is knocked through it and nothing is journaled."""
+        self.metal_service(devices=1)
+        desk = self.desk_with_metal("fake-metal")
+        self.assertTrue(go(desk.knock("fake-metal")))
+        self.assertEqual([e for e in self.store.read_fleet_log()
+                          if e.get("event") == "knock-refused"], [])
+
+
+class GuardedReleaseTest(DeskFixture):
+    """ADR 0007, Q6 (Samarth's rider): under ONE desk, a venue door that
+    tears down the metal it acquired would take every other experiment on
+    that metal with it. So an explicit release is guarded exactly as
+    decommission is — running work NAMED, nothing torn down — while the
+    desk's own idle clock releases unguarded, because its evidence is that
+    nothing has been busy there for the metal's whole limit."""
+
+    def test_a_release_over_running_work_is_refused_with_the_run_named(self) -> None:
+        service = self.metal_service(devices=2)
+        desk = self.desk_with_metal("fake-metal")
+
+        async def drive():
+            reply = await Campaigns(desk).submit(self.split_spec())
+            refused = await desk.release("fake-metal", reason="my door")
+            stood = "fake-metal" not in desk.released and dict(desk.listings)
+            trainer = service.hosts[reply["host"]]
+            await trainer._adoptions[reply["run_id"]]
+            after = await desk.release("fake-metal", reason="my door")
+            return reply, refused, stood, after
+        reply, refused, stood, after = go(drive())
+        self.assertFalse(refused["released"], refused)
+        self.assertIn(reply["run_id"], refused["running"])
+        self.assertIn("force", refused["error"])
+        self.assertEqual(len(stood), 2)          # nothing came down: two listings
+        self.assertTrue(after["released"])       # finished work holds nothing
+        self.assertIn("fake-metal", desk.released)
+
+    def test_the_guard_is_the_whole_metal_not_one_host(self) -> None:
+        """A release takes every host on the metal at once, so the question
+        is asked of the metal: the run's anchor and the serve host it merely
+        routes through both count."""
+        service = self.metal_service(devices=2)
+        desk = self.desk_with_metal("fake-metal")
+
+        async def drive():
+            reply = await Campaigns(desk).submit(self.split_spec())
+            holding = desk.metal_dependents("fake-metal")
+            await service.hosts[reply["host"]]._adoptions[reply["run_id"]]
+            return reply, holding
+        reply, holding = go(drive())
+        self.assertEqual(len(desk.listings), 2)
+        self.assertEqual(holding, [reply["run_id"]])
+
+    def test_force_hands_it_back_anyway(self) -> None:
+        """The operator's verb, at the desk's own door alone."""
+        self.metal_service(devices=2)
+        desk = self.desk_with_metal("fake-metal")
+
+        async def drive():
+            reply = await Campaigns(desk).submit(self.split_spec())
+            forced = await desk.release("fake-metal", reason="sweep",
+                                        force=True)
+            return reply, forced
+        reply, forced = go(drive())
+        self.assertTrue(forced["released"], forced)
+        self.assertIn(reply["run_id"], forced["running"])   # named, not spared
+        self.assertIn("fake-metal", desk.released)
+
+    def test_the_idle_rule_releases_unguarded(self) -> None:
+        """ADR 0003's promise is not weakened into 'unless a journal row
+        still says running': the sweep's own evidence — nothing busy on this
+        metal for its whole limit — is stronger than the guard's, so
+        `release_idle` releases with force.
+
+        The two readings disagree only where the guard and the clock look at
+        different things (a serve listing whose roster is empty while a run
+        anchored elsewhere still routes through it), so the clock is set
+        here rather than waited out: `idle_since` IS the sweep's memory of
+        when the quiet started."""
+        self.metal_service(devices=2)
+        desk = self.desk_with_metal("fake-metal", idle_s=600.0)
+
+        async def drive():
+            reply = await Campaigns(desk).submit(self.split_spec())
+            holding = desk.metal_dependents("fake-metal")
+            desk.idle_since["fake-metal"] = 0.0        # the quiet began long ago
+            due = await desk.release_idle(1000.0)
+            return reply, holding, due
+        reply, holding, due = go(drive())
+        self.assertEqual(holding, [reply["run_id"]])   # the guard would refuse
+        self.assertEqual(due, ["fake-metal"])          # the clock does not
+        self.assertIn("fake-metal", desk.released)

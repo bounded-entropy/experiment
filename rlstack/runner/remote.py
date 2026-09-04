@@ -1118,15 +1118,24 @@ class RemoteDesk:
             payload["idle_s"] = idle_s
         return await self._transport.call("metal", payload)
 
-    async def release(self, name: str, reason: str = "released") -> dict:
+    async def release(self, name: str, reason: str = "released",
+                      force: bool = False) -> dict:
         """Hand a metal back BY HAND — the acquire rung inverted at the desk
         (ADR 0003): its listings delisted, its residents down the ladder,
         its shift ended so the venue reclaims the container, and the row
         kept as inventory the next placement may knock awake. The desk's
         idle sweep issues this same verb on its own clock; this is the door
-        for an operator who knows the metal is done sooner."""
-        return await self._transport.call("release", {"metal": name,
-                                                      "reason": reason})
+        for an operator who knows the metal is done sooner.
+
+        REFUSED WHEN SOMEONE ELSE IS STILL WORKING THERE (ADR 0007, Q6):
+        under one desk a venue tearing down the metal it acquired would take
+        every other experiment on it too, so running work is named back and
+        nothing comes down. `force` overrides and is the desk operator's
+        verb; a venue door leaves it unsaid."""
+        payload = {"metal": name, "reason": reason}
+        if force:
+            payload["force"] = True
+        return await self._transport.call("release", payload)
 
     async def reap(self, probes: int = 3, wait: float = 0.0) -> dict:
         """The janitor's sweep, run by the desk now: probe every listing,

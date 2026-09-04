@@ -42,7 +42,14 @@ def demands_of(spec: ExperimentSpec,
     where the card is known (ADR 0001) — never here.
 
     `anchor` names the member the frame lands on ("main", any declared pool,
-    or "learner"). Unasked, `anchor_demand` chooses."""
+    or "learner"). Unasked, `anchor_demand` chooses.
+
+    Every INFERENCE demand also carries the adapter types this spec's bank
+    names (ADR 0007, Q4a) — the projection that lets the join rule check a
+    metal's engine recipe without the desk ever learning what an adapter type
+    IS. Reading the spec is this module's whole job; comparing the strings is
+    the desk's."""
+    serves = adapter_types_of(spec)
     out: list[Demand] = []
     for hi, host in enumerate(spec.topology.hosts):
         for member in host.members:
@@ -50,7 +57,8 @@ def demands_of(spec: ExperimentSpec,
                 out.append(Demand(
                     pool=member.name, capability="inference",
                     base=member.base or spec.policy.base, shape=member.tp,
-                    vram_gb=member.vram_gb, group=hi))
+                    vram_gb=member.vram_gb, group=hi,
+                    adapter_types=serves))
             else:
                 out.append(Demand(
                     pool=None, capability="training", base=spec.policy.base,
@@ -58,6 +66,19 @@ def demands_of(spec: ExperimentSpec,
     chosen = anchor_demand(tuple(out), anchor)
     return tuple(dataclasses.replace(d, anchor=True) if d is chosen else d
                  for d in out)
+
+
+def adapter_types_of(spec: ExperimentSpec) -> tuple[str, ...]:
+    """THE ADAPTER TYPES THIS SPEC'S BANK NAMES, sorted and deduplicated.
+
+    An engine is BUILT to serve a set of adapter types (`EngineBuild.serves`)
+    and refuses the rest at Phase 0. That refusal used to arrive after the
+    placement had already picked a host; carried here it arrives at the join,
+    where there is still somewhere else to go (ADR 0007, Q4a). Sorted because
+    a demand row is compared and journaled, and two orders of one set must
+    not read as two different demands."""
+    return tuple(sorted({adapter.adapter_type
+                         for adapter in spec.policy.bank.values()}))
 
 
 def anchor_demand(demands: Sequence[Demand], asked: str | None) -> Demand:
