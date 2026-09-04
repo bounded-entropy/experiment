@@ -339,7 +339,7 @@ class ShapeAndRegimeTest(unittest.TestCase):
 
         report = go(host.submit(heavy(17), SCHEMA))     # two full-fraction
         go(host.submit(heavy(99), SCHEMA))              # tenants both admit
-        self.assertEqual(report.updates_completed, 4)
+        self.assertEqual((report.completed, report.extent), (4, "train"))
         self.assertEqual(host.arbiter.declared_load(), 0.0)
         self.assertGreater(len(host.arbiter.switches), 1)
 

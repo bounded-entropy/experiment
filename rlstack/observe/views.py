@@ -20,8 +20,9 @@ from __future__ import annotations
 import time
 from collections.abc import Sequence
 
-from rlstack.data.plan import wave_count
-from rlstack.data.stores.base import ANNOTATION_FIELDS, Store
+from rlstack.data.stores.base import (
+    ANNOTATION_FIELDS, RunProgress, Store, run_progress,
+)
 from rlstack.observe.locate import Root, rooted
 
 
@@ -43,16 +44,15 @@ def _events_by_host(roots: Sequence[Store | Root]) -> list[tuple[Root, str, list
     return out
 
 
-def _progress(store: Store, run_id: str) -> tuple[int, object]:
-    """(committed, target) from read-only peeks — an observer never attaches.
+def _progress(store: Store, run_id: str) -> RunProgress:
+    """How far the run got, from read-only peeks — an observer never attaches.
 
-    The target is the TRAIN PLAN's length: one wave is one gradient update, so
-    a run is done when its plan is exhausted (#59). "?" for a run whose store
-    holds no train plan — a pre-#59 run, or one still being created."""
-    entries = store.peek_ledger(run_id)
-    committed = int(entries[-1]["update"]) if entries else 0
-    plan = store.peek_plan(run_id, "train")
-    return committed, "?" if plan is None else wave_count(plan)
+    The one predicate the desk's reaper reads (data/stores/base.py): the
+    target is the EXTENT plan's length — the train plan's where a run trains,
+    since one wave is one gradient update (#59), the rollout plan's where it
+    only generates (ADR 0006 Part B). `planned` is None for a run whose store
+    holds neither — a pre-#59 run, or one still being created."""
+    return run_progress(store, run_id)
 
 
 # ---------------------------------------------------------------------------
@@ -97,10 +97,8 @@ def hosts_data(roots: Sequence[Store | Root]) -> list[dict]:
             elif e.get("event") == "detach":
                 status_by_run[rid] = e.get("status", "?")
         for rid, status in list(status_by_run.items()):
-            if status != "done":
-                committed, target = _progress(root.store, rid)
-                if isinstance(target, int) and target > 0 and committed >= target:
-                    status_by_run[rid] = "done"
+            if status != "done" and _progress(root.store, rid).done:
+                status_by_run[rid] = "done"
         out.append({
             "host": host,
             "folder": root.folder,
@@ -213,12 +211,18 @@ def runs_data(roots: Sequence[Store | Root]) -> list[dict]:
         row["forked"] = len(holding) > 1
         own = next((root for root in holding if root.folder == folder),
                    holding[0] if holding else None)
-        committed, target = (_progress(own.store, run_id) if own else (0, "?"))
-        row["committed"], row["target"] = committed, target
-        # THE LEDGER IS TRUTH: a run whose commits reached its plan is done,
-        # whatever the journal's tail says — a crashed container loses its
-        # detach events, and observability must not let that read as failure
-        if isinstance(target, int) and target > 0 and committed >= target:
+        progress = (_progress(own.store, run_id) if own
+                    else RunProgress("", 0, None))
+        # `committed` and `target` are the page's own words for the extent's
+        # two numbers, and `extent` says which they count: a training run
+        # commits updates, a generation-only run seals rollouts
+        row["extent"] = progress.extent
+        row["committed"] = progress.completed
+        row["target"] = "?" if progress.planned is None else progress.planned
+        # THE PLAN IS TRUTH: a run whose extent is complete is done, whatever
+        # the journal's tail says — a crashed container loses its detach
+        # events, and observability must not let that read as failure
+        if progress.done:
             row["status"] = "done"
         # the SUBDIR the run's directory was filed under at birth ("" at the
         # top): the directory scan is truth once the manifest exists; the

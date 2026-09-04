@@ -47,8 +47,7 @@ import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 
-from rlstack.data.plan import wave_count
-from rlstack.data.stores.base import Store
+from rlstack.data.stores.base import Store, run_done
 from rlstack.policy.siteschema import SiteSchema
 from rlstack.runner.host import LEARNER_ROUTE, Host, Partition, Regime
 from rlstack.runner.residents import (
@@ -1018,16 +1017,13 @@ class Desk:
         return stranded
 
     def finished(self, run_id: str) -> bool:
-        """Is this run still WORK? Its ledger against its train plan's length
-        — the Trainer's own done condition, read off the store, because the
-        anchor's roster died with its metal and the store is the run. A run
-        with no plan on record is taken to be work."""
-        plan = self.store.peek_plan(run_id, "train")
-        if plan is None:
-            return False
-        entries = self.store.peek_ledger(run_id)
-        committed = int(entries[-1]["update"]) if entries else 0
-        return committed >= wave_count(plan)
+        """Is this run still WORK? Its EXTENT, read off the store, because the
+        anchor's roster died with its metal and the store is the run: the
+        ledger against the train plan where a run trains, the sealed rollouts
+        against the rollout plan where it only generates (ADR 0006 Part B).
+        The one predicate, shared with the observer — a run with no plan on
+        record is taken to be work."""
+        return run_done(self.store, run_id)
 
     def parked(self) -> dict[str, str]:
         """THE QUEUE, read off the journal: every run whose latest disposition

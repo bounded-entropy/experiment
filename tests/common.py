@@ -105,6 +105,26 @@ def arith_spec(train_uri: str, heldout_uri: str | None = None,
     return ExperimentSpec(**fields)
 
 
+def generation_spec(train_uri: str, **overrides: Any) -> ExperimentSpec:
+    """A GENERATION-ONLY run (ADR 0006 Part B): a rollout plan and no train
+    plan, no algo, no learner, an EMPTY bank served by `main`.
+
+    The smallest run the stack makes legal — a Generator and nothing else —
+    and the teacher shape ADR 0005 wants: it seals rollouts another run
+    replays by `store://<run_id>/rollouts/<r>#<i>`.
+    """
+    fields: dict[str, Any] = dict(
+        policy=PolicySpec(base="Qwen/Qwen3-0.6B", bank={}),
+        gen=GenSpec(envs=("math_single_turn",), tasks=(train_uri,)),
+        plans=Plans(rollout=arith_plans().rollout),
+        algo=None,
+        topology=Topology(hosts=(HostSpec((pool("main"),)),)),
+        seeds=Seeds(master=17),
+    )
+    fields.update(overrides)
+    return ExperimentSpec(**fields)
+
+
 def arith_store(root: str | Any) -> tuple[LocalStore, str, str]:
     """A store seeded with train + held-out tasks AND the standard plans."""
     store = LocalStore(root)

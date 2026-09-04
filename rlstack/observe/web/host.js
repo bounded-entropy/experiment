@@ -105,7 +105,7 @@ function drawTenancy(host) {
     row.append(el("td", {class: t.status === "running" ? "live" : ""}, esc(t.status)));
     row.append(el("td", {class: "k"}, esc(t.pools.join(", ") || "—")));
     row.append(el("td", {class: "k"}, esc(t.remotes.join(", ") || "—")));
-    row.append(el("td", {}, esc(`${t.updates_completed ?? "?"}/${t.n_updates ?? "?"}`)));
+    row.append(el("td", {}, esc(`${t.completed ?? "?"}/${t.n_updates ?? "?"}`)));
     row.append(el("td", {class: "k"}, esc(when(t.attached))));
     row.append(el("td", {class: "k"}, esc(t.attached
         ? residency(t) : "—")));

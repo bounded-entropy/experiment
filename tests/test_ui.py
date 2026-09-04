@@ -349,7 +349,7 @@ class HostPageTest(unittest.TestCase):
         self.assertEqual([lane["run_id"] for lane in lanes], ["aaa", "bbb"])
         done, running = lanes
         self.assertEqual((done["attached"], done["detached"]), (110.0, 160.0))
-        self.assertEqual((done["status"], done["updates_completed"]), ("done", 4))
+        self.assertEqual((done["status"], done["completed"]), ("done", 4))
         self.assertIsNone(running["detached"])        # still on the host
         self.assertEqual(running["status"], "running")
         self.assertEqual(running["remotes"], ["teacher"])

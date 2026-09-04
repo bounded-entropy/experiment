@@ -21,7 +21,7 @@ import unittest
 
 import json
 
-from common import arith_spec, arith_store
+from common import arith_spec, arith_store, generation_spec
 from rlstack import (
     Bundle, FakeEngine, FakeLearner, Topology, Host, HostSpec, Message, Metal,
     PolicySpec, Regime, RemotePool, Role, SamplingSpec, Seeds,
@@ -999,33 +999,31 @@ class AnchorTest(DeskFixture):
                     ("learner-detach", first["run_id"]),
                     ("learner-detach", second["run_id"])]))
 
-    def test_a_learner_less_spec_is_placed_and_refused_by_the_loop(self) -> None:
-        """A spec with no learner member anchors on `main` and PLACES — the
-        desk's "exactly one anchor" is satisfied without a learner. Whether
-        it then RUNS is ADR 0006 Part B: today the loop refuses it, and that
-        refusal is the loop's, not the desk's."""
+    def test_a_generation_only_spec_is_placed_and_runs(self) -> None:
+        """ADR 0006 Part B end to end at the desk: a spec with no learner
+        member anchors on `main`, places on a SERVE-ONLY listing, and runs
+        there as a Generator and nothing else — one sealed rollout per
+        planned wave, no ledger, and the desk agrees it is finished."""
         serving = self.stand_up("serve-a", "fleet://a", serves_pool=True,
                                 trains=False)
         desk = self.desk()
         desk.list_host("serve-a", serving.regimes, "fleet://a")
-        generation_only = arith_spec(
-            self.train, algo=None,
-            policy=PolicySpec(base="Qwen/Qwen3-0.6B", bank={}),
-            topology=Topology(hosts=(HostSpec((pool("main"),)),)))
+        spec = generation_spec(self.train)
 
         async def drive():
-            reply = await Campaigns(desk).submit(generation_only)
-            with self.assertRaises(NotImplementedError) as caught:
-                await serving._adoptions[reply["run_id"]]
-            return reply, str(caught.exception)
-        # the host prints a dying adoption's traceback to its own stdout
-        # (Host.adopt's rule: a silent adoption death is undiagnosable) —
-        # here the death is the assertion, so the transcript stays quiet
-        with contextlib.redirect_stdout(io.StringIO()):
-            reply, refusal = go(drive())
+            reply = await Campaigns(desk).submit(spec)
+            return reply, await serving._adoptions[reply["run_id"]]
+
+        reply, report = go(drive())
         self.assertTrue(reply["accepted"], reply)
         self.assertEqual(reply["pools"], {"main": "serve-a"})
-        self.assertIn("algo is required", refusal)
+        self.assertEqual((report.completed, report.extent), (4, "rollout"))
+
+        run = self.store.open_run(report.run_id)
+        self.assertEqual(run.read_ledger(), [])
+        for index in range(1, 5):
+            self.assertTrue(run.read_rollout(index))
+        self.assertTrue(desk.finished(report.run_id))
 
 
 class DecommissionTest(DeskFixture):

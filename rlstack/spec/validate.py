@@ -606,6 +606,24 @@ def check_learnerless_bank_is_frozen(spec: ExperimentSpec, schema: SiteSchema) -
         if spec.policy.bank[name].trainable]
 
 
+def check_a_train_plan_has_an_algo(spec: ExperimentSpec, schema: SiteSchema) -> list[ValidationIssue]:
+    """A train plan is what a Trainer consumes, one wave per update, and a
+    Trainer exists only where an algo does — so a train plan with no algo
+    names updates nothing will ever run, and the run could never be finished.
+
+    The mirror of check_a_rollout_plan_has_gen: each plan needs the
+    declaration that gives it a daemon (ADR 0006 Part B).
+    """
+    if spec.plans.train is not None and spec.algo is None:
+        return [_issue(
+            "train-without-algo", "plans.train",
+            "a train plan is consumed by the Trainer, but algo is None: with "
+            "no loss, no optimizer and no pipeline there is nothing to run "
+            "its waves through — drop the train plan (a generation-only run) "
+            "or declare the algo that would consume it")]
+    return []
+
+
 def check_a_rollout_plan_has_gen(spec: ExperimentSpec, schema: SiteSchema) -> list[ValidationIssue]:
     """A rollout plan MAKES trajectories, which takes an environment and tasks
     to make them from — so gen must exist to declare both."""
@@ -669,6 +687,7 @@ CHECKS = (
     check_post_pools_can_coreside,
     check_learnerless_bank_is_frozen,
     check_plans_declare_an_extent,
+    check_a_train_plan_has_an_algo,
     check_a_rollout_plan_has_gen,
     check_schedule_is_sane,
     check_warm_start_map_targets_this_bank,

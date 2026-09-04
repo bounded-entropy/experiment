@@ -34,7 +34,7 @@ class LoopTest(unittest.TestCase):
         spec = arith_spec(self.train)
         report, engine = self.run_spec(spec)
 
-        self.assertEqual(report.updates_completed, 4)
+        self.assertEqual((report.completed, report.extent), (4, "train"))
         self.assertIsNone(report.resumed_from)
 
         run = self.store.open_run(report.run_id)
@@ -268,4 +268,4 @@ class BaseBindingTest(unittest.TestCase):
         report = run_experiment(
             arith_spec(self.train), SCHEMA, self.store,
             FakeEngine(base="Qwen/Qwen3-0.6B"), FakeLearner())
-        self.assertEqual(report.updates_completed, 4)
+        self.assertEqual((report.completed, report.extent), (4, "train"))

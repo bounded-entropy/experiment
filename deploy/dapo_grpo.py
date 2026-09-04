@@ -212,8 +212,8 @@ def _run(train_tasks: str, eval_tasks: str, updates: int, master: int,
     import torch
     print(f"[{label}] rank0 peak {torch.cuda.max_memory_allocated()/2**30:.2f} GiB")
     print(f"[{label}] run_id={report.run_id} "
-          f"updates={report.updates_completed}")
-    return {"run_id": report.run_id, "updates": report.updates_completed}
+          f"{report.extent}={report.completed}")
+    return {"run_id": report.run_id, "completed": report.completed}
 
 
 @app.function(image=image, gpu="A100-80GB:2", volumes={"/store": store_volume, "/hf": hf_cache},

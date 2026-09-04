@@ -97,6 +97,17 @@ def clean_spec(**overrides: Any) -> ExperimentSpec:
     return ExperimentSpec(**fields)
 
 
+def generation_only(**overrides: Any) -> ExperimentSpec:
+    """The clean baseline as a GENERATION-ONLY run (ADR 0006 Part B): no algo,
+    no learner, an empty bank, and a rollout plan for its extent."""
+    fields: dict[str, Any] = dict(
+        algo=None, policy=replace(clean_spec().policy, bank={}),
+        plans=Plans(rollout="cas://plan/roll"),
+        topology=Topology(hosts=(HostSpec((pool("main"),)),)))
+    fields.update(overrides)
+    return clean_spec(**fields)
+
+
 def codes(spec: ExperimentSpec) -> set[str]:
     return {issue.code for issue in validate(spec, SCHEMA)}
 
@@ -108,10 +119,19 @@ class TestHappyPath(unittest.TestCase):
     def test_validate_or_raise_is_silent_when_clean(self) -> None:
         validate_or_raise(clean_spec(), SCHEMA)
 
-    def test_offline_spec_without_gen_or_algo_validates(self) -> None:
+    def test_offline_spec_without_gen_validates(self) -> None:
+        """The pure-offline run: it trains on trajectories sealed elsewhere,
+        so it declares no gen and makes nothing."""
+        spec = clean_spec(gen=None, plans=Plans(train="cas://plan/train"))
+        self.assertEqual(validate(spec, SCHEMA), [])
+
+    def test_a_spec_with_no_gen_and_no_algo_needs_no_daemons_and_is_refused(self) -> None:
+        """ADR 0006 Part B read backwards: with no algo there is no Trainer
+        and with no gen there may be no rollout plan, so such a spec declares
+        a run that would do nothing at all."""
         spec = clean_spec(gen=None, algo=None,
                           plans=Plans(train="cas://plan/train"))
-        self.assertEqual(validate(spec, SCHEMA), [])
+        self.assertEqual(codes(spec), {"train-without-algo"})
 
     def test_bank_provides_satisfy_requires(self) -> None:
         """A loss may require a tensor the bank's replay lowering computes
@@ -405,14 +425,15 @@ class TestCoherence(unittest.TestCase):
         self.assertEqual(codes(clean_spec(algo=laggy)), {"bad-schedule"})
 
     def test_algo_none_skips_schedule_and_loss_checks(self) -> None:
-        self.assertEqual(validate(clean_spec(algo=None), SCHEMA), [])
+        """The generation-only shape validates clean, and every algo rule
+        skips itself rather than reading None."""
+        self.assertEqual(validate(generation_only(), SCHEMA), [])
 
     def test_a_trainable_entry_without_a_learner_is_refused(self) -> None:
         """ADR 0006 Part B: a topology with no LearnerMember has no training
         metal, so nothing could ever train that entry — refused as text, by
         name, rather than mid-run as `None.install`."""
-        spec = clean_spec(algo=None, topology=Topology(
-            hosts=(HostSpec((pool("main"),)),)))
+        spec = generation_only(policy=clean_spec().policy)
         self.assertEqual(codes(spec), {"trainable-without-learner"})
         self.assertIn("pi", validate(spec, SCHEMA)[0].path)
 
@@ -420,25 +441,21 @@ class TestCoherence(unittest.TestCase):
         """The generation-only shape: entries built at their init and served,
         never trained. An EMPTY bank is the teacher's case, also fine."""
         frozen = replace(clean_spec().policy.bank["pi"], trainable=False)
-        pools_only = Topology(hosts=(HostSpec((pool("main"),)),))
-        self.assertEqual(validate(clean_spec(
-            algo=None, topology=pools_only,
-            policy=replace(clean_spec().policy, bank={"pi": frozen})),
-            SCHEMA), [])
-        self.assertEqual(validate(clean_spec(
-            algo=None, topology=pools_only,
-            policy=replace(clean_spec().policy, bank={})), SCHEMA), [])
+        self.assertEqual(validate(generation_only(policy=replace(
+            clean_spec().policy, bank={"pi": frozen})), SCHEMA), [])
+        self.assertEqual(validate(generation_only(), SCHEMA), [])
 
     def test_a_run_with_neither_plan_has_no_extent(self) -> None:
         """A run's length is its train plan or its rollout plan; declaring
         neither describes no work at all."""
         self.assertEqual(codes(clean_spec(plans=Plans())), {"no-extent"})
 
-    def test_a_rollout_only_run_has_an_extent(self) -> None:
-        spec = clean_spec(algo=None, plans=Plans(rollout="cas://plan/roll"),
-                          topology=Topology(hosts=(HostSpec((pool("main"),)),)),
-                          policy=replace(clean_spec().policy, bank={}))
-        self.assertEqual(validate(spec, SCHEMA), [])
+    def test_a_train_plan_without_an_algo_is_refused(self) -> None:
+        """The extent's plan must have a daemon to consume it: a train plan
+        is the Trainer's, and the Trainer is the algo's."""
+        self.assertEqual(codes(generation_only(
+            plans=Plans(train="cas://plan/train", rollout="cas://plan/roll"))),
+            {"train-without-algo"})
 
     def test_warmstart_unknown_delta(self) -> None:
         # map is source-name -> THIS bank's name; "ghost" names no delta here.

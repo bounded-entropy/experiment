@@ -6,6 +6,11 @@ buffer of the last commit. Which update that is comes from the train plan, so
 one plan paces both daemons without either calling the other (#59). WHICH
 policy version actually serves each wave stays opportunistic within the buffer
 and is recorded per turn — never prescribed, never re-derived.
+
+The buffer comes from the CALLER (needs_of, ADR 0006 Part B): the lag when a
+Trainer consumes these rollouts, None when nothing does. None is UNPACED — the
+buffer bounds staleness against a moving policy, and in a generation-only run
+the policy never moves.
 """
 
 from __future__ import annotations
@@ -31,12 +36,13 @@ class Generator(Daemon):
                  tasks: Mapping[str, Task], engine: Engine,
                  routes_at: Callable[[Bundle], Routes],
                  initial_bundle: Bundle, max_inflight: int,
+                 buffer: int | None,
                  refs=None) -> None:
         super().__init__(signals, arbiter, run)
         self.engine = engine
         self.gen = spec.gen
         self.master = spec.seeds.master
-        self.buffer = spec.algo.schedule.max_policy_lag
+        self.buffer = buffer
         self.plan = plan
         self.due_at = due_at
         self.tasks = tasks
@@ -63,7 +69,14 @@ class Generator(Daemon):
 
     def may_generate(self, index: int) -> bool:
         """Rollout r waits for commit u-1-B, where u is the update that first
-        consumes it: at most B waves in flight beyond the last committed."""
+        consumes it: at most B waves in flight beyond the last committed.
+
+        With NO buffer nothing consumes these rollouts (there is no Trainer to
+        advance a ledger this would wait on), so the run is unpaced and every
+        rollout may be sampled the moment the one before it is sealed.
+        """
+        if self.buffer is None:
+            return True
         return self.committed() >= self.consumed_by(index) - 1 - self.buffer
 
     def already_sealed(self, index: int) -> bool:

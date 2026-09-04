@@ -397,6 +397,30 @@ class Store(ABC):
             return None
         return payload["columns"]
 
+    def peek_rollout(self, run_id: str, index: int) -> list[dict[str, Any]] | None:
+        """One SEALED generated wave's trajectory rows WITHOUT attaching — the
+        rollouts twin of peek_wave, and the door another run's replay reads a
+        generation-only run's output through (ADR 0006 Part B). A rollout is
+        sealed or absent, never half (write_rollout is atomic), so a peek is
+        as safe as reading the ledger. None when that rollout is not sealed."""
+        try:
+            raw = gzip.decompress(
+                self._read(rollout_key(self.run_prefix(run_id), index)))
+        except FileNotFoundError:
+            return None
+        return [json.loads(line) for line in raw.decode("utf-8").split("\n") if line]
+
+    def peek_rollouts_sealed(self, run_id: str) -> int:
+        """How many generated waves this run has sealed, WITHOUT attaching.
+
+        The rollouts half of "how far along is this run": a Generator makes
+        indices 1..n in order and each write is atomic, so counting the keys
+        IS the count and the count IS the progress. Nothing ever sweeps
+        rollouts/ (they belong to whichever updates a plan says, so they have
+        no update of their own to be uncommitted under)."""
+        return sum(1 for key in self._list(f"{self.run_prefix(run_id)}/rollouts")
+                   if key.endswith(".jsonl.gz"))
+
     def peek_plan(self, run_id: str, kind: str) -> bytes | None:
         """One of the plans the run was created with, WITHOUT attaching: the
         run's SHAPE, copied in verbatim at creation and never rewritten, so
@@ -594,6 +618,68 @@ class Store(ABC):
                     pass
         return out
 
+
+# ---------------------------------------------------------------------------
+# how far a run got, for every kind of run — read off the store, by everyone
+# ---------------------------------------------------------------------------
+
+@dataclass(frozen=True)
+class RunProgress:
+    """HOW FAR A RUN GOT, against the plan that is its EXTENT (ADR 0006 Part
+    B): updates committed for a run that trains, rollouts sealed for one that
+    only generates.
+
+    `extent` names which plan the numbers count ("" when the run has neither
+    on record — a directory still being created), and `planned` is None for
+    the same reason, which is why a reader that renders "?" can tell "not yet
+    known" from "none yet done".
+    """
+
+    extent: str
+    completed: int
+    planned: int | None
+
+    @property
+    def done(self) -> bool:
+        """A run is done when its EXTENT is: the ledger reached the train
+        plan's length, or the rollout plan's last wave is sealed. A run with
+        no plan on record is still work — the one predicate the desk's
+        reaper, the observer and the host all read, so no copy of it can
+        drift (Q3)."""
+        return self.planned is not None and self.completed >= self.planned
+
+
+def run_progress(store: "Store", run_id: str) -> RunProgress:
+    """One run's progress from read-only peeks — an observer never attaches.
+
+    The train plan is the extent where a run has one (one wave is one gradient
+    update, so the ledger is the count); otherwise the rollout plan is, and
+    the sealed rollouts are the count. No Sealer and no ledger is needed for
+    the second: `write_rollout` is atomic and nothing ever sweeps rollouts/.
+    """
+    # imported here, not at module scope: rlstack.data's package __init__
+    # imports stores, so a top-level import back into the package would be a
+    # cycle. Still inside the membrane — data/ imports no other package.
+    from rlstack.data.plan import wave_count
+
+    train = store.peek_plan(run_id, "train")
+    if train is not None:
+        entries = store.peek_ledger(run_id)
+        return RunProgress("train",
+                           int(entries[-1]["update"]) if entries else 0,
+                           wave_count(train))
+    rollout = store.peek_plan(run_id, "rollout")
+    if rollout is None:
+        return RunProgress("", 0, None)
+    return RunProgress("rollout", store.peek_rollouts_sealed(run_id),
+                       wave_count(rollout))
+
+
+def run_done(store: "Store", run_id: str) -> bool:
+    """Is this run still WORK? Its extent, read off the store, because the
+    store is the run (I10) — what the desk's reaper asks of a run whose host
+    died, and what the observer's "done" means."""
+    return run_progress(store, run_id).done
 
 
 @dataclass

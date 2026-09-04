@@ -61,7 +61,7 @@ def main() -> None:
 
     schema = fake_qwen_schema(4, base="Qwen/Qwen3-0.6B")
     report = run_experiment(spec, schema, store, FakeEngine(), FakeLearner())
-    print(f"run_id={report.run_id}  updates={report.updates_completed}  "
+    print(f"run_id={report.run_id}  {report.extent}={report.completed}  "
           f"resumed_from={report.resumed_from}")
 
     again = run_experiment(spec, schema, store, FakeEngine(), FakeLearner())

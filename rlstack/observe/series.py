@@ -9,8 +9,7 @@ committed bytes.
 
 from __future__ import annotations
 
-from rlstack.data.plan import wave_count
-from rlstack.data.stores.base import Store
+from rlstack.data.stores.base import Store, run_progress
 from rlstack.observe.panels import PanelError, evaluate, missing_args
 
 
@@ -20,10 +19,11 @@ def run_series(store: Store, run_id: str,
     manifest = store.peek_manifest(run_id)
     if manifest is None:
         return None
-    # what the committed updates count up to: the train plan's length, since
-    # one wave is one gradient update (#59). None for a run with no plan bytes.
-    plan = store.peek_plan(run_id, "train")
-    target = wave_count(plan) if plan is not None else None
+    # what the run counts up to, and which plan that is: the train plan's
+    # length where a run trains, since one wave is one gradient update (#59),
+    # the rollout plan's where it only generates (ADR 0006 Part B). None for a
+    # run with no plan bytes at all.
+    progress = run_progress(store, run_id)
 
     entries = store.peek_ledger(run_id)
     updates = [{
@@ -55,8 +55,11 @@ def run_series(store: Store, run_id: str,
         "derived": derived_series(
             panels if panels is not None else store.read_panels(),
             dictionary, updates, evals),
-        "committed": updates[-1]["update"] if updates else 0,
-        "target": target,
+        # a run whose extent is ROLLOUTS commits nothing: its ledger panels
+        # are empty and `completed` counts the waves its Generator sealed
+        "extent": progress.extent,
+        "committed": progress.completed,
+        "target": progress.planned,
     }
 
 

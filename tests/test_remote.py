@@ -79,7 +79,7 @@ class RemoteRunTest(unittest.TestCase):
         arbiter = Arbiter()
         report = run_experiment(spec, SCHEMA, store, {"main": main, "aux": aux},
                                 FakeLearner(), arbiter=arbiter)
-        self.assertEqual(report.updates_completed, 4)
+        self.assertEqual((report.completed, report.extent), (4, "train"))
         self.assertIsNone(arbiter.attached_group(main))
         self.assertIsNone(arbiter.attached_group(aux))
 

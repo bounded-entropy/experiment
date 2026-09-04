@@ -50,7 +50,8 @@ export async function drawRun() {
     + `<span class="meta">loss ${esc(dict.loss ?? "?")} · lag ${esc(dict.max_policy_lag ?? 0)}
      · post [${(dict.post_pipeline || []).map(esc).join(" → ")}]</span>
      <span class="${data.committed >= (data.target ?? 1e9) ? "meta" : "live"}">
-     ${data.committed}/${esc(data.target ?? "?")} committed</span>`)
+     ${data.committed}/${esc(data.target ?? "?")}
+     ${data.extent === "rollout" ? "rollouts sealed" : "committed"}</span>`)
     + (mine ? `<span class="meta">on ${mine.hosts.map(h =>
         `<a href="${hostPath(h, folder)}" style="color:${C.feed}">${esc(h)}</a>`
       ).join(" + ") || "?"}</span>` : ""));
@@ -134,7 +135,7 @@ export async function drawRun() {
         grid.append(card(c.name + " (eval)", c.producer.replace("postprocessor:", ""),
             [{label: "eval", color: C.eval, dash: true, points: evalOf(c.name)}]));
   }
-  drawWaves(waves);
+  drawWaves(waves, data.extent);
   legend("solid = training · <span style='color:#ffb86b'>dashed = held-out eval</span>"
     + " · hover any chart for the raw values · refreshes every 3s"
     + " · panels & priority from the run's own dictionary.json"
@@ -176,10 +177,18 @@ function drawSteps(timing) {
 
 // ---- the tail of sealed waves ---------------------------------------------
 
-function drawWaves(waves) {
+function drawWaves(waves, extent) {
   const rows = (waves || {}).waves || [];
   document.getElementById("page").append(
       el("h2", {}, "sealed waves <span>the ledger's tail — click one to read it</span>"));
+  // a run whose extent is ROLLOUTS has no Trainer and so no ledger at all:
+  // its output is sealed rollouts, and every panel fed by the ledger is
+  // legitimately empty. Say that rather than reading as a stalled run.
+  if (!rows.length && extent === "rollout") {
+    note("this run only generates: no Trainer, no ledger, no committed "
+       + "waves — its output is the sealed rollouts counted above");
+    return;
+  }
   if (!rows.length) { note("no committed waves yet"); return; }
   const table = el("table", {}, "<tr><th>update</th><th>trajectories</th>"
       + "<th>groups</th><th>post means</th><th>bundle</th></tr>");

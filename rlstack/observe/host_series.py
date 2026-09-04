@@ -34,7 +34,7 @@ from rlstack.observe.views import hosts_data, runs_data
 CLAIMED_FIELDS = {
     "host-up": ("engines", "partition", "regimes", "residents", "store"),
     "attach": ("pools", "remotes", "n_updates", "store"),
-    "detach": ("status", "updates_completed"),
+    "detach": ("status", "completed", "extent", "updates_completed"),
     "stats": ("gpus",),
     "traffic": ("window_s", "prefill_tokens", "decode_tokens", "requests",
                 "ttft_ms_mean", "admit_wait_ms_mean", "admit_wait_ms_max",
@@ -154,7 +154,7 @@ def tenancy_lanes(events: Sequence[dict]) -> list[dict]:
                     "remotes": list(event.get("remotes", [])),
                     "n_updates": event.get("n_updates"),
                     "attached": event.get("t"), "detached": None,
-                    "status": "running", "updates_completed": None}
+                    "status": "running", "completed": None, "extent": None}
             lanes.append(lane)
             open_lane[run_id] = lane
         else:
@@ -166,7 +166,14 @@ def tenancy_lanes(events: Sequence[dict]) -> list[dict]:
                 lanes.append(lane)
             lane["detached"] = event.get("t")
             lane["status"] = event.get("status", "?")
-            lane["updates_completed"] = event.get("updates_completed")
+            # how far the tenancy got, old spelling or new: a detach said
+            # `updates_completed` before ADR 0006 Part B gave a run an EXTENT
+            # (a generation-only run completes rollouts, not updates), and
+            # journals on the volume are append-only history
+            lane["completed"] = (event.get("completed")
+                                 if "completed" in event
+                                 else event.get("updates_completed"))
+            lane["extent"] = event.get("extent")
     return lanes
 
 

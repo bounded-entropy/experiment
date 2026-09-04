@@ -246,8 +246,8 @@ def _run(task_id: str, held_out: list[str], updates: int, master: int,
                                      remotes=pools))
     store_volume.commit()
     print(f"[{label}] run_id={report.run_id} "
-          f"updates={report.updates_completed}")
-    return {"run_id": report.run_id, "updates": report.updates_completed}
+          f"{report.extent}={report.completed}")
+    return {"run_id": report.run_id, "completed": report.completed}
 
 
 def _tasks(store, n_held_out: int = 4):

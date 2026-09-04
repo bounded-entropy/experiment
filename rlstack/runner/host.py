@@ -132,7 +132,11 @@ class Tenancy:
     pools: dict[str, str]           # pool name -> base the bound engine serves
     store: str = ""                 # locator of the run's OWN store
     status: str = "running"         # running | done | failed
-    updates_completed: int | None = None
+    # how far the run's EXTENT got and which plan that is (ADR 0006 Part B,
+    # Q7): updates committed for a run that trains, rollouts sealed for one
+    # that only generates. Observability, never identity.
+    completed: int | None = None
+    extent: str = ""
     attached_at: float = field(default_factory=time.time)
 
 
@@ -388,7 +392,9 @@ class Host:
         self.store.append_host_event(self.name, {
             "event": "attach", "t": time.time(), "run_id": rid,
             "pools": sorted(binding), "remotes": sorted(remote_pools),
-            "plan": spec.plans.train,     # the shape, by reference (#59)
+            # the shape, by reference (#59): the EXTENT plan — the train plan
+            # where one trains, else the rollout plan the run is long by
+            "plan": getattr(spec.plans, spec.plans.extent),
             "store": run_store.describe(),
             # filing rides the attach so an observer knows it from the run's
             # FIRST breath: the run directory's manifest lands moments after
@@ -412,10 +418,12 @@ class Host:
         finally:
             self.release_tenant(learner, rid)
         self.roster[rid].status = "done"
-        self.roster[rid].updates_completed = report.updates_completed
+        self.roster[rid].completed = report.completed
+        self.roster[rid].extent = report.extent
         self.store.append_host_event(self.name, {
             "event": "detach", "t": time.time(), "run_id": rid,
-            "status": "done", "updates_completed": report.updates_completed})
+            "status": "done", "completed": report.completed,
+            "extent": report.extent})
         return report
 
     def release_tenant(self, learner: Learner | None, run_id: str) -> None:
@@ -709,7 +717,7 @@ class Host:
             "admitted": self.arbiter.admitted(),
             "residents": [r.row() for r in self.residents],
             "tenants": {rid: {"status": t.status, "pools": t.pools,
-                              "updates_completed": t.updates_completed}
+                              "completed": t.completed, "extent": t.extent}
                         for rid, t in sorted(self.roster.items())},
         }
 
