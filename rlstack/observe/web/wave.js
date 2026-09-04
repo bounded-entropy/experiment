@@ -10,7 +10,7 @@
 
 import {C, brief, el, esc, getAnswer, getJSON, note, raw, section} from "./dom.js";
 import {head, histogramCard} from "./charts.js";
-import {apiRun, ctx, drawAmbiguity, legend, route, runPath, syncSwitcher}
+import {apiRun, ctx, drawAmbiguity, route, runPath, syncSwitcher}
   from "./nav.js";
 
 const FINISH_COLOR = {stop: C.rail, eos: C.feed, length: C.warn};
@@ -45,20 +45,12 @@ export async function drawWave() {
   drawDistributions(s);
   drawColumns(s, wave.ledger);
   drawTrajectories(wave);
-  const home = wave.extent === "rollout" ? "rollouts" : "waves";
-  legend("this wave is sealed: runs/&lt;id&gt;/" + home + "/" + String(wave.update).padStart(6, "0")
-    + (wave.extent === "rollout"
-        ? ".jsonl.gz, the Generator's own atomic write (no postdata, no ledger line — "
-          + "this run only generates), read through the observer's peek verbs · "
-        : ".jsonl.gz plus its postdata, read through the observer's peek verbs · ")
-    + "hover a histogram bar for its edges and count · a bubble with a blue edge "
-    + "was GENERATED (one Turn: one pinned bundle, one seed, one contiguous KV)");
 }
 
 // ---- the distributions ----------------------------------------------------
 
 function drawDistributions(s) {
-  const grid = section("distribution", "this wave's own bytes, binned server-side");
+  const grid = section("distribution");
   for (const panel of s.panels) grid.append(histogramCard(panel));
   grid.append(finishCard(s.finish));
 }
@@ -89,8 +81,7 @@ function finishCard(finish) {
 
 function drawColumns(s, ledger) {
   const holder = document.getElementById("page");
-  holder.append(el("h2", {}, "postdata <span>every column the pipeline wrote for "
-      + "this wave</span>"));
+  holder.append(el("h2", {}, "postdata"));
   if (!s.columns.length) { note("this wave has no postdata columns"); return; }
   const table = el("table", {}, "<tr><th>column</th><th>kind</th><th>n</th>"
       + "<th>mean</th><th>min</th><th>max</th><th>ledger mean</th></tr>");
@@ -113,8 +104,7 @@ function drawColumns(s, ledger) {
 
 function drawTrajectories(wave) {
   const holder = document.getElementById("page");
-  holder.append(el("h2", {}, "trajectories <span>by Group — the scope a "
-      + "postprocessor saw</span>"));
+  holder.append(el("h2", {}, "trajectories"));
   if (wave.truncated)
     note(`showing the first ${wave.summary.trajectories} of `
        + `${wave.summary.trajectories + wave.truncated} trajectories`);

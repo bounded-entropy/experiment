@@ -9,7 +9,7 @@ import {C, WHEEL, ago, brief, clock, drawnOnce, el, esc, getAnswer, gib,
         lostTick, note, okTick, pulseDot, section, storeTail, when}
   from "./dom.js";
 import {card, plot, residencyTip, timeline} from "./charts.js";
-import {ctx, legend, query, route, runPath, withHours} from "./nav.js";
+import {ctx, query, route, runPath, withHours} from "./nav.js";
 
 const MOMENT_COLOR = {"host-up": C.teal, attach: C.rail, detach: C.feed,
                       sleep: C.derived, wake: C.eval};
@@ -47,8 +47,6 @@ export async function drawHost() {
   drawThroughput(host);
   drawGpu(host);
   drawSlot(host);
-  legend("this page is one file: hosts/" + esc(route.host) + "/log.jsonl · hover any"
-    + " bar, point or ▲ moment for its raw values · refreshes every 3s");
   okTick();
 }
 
@@ -56,7 +54,7 @@ export async function drawHost() {
 
 function drawBirth(host) {
   const holder = document.getElementById("page");
-  holder.append(el("h2", {}, "the host <span>as it attested itself at birth</span>"));
+  holder.append(el("h2", {}, "the host"));
   const partition = host.partition
     ? `${esc(host.partition.gpu || "?")} ${esc(host.partition.metal ?? host.partition.gpuset)} devices `
       + `[${(host.partition.devices || []).join(", ")}]`
@@ -89,7 +87,7 @@ function span(host) {
 
 function drawTenancy(host) {
   const holder = document.getElementById("page");
-  holder.append(el("h2", {}, "tenancy <span>attach → detach, from the journal</span>"));
+  holder.append(el("h2", {}, "tenancy"));
   if (!host.tenancy.length) {
     note("no tenant has ever attached here");
     return;
@@ -135,13 +133,11 @@ function drawThroughput(host) {
       {xlabel: clock, breakGaps: true, y0: 0, markers: marks}, extra || {});
   if (!has("prefill_tok_s") && !has("requests_s") && !has("inflight")
       && !has("ttft_ms")) {
-    document.getElementById("page").append(el("h2", {},
-        "throughput <span>windowed traffic, as the host journals it</span>"));
-    note("no traffic events journaled yet — a serving host emits one per stats "
-       + "tick: prefill and decode tokens, requests, ttft, admission wait, inflight");
+    document.getElementById("page").append(el("h2", {}, "throughput"));
+    note("no traffic events journaled yet");
     return;
   }
-  const grid = section("throughput", "windowed traffic, as the host journaled it");
+  const grid = section("throughput");
   if (has("prefill_tok_s") || has("decode_tok_s"))
     grid.append(card("tokens/s", "prefill · decode", [
         {label: "prefill", color: C.feed, points: ch.prefill_tok_s || []},
@@ -173,12 +169,11 @@ function momentMarks(moments) {
 function drawGpu(host) {
   if (!host.gpus.length) {
     document.getElementById("page").append(el("h2", {}, "gpu"));
-    note("no stats events journaled (run_stats not running, or no NVIDIA runtime)");
+    note("no stats events journaled");
     return;
   }
   const marks = momentMarks(host.moments);
-  const grid = section("gpu",
-      "one card per device · utilization over HBM, with the device total as the line");
+  const grid = section("gpu");
   for (const g of host.gpus) grid.append(deviceCard(g, marks));
 }
 
@@ -213,12 +208,10 @@ function drawSlot(host) {
       !CLAIMED_EVENTS.some(prefix => m.key.startsWith(prefix)));
   if (!metrics.length) {
     document.getElementById("page").append(el("h2", {}, "journaled metrics"));
-    note("none unclaimed — this page plots any numeric field a host event carries "
-       + "that the readings above do not already draw");
+    note("none unclaimed");
     return;
   }
-  const grid = section("journaled metrics",
-      "any numeric field this host emits that no reading above claims");
+  const grid = section("journaled metrics");
   for (const m of metrics)
     grid.append(card(m.key, m.event, [{label: m.key, color: C.derived,
         points: m.points}], {xlabel: clock, breakGaps: true}));

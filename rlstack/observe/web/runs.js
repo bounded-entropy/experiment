@@ -13,7 +13,7 @@
 
 import {ago, drawnOnce, el, esc, lostTick, okTick, storeTail}
   from "./dom.js";
-import {ctx, hostPath, legend, runPath, runsIndex} from "./nav.js";
+import {ctx, hostPath, runPath, runsIndex} from "./nav.js";
 
 let needle = "";
 let latest = [];
@@ -112,12 +112,6 @@ function render() {
     if (!mine.length) continue;
     tree.append(many ? folderBlock(folder, mine) : dirBlocks(mine, false, ""));
   }
-  legend("a folder IS a store root · <span class='key'>dir/</span> = the run's"
-    + " filing subdir, chosen at submit and never moved · name and"
-    + " tags are annotations — flavortext, never hashed · "
-    + "<span class='stall'>stalled</span> = the journal says running but a host"
-    + " of the run has no pulse (debug those first) · ⚠FORK = one run_id in two"
-    + " roots · filter grammar: regex terms AND, | for OR · refreshes every 3s");
 }
 
 function folderBlock(folder, rows) {

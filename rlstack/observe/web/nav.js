@@ -173,9 +173,6 @@ export function drawAmbiguity(runId, folders) {
   if (sel) sel.remove();          // nothing to switch FROM: no run is selected
   ctx(`<span>${esc(runId)}</span>`
     + `<span class="warn">in ${folders.length} folders</span>`);
-  holder.append(el("p", {class: "note"},
-      "this run_id names a run in more than one folder — the same spec "
-    + "submitted twice. Identity is content; the folder says which one."));
   const table = el("table", {}, "<tr><th>folder</th><th>run</th></tr>");
   for (const folder of folders) {
     const row = el("tr", {});
@@ -185,10 +182,5 @@ export function drawAmbiguity(runId, folders) {
     table.append(row);
   }
   holder.append(table);
-  legend("a folder is a store root, fixed at birth · every link the index "
-    + "emits carries its folder");
 }
 
-export function legend(html) {
-  document.getElementById("legend").innerHTML = html;
-}

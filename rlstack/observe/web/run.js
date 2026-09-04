@@ -8,7 +8,7 @@
 import {C, brief, drawnOnce, el, esc, getAnswer, getJSON, lostTick, note,
         okTick, section} from "./dom.js";
 import {card, emptyCard, stackedCard} from "./charts.js";
-import {apiRun, ctx, drawAmbiguity, hostPath, legend, route, syncSwitcher,
+import {apiRun, ctx, drawAmbiguity, hostPath, route, syncSwitcher,
         wavePath} from "./nav.js";
 
 const GAP = "logprob_gap";      // the parity alarm (#25's certificate, running)
@@ -80,7 +80,7 @@ export async function drawRun() {
     ...measured(name)];
 
   if (feeding.length) {
-    const grid = section("feeds the loss", "walkback from " + (dict.loss ?? "?"));
+    const grid = section("feeds the loss");
     for (const c of feeding)
       grid.append(card(c.name, c.producer.replace("postprocessor:", ""),
                        pair(c.name, C.feed)));
@@ -102,7 +102,7 @@ export async function drawRun() {
       c.phase === "train" && c.kind === "stat" &&
       c.producer.startsWith("adapter:"));
   if (adapterStats.length) {
-    const grid = section("adapter stats", "declared provides, per update");
+    const grid = section("adapter stats");
     for (const c of adapterStats)
       grid.append(card(c.name, c.producer.replace("adapter:", ""),
                        [{label: c.name, color: C.feed,
@@ -110,11 +110,11 @@ export async function drawRun() {
   }
   const derived = data.derived || [];
   if (derived.length) {
-    const grid = section("derived", "your panels.json");
+    const grid = section("derived");
     for (const d of derived) {
       if (d.missing || d.error) {
         grid.append(emptyCard(d.name, d.expr, d.error ? d.error
-            : "missing from this run's pipeline: " + d.missing.join(", ")));
+            : "missing: " + d.missing.join(", ")));
       } else {
         grid.append(card(d.name, d.expr, [
           {label: d.name, color: C.derived, points: d.points},
@@ -136,10 +136,6 @@ export async function drawRun() {
             [{label: "eval", color: C.eval, dash: true, points: evalOf(c.name)}]));
   }
   drawWaves(waves, data.extent);
-  legend(`solid = training · <span style="color:${C.eval}">dashed = held-out eval</span>`
-    + " · hover any chart for the raw values · refreshes every 3s"
-    + " · panels & priority from the run's own dictionary.json"
-    + " · a sealed wave is read from the store, never from a live run");
   okTick();
 }
 
@@ -147,7 +143,7 @@ export async function drawRun() {
 
 function drawParity(points, dict) {
   if (!points.length) return;
-  const grid = section("parity", "logprob_gap — the running certificate (#25)");
+  const grid = section("parity");
   grid.append(card(GAP, "loss:" + (dict.loss ?? "?"),
       [{label: GAP, color: C.warn, points: points}],
       {reference: [{y: 0, label: "identical kernels", color: C.dim}]}));
@@ -157,12 +153,10 @@ function drawParity(points, dict) {
 
 function drawSteps(timing) {
   const updates = ((timing || {}).updates || []).filter(u => u.seconds > 0);
-  const grid = section("step economics",
-      "wall seconds per committed update, and the four phases inside them", "half");
+  const grid = section("step economics", "half");
   if (!updates.length) {
     grid.append(emptyCard("steps/s", "host journal",
-        "no update events journaled for this run yet — a host emits one per "
-        + "completed update"));
+        "no update events journaled yet"));
     return;
   }
   grid.append(card("steps/s", "1 / update seconds",
@@ -185,12 +179,9 @@ function drawWaves(waves, extent) {
   // Part B). Every panel fed by the ledger stays legitimately empty.
   const generated = extent === "rollout";
   document.getElementById("page").append(
-      el("h2", {}, generated
-        ? "sealed rollouts <span>the Generator's tail — click one to read it</span>"
-        : "sealed waves <span>the ledger's tail — click one to read it</span>"));
+      el("h2", {}, generated ? "sealed rollouts" : "sealed waves"));
   if (!rows.length && generated) {
-    note("this run only generates: no Trainer, no ledger — its output is "
-       + "the sealed rollouts, and none is sealed yet");
+    note("no rollouts sealed yet");
     return;
   }
   if (!rows.length) { note("no committed waves yet"); return; }

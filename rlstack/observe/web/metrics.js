@@ -11,7 +11,7 @@
 import {WHEEL, brief, drawnOnce, el, esc, getJSON, hideTip, lostTick, okTick,
         poll, showTip} from "./dom.js";
 import {plot} from "./charts.js";
-import {ctx, legend, runPath} from "./nav.js";
+import {ctx, runPath} from "./nav.js";
 
 let metric = new URLSearchParams(location.search).get("metric") || "reward";
 let expr = new URLSearchParams(location.search).get("q") || "";
@@ -118,8 +118,4 @@ function render(data) {
     chip.addEventListener("mouseleave", () => { poll.hovering = false; hideTip(); });
     chips.append(chip);
   }
-  legend("one line per run, x = update · the query grammar is the runs page's"
-    + " (regex terms AND, | for OR) · a chip links to its run page · metrics"
-    + " are whatever the ledgers carry — rails, declared provides, postdata"
-    + " columns · refreshes every 3s");
 }

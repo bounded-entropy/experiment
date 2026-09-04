@@ -125,9 +125,9 @@ export function hideTip() {
 addEventListener("scroll", () => { poll.hovering = false; hideTip(); },
                  {passive: true});
 
-export function section(title, note, kind) {
+export function section(title, kind) {
   const holder = document.getElementById("page");
-  holder.append(el("h2", {}, esc(title) + (note ? ` <span>${esc(note)}</span>` : "")));
+  holder.append(el("h2", {}, esc(title)));
   const grid = el("div", {class: kind ? "grid " + kind : "grid"});
   holder.append(grid);
   return grid;

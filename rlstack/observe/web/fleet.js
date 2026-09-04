@@ -6,7 +6,7 @@
 import {C, WHEEL, ago, brief, clock, drawnOnce, el, esc, getJSON, lostTick,
         okTick, pulseDot, raw, section, storeTail, when} from "./dom.js";
 import {card, emptyCard, residencyTip, timeline} from "./charts.js";
-import {ctx, hostPath, legend, withHours} from "./nav.js";
+import {ctx, hostPath, withHours} from "./nav.js";
 
 export async function drawFleet() {
   const [fleet, flow] = await Promise.all([
@@ -38,7 +38,7 @@ export async function drawFleet() {
         "no hosts journaled in this store yet"));
     return;
   }
-  holder.append(el("h2", {}, "placement <span>who ran where, over time</span>"));
+  holder.append(el("h2", {}, "placement"));
   holder.append(timeline(fleet.hosts.map(h => ({
       name: label(h), href: link(h),
       bars: h.tenancy.map(t => ({label: t.run_id, status: t.status,
@@ -50,7 +50,7 @@ export async function drawFleet() {
 
   const busy = fleet.hosts.filter(h => h.util.length);
   if (busy.length) {
-    const grid = section("utilization", "busiest device per host", "wide");
+    const grid = section("utilization", "wide");
     grid.append(card("gpu util", busy.map(label).join(" · "),
         busy.map((h, i) => ({label: label(h), color: WHEEL[i % WHEEL.length],
                              points: h.util})),
@@ -87,13 +87,6 @@ export async function drawFleet() {
   }
   document.getElementById("page").append(el("h2", {}, "hosts"));
   document.getElementById("page").append(table);
-  legend("facts are host journals; ● liveness is a fleet-service PROBE where one"
-    + " is connected, a journal-heartbeat PRESUMPTION otherwise (hover the dot)"
-    + ` · <span style="color:${C.rail}">green = resident</span>,`
-    + ` <span style="color:${C.feed}">blue = done</span>,`
-    + ` <span style="color:${C.eval}">orange = stalled (running, host has no pulse)</span>,`
-    + ` <span style="color:${C.warn}">red = failed</span> · aggregates sum per`
-    + " bucket · hover anything for raw values");
   okTick();
 }
 
@@ -102,15 +95,12 @@ export async function drawFleet() {
 function drawAggregates(flow, asOf) {
   const inference = (flow || {}).inference || [];
   const training = (flow || {}).training || [];
-  const grid = section("fleet throughput",
-      "summed per bucket — each host's own mean rate, added across hosts",
-      "half");
+  const grid = section("fleet throughput", "half");
   if (!inference.length && !training.length) {
     grid.append(emptyCard("inference", "traffic events",
-        "no traffic events journaled yet — a serving host emits one per stats tick"));
+        "no traffic events journaled yet"));
     grid.append(emptyCard("training", "update events",
-        "no update events journaled yet — a training host emits one per "
-        + "completed update"));
+        "no update events journaled yet"));
     return;
   }
   grid.append(card("inference · tokens/s",
