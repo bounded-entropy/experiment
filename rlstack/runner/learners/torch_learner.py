@@ -89,7 +89,10 @@ class TorchLearner:
         )
         for entry in parameterization.entries:
             adapter_type = ADAPTER_TYPES.get(entry.adapter_type).instance
-            params = adapter_type.params(entry.sites, dict(entry.init))
+            # version 0 through the adapter type's OWN init function, so a
+            # learner-built v0 and a learner-less run's (ADR 0006 Part B)
+            # are the same bytes and the same bundle id
+            params = adapter_type.initial_params(entry.sites, entry.init)
             state.params[entry.name] = params
             state.adapter_types[entry.name] = adapter_type
             state.sites[entry.name] = entry.sites

@@ -19,7 +19,9 @@ from collections.abc import AsyncIterator, Mapping, Sequence
 
 from rlstack.data.flatten import TokenBatch
 from rlstack.data.trajectory import Message
-from rlstack.policy.adapters.base import Directive, Mechanism
+from rlstack.policy.adapters.base import (
+    AdapterType, Directive, Mechanism, adapter_type,
+)
 from rlstack.policy.adapters.rollout import Request
 from rlstack.policy.compile import Bundle
 from rlstack.policy.siteschema import SiteMeta
@@ -246,6 +248,63 @@ class FakeEngine:
         return str(answer + 1 + rng.randrange(9))
 
 
+def fake_initial_payload(sites: Sequence[SiteMeta],
+                         init: Mapping[str, object]) -> bytes:
+    """THE FAKE WORLD'S INIT FUNCTION: version 0 of one bank entry as bytes, a
+    pure digest of the entry's resolved sites and its (seed-carrying) init.
+
+    The real one is `AdapterType.initial_payload`, which needs torch; this is
+    the same rule with the numerics taken out, and it is the ONE definition
+    both fake sides call — `FakeLearner` for a frozen entry it was asked to
+    install, `FakeAdapter.emit` for the same entry built with no learner at
+    all. That is what lets the stdlib-only suite pin ADR 0006 Part B's
+    promise: a learner-built v0 and a learner-less v0 compile to the same
+    bundle id. Entry NAMES do not enter it, exactly as they do not enter a
+    real adapter type's params: two entries with the same sites and the same
+    seed ARE the same delta.
+    """
+    return ("fake-init:" + content_hash({
+        "sites": [meta.name for meta in sites],
+        "init": {key: init[key] for key in sorted(init)},
+    })[:16]).encode()
+
+
+@dataclass
+class FakeParams:
+    """What FakeAdapter builds: the payload, and nothing else. A fake adapter
+    type has no tensors, so its parameterization IS its emitted bytes."""
+
+    payload: bytes
+
+
+@adapter_type("fake")
+class FakeAdapter(AdapterType):
+    """A stdlib adapter type: the fake world's delta, servable through punica.
+
+    FakeEngine / FakeLearner make the runner executable with no GPU; this
+    makes the POLICY executable with no GPU, which is what a test of the init
+    function needs — every real adapter type's `params` builds tensors. It
+    lowers nothing (a fake bank is never really served) and trains nothing;
+    what it is for is the seam: `initial_payload` here and `FakeLearner`'s
+    frozen payload are one function (ADR 0006 Part B).
+    """
+
+    serving = Mechanism.PUNICA
+
+    def site_ok(self, meta: SiteMeta) -> bool:
+        """Wherever a weight is — the punica lever's own rule."""
+        return meta.has_weight
+
+    def params(self, sites: tuple[SiteMeta, ...], init: dict) -> FakeParams:
+        return FakeParams(fake_initial_payload(sites, init))
+
+    def emit(self, params: FakeParams) -> bytes:
+        return params.payload
+
+    def load(self, params: FakeParams, payload: bytes) -> None:
+        params.payload = payload
+
+
 @dataclass
 class _FakeTenant:
     """One experiment's digest state on this fake learner."""
@@ -253,6 +312,7 @@ class _FakeTenant:
     trainable: list[str]
     all_names: list[str]
     provides: list[str]                 # every name the bank DECLARES it provides
+    frozen: dict[str, bytes]            # v0 payloads, by the fake init function
     init: str
     state: str
     steps: int = 0
@@ -266,7 +326,9 @@ class FakeLearner:
     the precise pre-crash state — which is what the resume-equivalence tests
     bite on. The tenant key never enters the digests: a single-tenant run's
     bytes are identical whether or not anyone shares the learner (the tenancy
-    invariant, testable). Frozen deltas emit a constant init-derived payload.
+    invariant, testable). Frozen deltas emit `fake_initial_payload` — the fake
+    world's init function, which is also what a run with NO learner builds its
+    v0 with, so the two agree by construction (ADR 0006 Part B, Q6).
     """
 
     def __init__(self, fsdp: int = 1, sleeps: bool = False) -> None:
@@ -311,6 +373,11 @@ class FakeLearner:
             provides=sorted({
                 name for e in entries.values()
                 for name in ADAPTER_TYPES.get(e.adapter_type).instance.provides}),
+            # a frozen entry is built at install and never moves, so its
+            # payload is the fake init function's — the same bytes a run with
+            # no learner builds for it (ADR 0006 Part B)
+            frozen={name: fake_initial_payload(entry.sites, entry.init)
+                    for name, entry in entries.items() if not entry.trainable},
             init=init, state=init)
 
     def uninstall(self, tenant: str) -> None:
@@ -358,9 +425,8 @@ class FakeLearner:
     def emit(self, tenant: str) -> Emitted:
         state = self._tenant(tenant)
         adapters = {
-            name: (f"fake-delta:{name}:"
-                   f"{state.state if name in state.trainable else state.init}"
-                   ).encode()
+            name: (f"fake-delta:{name}:{state.state}".encode()
+                   if name in state.trainable else state.frozen[name])
             for name in state.all_names
         }
         optim = {name: f"fake-optim:{name}:{state.steps}:{state.state}".encode()

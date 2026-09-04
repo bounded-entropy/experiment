@@ -136,6 +136,34 @@ class AdapterType:
         """Build the trainable parameterization for the matched sites."""
         raise NotImplementedError
 
+    def initial_params(self, sites: tuple[SiteMeta, ...],
+                       init: Mapping[str, Any]) -> Any:
+        """VERSION ZERO OF ONE BANK ENTRY, said in one place: `params` over the
+        entry's resolved sites and its init mapping — whose per-entry seed was
+        already derived by the runner (loop.init_seed), so the same entry is
+        the same object wherever it is built.
+
+        The learner's install builds its v0 here (learners/torch_learner.py)
+        and a run with NO learner emits it through `initial_payload` at Phase
+        1 (ADR 0006 Part B, Q6). One init function per adapter type is what
+        makes those two paths the same bytes rather than two implementations
+        that happen to agree.
+        """
+        return self.params(sites, dict(init))
+
+    def initial_payload(self, sites: tuple[SiteMeta, ...],
+                        init: Mapping[str, Any]) -> bytes:
+        """That version zero, lowered to the payload an engine serves:
+        `emit(initial_params(sites, init))`.
+
+        THE INIT FUNCTION a run with no learner calls. Its bytes are the ones
+        a learner would have emitted for the same entry at version 0, so the
+        bundle they compile into is the same content-addressed bundle id, and
+        a generation-only run serves exactly what a training run's Phase 1
+        would have served.
+        """
+        return self.emit(self.initial_params(sites, init))
+
     def provide(self, params: Any) -> Mapping[str, Any]:
         """The COMPUTE half of the `provides` declaration: training-forward
         tensors, recomputed by every pass.
