@@ -257,14 +257,11 @@ class DeskDoorTest(VenueFixture):
         """What the door declares is exactly what a venue proposes: a metal
         told `serves=lora,serves=steer` at the desk carves the same engine
         `steer_l4` would have proposed for itself."""
-        from rlstack.runner.residents import Builds, EngineBuild, LearnerBuild
-
-        declared = Builds(
-            engine=EngineBuild(**self.desk_venue.parse_build(
+        self.assertEqual(
+            self.desk_venue.declared(
                 "max_model_len=2048,max_bundles=8,max_rank=16,serves=lora,"
-                "serves=steer,enforce_eager")),
-            learner=LearnerBuild(**self.desk_venue.parse_build("")))
-        self.assertEqual(declared, self.steer_l4.proposed_recipe())
+                "serves=steer,enforce_eager", ""),
+            self.steer_l4.proposed_recipe())
 
 
 if __name__ == "__main__":

@@ -1118,6 +1118,16 @@ class RemoteDesk:
             payload["idle_s"] = idle_s
         return await self._transport.call("metal", payload)
 
+    async def recipe(self, metal: str, builds: Mapping) -> dict:
+        """DECLARE WHAT A METAL BUILDS (ADR 0007, Q4). `builds` is a
+        `Builds.row()`: the desk journals it as a `recipe` event, the latest
+        per metal wins, and the next carve to that metal carries it — which is
+        how a container that booted bare learns what it is for. Through the
+        desk rather than into the journal directly, because the fleet journal
+        has one writer (I10)."""
+        return await self._transport.call("recipe", {"metal": metal,
+                                                     "builds": dict(builds)})
+
     async def release(self, name: str, reason: str = "released",
                       force: bool = False) -> dict:
         """Hand a metal back BY HAND — the acquire rung inverted at the desk

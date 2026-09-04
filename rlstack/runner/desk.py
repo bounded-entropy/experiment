@@ -1396,6 +1396,13 @@ class Desk:
             retried = await self.retry_parked()
             return {"registered": payload["name"], "reaped": reaped,
                     "retried": retried}
+        if verb == "recipe":
+            # WHAT A METAL BUILDS, declared through the desk's own door (ADR
+            # 0007, Q4) — and through the desk, because the fleet journal has
+            # ONE writer and this is one of its events (I10)
+            self.recipe(payload["metal"], Builds.from_row(payload["builds"]))
+            return {"metal": payload["metal"],
+                    "builds": self.recipe_row(payload["metal"])}
         if verb == "reap":
             return await self.reap(probes=int(payload.get("probes", 3)),
                                    wait=float(payload.get("wait", 0.0)))

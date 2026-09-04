@@ -142,20 +142,18 @@ def read_scalar(value: str):
     return value
 
 
-@app.function(image=cpu_image, volumes={"/store": store_volume}, timeout=600)
-def declare(metal: str, engine: str, learner: str) -> dict:
-    """The `recipe` door's volume side: build the record, journal it through
-    a desk over the SAME journal, and report the row. It runs beside the
-    store because a Builds record is constructed from rlstack, not from the
-    driver's laptop."""
-    from rlstack.runner.desk import Desk as TheDesk
+def declared(engine: str, learner: str):
+    """The two flag lines as a `Builds` record — what a carve is built from.
+
+    Constructed on the CLIENT, because `modal run` runs a local entrypoint
+    with this repo on its path and a Builds is an rlstack record like any
+    other; only its row crosses. The write itself goes through the desk's own
+    `recipe` verb, never into the journal beside it, because the fleet journal
+    has ONE writer (I10)."""
     from rlstack.runner.residents import Builds, EngineBuild, LearnerBuild
 
-    builds = Builds(engine=EngineBuild(**parse_build(engine)),
-                    learner=LearnerBuild(**parse_build(learner)))
-    TheDesk.from_journal(a_store()).recipe(metal, builds)
-    store_volume.commit()
-    return {"metal": metal, "builds": builds.row()}
+    return Builds(engine=EngineBuild(**parse_build(engine)),
+                  learner=LearnerBuild(**parse_build(learner)))
 
 
 @app.local_entrypoint()
@@ -172,10 +170,13 @@ def recipe(metal: str = "", engine: str = "", learner: str = "") -> None:
     desk; carried by every carve, so a reborn container is rebuilt from it and
     never from its own constants; and required, because a bare metal refuses a
     carve it cannot describe."""
+    import asyncio
+
     if not metal:
         raise SystemExit("--metal <name> [--engine k=v,flag,...] "
                          "[--learner k=v,...]")
-    print(json.dumps(declare.remote(metal, engine, learner), indent=1))
+    told = asyncio.run(desk().recipe(metal, declared(engine, learner).row()))
+    print(json.dumps(told, indent=1))
 
 
 @app.local_entrypoint()

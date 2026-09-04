@@ -1927,6 +1927,23 @@ class BareMetalTest(DeskFixture):
         self.assertTrue(service.builds.engine.sleeps)
         self.assertTrue(service.describe()["builds"]["engine"]["sleeps"])
 
+    def test_the_recipe_door_writes_through_the_desk(self) -> None:
+        """The operator's declaration is a WIRE verb (`deploy/desk.py::
+        recipe`), not a second writer beside the journal: the fleet journal
+        has one writer and this is one of its events (I10). A row in, the
+        declared row back, and the metal that could not be carved on carves."""
+        service = self.bare_metal()
+        desk = self.desk()
+        desk.register_metal(service.metal, address="metal://fake-metal")
+        remote = RemoteDesk(LocalTransport(Campaigns(desk)))
+
+        told = go(remote.recipe("fake-metal", Builds.fakes().row()))
+        self.assertEqual(told, {"metal": "fake-metal",
+                                "builds": Builds.fakes().row()})
+        self.assertEqual(desk.recipe_for("fake-metal"), Builds.fakes())
+        reply = go(Campaigns(desk).submit(self.split_spec()))
+        self.assertTrue(reply["accepted"], reply)
+
     def test_the_declaration_outlives_the_desk(self) -> None:
         """`recipe` is a journaled event and `from_journal` replays it,
         latest per metal winning — so an operator declares once and a desk
