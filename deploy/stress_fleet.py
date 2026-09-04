@@ -7,6 +7,8 @@ learner mid-run, and bases that are not Qwen.
     PYTHONUNBUFFERED=1 modal run deploy/stress_fleet.py::topology   # three tenants (lora / steer /
                                                       #   soft_prompt) through the desk, released
     PYTHONUNBUFFERED=1 modal run deploy/stress_fleet.py::latejoin   # A runs; B joins A's learner mid-run
+    PYTHONUNBUFFERED=1 modal run deploy/stress_fleet.py::remote_learner  # UNRUN: anchored on main,
+                                                      #   the learner on the other listing (ADR 0006 A)
     modal run deploy/stress_fleet.py::status / ::sweep / ::down --call-id <id>
 
     RLSTACK_STRESS_GPU=L4 RLSTACK_STRESS_TP=1 RLSTACK_STRESS_FSDP=1 modal deploy ...   # the 1x1 shape
@@ -461,6 +463,17 @@ def host_status(address: str) -> dict:
     return RemoteHost(MetalTransport(address)).status()
 
 
+@app.function(image=cpu_image, volumes={"/store": store_volume}, timeout=300)
+def learner_custody(host: str) -> list[dict]:
+    """WHO IS ON A LEARNER, off that host's journal: the learner-attach /
+    learner-detach rows a foreign frame writes (ADR 0006 Part A). A run
+    anchored elsewhere leaves no tenancy in this host's roster, so this is
+    the only place its custody of the training metal is recorded."""
+    store_volume.reload()
+    return [e for e in a_store().read_host_log(host)
+            if str(e.get("event", "")).startswith("learner-")]
+
+
 # ---------------------------------------------------------------------------
 # the bases: one L4 each, no desk — schema, the gate, parity, a generation
 # ---------------------------------------------------------------------------
@@ -751,12 +764,13 @@ def release_everything(reason: str) -> list[str]:
     return released
 
 
-def submit(name: str, row: dict) -> dict:
+def submit(name: str, row: dict, anchor: str | None = None) -> dict:
     import asyncio
 
     from rlstack.runner.remote import spec_from_json
 
-    reply = asyncio.run(desk().submit(spec_from_json(row), subdir="stress"))
+    reply = asyncio.run(desk().submit(spec_from_json(row), subdir="stress",
+                                      anchor=anchor))
     print(f"[submit] {name}: {json.dumps(reply, default=str)[:400]}", flush=True)
     if not reply.get("accepted"):
         raise SystemExit(f"{name} was not accepted: {reply}")
@@ -878,6 +892,62 @@ def latejoin(master: int = 51) -> None:
               flush=True)
     finally:
         take_down(call, "latejoin check done")
+
+
+@app.local_entrypoint()
+def remote_learner(master: int = 61) -> None:
+    """THE RUNNER AWAY FROM ITS LEARNER (ADR 0006 Part A) — WRITTEN, UNRUN.
+
+    One lora tenant submitted with `anchor="main"`, so the desk delivers the
+    frame to the SERVING listing and threads the learner's address as a
+    route: the Trainer runs beside the sampling host and every learner verb
+    — install, one per microbatch, optim_step, emit, uninstall — crosses the
+    host door to the fsdp=FSDP listing and is admitted at ITS arbiter.
+
+    What it would show that fakes cannot: the wire cost of a TokenBatch per
+    microbatch and an emit per update between two real containers, the
+    admitted frames interleaving with that host's own alternation, and the
+    custody rows on the learner host's journal for a run whose tenancy lives
+    somewhere else. It ends like every other door here: release every metal
+    through the desk and assert the plane is empty (ADR 0003).
+
+    Samarth runs metal; this has never been run.
+    """
+    call = metal_handle().serve.spawn()
+    print(f"[remote_learner] {METAL} serving: call {call.object_id}", flush=True)
+    try:
+        print(json.dumps(wait_for_metal(), indent=1), flush=True)
+        rows = build_specs.remote(["lora"], [UPDATES], [master])
+        reply = submit("anchored-on-main", rows["lora"], anchor="main")
+        runs = {"anchored-on-main": reply["run_id"]}
+        pools = reply["pools"]
+        away = pools["main"] != pools["learner"]
+        print(f"[anchor] frame at {reply['host']}, main on {pools['main']}, "
+              f"learner on {pools['learner']} — "
+              f"{'the runner is away from its learner' if away else 'ONE HOST: no wire exercised'}",
+              flush=True)
+        if reply["host"] != pools["main"]:
+            raise SystemExit(f"anchored on {reply['host']}, not on main's host")
+        progress = await_runs(runs, {"anchored-on-main": UPDATES})
+        rails = report_rails(runs, progress)
+        # the tenancy lives at the anchor; the learner host holds only custody
+        anchor_roster = host_status.remote(
+            desk().status()["listings"][pools["main"]]["address"]
+        ).get("tenants", {})
+        custody = learner_custody.remote(pools["learner"])
+        print(json.dumps({"away": away, "pools": pools,
+                          "anchor_roster": anchor_roster,
+                          "learner_custody": custody, "rails": rails},
+                         indent=1), flush=True)
+        if reply["run_id"] not in anchor_roster:
+            raise SystemExit("the anchor host does not carry the tenancy")
+        if [row["event"] for row in custody
+                if row.get("run_id") == reply["run_id"]] != [
+                    "learner-attach", "learner-detach"]:
+            raise SystemExit("the learner host did not journal this tenancy's "
+                             "two ends")
+    finally:
+        take_down(call, "remote-learner check done")
 
 
 @app.local_entrypoint()
