@@ -11,6 +11,9 @@ from __future__ import annotations
 import unittest
 from dataclasses import FrozenInstanceError, fields, replace
 
+from common import TRAIN, arith_spec, arith_task_bytes, cas_uri
+from rlstack.policy.siteschema import fake_qwen_schema
+from rlstack.runner.loop import experiment_identity
 from rlstack.runner.refs import parse
 from rlstack.spec.canonical import content_hash
 from rlstack.spec.specs import (
@@ -159,6 +162,16 @@ class TestIdentity(unittest.TestCase):
         warm = replace(exp, init=WarmStart(policy="store://parent@40", optim="load"))
         self.assertNotEqual(content_hash(exp), content_hash(warm))
 
+    def test_an_existing_spec_keeps_the_run_id_it_has_always_had(self) -> None:
+        """ADR 0006 Part B, promise 1: `Plans.train` became optional and the
+        extent a derived PROPERTY, so no hashed record gained a field and no
+        existing run's identity moved. The literal below is what a pre-Part-B
+        tree computes for tests/common.py's arith_spec — if it ever changes,
+        every sealed run in every store has been orphaned."""
+        spec = arith_spec(cas_uri(arith_task_bytes(TRAIN[1], TRAIN[2], TRAIN[0])))
+        schema = fake_qwen_schema(4, base="Qwen/Qwen3-0.6B")
+        self.assertEqual(experiment_identity(spec, schema), "2432682289f4")
+
 
 class TestVocabularies(unittest.TestCase):
     def test_a_ref_accepts_the_three_locations(self) -> None:
@@ -214,11 +227,22 @@ class TestDefaults(unittest.TestCase):
         self.assertEqual((s.temperature, s.top_p, s.max_tokens), (1.0, 1.0, 1024))
 
     def test_plans(self) -> None:
-        """`train` is mandatory — its LENGTH is the run's length. The other two
-        are absent when a run makes nothing (every train leaf is sealed
-        elsewhere) or measures nothing."""
+        """A plan is absent when the run does not do that thing: no rollout
+        plan makes nothing (every train leaf is sealed elsewhere), no train
+        plan trains nothing (a generation-only run)."""
         p = Plans(train="cas://plan/train")
         self.assertEqual(p.rollout, None)
+        self.assertEqual(Plans(rollout="cas://plan/roll").train, None)
+
+    def test_extent_is_the_plan_that_is_the_run_s_length(self) -> None:
+        """ADR 0006 Part B: the train plan when there is one — one wave is one
+        update — else the rollout plan, whose last sealed wave ends a run that
+        only generates. Derived, never a field, so no hashed record moved."""
+        self.assertEqual(Plans(train="cas://t", rollout="cas://r").extent,
+                         "train")
+        self.assertEqual(Plans(train="cas://t").extent, "train")
+        self.assertEqual(Plans(rollout="cas://r").extent, "rollout")
+        self.assertNotIn("extent", [f.name for f in fields(Plans)])
 
     def test_measurement_left_the_spec(self) -> None:
         """#70: a run's identity is its training loop. Plans carries no eval

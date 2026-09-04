@@ -75,8 +75,11 @@ def data_fingerprint(spec: ExperimentSpec) -> str:
     The plans and the task sets are both cas uris, so their shas already are
     their contents: a plan that draws different tasks, or a task file whose
     rows changed, is a different experiment without anyone saying so (I3).
+    A plan the run does not declare renders as `-`, so a generation-only run
+    (no train plan) fingerprints as one, and every run that has both is
+    fingerprinted exactly as it always was.
     """
-    parts = [spec.plans.train, spec.plans.rollout or "-"]
+    parts = [spec.plans.train or "-", spec.plans.rollout or "-"]
     if spec.gen is not None:
         parts.extend(spec.gen.tasks)
     return "|".join(parts)
@@ -263,10 +266,12 @@ def init_seed(master: int, entry: str) -> int:
 
 
 def load_plans(declared: Plans, store: Store) -> dict[str, RunPlan]:
-    """Resolve the declared plan uris. `train` is mandatory — it is the run's
-    length; the other two are absent when the run makes or measures nothing."""
-    out = {"train": decode(store.cas_get(declared.train))}
-    for kind in ("rollout",):
+    """Resolve the declared plan uris, by kind. A plan the spec leaves None is
+    absent from the map: no train plan is a run that never trains, no rollout
+    plan is a run that never samples, and the gate refuses the spec that
+    declares neither."""
+    out = {}
+    for kind in ("train", "rollout"):
         uri = getattr(declared, kind)
         if uri is not None:
             out[kind] = decode(store.cas_get(uri))

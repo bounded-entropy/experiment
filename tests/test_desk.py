@@ -24,8 +24,8 @@ import json
 from common import arith_spec, arith_store
 from rlstack import (
     Bundle, FakeEngine, FakeLearner, Topology, Host, HostSpec, Message, Metal,
-    Regime, RemotePool, Role, SamplingSpec, Seeds, fake_qwen_schema, learner,
-    pool,
+    PolicySpec, Regime, RemotePool, Role, SamplingSpec, Seeds,
+    fake_qwen_schema, learner, pool,
 )
 from rlstack.runner.host import Partition
 from rlstack.spec.canonical import canonical_json
@@ -1010,6 +1010,7 @@ class AnchorTest(DeskFixture):
         desk.list_host("serve-a", serving.regimes, "fleet://a")
         generation_only = arith_spec(
             self.train, algo=None,
+            policy=PolicySpec(base="Qwen/Qwen3-0.6B", bank={}),
             topology=Topology(hosts=(HostSpec((pool("main"),)),)))
 
         async def drive():

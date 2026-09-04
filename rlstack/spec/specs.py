@@ -79,20 +79,36 @@ class PolicySpec:
 
 @dataclass(frozen=True)
 class Plans:
-    """The shape of the run, by reference: three content-addressed plans.
+    """The shape of the run, by reference: content-addressed plans.
 
-    `train` is what the Trainer consumes, one wave per update, and its LENGTH
-    is the run's length. `rollout` is what the Generator makes, one wave per
-    rollout index; None means the run samples nothing (every train leaf is
-    already sealed elsewhere). Measurement has no plan here: it is not part
-    of the run (a Measurement follows the ledger from outside, observe-side).
+    `train` is what the Trainer consumes, one wave per update; None means
+    nothing trains (a generation-only run — ADR 0006 Part B). `rollout` is
+    what the Generator makes, one wave per rollout index; None means the run
+    samples nothing (every train leaf is already sealed elsewhere). At least
+    one of them exists, or the run has no work and no length — the gate says
+    so (check_plans_declare_an_extent). Measurement has no plan here: it is
+    not part of the run (a Measurement follows the ledger from outside,
+    observe-side).
 
     Each uri's sha IS the plan's content hash, so a plan hashes into run_id
     exactly as if it were written inline, while the spec stays readable.
     """
 
-    train: str                    # "cas://<sha>"
+    train: str | None = None      # "cas://<sha>"
     rollout: str | None = None
+
+    @property
+    def extent(self) -> str:
+        """WHICH PLAN IS THE RUN'S LENGTH: the train plan when one exists —
+        one wave is one gradient update, so a run is done when its updates
+        are — else the rollout plan, whose last sealed wave ends a run that
+        only generates.
+
+        A derived property and never a field: the extent is readable off the
+        two uris, so no hashed record gains anything and every existing run's
+        identity is exactly what it was (ADR 0006 Part B, Q4).
+        """
+        return "train" if self.train is not None else "rollout"
 
 
 @dataclass(frozen=True)

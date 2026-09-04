@@ -481,7 +481,15 @@ def check_members_match_their_shape(spec: ExperimentSpec, engine_map,
                 f"for it is built tp={engine.tp}"))
     for host in spec.topology.hosts:
         for member in host.members:
-            if isinstance(member, LearnerMember) and learner.fsdp != member.fsdp:
+            if not isinstance(member, LearnerMember):
+                continue
+            if learner is None:
+                issues.append(_issue(
+                    "learner-missing", "topology(learner)",
+                    "the spec declares a learner but none was handed to the "
+                    "run: a declared LearnerMember is training metal the run "
+                    "expects to reach, locally or over the wire"))
+            elif learner.fsdp != member.fsdp:
                 issues.append(_issue(
                     "learner-shape-mismatch", "topology(learner)",
                     f"the spec declares fsdp={member.fsdp} but the learner "
@@ -563,6 +571,41 @@ def check_post_pools_can_coreside(spec: ExperimentSpec, schema: SiteSchema) -> l
     return issues
 
 
+def check_plans_declare_an_extent(spec: ExperimentSpec, schema: SiteSchema) -> list[ValidationIssue]:
+    """A run has a LENGTH: either a train plan (one wave per update) or a
+    rollout plan (one wave per rollout). A spec declaring neither describes a
+    run with no work and nothing to be done, which nothing could ever call
+    finished (ADR 0006 Part B)."""
+    if spec.plans.train is not None or spec.plans.rollout is not None:
+        return []
+    return [_issue(
+        "no-extent", "plans",
+        "plans declares neither a train plan nor a rollout plan, so the run "
+        "has no extent: nothing to train, nothing to sample, no length")]
+
+
+def check_learnerless_bank_is_frozen(spec: ExperimentSpec, schema: SiteSchema) -> list[ValidationIssue]:
+    """A TRAINABLE bank entry needs a learner to train it, and the topology is
+    where a run says it has one.
+
+    A spec declaring no LearnerMember runs without training metal (ADR 0006
+    Part B: a generation-only run is a Generator and nothing else), and its
+    bank entries are built at their init and never move — so a trainable
+    entry there is a contradiction, refused here as text rather than
+    surfacing mid-run as `None.install`. Freeze the entry, or declare the
+    learner that would train it.
+    """
+    if any(isinstance(member, LearnerMember)
+           for host in spec.topology.hosts for member in host.members):
+        return []
+    return [_issue(
+        "trainable-without-learner", f"policy.bank.{name}",
+        f"bank entry {name!r} is trainable but the topology declares no "
+        f"learner: nothing in this run could train it")
+        for name in sorted(spec.policy.bank)
+        if spec.policy.bank[name].trainable]
+
+
 def check_a_rollout_plan_has_gen(spec: ExperimentSpec, schema: SiteSchema) -> list[ValidationIssue]:
     """A rollout plan MAKES trajectories, which takes an environment and tasks
     to make them from — so gen must exist to declare both."""
@@ -624,6 +667,8 @@ CHECKS = (
     check_traffic_routes_to_declared_pools,
     check_post_pools_are_declared,
     check_post_pools_can_coreside,
+    check_learnerless_bank_is_frozen,
+    check_plans_declare_an_extent,
     check_a_rollout_plan_has_gen,
     check_schedule_is_sane,
     check_warm_start_map_targets_this_bank,
