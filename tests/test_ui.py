@@ -16,7 +16,7 @@ import tempfile
 import unittest
 from io import BytesIO
 
-from common import arith_spec, arith_store
+from common import arith_spec, arith_store, generation_spec
 from rlstack import (
     FakeEngine, FakeLearner, LocalStore, fake_qwen_schema, run_experiment,
 )
@@ -27,7 +27,9 @@ from rlstack.observe.page import asset, document
 from rlstack.observe.panels import PanelError, evaluate, missing_args, panel_args
 from rlstack.observe.series import run_series
 from rlstack.observe.ui import ui_app
-from rlstack.observe.views import partition_metal, render_hosts
+from rlstack.observe.views import (
+    partition_metal, render_hosts, runs_data,
+)
 
 SCHEMA = fake_qwen_schema(4, base="Qwen/Qwen3-0.6B")
 
@@ -73,6 +75,7 @@ class UiTest(unittest.TestCase):
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
         self.store, train, heldout = arith_store(tmp.name)
+        self.train_uri = train
         self.report = run_experiment(arith_spec(train, heldout), SCHEMA,
                                      self.store, FakeEngine(), FakeLearner())
         fabricate_heldout(self.store, self.report.run_id)
@@ -99,6 +102,28 @@ class UiTest(unittest.TestCase):
 
     def test_series_is_none_for_an_unknown_run(self) -> None:
         self.assertIsNone(run_series(self.store, "nope"))
+
+    def test_a_generation_only_runs_series_counts_rollouts(self) -> None:
+        """ADR 0006 Part B: the observer reads the same progress predicate the
+        desk does, so a run with no ledger shows its SEALED ROLLOUTS against
+        its rollout plan and says which — its update panels are legitimately
+        empty rather than a stalled training run's."""
+        report = run_experiment(generation_spec(self.train_uri), SCHEMA,
+                                self.store, FakeEngine(), None)
+        series = run_series(self.store, report.run_id)
+        self.assertEqual((series["extent"], series["committed"],
+                          series["target"]), ("rollout", 4, 4))
+        self.assertEqual(series["updates"], [])
+
+        # the runs list reads the same predicate: a journaled tenancy whose
+        # rollouts are all sealed is DONE, whatever its detach said
+        self.store.append_host_event("l4-a", {
+            "event": "attach", "t": 1.0, "run_id": report.run_id,
+            "pools": ["main"], "store": self.store.describe()})
+        row = next(r for r in runs_data([self.store])
+                   if r["run_id"] == report.run_id)
+        self.assertEqual((row["extent"], row["committed"], row["target"],
+                          row["status"]), ("rollout", 4, 4, "done"))
 
     def test_a_measurement_is_a_first_class_chart_metric(self) -> None:
         """The charts page plots `<measurement>:<mean>` beside the ledger
@@ -260,6 +285,7 @@ class DerivedSeriesTest(unittest.TestCase):
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
         self.store, train, heldout = arith_store(tmp.name)
+        self.train_uri = train
         self.report = run_experiment(arith_spec(train, heldout), SCHEMA,
                                      self.store, FakeEngine(), FakeLearner())
         fabricate_heldout(self.store, self.report.run_id)
