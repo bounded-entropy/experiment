@@ -5,7 +5,7 @@
 | **Date** | 2026-09-04 |
 | **Status** | **IMPLEMENTED 2026-09-04 — CONTEXT #81** (venue written and UNRUN). Accepted at the 2026-09-04 review; Q5, Q6, Q9 and Q11 stood on their recommendations; Q3 REDACTED in part (a row with no record replays at every position) and that redaction is the whole of the steer change |
 | **Author** | Claude Fable 5.1 (session: the SPAR introspection paper, 2026-09-04) |
-| **Touches** | `data/tasks/` (one new dataset file), `inference/environments/` (two one-file environments), `training/post/` (two processors in the existing shape), `runner/measure.py` (a measurement may route to a second pool), `deploy/concept_steer.py` (the venue), `tests/`. NO steer file, no `rollout.py`, no `replay.py`, no learner or engine file (Q2, Q3) |
+| **Touches** | `data/tasks/` (one new dataset file), `inference/environments/` (two one-file environments), `training/post/` (two processors in the existing shape), `runner/measure.py` (a measurement may route to a second pool), `deploy/concept_steer.py` (the venue), `tests/`, and ONE rule in `policy/adapters/steer_torch.py` (Q3, as redacted: a row with no record replays at every position). No `rollout.py`, no `replay.py`, no learner or engine file (Q2, Q3) |
 | **Invariants** | I3 (the hint is content, so it hashes; the teacher run's identity is the set's), I6 (a record, when one exists, is the truth; a row without one replays at the adapter type's default — nothing is declared in the bank), I9 (a processor scores through a declared pool under privileged conditioning — hinted + teacher, combined), I5 (a 32B student is new metal territory; the spec says nothing about where) |
 | **CONTEXT** | extends #40 (the scoring verb, hinted logprobs), #47 (the teacher is a pool), #60 (a dataset becomes content), #70 (measurement outside the run), #77 / ADR 0004 (the steer, UNCHANGED: the record is the only truth — Q3). DEPENDS ON ADR 0006 (a run is daemons with resources): the teacher's trajectory set is a generation-only RUN, not a content file |
 
@@ -545,7 +545,7 @@ runs: unchanged, because `init` gains no key at the default (promise 1) and
 are the obligations, and that the one deliberate loss — the replay-side
 "recorded nothing" alarm — is acceptable against a seal-side test?
 
-> **Samarth:** not raised in the 2026-09-04 review; the obligations stand as stated. (The seal-side alarm clause is moot: the replay refusal was kept, Q3.)
+> **Samarth:** not raised in the 2026-09-04 review; the obligations stand as stated. (The seal-side alarm clause STANDS: Q3's redaction replaced the replay refusal with the default, and the alarm moved to the seal side as the clause says.)
 
 ## Outcome
 
