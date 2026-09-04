@@ -4612,7 +4612,7 @@ specs; backends (local/modal/skypilot) and GPU topology are semantics-neutral.
       `tasks_dapo.py` stays, it is content. `deploy/ui.py`'s `VolumeReadStore`
       retired (Q7): the container mounts the volume and serves the CLI's own
       app over `LocalStore`.
-    - **WHAT THE TESTS PIN.** 1050 on fakes (from 1003 before the ADR).
+    - **WHAT THE TESTS PIN.** 1051 on fakes (from 1003 before the ADR; the recipe wire verb added one).
       `tests/test_transports.py`: the grammar, the factory's two refusals by
       name, the Modal branch imported only when taken (against a `sys.modules`
       stub, so the suite stays stdlib-only). `tests/test_architecture.py`:
