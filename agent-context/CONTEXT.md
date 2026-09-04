@@ -4558,8 +4558,10 @@ specs; backends (local/modal/skypilot) and GPU topology are semantics-neutral.
       `adopt_recipe` replaces whatever the container booted with). So
       `MetalService(builds=None)` is the normal state, `Desk.recipe(metal,
       builds)` journals a `recipe` event (latest per metal wins, replayed by
-      `from_journal`), `deploy/desk.py::recipe` is the operator's door, and a
-      registration's `builds` is a PROPOSAL journaled as that same event. A
+      `from_journal`), `deploy/desk.py::recipe` is the operator's door — it
+      sends the desk's `recipe` WIRE VERB, never a write beside the journal,
+      so the fleet journal keeps its one writer (I10) — and a registration's
+      `builds` is a PROPOSAL journaled as that same event. A
       carve to a metal nothing declared for is refused BY NAME at both ends:
       the desk passes it over with a journaled `carve-refused`, and a bare
       metal handed a recipe-less request refuses at its own door — never

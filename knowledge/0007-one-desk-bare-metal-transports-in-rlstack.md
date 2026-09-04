@@ -205,8 +205,13 @@ If the other branch: the discipline holds by hand, and the first stray import in
 
 ## Outcome
 
-Landed in three commits, `4d10c40` → `1fe6c96`, and recorded as **CONTEXT #84**.
-**1050 tests green, from 1003.**
+Landed in five commits, `4d10c40` → `6cf21c2`, and recorded as **CONTEXT #84**.
+**1051 tests green, from 1003.** The fourth commit (`9ec7343`) is a correction
+found in review: the first cut of `deploy/desk.py::recipe` wrote the `recipe`
+event from a side `@app.function` — a SECOND writer on the fleet journal, which
+the standing desk would not have seen until a restart (I10). The door now sends
+the desk's `recipe` WIRE VERB (`RemoteDesk.recipe` → `Desk.serve`), and the
+journal keeps its one writer.
 
 **What landed, against the ten Decision bullets.** All ten. `runner/transports/`
 with `modal_cls.py` and `remote.py`'s `Address` / `parse_address` /
