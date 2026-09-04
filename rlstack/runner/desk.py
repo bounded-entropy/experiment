@@ -50,7 +50,7 @@ from dataclasses import dataclass
 from rlstack.data.plan import wave_count
 from rlstack.data.stores.base import Store
 from rlstack.policy.siteschema import SiteSchema
-from rlstack.runner.host import Host, Partition, Regime
+from rlstack.runner.host import LEARNER_ROUTE, Host, Partition, Regime
 from rlstack.runner.residents import (
     GRACE_S, SIGNAL_GRACE_S, Builds, Resident, ResidentBirth, Teardown,
 )
@@ -139,9 +139,10 @@ class Demand:
     def name(self) -> str:
         """The key this demand's ADDRESS rides under — in a placement reply
         and in a delivery's routes. A pool is its own name; the learner
-        member has none of its own, so it is "learner", the one name the
-        whole plane calls it by."""
-        return self.pool or "learner"
+        member has none of its own, so it is LEARNER_ROUTE, the one name the
+        whole plane calls it by (host.py owns the constant, because the door
+        that resolves the route is the one that must agree)."""
+        return self.pool or LEARNER_ROUTE
 
     def per_device_gb(self) -> float | None:
         """The memory this demand needs on EACH device it spans: the total
@@ -668,7 +669,7 @@ class Desk:
                  for demand in demands}
         self.store.append_fleet_event({
             "event": "place", "t": time.time(), "delivered": False,
-            "pools": {pool or "learner": listing.name
+            "pools": {pool or LEARNER_ROUTE: listing.name
                       for pool, listing in placement.items()}})
         return {"placed": True, "pools": pools}
 
@@ -726,7 +727,7 @@ class Desk:
             return {"accepted": False, "host": anchor_listing.name,
                     "error": f"host {anchor_listing.name!r} did not answer "
                              f"the delivery: {down}"}
-        pools = {pool or "learner": listing.name
+        pools = {pool or LEARNER_ROUTE: listing.name
                  for pool, listing in placement.items()}
         self.store.append_fleet_event({
             "event": "place", "t": time.time(), "delivered": True,

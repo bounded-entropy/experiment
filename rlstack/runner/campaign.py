@@ -24,7 +24,12 @@ import json
 from collections.abc import Mapping, Sequence
 
 from rlstack.runner.desk import Demand, Desk, DeskError, demand_rows
+from rlstack.runner.host import LEARNER_ROUTE
 from rlstack.spec.specs import ExperimentSpec, PoolMember
+
+MAIN_POOL = "main"
+"""The policy pool every spec declares (the loop refuses an engine map
+without it) — and therefore the anchor when no learner is declared."""
 
 
 def demands_of(spec: ExperimentSpec,
@@ -70,7 +75,7 @@ def anchor_demand(demands: Sequence[Demand], asked: str | None) -> Demand:
     """
     by_name = {d.name(): d for d in demands}
     if asked is None:
-        asked = "learner" if "learner" in by_name else "main"
+        asked = LEARNER_ROUTE if LEARNER_ROUTE in by_name else MAIN_POOL
     chosen = by_name.get(asked)
     if chosen is None:
         raise DeskError(

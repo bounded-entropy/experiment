@@ -44,7 +44,7 @@ from rlstack.runner.meters import HostJournal, TrafficMeter
 if TYPE_CHECKING:
     from rlstack.runner.residents import Resident
 from rlstack.runner.remote import spec_from_json
-from rlstack.spec.specs import ExperimentSpec, PoolMember
+from rlstack.spec.specs import ExperimentSpec, LearnerMember, PoolMember
 
 
 class HostError(RuntimeError):
@@ -654,7 +654,7 @@ class Host:
                 f"placement routes a learner: one route key cannot address "
                 f"both — rename the pool")
 
-    def learner_member(self, spec: ExperimentSpec):
+    def learner_member(self, spec: ExperimentSpec) -> LearnerMember:
         """The spec's ONE learner member — the build fact a routed learner is
         attested against (its `fsdp`). A route to a learner the spec never
         declared is a placement bug, refused here."""
