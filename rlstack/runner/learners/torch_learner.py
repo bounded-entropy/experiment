@@ -26,6 +26,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 import torch
+import torch.utils.checkpoint
 
 from rlstack.data.flatten import TokenBatch
 from rlstack.policy.adapters.replay import ReplayRows, row_plan
@@ -33,6 +34,44 @@ from rlstack.policy.siteschema import SiteMeta
 from rlstack.registry import ADAPTER_TYPES, LOSSES
 from rlstack.runner.interfaces import Emitted, Parameterization, TrainStats
 from rlstack.training.losses import PolicyOutputs
+
+
+LOGPROB_CHUNK = 1024
+"""Positions per fp32 log-softmax chunk in `chosen_logprobs`: 1024 × a 152k
+vocab × 4 bytes is ~0.6 GiB, held twice at the peak of one chunk. The whole-
+copy path this replaced held it for EVERY position at once."""
+
+
+def chosen_logprobs(logits: torch.Tensor, targets: torch.Tensor,
+                    chunk: int = LOGPROB_CHUNK) -> torch.Tensor:
+    """log p(target_t | prefix) at every position, in fp32, from the model's
+    own-dtype logits [R, W, V] and targets [R, W] — CHUNK positions at a time,
+    under recompute.
+
+    The obvious `log_softmax(logits.float())` makes a four-byte copy of every
+    logit and a second one for the softmax, and autograd keeps the second for
+    backward: for a 4096-token microbatch over a 152k vocab that is one 8 GiB
+    contiguous block on top of whatever the shards and the recompute state
+    hold — and it was refused twice on the venue, at 48 and at 64 GiB per
+    card, with the card itself not full (ADR 0005's arms). Chunked and
+    checkpointed, the fp32 copy exists one chunk at a time in forward and
+    again in backward, and what autograd retains is the model's own logits,
+    which it retained anyway. Same numbers: fp32 softmax over the same
+    values, chunk boundaries cut across positions and never across a vocab.
+    """
+    rows, width, _ = logits.shape
+    out = []
+    for row in range(rows):
+        for start in range(0, width, chunk):
+            piece = logits[row, start:start + chunk]        # [<=chunk, V], a view
+            picked = targets[row, start:start + chunk, None]
+            out.append(torch.utils.checkpoint.checkpoint(
+                _chunk_logprob, piece, picked, use_reentrant=False))
+    return torch.cat(out).reshape(rows, width)
+
+
+def _chunk_logprob(piece: torch.Tensor, picked: torch.Tensor) -> torch.Tensor:
+    return torch.log_softmax(piece.float(), dim=-1).gather(1, picked)[:, 0]
 
 
 @dataclass
@@ -434,8 +473,7 @@ class TorchLearner:
         # so there is no cache to want
         logits = self._model(input_ids=ids, attention_mask=attention,
                              use_cache=False).logits
-        given_prefix = torch.log_softmax(logits[:, :-1].float(), dim=-1)
-        chosen = given_prefix.gather(2, ids[:, 1:, None])[..., 0]   # [R, W-1]
+        chosen = chosen_logprobs(logits[:, :-1], ids[:, 1:])         # [R, W-1]
         zero = torch.zeros(1, dtype=chosen.dtype, device=self.device)
         return torch.cat([torch.cat([zero, chosen[row, :stop - start - 1]])
                           for row, (start, stop) in enumerate(spans)])

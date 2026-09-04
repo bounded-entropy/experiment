@@ -26,7 +26,7 @@ except ImportError:                                  # the client environment
 if torch is not None:
     from rlstack.policy.adapters import lora_torch
     from rlstack.policy.adapters.replay import ReplayRows, RowPlan, row_plan
-    from rlstack.runner.learners.torch_learner import TorchLearner
+    from rlstack.runner.learners.torch_learner import TorchLearner, chosen_logprobs
 
 needs_torch = unittest.skipUnless(
     torch is not None, "torch is trainer metal: this suite runs in the image")
@@ -301,3 +301,30 @@ class PaddedForwardTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+@needs_torch
+class ChunkedLogprobTest(unittest.TestCase):
+    """`chosen_logprobs` is the whole-copy formula, chunked: same values and
+    same gradients through the logits, with chunk boundaries that fall inside
+    a row (found on the venue: the whole copy was one 8 GiB block, refused
+    twice)."""
+
+    def whole_copy(self, logits, targets):
+        return torch.log_softmax(logits.float(), dim=-1).gather(
+            2, targets[..., None])[..., 0]
+
+    def test_same_values_and_gradients_as_the_whole_copy(self) -> None:
+        torch.manual_seed(0)
+        logits = torch.randn(3, 7, 11, dtype=torch.bfloat16, requires_grad=True)
+        targets = torch.randint(0, 11, (3, 7))
+        whole = self.whole_copy(logits, targets)
+        chunked = chosen_logprobs(logits, targets, chunk=4)   # 7 = 4 + 3: a ragged tail
+        self.assertEqual(chunked.dtype, torch.float32)
+        self.assertTrue(torch.allclose(chunked, whole, atol=1e-6))
+        whole.sum().backward()
+        expected = logits.grad.clone()
+        logits.grad = None
+        chunked.sum().backward()
+        self.assertTrue(torch.allclose(logits.grad, expected, atol=1e-6))
+
