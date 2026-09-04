@@ -3,7 +3,7 @@
 | | |
 |---|---|
 | **Date** | 2026-09-01 |
-| **Status** | Implemented (2026-09-01; CONTEXT #74) |
+| **Status** | Implemented (2026-09-01; CONTEXT #74). **Amended 2026-09-04** (Samarth): the learner is a routable resident exactly like an engine, and the Trainer need not share its host or its process — see the Amendment at the end and ADR 0006 Part A |
 | **Author** | Claude Fable 5.1 (session: gsm-campaign, the ADR 0001 review) |
 | **Touches** | `runner/` (host, desk's MetalService, remote, interfaces, a new residents module), `runner/learners/`, `runner/fakes.py`, `data/stores/` (one opener), `deploy/`, `observe/` (one view, one move), `tests/` |
 | **Invariants** | I8 (multi-tenancy on both sides), I12 (a host is atomic and never reshaped), I5 (topology is semantics-neutral), I7 (the substrate is certified) |
@@ -194,7 +194,9 @@ package imports no spec class. `MetalService`'s books hold process handles;
 tenants come back only through the whole loop — resubmit, recarve — so the
 metal, the desk and the observer agree on what happened (Q7). `describe()` and
 `status()` name each resident with its pid and whether it answers. The Trainer
-does not move.
+does not move. *(Amended 2026-09-04: it may. The learner's door is reachable
+over any Transport, a training demand yields a route like a pool's, and the
+Trainer runs wherever the run is anchored — see the Amendment below.)*
 
 **Building a resident is rlstack's, not a venue's (Q4).** `runner/residents.py`
 owns `build_engine(regime, partition, build, store)` and `build_learner(regime,
@@ -877,3 +879,40 @@ a locator, so the observer's resolver had nothing to gain. The pipe transport
 lives in `residents.py` beside the door it serves, not in `remote.py`; the
 protocol-level pieces (services, codecs, `RemoteLearner`) are in `remote.py`
 as decided.
+
+## Amendment (2026-09-04) — the learner is fully remote, like the engine
+
+> **Samarth:** ok yes. let's actually make the learner fully remote just like
+> the engine, and remove the constraint that the trainer must live on the same
+> process.
+
+**What changes.** This ADR made the learner a process behind a door and kept
+the Host's proxy to it LOCAL: `RemoteLearner` was built only by the metal that
+spawned the resident (`desk.py:1529`), `HostService` forwarded no learner verb
+to a foreign caller, `check_fit` demanded an owned learner, and the campaign
+layer anchored every delivery on the learner's host because "the learner is
+never remote" (#43, #69). The amendment removes that rule: the five learner
+verbs cross the host door exactly as `sample_tokens` and `score_tokens` do,
+admitted at the SERVING host's arbiter per frame; a `LearnerMember` resolves to
+a `RemoteLearner` from a route address exactly as a `PoolMember` resolves to a
+`RemotePool`; a remote learner attaches to the runner's arbiter as a
+zero-footprint free resident, its alternation living at the far host; the
+learner demand yields a route, so the anchor of a delivery becomes a CHOICE
+(the learner's host by default when the spec declares one, `main` otherwise —
+ADR 0006 Q2, refolded). A run's Trainer therefore lives wherever the run is
+anchored, and any experiment may join a standing learner from any host.
+
+**What this ADR's reasoning already said.** The "cannot cross a wire" line was
+named a misattribution above: the autograd arc is the Learner's, the seal is
+the Trainer's, and only the verbs' bytes cross. The rank chorus stays internal
+to the learner resident (rank 0 answers the door and announces to its
+followers), so a frame from another host is the same frame. The store is the
+volume; the Trainer writes it from wherever it sits. Nothing in this ADR's
+Decision is contradicted except the sentence "The Trainer does not move", left
+standing with its note, because the reasoning is the artifact.
+
+**Where the shape lives.** ADR 0006 Part A carries the decision's seams,
+promises and the implementer's stated sub-decisions (admission host-side, an
+explicit `uninstall` verb at the end of a tenancy, sync frames kept per Q6,
+custody journaled at the learner's host). The CONTEXT entry that records the
+landing is ADR 0006's.

@@ -3,9 +3,9 @@
 | | |
 |---|---|
 | **Date** | 2026-09-04 |
-| **Status** | Proposed |
+| **Status** | Proposed — **Part A (the learner is a routable resident; the Trainer need not share its host) ACCEPTED 2026-09-04 by Samarth's instruction and in implementation**; Part B (generation-only runs: Q1, Q3–Q8) open |
 | **Author** | Claude Fable 5.1 (session: the SPAR introspection paper, 2026-09-04) |
-| **Touches** | `runner/loop.py` (Phase 1 split, `plan_daemons` → the needs), `runner/daemons/generator.py` (the pacing rule takes its buffer from the caller), `spec/specs.py` (`Plans.train` optional; the extent), `runner/campaign.py` (the anchor rule), `runner/desk.py` (`finished`), `runner/host.py` (`submit` on a learner-less host; the journal's plan), `runner/refs.py` (`store://<run_id>/rollouts/<r>`), `observe/views.py` + `observe/series.py` (progress off the extent), `spec/validate.py` (one gate: a learner-less run's bank), `tests/` |
+| **Touches** | Part A: `runner/remote.py` (`HostService` forwards the learner verbs; `RemoteLearner` over any transport), `runner/host.py` (`resolve_routes` learns the learner; `check_fit` accepts a routed one; custody journaled), `runner/loop.py` (`attach_residents`: a remote learner is a free resident; the tenant is uninstalled at the end of `submit`), `runner/interfaces.py` (`Learner.uninstall`), `runner/learners/torch_learner.py` + `runner/fakes.py` (the verb), `runner/campaign.py` (the learner demand yields a route; the anchor is a choice), `runner/desk.py` (`deliver` routes the learner demand), `deploy/` (one door: the runner beside the sampling host, the learner on another metal — written, unrun), `ARCHITECTURE.md` ("Resident / daemon", "Learner", "Wire" recoded), `tests/`. Part B: `runner/loop.py` (Phase 1 split, `plan_daemons` → the needs), `runner/daemons/generator.py` (the pacing rule takes its buffer from the caller), `spec/specs.py` (`Plans.train` optional; the extent), `runner/campaign.py` (the anchor rule), `runner/desk.py` (`finished`), `runner/host.py` (`submit` on a learner-less host; the journal's plan), `runner/refs.py` (`store://<run_id>/rollouts/<r>`), `observe/views.py` + `observe/series.py` (progress off the extent), `spec/validate.py` (one gate: a learner-less run's bank), `tests/` |
 | **Invariants** | I1 (a rollout is sealed data whether or not anything trains on it), I3 (`Plans.train=None` is a new value; every existing run's identity is unchanged), I10 (the store is the run: done-ness must be readable off it for every run kind), I12 (a learner-less run anchors on an inference host) |
 | **CONTEXT** | extends #27 (the blackboard: "plan_daemons derives one daemon per GPU responsibility"), #59 (the plan is data), #43/#69 (the desk is workload-blind; the anchor is the campaign layer's rule); closes the "generation-only runs" open thread — WITHOUT a Sealer |
 
@@ -78,7 +78,9 @@ shape (a Trainer, a learner, a ledger, a train plan):
 8. `campaign.py:44-48` — `demands_of` marks the LEARNER demand as the anchor
    ("the learner is never remote, said once, here"); `desk.py:679-683` —
    `submit` requires exactly one anchor. A learner-less spec has none and is
-   refused at the desk's door.
+   refused at the desk's door. *(Dissolved by Part A: the learner is
+   routable, so the anchor is a choice, and the deeper rule behind this line
+   — that a run's Trainer must sit beside its learner — is gone with it.)*
 9. `refs.py:26-28,90-96` — the store ref grammar is `store://<run_id>/
    waves/<u>` only. A Generator writes `rollouts/`; only a Trainer's
    `next_rows` materializes `waves/`. Another run cannot name a
@@ -102,6 +104,68 @@ where the frame lands, what a ref can name — is spelled once, for the
 experiment, in the loop and in the four readers of its ledger.
 
 ## Decision
+
+### Part A — the learner is a routable resident (accepted 2026-09-04)
+
+> **Samarth:** ok yes. let's actually make the learner fully remote just like
+> the engine, and remove the constraint that the trainer must live on the same
+> process.
+
+**The learner is reached exactly as an engine is.** The wire already exists
+(`RemoteLearner` / `LearnerService`, five JSON verbs, byte-identity tested —
+ADR 0002); what the amendment adds is the plumbing that let only the local
+host use it:
+
+- **The door.** `HostService.serve` forwards `install`, `forward_backward`,
+  `optim_step`, `emit`, `load` and the new `uninstall` to the host's
+  `LearnerService`, each frame ADMITTED at that host's arbiter under the
+  learner resident — the `sample_tokens` / `score_tokens` shape, so the
+  learner's alternation group (a multi-member HostSpec) is honored where the
+  learner lives. The verbs stay synchronous frames (ADR 0002 Q6, "later"):
+  over a real venue the transport's `ask` runs on its own thread, the shape
+  every venue's `blocking_ask` already has.
+- **Fit and routes.** `Host.resolve_routes` resolves a `"learner"` route into
+  `RemoteLearner(transport, fsdp=member.fsdp)` exactly as it resolves a pool
+  address into `RemotePool`; `check_fit` accepts a `LearnerMember` served by
+  a routed learner as it accepts a routed pool; `run_experiment_async` takes
+  the learner it is handed, local or remote, and `check_members_match_their_
+  shape` attests `fsdp` off the proxy's hello as before.
+- **Attach.** `attach_residents` attaches a remote learner as a zero-footprint
+  free resident (the `RemotePool` rule): local admission is bookkeeping, the
+  real admission happens at the learner's host per frame.
+- **The desk and the anchor.** `deliver` routes the learner demand under the
+  key `"learner"` (the name `place` already uses); `demands_of(spec, anchor)`
+  marks the chosen demand — the learner's when the spec declares one and
+  nothing else is asked, `main` otherwise or when asked — so a run's Trainer
+  lives where the run is anchored, by choice. The desk stays workload-blind.
+- **Tenant lifecycle.** `Learner.uninstall(tenant)` joins the protocol (the
+  `_remove` that already exists behind `install`'s reset, made a verb);
+  `Host.submit` uninstalls its tenant when the run ends, done or failed, so a
+  learner shared by runs anchored elsewhere does not accumulate the dead.
+  Resume is unchanged: a re-adoption installs and restores from blobs, as
+  every attach already does. The learner's host journals `learner-attach` /
+  `learner-detach` events per tenant so the observer sees who is on it.
+
+**Promises (Part A).** (1) Every existing venue and test that hands a local
+learner behaves as before: the learner's host is still the default anchor,
+and a local `RemoteLearner` still rides the local transport. (2) On fakes: a
+run anchored on the `main` pool's host with its learner on ANOTHER host
+produces a run directory byte-identical to the same spec anchored on the
+learner's host (`test_resume.py`'s shape, across two `Host` objects and a
+`LocalTransport`). (3) Two runs anchored on two different hosts join ONE
+learner listing through the desk, both commit, and the learner's roster
+shows both then neither. (4) A learner-less spec is no longer refused at the
+desk for want of an anchor; whether it RUNS is Part B. (5) The fakes suite
+is green.
+
+**Non-promises (Part A).** No metal proof in this ADR — the venue door is
+written and left unrun for Samarth (it costs a second metal). The
+per-microbatch frame and the per-update `emit` frame now cross a real wire
+when the learner is remote: the cost is the open thread's "4 GB on the wire"
+at large banks and is measured, not fixed. Frames stay synchronous. The
+NCCL transfer verb (ADR 0002 Q3) stays a later ADR.
+
+### Part B — a run is daemons with resources (open)
 
 **A run is a set of daemon NEEDS, each naming the daemon, its plan, and the
 residents it admits; `run_experiment_async` derives the experiment's needs
@@ -259,16 +323,16 @@ time shape for no reason the store needs.
 
 > **Samarth:**
 
-**Q2. The anchor of a learner-less run is the `main` pool's host.**
-Recommendation: yes. The Generator is a thin loop against a pool and a
-store; the serving host already runs adoptions (`adopt` is the door) and
-already hosts the runner for experiments whose learner it carries. A pure-
-client anchor (the submitting process itself) would make the run die with
-the client, which the desk's supervision cannot see.
-If the other branch: `Demand` grows a fourth capability ("runner") and the
-desk learns a placement for thin loops — a bigger change than the rule.
+**Q2. The anchor of a run is a choice — REFOLDED by Part A.** With the
+learner routable, no demand HAS to anchor: `demands_of(spec, anchor)` marks
+the learner's host when the spec declares a learner and nothing else is
+asked, and `main` otherwise or on request. A learner-less run therefore
+anchors on `main` without a special rule, and a pure-client anchor (the
+submitting process) stays refused for the reason given before: the run
+would die with the client, unseen by the desk's supervision.
 
-> **Samarth:**
+> **Samarth:** (answered by the 2026-09-04 instruction — the learner is
+> fully remote; Part A implements this fold)
 
 **Q3. `run_done` lives in the data layer, beside the peeks.**
 Recommendation: yes — the desk, the host and the observer all read it, and
