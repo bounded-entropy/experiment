@@ -5,8 +5,9 @@
 
 Two containers and one wire: PolicyHost serves the sampling partition (its own
 Host, its own arbiter, admission at the partition), and `run` drives the whole
-experiment beside the learner, whose GPUs are local because the learner is
-never remote. Everything semantics-bearing is in the spec below — the plans,
+experiment ANCHORED on the learner's container, whose GPUs are therefore local
+(the default anchor; since ADR 0006 Part A the learner may equally be reached
+over the wire). Everything semantics-bearing is in the spec below — the plans,
 the bank, the loss — and everything else here is venue (I5).
 
 The plans are written out rather than helper-built: waves x groups x leaves is

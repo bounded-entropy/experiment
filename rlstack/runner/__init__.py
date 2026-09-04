@@ -28,11 +28,12 @@ The map, by responsibility — read top to bottom:
     residents.py    a resident is a process (ADR 0002): the build records a
                     venue declares, the universal builders, the door and its
                     frames, Resident.spawn / in_process / stop, the ladder
-    remote.py       the wire: HostService admits pool verbs at its own
-                    arbiter and forwards through the resident's proxy;
-                    EngineService / LearnerService are the resident's end;
-                    RemotePool / RemoteLearner are the whole protocols over
-                    a Transport
+    remote.py       the wire: HostService admits pool verbs — and, since ADR
+                    0006 Part A, learner verbs — at its own arbiter and
+                    forwards through the resident's proxy; EngineService /
+                    LearnerService are the resident's end; RemotePool /
+                    RemoteLearner are the whole protocols over a Transport,
+                    across hosts as readily as inside one
     assemble.py     a planned wave becomes real: sample it, or take it
     refs.py         where an already-sealed trajectory lives
                     (live / replay / static), one file each

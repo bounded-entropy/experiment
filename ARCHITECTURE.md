@@ -427,7 +427,8 @@ or reshape a living host.
 **Demand** — one member's capability need as a value: capability, base, shard
 shape, `vram_gb` as the carve size (total across shards, None a whole device),
 the HostSpec it came from (`group` — members sharing one alternate on one
-host), and the **anchor** flag (where a delivered frame lands). The desk's
+host), the **anchor** flag (where a delivered frame lands), and `name()` —
+the key its address rides under, its pool's name or `learner`. The desk's
 whole input vocabulary; `demand_rows`/`demands_from` are its wire codec. A spec
 becomes demands in the CAMPAIGN layer, never at the desk, and GB passes through
 as declared.
@@ -448,8 +449,9 @@ the capacity VIEW: partition row + metal name), journaled and rebuilt by
 `from_journal`. Two doors: `place(demands)` answers addresses (the PURE
 CLIENT's door — an evaluator joins a pool and is thereafter just admitted
 traffic), and `submit(demands, frame)` additionally DELIVERS the opaque frame
-to the anchor demand's host with every other pool's address threaded as
-routes — routes come off the demand rows, which is what makes the blind relay
+to the anchor demand's host with every other MEMBER's address threaded as
+routes under its own name (the learner's included, since ADR 0006 Part A) —
+routes come off the demand rows, which is what makes the blind relay
 possible. A placement no listing serves becomes a desk-issued CARVE on a
 registered metal (deduce by residual in GB, command by RemoteMetal.carve —
 the request carries the desk's recipe row); only what no metal holds returns
@@ -473,8 +475,10 @@ owned — and the next placement that needs it knocks it back.
 `rlstack/runner/desk.py` (`Desk`, `Listing`), `rlstack/runner/remote.py` (`RemoteDesk`)
 
 **Campaign layer** — where SPECS meet the fleet, the only such place:
-`demands_of(spec)` (anchor on the learner — the learner is never remote, said
-once, here), `frame_for(spec)` (canonical row + the client's code claim), and
+`demands_of(spec, anchor)` (which demand the frame lands on — and therefore
+where the run's Trainer sits: the learner's by default, `main` with no learner
+declared, the asked-for member when one is asked; said once, here, in
+`anchor_demand`), `frame_for(spec)` (canonical row + the client's code claim), and
 `Campaigns` — the desk's spec-aware sidecar serving the passes that need both
 a store and spec knowledge (today `migrate`, the code-refresh warm-fork) over
 the desk's own Transport contract. A campaign's whole surface is
@@ -534,10 +538,14 @@ facts, speaks TOKENS, and pins each request's bundle at submission.
 
 **Learner** — training metal: differentiable forward/backward plus the
 optimizer, multi-tenant by additive install (`TorchLearner`,
-`FsdpTorchLearner`, `FakeLearner`). `fsdp` is a BUILD fact. The learner is
-never remote ACROSS HOSTS — the runner goes to it — and since ADR 0002 it is a
-process INSIDE its host, reached through `RemoteLearner` over its door. Its
-`install` takes a **Parameterization** and its package imports no spec class.
+`FsdpTorchLearner`, `FakeLearner`). `fsdp` is a BUILD fact. Since ADR 0002 it
+is a process inside its host, reached through `RemoteLearner` over its door;
+since ADR 0006 Part A that proxy also reaches ACROSS hosts, so a run anchored
+anywhere may join a standing learner — its verbs (`install`, `uninstall`,
+`forward_backward`, `optim_step`, `emit`, `load`) cross the host door and are
+admitted at the arbiter of the host that wears it, exactly as an engine's are.
+Its `install` takes a **Parameterization** and its package imports no spec
+class; `uninstall` ends a tenancy, and the host that ran the run issues it.
 `rlstack/runner/interfaces.py`, `rlstack/runner/learners/`
 
 **Parameterization** — what `install` builds, projected off the spec BY THE
@@ -586,11 +594,15 @@ only vLLM's mechanism for handing the device back (`enable_sleep_mode`, a
 build fact), never a property of a spec.
 `rlstack/runner/arbiter.py`
 
-**Wire** — pool traffic to a host that is not this process. `HostService` is
-the host-side end (it executes pool verbs on its own metal under its own
-arbiter — admission stays with the partition); a `Transport` carries JSON-safe
-dict frames; `RemotePool` implements the whole Engine protocol over it, so the
-runner cannot tell remote from local.
+**Wire** — traffic to a host that is not this process. `HostService` is the
+host-side end (it executes pool verbs on its own metal, and learner verbs on
+its own learner, under its own arbiter — admission stays with the partition);
+a `Transport` carries JSON-safe dict frames; `RemotePool` and `RemoteLearner`
+implement the whole Engine and Learner protocols over it, so the runner cannot
+tell remote from local. A learner proxy speaks through two doors: a resident's
+(sync `ask` frames, the runner beside it already admitted) and another host's
+(`admitted=True` — `call` frames driven on the proxy's own loop, because a
+Learner verb is synchronous and its caller is an event loop).
 `rlstack/runner/remote.py`, `deploy/modal_host.py` (`ModalTransport`)
 
 ### The store
@@ -680,10 +692,12 @@ the heavy object living on a partition (an Engine, a Learner — nouns of
 capability), a DAEMON is the thin loop that watches the store and pokes a
 resident (Generator, Trainer, Scorer — agent nouns). Daemons synchronize
 through the store ONLY, so colocation with their resident is a transport
-choice, not architecture. The Trainer sits beside its Learner because the
-runner goes to the learner's HOST; inside that host the Learner is a process
-behind five verbs (ADR 0002) — the autograd arc is the Learner's, the seal is
-the Trainer's, and neither crosses a wire: the verbs' bytes do.
+choice, not architecture — and since ADR 0006 Part A that is true of the
+Trainer too: it sits where the run is ANCHORED, which is the learner's host by
+default and any host by choice. The Learner is a process behind its verbs (ADR
+0002), reachable from another host (Part A) — the autograd arc is the
+Learner's, the seal is the Trainer's, and neither crosses a wire: the verbs'
+bytes do.
 
 **Measurement** — observation OUTSIDE the run (#70): a value naming held-out
 task ids, samples, a cadence, a scoring pipeline and its own seed, written as

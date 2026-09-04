@@ -211,9 +211,9 @@ def serving_host(name: str, store, gb: float, metal, cas_get):
 
 def _run(task_id: str, held_out: list[str], updates: int, master: int,
          label: str) -> dict:
-    """Drive the experiment from the learner's host; reach the two pools over
-    the wire, because they are other partitions even though they are in this
-    process (the learner is never remote — the runner goes to it)."""
+    """Drive the experiment from the learner's host — the default anchor —
+    and reach the two pools over the wire, because they are other partitions
+    even though they are in this process."""
     import asyncio
 
     from rlstack import ModalVolumeStore

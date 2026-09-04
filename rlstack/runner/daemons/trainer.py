@@ -21,7 +21,11 @@ pipeline with no pooled half awaits nothing and plans no Scorer, and this
 daemon is byte-for-byte the daemon it was.
 
 The gradient admits the LEARNER; the inline half admits nothing, because
-occupying metal is what put a processor on the other side of the split.
+occupying metal is what put a processor on the other side of the split. The
+learner it admits may live on ANOTHER host (ADR 0006 Part A) — then the local
+admission is bookkeeping over a free resident and the real one happens per
+frame at the host that wears it, which this daemon cannot tell and was never
+meant to.
 
 Those boundaries are also the update's four measured phases — collect / post /
 train / seal — lapped into an UpdateClock and journaled to the HOST after the

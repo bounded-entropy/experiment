@@ -148,10 +148,16 @@ inverse and the one rung the desk climbs DOWN: metal nothing has run on for
 venue reclaims the container) and kept as inventory the next placement may
 knock awake.
 A multi-regime host ALTERNATES its regimes on its own arbiter group — one host wearing masks, never two hosts
-coordinating — so a multi-member HostSpec places onto exactly one host. The
-learner is never remote: the runner goes to
-the learner's host and reaches every other partition through RemotePools
-(Engine protocol over a transport; admission host-side, where the metal is).
+coordinating — so a multi-member HostSpec places onto exactly one host. A run
+is ANCHORED on one member's host — its runner lives there — and reaches every
+other partition through proxies (the Engine and Learner protocols over a
+transport; admission host-side, where the metal is).
+*(Delta, CONTEXT #79 / ADR 0006 Part A: this paragraph read "the learner is
+never remote: the runner goes to the learner's host" until 2026-09-04. The
+learner is now routable exactly as a pool is — its verbs cross the host door
+and are admitted at the host that wears it — so the anchor is a CHOICE: the
+learner's host by default, `main` when no learner is declared, any declared
+member when asked. Fold at v4.)*
 
 ## 2. Primitives
 
@@ -393,13 +399,16 @@ class Learner(Protocol):             # training metal (TorchLearner / FakeLearne
 # one HostSpec places as ONE unit (a multi-member one is a multi-regime host
 # whose members alternate). place() -> Plan(Join|Carve|Acquire);
 # apply() executes the automatic rungs (carves journaled in fleet/log.jsonl);
-# submit() runs beside the learner's host with RemotePools to the rest.
+# submit() runs at the ANCHOR host with proxies to the rest (#79: the anchor
+# defaults to the learner's host and is a choice).
 
 # THE WIRE (runner/remote.py): HostService executes pool verbs under the
 # OWNING host's arbiter, addressed by capability (base, tp); Transport
-# carries JSON-safe frames (async call: sample/score — admitted; sync ask:
-# add_bundle/reachability/tokenize — admission-free by I8); RemotePool is the
-# Engine protocol over it — a remote main pool is byte-identical to local.
+# carries JSON-safe frames (async call: sample/score and, at a host door,
+# every learner verb — admitted; sync ask: add_bundle/reachability/tokenize —
+# admission-free by I8); RemotePool and RemoteLearner are the Engine and
+# Learner protocols over it — a remote main pool, and a remote learner, are
+# byte-identical to local (#79).
 
 # THE ARBITER is the physical half: object-keyed RESIDENTS (an engine, a
 # learner) attach with an exclusive group (from a multi-member HostSpec) or none;

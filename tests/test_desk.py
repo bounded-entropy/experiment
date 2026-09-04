@@ -1,7 +1,8 @@
 """The standing fleet: Desk (the desk), Listing, RemoteDesk.
 
 The claims under test: a campaign's whole surface is one frame (submit at the
-desk → placed over listings → adopted at the learner's host, routes threaded);
+desk → placed over listings → adopted at the ANCHOR host, every other
+member's address threaded as routes);
 a placement nothing serves comes back as a BOOT instruction, never a guess;
 solo-and-occupied listings are skipped like the join rung skips hosts; the
 desk journals every listing and placement and REBUILDS from its own journal
