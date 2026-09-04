@@ -497,3 +497,29 @@ class TrafficAcrossTheDoorTest(unittest.TestCase):
         self.assertAlmostEqual(row["admit_wait_ms_mean"], 2.0)             # the door's, untouched
         self.assertEqual(row["inflight"], 1)
 
+    def test_a_resident_that_answers_late_does_not_stall_the_gpu_samples(self) -> None:
+        """Found on the venue: the learner's 14-minute weight load blocked its
+        door, the stats tick awaited the drain inline, and no gpu sample was
+        journaled for the whole load. The sample must keep its cadence while
+        the drain runs as its own task."""
+        import time as clock
+
+        class Slow:
+            base, tp = "b", 1
+            def drain_traffic(self):
+                clock.sleep(0.6)                 # a door that answers late
+                return {"prefill_tokens": 1, "decode_tokens": 2, "requests": 1,
+                        "ttft_ms_mean": 5.0}
+        host = Host("late", engines=(Slow(),), learner=None, store=self.store,
+                    sampler=lambda: {"gpus": []})
+
+        async def a_few_ticks():
+            task = asyncio.create_task(host.run_stats(every=0.05))
+            await asyncio.sleep(0.3)
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+        go(a_few_ticks())
+        kinds = [e["event"] for e in self.store.read_host_log("late")]
+        self.assertGreaterEqual(kinds.count("stats"), 4)   # the cadence held
+        self.assertLessEqual(kinds.count("traffic"), 1)    # at most one drain in flight
+

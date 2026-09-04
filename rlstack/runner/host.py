@@ -418,7 +418,7 @@ class Host:
                 "status": "failed"})
             raise
         finally:
-            self.release_tenant(learner, rid)
+            await self.release_tenant(learner, rid)
         self.roster[rid].status = "done"
         self.roster[rid].completed = report.completed
         self.roster[rid].extent = report.extent
@@ -428,7 +428,7 @@ class Host:
             "extent": report.extent})
         return report
 
-    def release_tenant(self, learner: Learner | None, run_id: str) -> None:
+    async def release_tenant(self, learner: Learner | None, run_id: str) -> None:
         """THE TENANCY'S END AT THE LEARNER, whichever host wears it: the run
         is over — done or failed — so its parameterization leaves the training
         metal instead of accumulating there (ADR 0006 Part A). It matters now
@@ -444,7 +444,8 @@ class Host:
         if learner is None:
             return
         try:
-            learner.uninstall(run_id)
+            # a Learner verb WAITS on its host; off the loop (check_off_loop)
+            await asyncio.to_thread(learner.uninstall, run_id)
         except Exception as unreachable:      # noqa: BLE001 — see the docstring
             print(f"[host {self.name}] uninstall {run_id}: {unreachable}")
 
@@ -685,20 +686,46 @@ class Host:
         is computed from the samples; a gap in them IS the downtime. Run it
         alongside submissions: create_task(host.run_stats()), cancel when done.
 
-        ONE cadence, two events: the traffic window is drained on the same
-        tick rather than by a second timer, so load and utilization are read
-        against the same clock. The gpu sample is skipped where no NVIDIA
-        runtime answers; the traffic window never is — a host that served
-        nothing this window says so with zeros."""
-        while True:
-            sample = await asyncio.to_thread(self.sampler)
-            now = time.time()
-            if sample is not None:
-                self.store.append_host_event(self.name, {
-                    "event": "stats", "t": now, **sample})
-            self.store.append_host_event(self.name, {
-                "event": "traffic", "t": now, **await self.traffic_row(now)})
-            await asyncio.sleep(every)
+        ONE cadence, two events — but NOT one await. The gpu sample is
+        journaled the moment it is read, and the traffic window is drained as
+        its own task with at most one in flight, because a resident inside a
+        long synchronous stretch (a 32B's weight load, an engine's build)
+        cannot answer its door until it is done, and a tick that awaited it
+        inline lost every gpu sample for the whole of that stretch (found on
+        the venue: the samples stopped the second the learner began loading —
+        the one phase they were wanted for). A drain still pending at the
+        next tick is left to finish: the resident's meter keeps counting, so
+        the window it eventually returns covers the longer span honestly.
+        The gpu sample is skipped where no NVIDIA runtime answers; the
+        traffic window never is — a host that served nothing says zeros."""
+        draining: asyncio.Task | None = None
+        try:
+            while True:
+                sample = await asyncio.to_thread(self.sampler)
+                if sample is not None:
+                    self.store.append_host_event(self.name, {
+                        "event": "stats", "t": time.time(), **sample})
+                if draining is None or draining.done():
+                    draining = asyncio.create_task(self.journal_traffic())
+                await asyncio.sleep(every)
+        finally:
+            if draining is not None:
+                draining.cancel()
+
+    async def journal_traffic(self) -> None:
+        """One traffic window, drained and journaled — the stats tick's own
+        task, so a resident that answers late holds up this row and nothing
+        else. `t` is the tick that asked; a resident's part of the window may
+        run past it, and the counts are still the counts."""
+        now = time.time()
+        try:
+            row = await self.traffic_row(now)
+        except Exception as refused:
+            print(f"[host {self.name}] traffic: no window this tick: {refused}",
+                  flush=True)
+            return
+        self.store.append_host_event(self.name, {
+            "event": "traffic", "t": now, **row})
 
     async def traffic_row(self, now: float) -> dict:
         """This partition's traffic window: the door's own meter, drained,
