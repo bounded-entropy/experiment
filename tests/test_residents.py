@@ -160,18 +160,20 @@ class DoorTest(unittest.TestCase):
                              regime=regime, build=build,
                              store=self.store.address())
 
-    def alternating_host(self, *, sleeps: bool) -> tuple[Host, FakeEngine, FakeLearner]:
+    def alternating_host(self, *, sleeps: bool, fsdp: int = 1,
+                         refusal: str = "") -> tuple[Host, FakeEngine, FakeLearner]:
         engine = FakeEngine(base=BASE, sleeps=sleeps)
-        trainer = FakeLearner(sleeps=sleeps)
+        trainer = FakeLearner(fsdp=fsdp, sleeps=sleeps, sleep_refusal=refusal)
+        learn = Regime("learn", "training", BASE, fsdp)
         residents = (
             Resident.in_process(self.birth(self.serve, FakeEngineBuild(sleeps=sleeps)),
                                 engine),
-            Resident.in_process(self.birth(self.learn, FakeLearnerBuild(sleeps=sleeps)),
+            Resident.in_process(self.birth(learn, FakeLearnerBuild(sleeps=sleeps)),
                                 trainer))
         host = Host("alt", engines=(RemotePool(residents[0].transport, base=BASE),),
-                    learner=RemoteLearner(residents[1].transport),
+                    learner=RemoteLearner(residents[1].transport, fsdp=fsdp),
                     store=self.store, partition=self.partition,
-                    regimes=(self.serve, self.learn), residents=residents)
+                    regimes=(self.serve, learn), residents=residents)
         return host, engine, trainer
 
     def test_alternation_hooks_cross_the_door_for_both_kinds(self) -> None:
@@ -190,6 +192,35 @@ class DoorTest(unittest.TestCase):
         go(switch_twice())
         self.assertEqual(engine.naps, ["wake", "sleep", "wake"])
         self.assertEqual(trainer.naps, ["wake", "sleep"])
+
+    def test_a_sharded_learner_that_sleeps_is_wired_like_any_other(self) -> None:
+        """The wiring reads the HELLO, never the width (#82): an fsdp=2
+        learner whose resident says it sleeps alternates with the engine on
+        exactly the code path an unsharded one does. Which ranks moved is the
+        chorus's business and never the host's."""
+        host, engine, trainer = self.alternating_host(sleeps=True, fsdp=2)
+
+        async def switch():
+            async with host.arbiter.admit(host.engines[0]):
+                pass
+            async with host.arbiter.admit(host.learner):
+                pass
+        go(switch())
+        self.assertEqual(trainer.naps, ["wake"])
+        self.assertEqual(engine.naps, ["wake", "sleep"])
+        self.assertEqual(host.learner.fsdp, 2)
+
+    def test_a_learner_that_cannot_sleep_says_why_in_its_hello(self) -> None:
+        """`sleeps` is a PROBED build fact for a sharded learner (I7), so its
+        refusal carries the reason across the door — a hook nobody wired is
+        otherwise indistinguishable from a substrate nobody checked."""
+        host, _, _ = self.alternating_host(
+            sleeps=False, fsdp=2, refusal="this torch's FSDP2 is missing X")
+        hello = host.residents[1].hello
+        self.assertFalse(hello["sleeps"])
+        self.assertEqual(hello["fsdp"], 2)
+        self.assertIn("missing X", hello["sleep_refusal"])
+        self.assertNotIn("sleep_refusal", host.residents[0].hello)   # engines
 
     def test_a_resident_that_does_not_sleep_gets_no_hooks(self) -> None:
         host, engine, trainer = self.alternating_host(sleeps=False)
