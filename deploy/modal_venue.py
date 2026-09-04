@@ -77,8 +77,13 @@ def gpu_image_for(env: dict | None = None,
              .add_local_python_source(*SOURCES)
              .add_local_dir("rlstack/observe/web",
                             remote_path="/root/rlstack/observe/web"))
-    return image.add_local_dir("tests", remote_path="/root/tests") if with_tests \
-        else image
+    if not with_tests:
+        return image
+    # the suite's venue tests import deploy/*.py by path (tests/test_venues.py),
+    # so the venue files ship beside the tests — found in the image: three
+    # fixture errors, "No such file or directory: /root/deploy/concept_steer.py"
+    return (image.add_local_dir("tests", remote_path="/root/tests")
+            .add_local_dir("deploy", remote_path="/root/deploy"))
 
 
 def a_store():
