@@ -3943,6 +3943,109 @@ specs; backends (local/modal/skypilot) and GPU topology are semantics-neutral.
       door serializes — the coalescer question, #44); resume of a joined
       tenant.
 
+79. **THE LEARNER IS FULLY REMOTE, LIKE THE ENGINE: A RUN IS ANCHORED, AND
+    THE TRAINER GOES WITH THE ANCHOR** (Samarth, 2026-09-04: "ok yes. let's
+    actually make the learner fully remote just like the engine, and remove
+    the constraint that the trainer must live on the same process."). ADR
+    0006 **Part A**, decided and implemented; ADR 0002's Amendment records
+    what it removes from that ADR's shape. Part B (generation-only runs as
+    daemon needs — Q1, Q3-Q8) stays OPEN and nothing here implements it.
+    - **THE DOOR.** `HostService.serve` forwards the six learner verbs
+      (`install`, `uninstall`, `forward_backward`, `optim_step`, `emit`,
+      `load` — `LEARNER_VERBS`) to the host's own learner, each frame
+      ADMITTED at that host's arbiter under the learner resident, exactly as
+      `sample_tokens` is: a bare host's learner attaches there on first
+      remote use at zero footprint, and a host wearing no learner refuses the
+      frame the way it refuses an unserved engine address. The verb itself is
+      synchronous, so the admitted frame executes through `LearnerService.
+      answer`; a RESIDENT's door still takes learner verbs as ordered `ask`s
+      and still refuses `serve`.
+    - **TWO DOORS, ONE PROXY.** `RemoteLearner(transport, fsdp=, admitted=)`:
+      `admitted=False` is the Host's own resident (sync asks — unchanged, and
+      that is what keeps every existing venue identical), `admitted=True` is
+      another host's door — `call` frames driven to completion on the proxy's
+      OWN loop, on its own daemon thread, because a Learner verb may not
+      become async (ADR 0002 Q6, kept) and the caller is an event loop that
+      may be neither re-entered nor stalled. ONE loop for the proxy's life,
+      never one per frame: the serving host's admission is asyncio primitives
+      bound to the loop they first woke on. The shape is every venue's own
+      `blocking_ask`.
+    - **FIT, ROUTES, ATTACH.** `Host.resolve_routes` returns a typed `Routed`
+      (pools + learner) and resolves the `"learner"` key — the desk's own
+      name for the learner demand — into a routed proxy exactly as a pool
+      address becomes a `RemotePool`; a spec declaring a POOL named `learner`
+      beside a routed learner is refused rather than aliased. `check_fit`
+      accepts a `LearnerMember` served by a routed learner as it accepts a
+      routed pool; `submit(learner=)` hands `run_experiment_async` whichever
+      it has, so `check_members_match_their_shape` still attests `fsdp` off
+      the proxy (real for the same reason RemotePool's (base, tp) is: the
+      desk places a training demand only on a listing whose training regime
+      has that shape, and that host attested its learner against the regime
+      at birth). `attach_residents` attaches a routed learner as a
+      zero-footprint FREE resident — the `RemotePool` rule — because the real
+      admission is per frame at its own host.
+    - **THE ANCHOR IS A CHOICE.** `demands_of(spec, anchor)` marks one demand
+      through `anchor_demand`, the rule's one home: unasked, the learner's
+      when the spec declares one (so every existing venue behaves exactly as
+      before), `main` when it does not, the named member when one is asked; a
+      name the spec does not declare is a refusal. `Demand.name()` is the key
+      an address rides under, and `deliver` threads EVERY non-anchor member's
+      address whose listing is not the anchor's — the learner included. The
+      desk stays workload-blind: it relays one more address under one more
+      name. A learner-less spec is therefore no longer refused at the desk
+      for want of an anchor; whether it RUNS is Part B, and `loop`'s
+      `algo is None` refusal is untouched.
+    - **TENANT LIFECYCLE.** `Learner.uninstall(tenant)` joins the protocol —
+      the `_remove` that already lived behind `install`'s reset, made a verb,
+      IDEMPOTENT because "gone" is the goal state — in `TorchLearner`
+      (announced to the chorus by `FsdpTorchLearner`, whose `follow` table
+      grows the verb), `FakeLearner`, `LearnerService`, `RemoteLearner`.
+      `Host.submit` releases its tenant in a `finally`, done or failed, so a
+      standing learner joined by runs anchored elsewhere does not accumulate
+      the dead; an unreachable learner has nothing to release and never fails
+      a teardown. Resume is unchanged — a re-adoption installs and restores
+      from blobs, as every attach does. The learner's host journals
+      `learner-attach` / `learner-detach` (run_id, t) when a FOREIGN frame
+      installs or uninstalls, which is the only record of custody for a run
+      whose tenancy lives on another host; `observe/` reads it generically
+      (the exact strings `attach`/`detach` still gate the tenancy views, so
+      nothing there had to change).
+    - **WHAT THE TESTS PIN.** 915 green on fakes (from 891), 114 torch-gated
+      skips, ~7 s. `tests/test_remote_learner.py` (new, 18): the six verbs
+      over the resident door, admission at an ALTERNATING serving host (the
+      switch is the learner's), the custody journal, the verb split per door,
+      the routed learner as a free resident, uninstall on both exits — and
+      Part A's promise 2, a run anchored on the MAIN pool's host with its
+      learner on another host producing a run directory BYTE-IDENTICAL
+      (test_resume's `snapshot`) to the same run anchored on the learner's
+      host. `tests/test_desk.py`: a frame anchored on main with the learner
+      routed; TWO runs anchored on two serving hosts joining ONE listed
+      learner, both committing, both attaching and both leaving in that
+      learner host's journal (promise 3); a learner-less spec PLACED, its
+      refusal the loop's. `tests/test_placement.py`: the anchor's four cases.
+    - **UNPROVEN, STATED.** No metal: `deploy/stress_fleet.py::remote_learner`
+      is written and UNRUN (Samarth runs metal) — the door submits with
+      `anchor="main"`, asserts the frame landed on main's host, that the
+      anchor carries the tenancy while the learner host holds only custody,
+      that the journal has this run's two custody rows, and ends in the
+      release with the plane empty. So the WIRE COST is unmeasured: a routed
+      learner puts a TokenBatch on the wire per MICROBATCH and the emitted
+      payloads per UPDATE (the open thread's "4 GB on the wire" at large
+      banks), and the NCCL by-reference carriage (ADR 0002 Q3) is still a
+      later ADR. Frames stay synchronous, so a frame in flight cannot be
+      cancelled — a `stop` waits for it, exactly as it waits for an
+      in-process `forward_backward`. One LOCAL-TRANSPORT-ONLY limit, named in
+      the code: with a fleet sharing one process the serving host's arbiter
+      is entered from the proxy's loop while the caller's loop is blocked, so
+      a same-process serving host that ALTERNATES must not also carry engine
+      work admitted from the caller's loop; over a real transport the serving
+      host admits every frame on its own loop and the question does not
+      arise. Not tried: a routed learner under FSDP>1, a routed learner's
+      resume after the anchor host dies (the reroute replays the archived
+      delivery, so it should re-place both members — untested on metal), and
+      a pool literally named `learner` (refused at the host door; the desk's
+      placement reply has collided on that name since #43).
+
 ## Open threads (do NOT treat as settled; flag when your answer touches them)
 
 - TODO (Samarth, settled intent — future, nothing now): BUNDLE LRU EVICTION
@@ -3988,7 +4091,13 @@ specs; backends (local/modal/skypilot) and GPU topology are semantics-neutral.
   self-description — none require gradients. Needs a committing Sealer daemon
   (Trainer minus post/gradients) and the wave-shape/extent knobs (group_size,
   trajectories_per_wave, n_waves) relocated out of Schedule (ties into the
-  schedule-split thread below).
+  schedule-split thread below). *(ADR 0006 is this thread, ANSWERED in its
+  Context: no Sealer is needed — `write_rollout` is atomic and attach never
+  sweeps `rollouts/`, so a Generator alone leaves the durable artifact. Part
+  A landed the half that was blocking it at the door — #79: a learner-less
+  spec now PLACES, anchored on main. Part B — `needs_of`, `Plans.train`
+  optional, `run_done`, the rollouts ref, the Generator's pacing — is open
+  on Q1 and Q3-Q8.)*
 - Schedule: split statistical (group_size, epochs_per_wave, max_policy_lag) from
   engineering (microbatch_tokens) knobs?
 - Wave / ArchiveContext typing for the advantage stage (least-specified interface;

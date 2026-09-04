@@ -915,4 +915,4 @@ standing with its note, because the reasoning is the artifact.
 promises and the implementer's stated sub-decisions (admission host-side, an
 explicit `uninstall` verb at the end of a tenancy, sync frames kept per Q6,
 custody journaled at the learner's host). The CONTEXT entry that records the
-landing is ADR 0006's.
+landing is ADR 0006's: **#79**, 2026-09-04.

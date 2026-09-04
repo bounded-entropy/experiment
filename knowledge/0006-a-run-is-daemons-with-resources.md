@@ -3,7 +3,7 @@
 | | |
 |---|---|
 | **Date** | 2026-09-04 |
-| **Status** | Proposed — **Part A (the learner is a routable resident; the Trainer need not share its host) ACCEPTED 2026-09-04 by Samarth's instruction and in implementation**; Part B (generation-only runs: Q1, Q3–Q8) open |
+| **Status** | **Part A IMPLEMENTED 2026-09-04** (the learner is a routable resident; the Trainer need not share its host — landed as CONTEXT #79); Part B (generation-only runs: Q1, Q3–Q8) still Proposed and open |
 | **Author** | Claude Fable 5.1 (session: the SPAR introspection paper, 2026-09-04) |
 | **Touches** | Part A: `runner/remote.py` (`HostService` forwards the learner verbs; `RemoteLearner` over any transport), `runner/host.py` (`resolve_routes` learns the learner; `check_fit` accepts a routed one; custody journaled), `runner/loop.py` (`attach_residents`: a remote learner is a free resident; the tenant is uninstalled at the end of `submit`), `runner/interfaces.py` (`Learner.uninstall`), `runner/learners/torch_learner.py` + `runner/fakes.py` (the verb), `runner/campaign.py` (the learner demand yields a route; the anchor is a choice), `runner/desk.py` (`deliver` routes the learner demand), `deploy/` (one door: the runner beside the sampling host, the learner on another metal — written, unrun), `ARCHITECTURE.md` ("Resident / daemon", "Learner", "Wire" recoded), `tests/`. Part B: `runner/loop.py` (Phase 1 split, `plan_daemons` → the needs), `runner/daemons/generator.py` (the pacing rule takes its buffer from the caller), `spec/specs.py` (`Plans.train` optional; the extent), `runner/campaign.py` (the anchor rule), `runner/desk.py` (`finished`), `runner/host.py` (`submit` on a learner-less host; the journal's plan), `runner/refs.py` (`store://<run_id>/rollouts/<r>`), `observe/views.py` + `observe/series.py` (progress off the extent), `spec/validate.py` (one gate: a learner-less run's bank), `tests/` |
 | **Invariants** | I1 (a rollout is sealed data whether or not anything trains on it), I3 (`Plans.train=None` is a new value; every existing run's identity is unchanged), I10 (the store is the run: done-ness must be readable off it for every run kind), I12 (a learner-less run anchors on an inference host) |
@@ -415,4 +415,58 @@ the obligations, and that none requires a Sealer?
 
 ## Outcome
 
-Filled at implementation.
+### Part A — landed 2026-09-04, recorded as CONTEXT #79
+
+**What landed.** `LEARNER_VERBS` and `HostService.serve_learner` /
+`_learner` / `journal_custody` in `remote.py`; `LearnerService.answer`'s
+`uninstall` and a `serve` refusal that now names the host door as the admitted
+path; `RemoteLearner(admitted=)` with `frame` / `admitted_frame` /
+`frames_loop` — two doors, one proxy. `Host`: `LEARNER_ROUTE`, the typed
+`Routed` record, `resolve_routes` returning it (plus
+`check_learner_route_is_unambiguous` and `learner_member`), `check_fit(
+learner=)`, `submit(learner=)` and `release_tenant` in a `finally`, `adopt`
+threading both. `loop.attach_residents`: a routed learner is a free resident.
+`Learner.uninstall` in `interfaces.py`, `TorchLearner`, `FsdpTorchLearner`
+(announced, and in `follow`'s table), `FakeLearner`. `campaign.demands_of(
+spec, anchor)` + `anchor_demand`; `Campaigns.submit` / `RemoteDesk.submit`'s
+`anchor`; `Demand.name()` and `deliver` threading every member's address.
+`ARCHITECTURE.md`'s Learner / Wire / Resident-daemon / Campaign-layer /
+Demand / Desk entries, `runner/__init__.py`, `daemons/trainer.py`,
+`deploy/dapo_grpo.py`, `deploy/plora_l4.py`, and a delta note in
+`agent-context/rl-stack-spec.md` beside I12's paragraph.
+`deploy/stress_fleet.py::remote_learner` — written, UNRUN.
+
+**Tests.** 915 green on fakes (from 891 before), 114 torch-gated skips, ~7 s.
+New: `tests/test_remote_learner.py` (18, three of them torch-gated), plus
+three desk tests and four placement tests. `tests/test_resume.py` untouched
+and green.
+
+**What the shape's own questions decided, at implementation.** (a) The sync
+learner verbs cross the host door on the `call` path, not `ask`: admission is
+async (`arbiter.admit`), and a sync `answer` cannot enter it — so the CLIENT
+bridges, blocking on its own loop, rather than the door pretending. (b) That
+loop is ONE per proxy, not one per frame, because an alternating serving
+host's `asyncio.Condition` belongs to the loop it first woke on. (c) The
+custody journal is written by the HOST door only (a foreign frame), so a local
+run's bytes and journals are untouched. (d) `uninstall` is idempotent, which
+is what lets `Host.submit` release in a `finally` without knowing how far its
+run got.
+
+**Unproven.** No metal — the venue door is written and unrun, so the wire cost
+of a per-microbatch TokenBatch and a per-update `emit` between two containers
+is unmeasured, and the NCCL carriage (ADR 0002 Q3) stays a later ADR. Frames
+stay synchronous: a frame in flight cannot be cancelled. A routed learner
+under FSDP>1, and a routed run's reroute after its anchor host dies, are
+untried. One local-transport-only limit is named in the code: a same-process
+serving host that alternates must not also carry engine work admitted from the
+caller's blocked loop.
+
+### Part B — open
+
+Q1 and Q3–Q8 are unanswered and nothing above implements them:
+`run_experiment_async`'s `algo is None` refusal stands, `Plans.train` is still
+mandatory, there is no `needs_of`, no `run_done`, no `store://<run>/rollouts/
+<r>` ref, and the Generator is still paced by the ledger. What Part A did for
+Part B is remove the door-level blocker: a learner-less spec is no longer
+refused at the desk for want of an anchor (it anchors on `main`), which is
+pinned by a test.
