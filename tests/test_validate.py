@@ -447,15 +447,20 @@ class TestCoherence(unittest.TestCase):
 
     def test_a_run_with_neither_plan_has_no_extent(self) -> None:
         """A run's length is its train plan or its rollout plan; declaring
-        neither describes no work at all."""
-        self.assertEqual(codes(clean_spec(plans=Plans())), {"no-extent"})
+        neither describes no work at all — and a spec that declares an algo
+        is told about its missing plan in the same pass."""
+        self.assertEqual(codes(generation_only(plans=Plans())), {"no-extent"})
+        self.assertEqual(codes(clean_spec(plans=Plans())),
+                         {"no-extent", "algo-without-train-plan"})
 
-    def test_a_train_plan_without_an_algo_is_refused(self) -> None:
-        """The extent's plan must have a daemon to consume it: a train plan
-        is the Trainer's, and the Trainer is the algo's."""
+    def test_a_train_plan_and_an_algo_are_one_declaration(self) -> None:
+        """Read from two ends: the extent's plan must have a daemon to
+        consume it, and the Trainer an algo brings must have a plan."""
         self.assertEqual(codes(generation_only(
             plans=Plans(train="cas://plan/train", rollout="cas://plan/roll"))),
             {"train-without-algo"})
+        self.assertEqual(codes(clean_spec(plans=Plans(rollout="cas://p/r"))),
+                         {"algo-without-train-plan"})
 
     def test_warmstart_unknown_delta(self) -> None:
         # map is source-name -> THIS bank's name; "ghost" names no delta here.

@@ -66,8 +66,9 @@ from rlstack.data.flatten import Flat, TokenBatch, broadcast, flatten, pack
 from rlstack.data.tasks import load_tasks, split_tasks, write_tasks
 from rlstack.data.stores import (
     DEFAULT_RETENTION, KeepRestorable, LedgerError, LocalStore,
-    ManifestMismatch, ModalVolumeStore, RetentionPolicy, RunHandle, Store,
-    StoreAddress, StoreError, Swept, bump, open_store,
+    ManifestMismatch, ModalVolumeStore, RetentionPolicy, RunHandle,
+    RunProgress, Store, StoreAddress, StoreError, Swept, bump, open_store,
+    run_done, run_progress,
 )
 from rlstack.policy.compile import (
     Bundle, compile_bundle, group_by_adapter_type, group_by_mechanism,
@@ -102,7 +103,7 @@ from rlstack.runner.desk import (
 )
 from rlstack.runner.measure import Measurement, measure_run
 from rlstack.runner.loop import (
-    RunReport, experiment_identity, parameterization_of, plan_daemons,
-    run_experiment,
+    DaemonNeed, RunReport, experiment_identity, needs_of, parameterization_of,
+    plan_daemons, run_experiment,
 )
-from rlstack.runner.fakes import FakeEngine, FakeLearner
+from rlstack.runner.fakes import FakeAdapter, FakeEngine, FakeLearner

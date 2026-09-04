@@ -606,13 +606,15 @@ def check_learnerless_bank_is_frozen(spec: ExperimentSpec, schema: SiteSchema) -
         if spec.policy.bank[name].trainable]
 
 
-def check_a_train_plan_has_an_algo(spec: ExperimentSpec, schema: SiteSchema) -> list[ValidationIssue]:
-    """A train plan is what a Trainer consumes, one wave per update, and a
-    Trainer exists only where an algo does — so a train plan with no algo
-    names updates nothing will ever run, and the run could never be finished.
+def check_train_plan_and_algo_agree(spec: ExperimentSpec, schema: SiteSchema) -> list[ValidationIssue]:
+    """A TRAIN PLAN AND AN ALGO ARE ONE DECLARATION, read from two ends: the
+    plan is what the Trainer consumes, one wave per update, and the Trainer is
+    what an algo brings. Either without the other is a run half-described —
+    a plan no daemon would consume (and a length nothing could reach), or a
+    Trainer with nothing to train on.
 
-    The mirror of check_a_rollout_plan_has_gen: each plan needs the
-    declaration that gives it a daemon (ADR 0006 Part B).
+    The mirror of check_a_rollout_plan_has_gen: what a daemon needs, the spec
+    must declare (ADR 0006 Part B).
     """
     if spec.plans.train is not None and spec.algo is None:
         return [_issue(
@@ -621,6 +623,12 @@ def check_a_train_plan_has_an_algo(spec: ExperimentSpec, schema: SiteSchema) -> 
             "no loss, no optimizer and no pipeline there is nothing to run "
             "its waves through — drop the train plan (a generation-only run) "
             "or declare the algo that would consume it")]
+    if spec.algo is not None and spec.plans.train is None:
+        return [_issue(
+            "algo-without-train-plan", "plans.train",
+            "algo declares a Trainer, but there is no train plan for it to "
+            "consume: a run's updates are its train plan's waves, so a "
+            "training run without one has no work and no length")]
     return []
 
 
@@ -687,7 +695,7 @@ CHECKS = (
     check_post_pools_can_coreside,
     check_learnerless_bank_is_frozen,
     check_plans_declare_an_extent,
-    check_a_train_plan_has_an_algo,
+    check_train_plan_and_algo_agree,
     check_a_rollout_plan_has_gen,
     check_schedule_is_sane,
     check_warm_start_map_targets_this_bank,

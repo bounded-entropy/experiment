@@ -4133,11 +4133,13 @@ specs; backends (local/modal/skypilot) and GPU topology are semantics-neutral.
       `check_learnerless_bank_is_frozen` (a trainable entry with no declared
       LearnerMember is refused by name), `check_plans_declare_an_extent`
       (neither plan is a run with no length), and
-      `check_a_train_plan_has_an_algo` — the mirror of
-      `check_a_rollout_plan_has_gen`, so the extent's plan always has a daemon
-      to consume it. CONSEQUENCE, deliberate: a spec with neither gen nor algo
-      (which validated before, and would now describe a run with no daemons
-      at all) is refused; `test_validate` says so by name.
+      `check_train_plan_and_algo_agree` — the mirror of
+      `check_a_rollout_plan_has_gen`, read from two ends: the extent's plan
+      always has a daemon to consume it, and the Trainer an algo brings always
+      has a plan (`Plans.train` being optional made the second reachable for
+      the first time). CONSEQUENCE, deliberate: a spec with neither gen nor
+      algo — which validated before, and would now describe a run with no
+      daemons at all — is refused; `test_validate` says so by name.
     - **WHAT THE TESTS PIN.** 936 green on fakes (from 915), 115 torch-gated
       skips, ~7.5 s. `tests/test_initial_payload.py` (new, 5 — one torch-gated
       for lora): the init function is `emit ∘ initial_params`, version zero is

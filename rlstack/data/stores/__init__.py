@@ -14,8 +14,8 @@
 """
 
 from rlstack.data.stores.base import (  # noqa: F401
-    BLOB_SECTIONS, LedgerError, ManifestMismatch, RunHandle, Store,
-    StoreAddress, StoreError, bump,
+    BLOB_SECTIONS, LedgerError, ManifestMismatch, RunHandle, RunProgress,
+    Store, StoreAddress, StoreError, bump, run_done, run_progress,
 )
 from rlstack.data.stores.retention import (  # noqa: F401
     DEFAULT_RETENTION, KeepRestorable, RetentionPolicy, Swept,

@@ -499,7 +499,7 @@ completed` + `extent` with `Tenancy` and the host journal following (and
 `host_series` reading the detach event's old spelling as history).
 `store://<run_id>/rollouts/<r>#<i>` in `runner/refs.py`, read through the
 store's PEEK path. Three gate checks: `check_learnerless_bank_is_frozen`,
-`check_plans_declare_an_extent`, `check_a_train_plan_has_an_algo` (plus
+`check_plans_declare_an_extent`, `check_train_plan_and_algo_agree` (plus
 `learner-missing` in `check_members_match_their_shape`). Records:
 ARCHITECTURE.md (Plans/extent, run_done, DaemonNeed, Daemon, Blackboard, the
 leaf grammar replacing the retired `runner/sources/` entry),
@@ -523,11 +523,13 @@ the v0 bytes are provably the learner's. Q1 (unpaced) made `buffer` a
 caller's argument rather than a schedule read. Q7 renamed the report, the
 roster and the journal row.
 
-**What the shape's own questions decided, at implementation.** (a) A spec
-declaring a train plan with NO algo would have had an extent no daemon
-consumes — never finishable, eternally re-parked — so the gate refuses it, and
-a spec with neither gen nor algo (previously valid, and describing a run with
-no daemons at all) is refused with it. (b) `run_done`'s rollout half counts
+**What the shape's own questions decided, at implementation.** (a) A train plan and an algo
+are one declaration read from two ends: a train plan with no algo would have
+had an extent no daemon consumes (never finishable, eternally re-parked), and
+an algo with no train plan — reachable for the first time now that
+`Plans.train` may be None — would have died on a KeyError in `plan_daemons`.
+One gate rule refuses both, and a spec with neither gen nor algo (previously
+valid, and describing a run with no daemons at all) goes with them. (b) `run_done`'s rollout half counts
 sealed rollouts rather than testing only the last, because the observer needs
 the numerator anyway and one `_list` serves both readers. (c) The rollouts ref
 reads through `peek_*`, and the waves ref moved to the same door: `open_run`
