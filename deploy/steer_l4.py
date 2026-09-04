@@ -488,7 +488,8 @@ def await_runs(runs: dict[str, str], timeout_s: float = 3600.0) -> dict:
 def check(master: int = 11) -> None:
     """THE CHECK: up, two tenants through the desk, their ledgers, then the
     desk's release with the keepalive observed to return — and, whatever
-    happened, every metal released and the plane asserted empty.
+    happened, THIS venue's metal released and asserted freed. Its own, not
+    the whole plane: since ADR 0007 one desk serves every venue.
 
     A SYNC entrypoint on purpose: the desk's admission-free verbs (status)
     are blocking Modal calls on a worker thread, which deadlock under an
