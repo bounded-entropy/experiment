@@ -4035,8 +4035,8 @@ specs; backends (local/modal/skypilot) and GPU topology are semantics-neutral.
       later ADR. On a CARVED learner host that frame is decoded and
       re-encoded once more on its way from the host door to the resident's —
       the two hops — which is exactly what an engine frame has always done
-      there, and is measured by neither. Frames stay synchronous, so a frame in flight cannot be
-      cancelled — a `stop` waits for it, exactly as it waits for an
+      there, and is measured by neither. Frames stay synchronous, so a frame
+      in flight cannot be cancelled — a `stop` waits for it, as it waits for an
       in-process `forward_backward`. One LOCAL-TRANSPORT-ONLY limit, named in
       the code: with a fleet sharing one process the serving host's arbiter
       is entered from the proxy's loop while the caller's loop is blocked, so
