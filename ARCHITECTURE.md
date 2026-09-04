@@ -78,11 +78,29 @@ order-independent reductions exist to protect. On real metal the equivalent
 signal is the ledger's `logprob_gap` staying at the kernel floor.
 `tests/test_resume.py`, `rlstack/runner/fakes.py`
 
-**Schedule** — the wave-shape and estimator knobs: `group_size`,
-`trajectories_per_wave`, `n_updates`, `epochs_per_wave`, `microbatch_tokens`
-(the one engineering knob), and `max_policy_lag` — the lag *buffer*, how stale
-a behavior policy the trainer tolerates (0 = strict alternation).
+**Schedule** — what is left of the wave-shape knobs once the plan states the
+shape (#59): `microbatch_tokens` (the one engineering knob) and
+`max_policy_lag` — the lag *buffer*, how stale a behavior policy the trainer
+tolerates (0 = strict alternation). `group_size`, `trajectories_per_wave`,
+`n_updates` and `epochs_per_wave` left with the plan and the invariant.
 `rlstack/spec/specs.py`
+
+**Plans / extent** — the run's shape by reference: `train` (what the Trainer
+consumes, one wave per update) and `rollout` (what the Generator makes, one
+wave per rollout index), each a cas uri whose sha IS the plan's content hash.
+Either may be None — no rollout plan makes nothing, no train plan trains
+nothing — and the one that is present *first* is the run's **extent**: the
+plan whose length is the run's length, and against which "done" is decided.
+`Plans.extent` is a derived property, never a field, so no spec's identity
+moved when it arrived (ADR 0006 Part B).
+`rlstack/spec/specs.py`, `rlstack/data/plan.py`
+
+**run_done / run_progress** — done-ness for every kind of run, one predicate
+read off the store: the ledger against the train plan where a run trains, the
+sealed rollouts against the rollout plan where it only generates. It lives in
+the data layer because the desk's reaper, the observer and the host all read
+it and `data/` is the one package all three may import.
+`rlstack/data/stores/base.py`
 
 **Flow graph** — THE canonical walk over a spec's data declarations: nodes are
 every named artifact a run will contain, edges are `produces` / `consumes` /
@@ -672,19 +690,30 @@ own `dictionary.json`.
 ### The runtime
 
 **Blackboard** — Phase 2's shape: daemons synchronized ONLY through the store.
-Nobody calls anybody; the ledger is the commit bus and `waves/` the data bus.
-The *logical* half is awaitable predicates over the store; the *physical* half
-is the arbiter.
+Nobody calls anybody; the ledger is the commit bus and `waves/` the data bus
+(a run with no Trainer has neither, and its Generator writes `rollouts/`
+alone). The *logical* half is awaitable predicates over the store; the
+*physical* half is the arbiter.
 `rlstack/runner/loop.py`, `rlstack/runner/signals.py`
+
+**DaemonNeed / needs_of** — a run IS a set of daemon needs, each naming its
+daemon, the plan it consumes, the pools whose engines it admits and whether it
+admits the learner. `needs_of(spec)` is the one place a spec becomes daemons
+and the experiment is its special case; `plan_daemons` executes the needs.
+Phase 1 asks the needs what this run requires — a learner? — before Phase 2
+runs any of it (ADR 0006 Part B).
+`rlstack/runner/loop.py`
 
 **Daemon** — one GPU responsibility, four beats: await its condition, admit the
 residents its work occupies, do the work, write the store and notify. The
 **Generator** samples waves at the newest committed bundle within the lag
-buffer; the **Scorer** runs the pooled half of the post pipeline beside the
-pools it addresses and writes it as a postdata part; the **Trainer** runs the
-inline half + gradient + commit and is the ledger's only writer. Each
-condition method is a named, overridable seam. (The Evaluator retired in #70:
-measurement left the run.)
+buffer — or unpaced, when nothing consumes what it makes; the **Scorer** runs
+the pooled half of the post pipeline beside the pools it addresses and writes
+it as a postdata part; the **Trainer** runs the inline half + gradient +
+commit and is the ledger's only writer. Each exists exactly where its NEED
+does (`needs_of`), so a run with no algo is a Generator and nothing else, and
+each condition method is a named, overridable seam. (The Evaluator retired in
+#70: measurement left the run.)
 `rlstack/runner/daemons/`
 
 **Resident / daemon** — the two kinds of runtime thing, named: a RESIDENT is
@@ -716,12 +745,17 @@ halves meet once, at the part, so the gate refuses a pooled processor consuming
 an inline one's column. A pipeline with no pooled half plans no Scorer.
 `rlstack/spec/flow.py` (`split_pipeline`)
 
-**WaveFeed / source** — where the trainer's rows come from: `live` (this run's
-own Generator), `replay` (another run's sealed waves), `static` (a
-content-addressed trajectory file). All three make update `u`'s rows exist in
-THIS run's `waves/` and hand them back, so the trainer never knows which it has
-(I1).
-`rlstack/runner/sources/`
+**Ref / the leaf grammar** — where an already-sealed trajectory lives, and
+what WaveFeed's three SOURCES became when live/replay/static stopped being
+kinds of RUN and became kinds of LEAF (#59 retired `runner/sources/`): a
+`Replay` leaf names one row at `self://rollouts/<r>#<i>` (this run's own
+generated wave), `store://<run_id>/waves/<u>#<i>` (another run's sealed wave),
+`store://<run_id>/rollouts/<r>#<i>` (another run's sealed rollout — what a
+generation-only run leaves) or `cas://<sha>#<i>` (a fixed trajectory file).
+Only the first may answer "not yet". Whichever it is, realization makes update
+`u`'s rows exist in THIS run's `waves/` under this run's group keys, so the
+trainer never knows which it has (I1).
+`rlstack/runner/refs.py`, `rlstack/runner/assemble.py`
 
 **Traffic** — what travels to a pool: **sample** traffic (a token stream
 assembled into a Turn) and **score** traffic (logprobs of given tokens, one
@@ -874,7 +908,9 @@ One currency and one decider per rung (I12):
   then retry the queue. `parked()` is the queue read off the journal (the
   latest disposition per run; a delivered placement supersedes), retried under
   one lock on every reap that reaped and every `metal` registration event.
-  A run whose ledger reached its plan is not work and is left alone.
+  A run whose EXTENT is complete is not work and is left alone
+  (`run_done` — the ledger against the train plan, or the sealed
+  rollouts against the rollout plan).
 - **register (metal)** — the acquire rung recorded, and the re-registration
   rule: a known name at the same address updates the row (measured facts,
   recipe) and reaps that metal's corpses by probe; at another address it is
@@ -973,7 +1009,7 @@ referenced by number throughout the code. In short, by subject:
 
 | | subject | where the vocabulary above touches it |
 |---|---|---|
-| I1 | two worlds, one membrane | seal, Rollout/Trajectory, WaveFeed |
+| I1 | two worlds, one membrane | seal, Rollout/Trajectory, ref/leaf |
 | I2 | policy is the only bridge | adapter type, lowering, bundle, parity |
 | I3 | identity is computed | run_id, spec, registry code hashes |
 | I4 | registered things declare, then compute | registry, flow graph, submit gate |

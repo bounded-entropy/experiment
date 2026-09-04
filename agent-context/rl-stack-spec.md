@@ -159,6 +159,29 @@ and are admitted at the host that wears it — so the anchor is a CHOICE: the
 learner's host by default, `main` when no learner is declared, any declared
 member when asked. Fold at v4.)*
 
+*(Delta, CONTEXT #80 / ADR 0006 Part B: A RUN IS A SET OF DAEMON NEEDS with
+the resources each admits, and the experiment is the set `needs_of(spec)`
+reads off a spec — a Trainer iff `algo` is not None, a Scorer iff the post
+pipeline has a pooled half, a Generator iff there is a rollout plan. So
+`algo=None` is no longer refused by the loop: a GENERATION-ONLY run places,
+runs, and seals rollouts with no learner, no Trainer and no ledger, and needs
+no Sealer (a rollout's atomic write IS its seal; attach never sweeps
+`rollouts/`). Consequences for this text: (a) `Plans.train` is optional and a
+run's LENGTH is its EXTENT — the train plan when there is one, else the
+rollout plan — so "one wave is one gradient update" states the train extent
+only, and done-ness is `run_done(store, run_id)` in the data layer, read by
+the desk's reaper, the observer and the host alike; (b) every adapter type
+carries an init function (`AdapterType.initial_params` / `initial_payload`),
+which the learner's install builds v0 through and a learner-less Phase 1 calls
+directly, so the v0 bytes and the content-addressed bundle id are the same
+whoever built them; (c) the leaf grammar gains
+`store://<run_id>/rollouts/<r>#<i>` — a generation-only run never writes
+`waves/`, so its output is named by the artifact it does write; (d) two gate
+rules join the table: a trainable bank entry needs a declared learner, and
+each declared plan needs the declaration that gives it a daemon (a train plan
+needs an algo, a rollout plan needs gen), so a spec that declares no daemons
+at all is refused. Fold at v4.)*
+
 ## 2. Primitives
 
 **A. Specs** (hashable — they are identity) · **B. Registries** (declared +
