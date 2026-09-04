@@ -891,8 +891,8 @@ the Host's proxy to it LOCAL: `RemoteLearner` was built only by the metal that
 spawned the resident (`desk.py:1529`), `HostService` forwarded no learner verb
 to a foreign caller, `check_fit` demanded an owned learner, and the campaign
 layer anchored every delivery on the learner's host because "the learner is
-never remote" (#43, #69). The amendment removes that rule: the five learner
-verbs cross the host door exactly as `sample_tokens` and `score_tokens` do,
+never remote" (#43, #69). The amendment removes that rule: the six learner
+verbs (`uninstall` joined the protocol at implementation) cross the host door exactly as `sample_tokens` and `score_tokens` do,
 admitted at the SERVING host's arbiter per frame; a `LearnerMember` resolves to
 a `RemoteLearner` from a route address exactly as a `PoolMember` resolves to a
 `RemotePool`; a remote learner attaches to the runner's arbiter as a

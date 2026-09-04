@@ -3,9 +3,9 @@
 | | |
 |---|---|
 | **Date** | 2026-09-04 |
-| **Status** | **Part A IMPLEMENTED 2026-09-04** (the learner is a routable resident; the Trainer need not share its host — landed as CONTEXT #79); Part B (generation-only runs: Q1, Q3–Q8) still Proposed and open |
+| **Status** | **Part A IMPLEMENTED 2026-09-04** (the learner is a routable resident; the Trainer need not share its host — landed as CONTEXT #79); Part B (generation-only runs) ANSWERED 2026-09-04 — Q1, Q4, Q5 agreed; Q6 DISAGREED and folded (every adapter type gets an init function; a no-learner run builds its v0 with it); Q2 refolded by Part A; Q3, Q7, Q8 stand on their recommendations, not raised — not yet implemented |
 | **Author** | Claude Fable 5.1 (session: the SPAR introspection paper, 2026-09-04) |
-| **Touches** | Part A: `runner/remote.py` (`HostService` forwards the learner verbs; `RemoteLearner` over any transport), `runner/host.py` (`resolve_routes` learns the learner; `check_fit` accepts a routed one; custody journaled), `runner/loop.py` (`attach_residents`: a remote learner is a free resident; the tenant is uninstalled at the end of `submit`), `runner/interfaces.py` (`Learner.uninstall`), `runner/learners/torch_learner.py` + `runner/fakes.py` (the verb), `runner/campaign.py` (the learner demand yields a route; the anchor is a choice), `runner/desk.py` (`deliver` routes the learner demand), `deploy/` (one door: the runner beside the sampling host, the learner on another metal — written, unrun), `ARCHITECTURE.md` ("Resident / daemon", "Learner", "Wire" recoded), `tests/`. Part B: `runner/loop.py` (Phase 1 split, `plan_daemons` → the needs), `runner/daemons/generator.py` (the pacing rule takes its buffer from the caller), `spec/specs.py` (`Plans.train` optional; the extent), `runner/campaign.py` (the anchor rule), `runner/desk.py` (`finished`), `runner/host.py` (`submit` on a learner-less host; the journal's plan), `runner/refs.py` (`store://<run_id>/rollouts/<r>`), `observe/views.py` + `observe/series.py` (progress off the extent), `spec/validate.py` (one gate: a learner-less run's bank), `tests/` |
+| **Touches** | Part A: `runner/remote.py` (`HostService` forwards the learner verbs; `RemoteLearner` over any transport), `runner/host.py` (`resolve_routes` learns the learner; `check_fit` accepts a routed one; custody journaled; the tenant is released at the end of `submit`), `runner/loop.py` (`attach_residents`: a remote learner is a free resident), `runner/interfaces.py` (`Learner.uninstall`), `runner/learners/torch_learner.py` + `runner/fakes.py` (the verb), `runner/campaign.py` (the learner demand yields a route; the anchor is a choice), `runner/desk.py` (`deliver` routes the learner demand), `deploy/` (one door: the runner beside the sampling host, the learner on another metal — written, unrun), `ARCHITECTURE.md` ("Resident / daemon", "Learner", "Wire" recoded), `tests/`. Part B: `runner/loop.py` (Phase 1 split, `plan_daemons` → the needs), `runner/daemons/generator.py` (the pacing rule takes its buffer from the caller), `spec/specs.py` (`Plans.train` optional; the extent), `runner/campaign.py` (the anchor rule), `runner/desk.py` (`finished`), `runner/host.py` (`submit` on a learner-less host; the journal's plan), `runner/refs.py` (`store://<run_id>/rollouts/<r>`), `observe/views.py` + `observe/series.py` (progress off the extent), `spec/validate.py` (one gate: a learner-less run's bank is frozen), `policy/adapters/base.py` (`AdapterType.initial_payload` — the init function; `torch_learner.install` builds v0 through it), `runner/fakes.py` (the fake world's init seam), `tests/` |
 | **Invariants** | I1 (a rollout is sealed data whether or not anything trains on it), I3 (`Plans.train=None` is a new value; every existing run's identity is unchanged), I10 (the store is the run: done-ness must be readable off it for every run kind), I12 (a learner-less run anchors on an inference host) |
 | **CONTEXT** | extends #27 (the blackboard: "plan_daemons derives one daemon per GPU responsibility"), #59 (the plan is data), #43/#69 (the desk is workload-blind; the anchor is the campaign layer's rule); closes the "generation-only runs" open thread — WITHOUT a Sealer |
 
@@ -179,12 +179,17 @@ from its spec and is otherwise the generic runner.** Concretely:
   exists and `None` when nothing consumes — unpaced). Phase 2 is one
   TaskGroup over the needs, as today.
 - **Phase 1 splits in two.** "The policy's initial bundle" is every run's
-  (the main engine must serve the bank): with a learner it is `install` +
-  `emit` as today; without one the bank must be EMPTY or every entry FROZEN
-  with sealed payloads (a `WarmStart` from a run that trained it — the blobs
-  ARE the payloads, read by `_warm_start`'s path, no torch on the runner's
-  side) — refused at the gate otherwise. "The learner's install" is the
-  TrainerNeed's alone. `attach_residents` attaches what the needs admit.
+  (the main engine must serve the bank), and it is built by ONE function
+  either way: `AdapterType.initial_payload(sites, init)` — the adapter
+  type's init separated out (Q6, Samarth's fold), `params(sites, init)`
+  followed by `emit`, seeded by `init_seed` — which the learner's `install`
+  uses to build its v0 and which a run with NO learner calls directly at
+  Phase 1, so the bytes and the content-addressed bundle id are identical
+  whoever built them. A learner-less run's entries are FROZEN (nothing
+  trains them; a trainable entry there is refused at the gate); a
+  `WarmStart`, when given, supplies sealed payloads instead. "The learner's
+  install" is the TrainerNeed's alone. `attach_residents` attaches what the
+  needs admit.
 - **The extent.** A run's length is its `extent` plan: the train plan when
   there is one, else the rollout plan. `Plans.train` becomes `str | None`
   (a rollout-only run leaves it None; the fingerprint already writes `-`);
@@ -218,9 +223,9 @@ from its spec and is otherwise the generic runner.** Concretely:
   `submit` tolerates `learner=None` for a learner-less spec; the attach event
   journals the extent plan. `runner/refs.py`: the rollouts location.
   `observe/views.py`, `observe/series.py`: progress off the extent.
-  `spec/validate.py`: `check_learnerless_bank_is_sealed` — a spec with no
-  `LearnerMember` may not carry a trainable entry, and its frozen entries
-  must have a `WarmStart` source. `tests/`: a generation-only run on fakes,
+  `spec/validate.py`: `check_learnerless_bank_is_frozen` — a spec with no
+  `LearnerMember` may not carry a trainable entry; its frozen entries are
+  built by the init function, or from a `WarmStart` when one is given. `tests/`: a generation-only run on fakes,
   its resume-equivalence, the desk placing and finishing one, the ref
   resolving, the gate refusing a trainable entry without a learner.
 - **Untouched** — `runner/daemons/trainer.py`, `scorer.py`: they exist only
@@ -252,7 +257,10 @@ from its spec and is otherwise the generic runner.** Concretely:
   rollouts, and readers that want "commits" see zero. `migrate` refuses a
   generation-only run as it refuses any run with no ledger (it has nothing
   to warm-start from), stated rather than fixed. A learner-less run cannot
-  INITIALIZE a delta (Q6): the bank is empty or sealed elsewhere.
+  TRAIN a delta: its entries are frozen at their init (Q6). The init
+  function needs torch on the anchor host, which every metal container
+  has; the fake world gets the same seam so the local suite stays
+  stdlib-only.
 
 ### Interfaces
 
@@ -299,6 +307,13 @@ class Plans:
     @property
     def extent(self) -> str: ...       # "train" if self.train is not None else "rollout"
 
+# policy/adapters/base.py — the init function, separated out (Q6)
+class AdapterType:
+    def initial_payload(self, sites: tuple[SiteMeta, ...], init: dict) -> bytes:
+        """The entry's version-0 payload: emit(params(sites, init)). The
+        learner's install builds its v0 through this; a run with no learner
+        calls it at Phase 1 — the same bytes, the same bundle id."""
+
 # data/stores/base.py — done-ness for every run kind, one predicate
 def run_done(store: Store, run_id: str) -> bool:
     """Train extent: ledger tail >= wave_count(train plan). Rollout extent:
@@ -321,7 +336,7 @@ If the other branch: `buffer` stays an int and `committed()` is replaced by
 "rollouts sealed", which pins the Generator to a sequential one-wave-at-a-
 time shape for no reason the store needs.
 
-> **Samarth:**
+> **Samarth:** agree — unpaced (2026-09-04).
 
 **Q2. The anchor of a run is a choice — REFOLDED by Part A.** With the
 learner routable, no demand HAS to anchor: `demands_of(spec, anchor)` marks
@@ -342,7 +357,7 @@ estimator-free, which is the data layer's charter.
 If the other branch (in `runner/`): the observer cannot import it and grows
 a copy, which is the duplication this ADR exists to remove.
 
-> **Samarth:**
+> **Samarth:** not raised in the 2026-09-04 review; the recommendation stands unless Samarth objects.
 
 **Q4. `Plans.train` becomes optional and `extent` is a derived property, so
 no hashed record gains a field.**
@@ -357,7 +372,7 @@ If the other branch: a migration of every sealed manifest's spec row, or a
 decoder rule that tolerates the absence — the decoder already tolerates
 extra fields (#70), so absence is the cheaper direction anyway.
 
-> **Samarth:**
+> **Samarth:** agree (2026-09-04).
 
 **Q5. The ref `store://<run_id>/rollouts/<r>#<i>` — and a Generator-only run
 never writes `waves/`.**
@@ -371,7 +386,7 @@ If the other branch (the Generator also writes waves so the grammar stays
 one word): two copies of every rollout in a generation-only run's directory
 and a second writer of `waves/` — one writer per artifact is the rule.
 
-> **Samarth:**
+> **Samarth:** agree (2026-09-04).
 
 **Q6. A learner-less run's bank is EMPTY or SEALED: frozen entries only,
 their payloads from a `WarmStart` source, refused at the gate otherwise.**
@@ -386,7 +401,7 @@ If the other branch (build deltas on the runner's host): torch becomes a
 runner-side dependency of generation-only runs, and zero-init-only would be
 the honest limit (a seeded init needs the same code path a learner runs).
 
-> **Samarth:**
+> **Samarth:** DISAGREE — "Identity payloads without a learner", then: "to be clear about the v0 bundle issue, we should separate out an init function for all adaptertypes, and then use this init function when we have a no-learner run" (2026-09-04). *Folded into the Decision's Phase-1 bullet and the sketch: `AdapterType.initial_payload`, used by the learner's install AND by a learner-less Phase 1, so the v0 bytes and bundle id are identical; a learner-less run's entries are frozen; a WarmStart still supplies sealed payloads when given.*
 
 **Q7. `RunReport.updates_completed` becomes `completed` + `extent`; the host
 journal's attach event records the extent plan; the roster's
@@ -397,7 +412,7 @@ never identity, so the rename costs a UI label and a few tests. Keeping
 If the other branch: keep the field names, define `updates_completed` as
 "extent completed", and accept the word.
 
-> **Samarth:**
+> **Samarth:** not raised in the 2026-09-04 review; the recommendation stands unless Samarth objects.
 
 **Q8. Crash and resume, stated once.** A generation-only run resumes by
 `already_sealed` skipping every rollout on disk — the Generator's existing
@@ -411,7 +426,7 @@ the reaper stops re-delivering — pinned by a test that reaps a finished
 generation-only run's host and asserts nothing is parked. Agree these are
 the obligations, and that none requires a Sealer?
 
-> **Samarth:**
+> **Samarth:** not raised in the 2026-09-04 review; the obligations stand as stated.
 
 ## Outcome
 
@@ -461,9 +476,11 @@ untried. One local-transport-only limit is named in the code: a same-process
 serving host that alternates must not also carry engine work admitted from the
 caller's blocked loop.
 
-### Part B — open
+### Part B — answered 2026-09-04, not implemented
 
-Q1 and Q3–Q8 are unanswered and nothing above implements them:
+Q1, Q4 and Q5 agreed; Q6 disagreed and folded (the adapter type's init
+function); Q2 refolded by Part A; Q3, Q7 and Q8 stand on their
+recommendations. Nothing above implements them:
 `run_experiment_async`'s `algo is None` refusal stands, `Plans.train` is still
 mandatory, there is no `needs_of`, no `run_done`, no `store://<run>/rollouts/
 <r>` ref, and the Generator is still paced by the ledger. What Part A did for
