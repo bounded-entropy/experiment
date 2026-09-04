@@ -731,7 +731,10 @@ bytes do.
 **Measurement** — observation OUTSIDE the run (#70): a value naming held-out
 task ids, samples, a cadence, a scoring pipeline and its own seed, written as
 measurements/<run_id>/<name>/ (write-once manifest + append-only points) by
-`measure_run` — one idempotent pass any process can run against a pool, backfilling
+`measure_run` — one idempotent pass any process can run against a pool (or
+several: `pools=` routes every other name a measurement addresses to its
+engine under a payload-free base bundle, exactly the loop's rule, so a
+pipeline may score through a teacher — ADR 0005), backfilling
 every missing point (retention keeps every adapter version restorable) and
 following the ledger's future. Never the run dir, never identity, never
 resume-equivalence; deletable, though a changed observation is a NEW name.
@@ -775,7 +778,10 @@ declares (`AdapterType.directive`), at most one per adapter type per
 request, carried on `Request` to the rollout lowering and across the wire by
 adapter type name. A spec fixes what an adapter IS; a directive says what it
 does for THIS request (a `SteerWindow`: which positions). Its effect is
-recorded at the seal, so passing one asks replay to remember nothing.
+recorded at the seal, so passing one asks replay to remember nothing — and a
+row with NO record, a trajectory this policy never sampled, replays at the
+adapter type's own default, the same one a request with no directive gets
+(ADR 0005, Q3). Nothing about a directive is declared in the bank.
 `rlstack/policy/adapters/base.py` (`Directive`), `rlstack/policy/adapters/steer.py` (`SteerWindow`)
 
 ---

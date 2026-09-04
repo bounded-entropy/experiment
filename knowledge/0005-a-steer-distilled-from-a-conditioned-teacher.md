@@ -3,7 +3,7 @@
 | | |
 |---|---|
 | **Date** | 2026-09-04 |
-| **Status** | Accepted (2026-09-04 review; Q5, Q6, Q9 and Q11 stand on their recommendations) — implementation waits on ADR 0006 Part B landing |
+| **Status** | **IMPLEMENTED 2026-09-04 — CONTEXT #81** (venue written and UNRUN). Accepted at the 2026-09-04 review; Q5, Q6, Q9 and Q11 stood on their recommendations; Q3 REDACTED in part (a row with no record replays at every position) and that redaction is the whole of the steer change |
 | **Author** | Claude Fable 5.1 (session: the SPAR introspection paper, 2026-09-04) |
 | **Touches** | `data/tasks/` (one new dataset file), `inference/environments/` (two one-file environments), `training/post/` (two processors in the existing shape), `runner/measure.py` (a measurement may route to a second pool), `deploy/concept_steer.py` (the venue), `tests/`. NO steer file, no `rollout.py`, no `replay.py`, no learner or engine file (Q2, Q3) |
 | **Invariants** | I3 (the hint is content, so it hashes; the teacher run's identity is the set's), I6 (a record, when one exists, is the truth; a row without one replays at the adapter type's default — nothing is declared in the bank), I9 (a processor scores through a declared pool under privileged conditioning — hinted + teacher, combined), I5 (a 32B student is new metal territory; the spec says nothing about where) |
@@ -549,4 +549,70 @@ are the obligations, and that the one deliberate loss — the replay-side
 
 ## Outcome
 
-Filled at implementation.
+### Landed 2026-09-04, recorded as CONTEXT #81
+
+**What landed.** `data/trajectory.hint_for(task)` — moved out of
+`training/post/hinted_logprobs.py` so the conditioned-teacher ENVIRONMENT may
+reach it without `inference/` importing `training/`; `HintedLogprobs`' class
+source is untouched, so no run's identity moved.
+`data/tasks/concept_prompts.py` (`concept_prompt_tasks`, `renderer`,
+`system_block`, `user_prompt`, `check_hint_concatenates`, `is_prose`,
+`task_from_row`, `prompt_splits`, `SYSTEM_PROMPT`, `PROSE_CATEGORIES`),
+registered as `concept_prompts` in `__main__.BUILDERS`.
+`inference/environments/conditioned_teacher.py` and `single_turn.py`.
+`training/post/conditioned_teacher_logprobs.py` and `reverse_kl.py`.
+`policy/adapters/steer_torch.py`: `recorded_window` answers `(0, None)` for a
+row with no record, with `steer.py`'s and `steer_torch.py`'s docstrings
+recoded to say the rule. `runner/measure.py`: `measure_run(..., pools=)`,
+`base_bundles`, plus `token_level_columns` / `column_mean` under
+`reduce_point`. `deploy/concept_steer.py` (new venue, 856 lines, UNRUN).
+`ARCHITECTURE.md`'s Directive and Measurement entries, one clause each.
+
+**Tests.** 973 green on fakes (from 936 at ADR 0006 Part B), 117 torch-gated
+skips, ~7.7 s. New: `tests/test_conditioned_teacher.py` (19 — the two
+environments, the two processors, the split, and the teacher→student SFT end
+to end including resume-equivalence), `test_tasks.py` (+11 over the builder's
+pure half with a fake tokenizer), `test_steer.py` (+2 seal-side, +2
+torch-gated replay, one refusal case narrowed to disagreement alone),
+`test_measure.py` (+3). `tests/test_resume.py` is untouched and green.
+
+**What the answers changed.** Q2 (ALL only) removed every window machine the
+first draft proposed and left the coverage confound as a stated
+non-promise. Q3's redaction is the whole of the steer change: nothing is
+declared in the bank, a record is the truth where there is one, and a row
+without one replays at the default — which is what makes SFT on a foreign
+trajectory set possible for a steer at all. Q4 made the trajectory set a
+generation-only RUN, which is why this ADR waited on 0006 and why the teacher
+needs no bank.
+
+**What the shape's own questions decided, at implementation.** (a) `hint_for`
+went to `data/trajectory.py` beside `Task` rather than `data/tasks/base.py`:
+it is a read of what a task SAYS, not a verb for building a set, and
+`tasks/base.py` imports the Store. (b) The concatenation assertion runs PER
+ROW, not once on a probe, because each Task's own `meta["hint"] + prompt` is
+what the engine will concatenate for that row. (c) `reduce_point` had to
+learn token-level columns before a distillation measurement could be
+written at all — fixed by reading `PostDef.token_level`, never a value's
+shape. (d) The venue's split ASKS for 2304 train prompts to guarantee the
+plan's 2048, because counts are drawn and a 2048/8850 draw falls short half
+the time.
+
+**Unproven.** No metal: nothing here has run on a GPU, and every number in
+the venue is a guess. The 32B student's rank-0 peak and pace, and the
+eager-mode serving cost of a steer-serving 32B build, are unmeasured. The
+chat-template concatenation assertion is only exercised on the volume; the
+no_robots schema was read off the hub API, not off a download. FOUND WHILE
+WRITING THE VENUE and stated rather than fixed: `FsdpTorchLearner.sleeps` is
+`ranks.width == 1`, so at fsdp=2 the alternating HostSpec's arbiter wires no
+sleep hook for the learner and only the engine hands its share back — whether
+Q7's one-A100-80GB:2 treaty holds is the shakeout's first finding. The
+coverage confound (Q2) and the SFT ledger's `logprob_gap` reading as
+distillation distance rather than parity stand exactly as the non-promises
+state them.
+
+**One contradiction in this document, left standing rather than edited
+away.** Q11's closing note says "(The seal-side alarm clause is moot: the
+replay refusal was kept, Q3.)" — written before Q3's redaction, which
+replaced that refusal with the default. The Decision, as rewritten after the
+review, and Q3's own redaction are what was implemented; Q11's note is stale
+and is left as the record of the order the answers arrived in.

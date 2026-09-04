@@ -4172,6 +4172,172 @@ specs; backends (local/modal/skypilot) and GPU topology are semantics-neutral.
       still lists `runner/sources/`, a folder #59 removed — ARCHITECTURE.md
       now says what replaced it; the STYLE line is Samarth's to cut.
 
+81. **A STEERING VECTOR DISTILLED FROM A PROMPT-CONDITIONED TEACHER (ADR
+    0005).** Samarth's prompt: "it's unclear whether the model is doing some
+    sort of post-hoc reasoning on the final residual, instead of actually
+    doing some internal computation for the layer experiment ... we can
+    instead make the loss objective a distillation objective wrt a reference
+    model conditioned on a system prompt to talk about a specific concept ...
+    train the residual stream vector to output a logit distribution similar
+    to that of this conditioned model (just via SFT) ... and then see if the
+    model can still learn via ICL". ADR 0005, decided 2026-09-04 and
+    implemented the same day on top of ADR 0006 (#79/#80): the teacher's
+    trajectory set IS a generation-only run, which is why the two ADRs are
+    one arc. NOTHING HERE HAS RUN ON METAL.
+    - **THE HINT IS TASK CONTENT, AND `hint_for` MOVED TO THE DATA LAYER.**
+      `rlstack/data/tasks/concept_prompts.py` reads HuggingFaceH4/no_robots
+      into Tasks whose `prompt` is the Qwen3 chat template over ONE user
+      message (thinking off, NO system block — what the student is asked at
+      eval) and whose `meta["hint"]` is the concept's system block rendered
+      alone (what the teacher is told). Six prose categories kept —
+      Generation, Open QA, Brainstorm, Chat, Rewrite, Summarize, 8850 rows —
+      and Coding / Classify / Closed QA / Extract dropped, because a
+      happiness system prompt has nothing to color in a label or a function
+      (Q6). The hint hashes into the set's uri and so into every run_id that
+      names it (I3): a second concept is a second uri, not a knob — #60's
+      thinking-mode precedent. `hint_for` was `hinted_logprobs`' private
+      helper over a Trajectory; it now lives beside `Task` in
+      `data/trajectory.py` and takes a Task, because the conditioned-teacher
+      ENVIRONMENT needs the same convention and `inference/` never imports
+      `training/` (STYLE rule 8). `HintedLogprobs`' class source is
+      untouched, so no run's identity moved.
+    - **THE BUILDER'S ONE REFUSAL, run per row.** `hint + prompt`,
+      concatenated raw, must be byte-for-byte the template's rendering of
+      the two-message conversation. VllmEngine's stated v0 choice is that a
+      prompt is the RAW token concatenation of its messages (#60), so the
+      conditioned teacher's context IS that concatenation; a template that
+      emits a DEFAULT system block when none is given would give the prompt
+      one and the concatenation two, conditioning the teacher on text no
+      chat model was trained to read — silently. `check_hint_concatenates`
+      refuses the build instead. It is only ever checked when `prompts`
+      actually runs on the volume; the local suite exercises it against a
+      fake tokenizer, including the default-system-block failure.
+    - **TWO ENVIRONMENTS.** `conditioned_teacher` samples `main` with
+      `[hint_for(task), prompt]` and NO directive, then seals
+      `messages=[prompt, turn.message]` with the hint in `env_extras` as
+      provenance — in the record, out of the message stream, so `flatten`
+      can never tokenize it into the student's document. That asymmetry is
+      the experiment. `single_turn` is `math_single_turn`'s body under a
+      name that does not claim the corpus is math; the old name stays
+      registered because runs hashed it.
+    - **TWO PROCESSORS.** `conditioned_teacher_logprobs` is
+      `teacher_scores`' walk with the hint at the head of the context —
+      the teacher's own metal AND the privileged conditioning, which neither
+      existing processor had — producing the SAME column name,
+      `teacher_logprobs`, so `opd` requires it unchanged: a different
+      conditioning is a different PROCESSOR, never an edit to a loss (#47's
+      rule applied to the hint). `reverse_kl` is pool-less (so
+      TRAINER-INLINE by the split rule), consumes that column, and produces
+      one float per trajectory: the mean over generated tokens of (recorded
+      behavior logprob − teacher logprob) — the one-sample estimate `opd`'s
+      ledger `loss` already is, reported for a run that does not train on
+      it. Pooled-then-inline is the LEGAL direction and the gate says so.
+    - **ONE STEER RULE CHANGED, at Samarth's redaction of Q3** ("i want to
+      redact that the sft traces have to seal the tokens. just make the
+      default that it applied for all the window"). `steer_torch.
+      recorded_window` refused a row whose turns recorded no `steer_window`.
+      Right for a row the policy sampled; wrong for the ordinary case of
+      training a steer on FOREIGN rows — a teacher's sealed rollouts, a
+      fixed cas file — which carry no record and are not a bug. Such a row
+      now replays at `(0, None)`: the adapter type's own default, the same
+      one the rollout applies with no directive, DECLARED IN NO BANK (which
+      is the half of Q3 Samarth was most explicit about). The "two windows
+      in one row" refusal stays, and a row that HAS a record still replays
+      exactly its record. The alarm the refusal used to raise moved to the
+      SEAL side, where the fact is: a test pins that a bundle carrying a
+      steer records a window on every request — sampled or scored, directive
+      or none — so "no record" can only mean "no steer sampled this". ADR
+      0004's directive rule is unchanged in every other respect and no
+      spec's identity moved.
+    - **A MEASUREMENT MAY ADDRESS MORE THAN THE POLICY.**
+      `measure_run(..., pools=)` routes every extra name to its engine under
+      a payload-free base bundle — `loop.py`'s own rule for a non-policy
+      pool, so "teacher" on the SAME engine object as "main" is one dict
+      entry and no second resident (the Routes contract already said one
+      engine may back many names). Found and fixed while wiring it:
+      `reduce_point` could not fold a TOKEN_LEVEL column at all
+      ("must be real number, not list") — reachable before this entry, since
+      any measurement naming `hinted_logprobs` would have hit it.
+      `token_level_columns` reads the pipeline's per-token columns off
+      `PostDef.token_level` (declaration, never a value's shape) and
+      `column_mean` folds such a column over every token of every row.
+    - **THE EXPERIMENT, as two runs and one measurement.** The teacher is a
+      generation-only run with an EMPTY bank — `main` is the bare
+      Qwen3-32B, the hint is the whole of the conditioning — whose sealed
+      `rollouts/` ARE the trajectory set and whose run_id is the set's
+      identity (Q4, ADR 0006). Each student arm is `Plans(train=<Replay
+      leaves over store://<teacher>/rollouts/<r>#<i>>, rollout=None)`,
+      `gen=None`, `loss="sft"`, `post=()`, and ONE `steer(f"resid_pre.
+      {layer}", d=5120)` at one of the paper's anchors (10 / 32 / 54 of 64,
+      Q8 — `resid_pre.<n>` is the stream leaving `model.layers[n]`, which is
+      where the harness adds); the three arms share plan bytes and differ in
+      the bank alone. The distillation number is a Measurement (#70):
+      `single_turn` over held-out prompts, `conditioned_teacher_logprobs` →
+      `reverse_kl`, every 8th version. The ICL test itself runs in the
+      PAPER'S harness over exported vectors (Q10) — `adapters/v@<n>.bin` is
+      `steer_torch.emit`'s safetensors keyed by boundary path — because a
+      k-shot prompt needs k injections and a request carries one window,
+      which is a change to ADR 0004's directive rule and would want its own
+      ADR.
+    - **THE VENUE IS WRITTEN AND UNRUN** (`deploy/concept_steer.py`, 856
+      lines, `stress_fleet`/`steer_l4`'s desk shape): doors `prompts`,
+      `distill_set`, `train --layer --teacher-run`, `measure --run-id`,
+      `export --run-id --version`, `status`, `sweep`, and every door that
+      acquires metal ends in the desk's `release` with the plane ASSERTED
+      empty (ADR 0003 / #77). One metal on A100-80GB:2 (or H100:2), one
+      HostSpec ALTERNATING `main` tp=2 with the learner fsdp=2 (Q7), a
+      recipe serving `steer` (eager, our worker class) with
+      `enable_sleep_mode` on the engine. Specs written out as literal values
+      (I5).
+    - **WHAT THE TESTS PIN.** 973 green on fakes (from 936 at #80), 117
+      torch-gated skips, ~7.7 s. `tests/test_conditioned_teacher.py` (new,
+      19): the hint is in the engine's context and out of the sealed stream
+      and survives in `env_extras`; the conditioned walk matches a by-hand
+      score and differs from the plain teacher's on the same pool;
+      `reverse_kl`'s value, its refusal of a misaligned column, and the
+      pipeline run in two halves equalling one whole; and the shape END TO
+      END — an empty-bank teacher seals a set under the hint, a steer arm
+      SFTs on it (its waves the teacher's rows, its own `rollouts/` absent),
+      those rows carry NO `steer_window`, and killed at a ledger append and
+      resumed the student's directory is byte-identical to a straight run's.
+      `test_tasks.py` (+11) covers the builder's pure half against a fake
+      tokenizer. `test_steer.py` gains the seal-side alarm, the empty bank
+      recording nothing, and two torch-gated replay cases (no record replays
+      everywhere; a record still replays itself). `test_measure.py` (+3):
+      the distillation pipeline through a teacher pool, the teacher's log
+      showing only its bare base bundle, and the missing pool failing by
+      name.
+    - **UNPROVEN, STATED.** NO METAL: not one number in this entry was
+      observed on a GPU. The 32B as a STUDENT is new territory — an fsdp=2
+      learner over a frozen 32B has never been built, so its rank-0 peak and
+      its pace are unmeasured — and so is the eager-mode serving cost of a
+      steer-serving 32B build (#77 named it). The chat-template
+      concatenation assertion is only checked when the corpus is actually
+      built on the volume; the no_robots schema here is the hub's DECLARED
+      one, read off the API rather than off a download (unlike #60's DAPO
+      notes, which were inspected). FOUND WHILE WRITING THE VENUE, stated
+      rather than fixed: a SHARDED learner reports it cannot sleep
+      (`FsdpTorchLearner.sleeps = ranks.width == 1`, because offloading a
+      DTensor chorus is its own proof — ADR 0002), so on the alternating
+      HostSpec at fsdp=2 the arbiter wires no sleep hook for the learner and
+      only the ENGINE hands its share back, while the partition's fraction
+      is the unit's LARGEST member either way — whether a 32B engine and a
+      32B fsdp=2 learner both fit one 80 GB card is the shakeout's first
+      finding, and the fallbacks are two HostSpecs on wider metal or a
+      smaller engine share. THE COVERAGE CONFOUND IS ACCEPTED (Q2, Samarth:
+      "ALL only"): the vector trains over EVERY position, prompt and
+      completion, while the paper's harness injects at the user turn only
+      during prefill — so a null ICL result has a train/eval shift among its
+      explanations, and that belongs beside the number when it is reported.
+      The SFT ledger's `logprob_gap` on foreign rows is NOT a parity alarm:
+      `behavior_logprobs` are the TEACHER's under the hint, so the rail
+      reads mean |student − teacher| — the distillation distance — and the
+      observer will still label it the parity rail. And the teacher run's
+      rollouts are not byte-reproducible across engine batch compositions
+      (#46's vLLM sampling noise); within ONE store the run resumes by
+      skipping sealed rollouts and never re-samples one, which is what
+      identity needs.
+
 ## Open threads (do NOT treat as settled; flag when your answer touches them)
 
 - TODO (Samarth, settled intent — future, nothing now): BUNDLE LRU EVICTION

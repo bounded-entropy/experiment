@@ -851,3 +851,6 @@ per-forward verb per mechanism); the deploy; then what metal taught.
 - **Unproven, as the non-promises said:** TP above 1 (one flag away),
   pipeline parallel, the throughput cost of eager plus hooks, mid-layer sites
   (Q8's later ADR).
+- **Q2's record rule gained one clause later** (ADR 0005 Q3, CONTEXT #81): a
+  row with NO record — a trajectory this policy never sampled — replays at
+  the default rather than being refused. Everything above is unchanged.
