@@ -3,7 +3,7 @@
 | | |
 |---|---|
 | **Date** | 2026-09-04 |
-| **Status** | Accepted (2026-09-04 review: Q2, Q3, Q4, Q4a, Q8, Q9 agreed; Q6 agreed with a rider, folded; Q1, Q5, Q7, Q10, Q11 stand on their recommendations) — in implementation |
+| **Status** | Implemented on fakes (CONTEXT #84); awaiting the metal re-runs (Q9). Accepted 2026-09-04: Q2, Q3, Q4, Q4a, Q8, Q9 agreed; Q6 agreed with a rider, folded; Q1, Q5, Q7, Q10, Q11 stood on their recommendations |
 | **Author** | Claude Fable 5.1 (session: the SPAR introspection paper, 2026-09-04) |
 | **Touches** | `rlstack/runner/transports/` (NEW region: one file per wire substrate, `modal_cls.py` first), `rlstack/runner/remote.py` (a transport factory keyed by address scheme; `LocalTransport` stays), `rlstack/runner/desk.py` (`MetalService` boots BARE; the recipe is a desk-held, journaled row; `knock` refuses loudly without `boot_for`), `rlstack/data/stores/` (the observer's read-only Modal view folded in or retired), `deploy/desk.py` (NEW: the one standing desk and its doors), `deploy/modal_venue.py` (NEW: the metal container chassis and the campaign helpers), `deploy/concept_steer.py` (rewritten minimal — the proof of concept), `deploy/steer_l4.py` + `deploy/stress_fleet.py` (rewritten onto the chassis; their probes are the regression proof), `deploy/dapo_grpo.py` + `deploy/plora_l4.py` (retired, Q8), `deploy/ui.py`, `STYLE.md` rule 8 (one line: the new region; Samarth's edit), `ARCHITECTURE.md` (Wire, Desk, Builds, MetalService entries), `tests/test_architecture.py` (the region, and rule 7 pinned), `tests/` |
 | **Invariants** | I5 (topology is semantics-neutral: a venue owns addresses and images, never a recipe or a builder), I7 (the substrate is certified: a transport is a build-side implementation behind a protocol), I12 (a metal's capability is a birth fact — measured; its RECIPE becomes the desk's declaration, not the container's), I10 (the fleet journal is one record for one fleet) |
@@ -205,4 +205,62 @@ If the other branch: the discipline holds by hand, and the first stray import in
 
 ## Outcome
 
-Filled at implementation.
+Landed in three commits, `4d10c40` → `1fe6c96`, and recorded as **CONTEXT #84**.
+**1050 tests green, from 1003.**
+
+**What landed, against the ten Decision bullets.** All ten. `runner/transports/`
+with `modal_cls.py` and `remote.py`'s `Address` / `parse_address` /
+`transport_for` (Q1, Q3); `deploy/desk.py` as the one desk on one journal (Q2);
+`MetalService(builds=None)` with the desk's journaled `recipe` event and a
+carve refused by name at both ends (Q4); `covers` split into
+`matches_capability` + `recipe_serves`, fed by `campaign.adapter_types_of`
+(Q4a); `deploy/modal_venue.py`'s `metal_class` and campaign helpers; the
+chassis' `boot_for` and `Desk.knock`'s journaled `knock-refused` (Q5); campaign
+doors that never release and check-venue releases that are guarded and scoped
+(Q6); `deploy/ui.py` over the mount (Q7); the two hand-built venues deleted
+(Q8); the three venues on the chassis plus a fakes-backed chassis test (Q9);
+rule 7 pinned by `tests/test_architecture.py` (Q10).
+
+**What the answers changed.** Q6's rider is the only shape change, and it grew
+a second guard the ADR did not have: `Desk.release` is now refused over
+dependents exactly as `decommission` is, asked of the WHOLE metal
+(`metal_dependents`, over one shared `dependents_on` body) because a release
+takes every host on a metal at once. Its corollary had to be ruled on
+separately: `release_idle` passes `force=True`, because the idle sweep's
+evidence — nothing busy on that metal for its whole limit — is stronger than
+the guard's, and letting a stale "running" row veto it would have quietly
+weakened ADR 0003's promise.
+
+**Three things the implementation added that the ADR did not name.**
+(1) `MetalService.route` / `unroute`: #77's in-process rule became a published
+entry on `remote.py`'s switchboard rather than a closure copied into every
+venue, which is what actually lets `transport_for` be the one factory
+*everywhere* instead of everywhere-but-inside-a-metal-container.
+(2) `builds_proposed`: one named row→record crossing at the desk's wire door,
+so `Desk` speaks `Builds` and the wire speaks rows (no meta-dict bags).
+(3) `tests/venue_stub.py`: a Modal stand-in, which makes the `deploy/` files
+importable by the suite at all — that is what promise 7's byte-comparison
+rides on, and it is a durable capability rather than a test fixture.
+
+**What stayed unproven.** No metal was run (the ADR forbade it of the
+implementing session). Named specifically: that a Modal container answers the
+new `door` / `door_ask` signature; that the desk's `boot_for` spawn wakes
+metal in *another* app; that `deploy/ui.py` over the mount reads fresh — the
+SDK-backed reader it replaces was written **because** a mid-scan
+`volume.reload()` made runs hop root → subdir and timed `/api/runs` out at 60 s,
+and the fix here (reload only at the cache-rebuild boundary, under the rebuild
+lock) is reasoned, not measured; and `deploy/concept_steer.py` landed at **460
+lines, not ≤ 220** — promise 1 missed. The remainder is a 66-line experiment
+docstring, five volume-side functions and six doors: every line is science or a
+door, but there is more of both than the promise estimated. Line counts for the
+other two: `steer_l4.py` 948 → 555, `stress_fleet.py` 1226 → 881 (the ADR's
+Context said 976; it was 1226 by the time this was implemented).
+
+**Samarth's, before this is `Implemented`:** `modal deploy deploy/desk.py`,
+then `steer_l4::probe` and `::check` through the one desk, then
+`stress_fleet::topology` / `::latejoin` / `::learner_sleep`. And one edit only
+this repo's owner makes: **STYLE.md rule 8's tree** names neither
+`runner/transports/` (the new region) nor the fact that `runner/sources/` is
+now empty. `tests/test_architecture.py` derives its regions from its own table
+and enforces `runner/transports/` either way, so nothing is unguarded — the
+document is simply behind the tree.

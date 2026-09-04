@@ -26,8 +26,10 @@ The map, by responsibility — read top to bottom:
                     Regimes) owning its engines, its one learner, its arbiter
                     and its journal; submit binds / fits / attests / runs
     desk.py         the desk (listings, metal, placement over them: join →
-                    carve → acquire) and MetalService, the metal-side books
-                    that spawn residents from the metal's recipe
+                    carve → acquire; the recipe it DECLARES per metal, and
+                    the guards over release and decommission) and
+                    MetalService, the metal-side books that boot BARE and
+                    spawn residents from the recipe a carve delivers
     residents.py    a resident is a process (ADR 0002): the build records a
                     venue declares, the universal builders, the door and its
                     frames, Resident.spawn / in_process / stop, the ladder
@@ -36,7 +38,10 @@ The map, by responsibility — read top to bottom:
                     forwards through the resident's proxy; EngineService /
                     LearnerService are the resident's end; RemotePool /
                     RemoteLearner are the whole protocols over a Transport,
-                    across hosts as readily as inside one
+                    across hosts as readily as inside one. Also THE ADDRESS
+                    GRAMMAR and the one transport factory (ADR 0007):
+                    parse_address / transport_for, with the in-process
+                    switchboard consulted first
     assemble.py     a planned wave becomes real: sample it, or take it
     refs.py         where an already-sealed trajectory lives: this run's own
                     rollouts, another run's waves or rollouts, a cas file
@@ -46,7 +51,11 @@ The map, by responsibility — read top to bottom:
                     UpdateClock the Trainer laps, and the HostJournal door
                     they reach — wall clock, so host journals only
     engines/        real inference metal (vllm_engine), heavy imports,
-    learners/       real training metal (torch_learner) — import lazily
+    learners/       real training metal (torch_learner),
+    transports/     real wire substrates (modal_cls) — all three import
+                    their substrate at module scope and are therefore
+                    imported LAZILY, never from the package root (STYLE
+                    rule 7, pinned by tests/test_architecture.py)
     fakes.py        FakeEngine / FakeLearner / FakeAdapter: deterministic
                     stand-ins behind the same protocols (metal, and the one
                     stdlib adapter type), for tests and dry runs

@@ -465,7 +465,12 @@ inside one).
 `rlstack/data/stores/base.py` (`run_prefix`, `check_subdir`)
 
 **Desk** — placement as a service and the fleet journal's one writer (the
-Trainer/ledger pattern on the fleet plane). WORKLOAD-BLIND: its vocabulary is
+Trainer/ledger pattern on the fleet plane). THERE IS ONE (ADR 0007, Q2):
+`deploy/desk.py` is the only file that stands a desk container up, every
+venue's metal registers with it and every campaign submits to it, and it
+rebuilds from ONE journal — which is what makes two campaigns serialize
+through one placement ladder instead of double-reading one residual (#68).
+WORKLOAD-BLIND: its vocabulary is
 Demands, listings, metal and addresses; it imports no spec class. It holds
 **Listings** — descriptions of standing hosts (regimes, address, solo, and
 the capacity VIEW: partition row + metal name), journaled and rebuilt by
@@ -477,15 +482,18 @@ routes under its own name (the learner's included, since ADR 0006 Part A) —
 routes come off the demand rows, which is what makes the blind relay
 possible. A placement no listing serves becomes a desk-issued CARVE on a
 registered metal (deduce by residual in GB, command by RemoteMetal.carve —
-the request carries the desk's recipe row); only what no metal holds returns
-boot instructions — the standing acquire, a human's. THE DESK SUPERVISES ITS
+the request carries the desk's recipe row, and a metal nothing has DECLARED
+for is passed over with a journaled `carve-refused`); only what no metal holds
+returns boot instructions — the standing acquire, a human's. THE DESK SUPERVISES ITS
 METALS (ADR 0001, Q5): the one automatic restart is a metal's, and the loop
 is **reap → knock → re-register → reroute**. `reap` probes every listing,
 retries the silent, concludes what stays silent (decarve + delist "reaped"),
 STRANDS the unfinished runs those hosts carried (journaled `parked` first —
 the queue), KNOCKS each metal that lost listings (`boot_for(name)` where the
 venue has one, else `describe()` through the plane address — on Modal the
-knock IS the boot), and retries the queue. `register_metal` of a known name
+knock IS the boot; with NEITHER the knock refuses LOUDLY, journaling
+`knock-refused`, because a supervision loop that fails as a silent no-op is
+how a venue bug hides for an hour), and retries the queue. `register_metal` of a known name
 at the SAME address is the container generation turning over: the row takes
 the measured facts (and a new recipe, if carried), its corpses are reaped by
 probe with zero retries ("metal re-registered"), and every registration event
@@ -494,8 +502,15 @@ name at another address is a collision, refused. A host dying alone stays a
 human's resubmit. THE DESK ALSO RELEASES ITS IDLE METAL (ADR 0003): the same
 tick observes every carve-able metal and releases what has been idle past its
 limit — the acquire rung inverted, automatic because the metal is already
-owned — and the next placement that needs it knocks it back.
-`rlstack/runner/desk.py` (`Desk`, `Listing`), `rlstack/runner/remote.py` (`RemoteDesk`)
+owned — and the next placement that needs it knocks it back. `recipe(metal,
+builds)` is the desk's other declaration (ADR 0007, Q4) — see **Builds**. AN
+EXPLICIT RELEASE IS GUARDED like `decommission` (Q6): running work routing
+through ANY listing on that metal is named and the release refused, so a venue
+door handing back the metal it acquired cannot take another experiment with
+it; `force` is the operator's, at the desk's own door. The IDLE rule releases
+unguarded, because its evidence — nothing busy for the metal's whole limit —
+is stronger than the guard's.
+`rlstack/runner/desk.py` (`Desk`, `Listing`), `rlstack/runner/remote.py` (`RemoteDesk`), `deploy/desk.py`
 
 **Campaign layer** — where SPECS meet the fleet, the only such place:
 `demands_of(spec, anchor)` (which demand the frame lands on — and therefore
@@ -507,7 +522,13 @@ a store and spec knowledge (today `migrate`, the code-refresh warm-fork) over
 the desk's own Transport contract. A campaign's whole surface is
 `RemoteDesk(transport).submit(spec)` (shaping happens client-side) or
 `.resolve(demands)` for a pure client; no venue word appears in any of it.
-`rlstack/runner/campaign.py`
+`demands_of` also projects the spec's bank into each inference demand's
+`adapter_types` — the strings the JOIN rule compares against a metal recipe's
+`serves` (ADR 0007, Q4a), so a spec is refused at the join rather than late at
+Phase 0, and the desk still interprets nothing. A CAMPAIGN DOOR SUBMITS AND
+FOLLOWS; IT NEVER RELEASES (Q6): idle metal is the desk's to collect, and
+under one desk a door's teardown would take whatever else had joined.
+`rlstack/runner/campaign.py`, `deploy/modal_venue.py` (`submit_and_follow`)
 
 **MetalService / the metal plane** — the metal-side end of the standing
 carve: the container that owns a device wears it by default. One MEASURED
@@ -522,11 +543,16 @@ desk's decision; idempotent, because released is a goal state), `residual` /
 `describe` (the desk's deduction feed). `build` is where THE ONE CROSSING happens:
 `fraction_for_gb` turns the per-device GB into the partition's fraction
 against the card this metal measured, and a slice larger than one device
-raises the acquire rung by name, never clamps. It holds a RECIPE (**Builds**)
-— the desk's row when the carve request carries one — and a carve spawns one
-resident process per regime from it; a resident's unbidden exit decarves its
-host. The desk DEDUCES, the metal ENFORCES; the metal writes nothing to the
-fleet journal.
+raises the acquire rung by name, never clamps. IT BOOTS BARE (ADR 0007, Q4):
+measuring a card and mounting a store are the container's, but what to BUILD
+is a declaration and the desk makes it — the recipe (**Builds**) arrives with
+the carve request (`adopt_recipe`), and a bare metal handed a request carrying
+none refuses BY NAME rather than half-building. A carve spawns one resident
+process per regime from that recipe; a resident's unbidden exit decarves its
+host. `route`/`unroute` publish each carved host's address on the in-process
+switchboard, which is how anything inside this container reaches a sibling
+without a self-call (#77). The desk DEDUCES, the metal ENFORCES; the metal
+writes nothing to the fleet journal.
 `rlstack/runner/desk.py` (`MetalService`), `rlstack/runner/remote.py` (`RemoteMetal`)
 
 **Builds / EngineBuild / LearnerBuild** — a metal's recipe: the capacity knobs
@@ -534,12 +560,15 @@ a partition cannot tell you (an engine's context length, bundle count, rank,
 ensemble width, served adapter types, sleep mode; a learner's dtype, clip,
 activation checkpointing). Everything ELSE about a resident — class, base,
 width, device, fraction — follows from (regime, partition) in `build_engine` /
-`build_learner`, so building is rlstack's, not a venue's. Declared at bring-up
-from the deploy's constants — the metal's FIRST declaration — and journaled on
-the `metal` registration and every `host-up`; the desk's journaled row is the
-CANON (ADR 0001, Q5c): it rides every carve request, the metal builds from it
-(`adopt_recipe`), and a re-registration carrying a different recipe updates
-it. `FakeEngineBuild` / `FakeLearnerBuild` put the fakes in a real process.
+`build_learner`, so building is rlstack's, not a venue's. DECLARED AT THE DESK
+(ADR 0007, Q4): `Desk.recipe(metal, builds)` journals a `recipe` event, the
+latest per metal wins, `from_journal` replays it, and `deploy/desk.py::recipe`
+is the door an operator says it at. A metal's own constants are at most a
+PROPOSAL a registration carries, journaled as the same event. The desk's row
+is the CANON (ADR 0001, Q5c): it rides every carve request and the metal
+builds from it (`adopt_recipe`), so a reborn container is rebuilt from the
+desk's row and never from its own. `EngineBuild.serves` is also half the JOIN
+rule — see **Campaign layer**. `FakeEngineBuild` / `FakeLearnerBuild` put the fakes in a real process.
 `rlstack/runner/residents.py`
 
 **StoreAddress / open_store** — a store as a value a child process can reopen
@@ -625,8 +654,19 @@ implement the whole Engine and Learner protocols over it, so the runner cannot
 tell remote from local. A learner proxy speaks through two doors: a resident's
 (sync `ask` frames, the runner beside it already admitted) and another host's
 (`admitted=True` — `call` frames driven on the proxy's own loop, because a
-Learner verb is synchronous and its caller is an event loop).
-`rlstack/runner/remote.py`, `deploy/modal_host.py` (`ModalTransport`)
+Learner verb is synchronous and its caller is an event loop). A wire's real
+SUBSTRATE is one file per substrate under `runner/transports/`, imported
+lazily (STYLE rule 7); `LocalTransport` is not one — it is the contract's own
+enforcement, the json round trip both ways, so it stays beside the protocol.
+An **address** names the venue and the thing: `modal://<app>/<cls>[#<host>]`
+or `local://<host>`, read by `parse_address` and turned into a transport by
+`transport_for` — THE one factory (ADR 0007, Q3). Every resolver in the fleet
+is that function: a desk's `host_for`/`metal_for`, a host's `transport_for`, a
+campaign's door. It consults the IN-PROCESS switchboard first, because what
+answers in this process must be answered here and never over a self-call
+(#77). A venue constructs no transport and writes no scheme rule.
+`rlstack/runner/remote.py` (`Transport`, `LocalTransport`, `parse_address`,
+`transport_for`), `rlstack/runner/transports/modal_cls.py` (`ModalClsTransport`)
 
 ### The store
 

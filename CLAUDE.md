@@ -108,15 +108,19 @@ sessions read. Cross-reference each in the other, fold into
 ## Quick commands
 
 ```
-python3.13 -m unittest discover -s tests        # fakes suite (~7s; torch-gated cases skip)
+python3.13 -m unittest discover -s tests        # fakes suite (~8s; torch-gated cases skip)
 PYTHONUNBUFFERED=1 modal run deploy/steer_l4.py::run_tests   # the same suite inside the image
 modal run deploy/steer_l4.py::probe             # the steer's parity exam on one L4 (~4m)
+modal deploy deploy/desk.py                     # THE desk — once, for every venue (ADR 0007)
+modal run deploy/desk.py::status                # every listing and every metal, one fleet
+modal run deploy/desk.py::recipe --metal steer-l4 --engine ... --learner ...
+                                                #   what that metal builds (a metal boots bare)
+modal run deploy/desk.py::sweep                 # release every metal the desk holds (guarded)
 modal deploy deploy/steer_l4.py && \
 PYTHONUNBUFFERED=1 modal run deploy/steer_l4.py::check       # two tenants through the desk,
                                                 #   released by the desk (~10m; ADR 0004)
-modal run deploy/steer_l4.py::sweep             # release every metal the desk still holds
-modal run deploy/plora_l4.py::shakeout          # plora, three hosts on one L4
-modal run deploy/dapo_grpo.py                   # the DAPO GRPO run
+modal run deploy/stress_fleet.py::topology      # three adapter types at tp=2/fsdp=2
+modal run deploy/concept_steer.py::train --layer 10 --teacher-run <rid>   # ADR 0005, UNRUN
 python3.13 -m rlstack ui <store-root>           # the observer UI over a local store
 ```
 

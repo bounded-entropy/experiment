@@ -4515,6 +4515,143 @@ specs; backends (local/modal/skypilot) and GPU topology are semantics-neutral.
       stamps the document count; and spectral_latent's first suite
       (tests/test_spectral_latent.py) pins the shared recipes on its side.
 
+84. **ONE DESK, BARE METAL, TRANSPORTS IN THE LIBRARY: THE VENUE CHASSIS (ADR
+    0007).** Samarth's prompt (2026-09-04): "'Transports' -> we should move
+    this out into smth more general... 'The Desk container' -> we should have
+    a general desk interface already and have modal be a specific
+    implementation, and have its own separate start script. how would multiple
+    deploy scripts even work right now... why do we have a bring up metal
+    here? that should entirely belong to the desk... we need a lot of cleanup
+    and abstrcation here (but we're pretty close probably, we're just
+    implementing things badly)". The audit that answered "how would multiple
+    deploy scripts even work": THEY DID NOT. Each of the three desk-shaped
+    venues stood up its own Modal app, its own `Desk` container and its own
+    fleet journal, so a campaign could only place onto metal that had
+    registered with ITS app — and #68's own design statement ("concurrent
+    campaigns serialize through one desk instead of double-reading one
+    residual"), recorded and never built, stayed unbuilt. The three transport
+    blocks were byte-identical across the files.
+    - **ONE DESK (Q2).** `deploy/desk.py` is the only file in the tree that
+      stands a desk container up: the app `rlstack-desk`, `min_containers=1`
+      (a metal announcing itself must find someone home), `max_containers=1`
+      (two desks replaying one journal would each believe they own the fleet),
+      and ONE journal — the store's default. The per-venue `Store` subclasses
+      that re-keyed `fleet/<venue>.jsonl` are gone; the old files stay on the
+      volume as history nothing reads, and a run placed by an old desk is
+      resubmitted to the new one, which is a resume by identity (I3).
+    - **THE ADDRESS CARRIES THE VENUE (Q3, landed first).**
+      `modal://<app>/<cls>[#<host>]`, `local://<host>`, read by
+      `parse_address` and turned into a transport by `transport_for` — the ONE
+      factory, which is every resolver in the fleet: a desk's `host_for` and
+      `metal_for`, a host's `transport_for`, a campaign's door. The app in the
+      address is exactly what lets one desk command metal deployed in another
+      venue's app; baking it into a per-venue transport class was why one desk
+      could not serve two venues. The real substrate moved to
+      `rlstack/runner/transports/modal_cls.py` (one class over every deployed
+      class's `door` / `door_ask` pair), a THIRD heavy region beside
+      `engines/` and `learners/`. `LocalTransport` stayed in `remote.py`: it
+      is the contract's own enforcement (the json round trip both ways), not a
+      substrate — the rule that keeps `FakeEngine` out of `engines/`.
+    - **THE METAL BOOTS BARE (Q4).** Measuring a card and mounting a store are
+      the container's; what to BUILD is a declaration, and the desk was
+      already holding the canon (ADR 0001, Q5c — its row rides every carve and
+      `adopt_recipe` replaces whatever the container booted with). So
+      `MetalService(builds=None)` is the normal state, `Desk.recipe(metal,
+      builds)` journals a `recipe` event (latest per metal wins, replayed by
+      `from_journal`), `deploy/desk.py::recipe` is the operator's door, and a
+      registration's `builds` is a PROPOSAL journaled as that same event. A
+      carve to a metal nothing declared for is refused BY NAME at both ends:
+      the desk passes it over with a journaled `carve-refused`, and a bare
+      metal handed a recipe-less request refuses at its own door — never
+      half-built.
+    - **THE JOIN CHECKS WHAT THE RECIPE SERVES (Q4a).** `covers` is two
+      halves now: `matches_capability` (the old rule) and `recipe_serves` — an
+      inference demand may land only on a metal whose engine recipe serves
+      every adapter type the demand names. `campaign.adapter_types_of` reads
+      them off the spec's bank and `demands_of` carries them, so the desk
+      compares strings it does not interpret and stays workload-blind (#69). A
+      steer spec on a lora-only engine is refused at the JOIN, where the
+      placement can still go elsewhere, rather than late at Phase 0 on the
+      host. Unknown is never a refusal: no named type, a training demand (a
+      learner builds any type), and a metal with no declared recipe all pass.
+      DERIVATION from demands is asked and NOT built — a follow-up for when a
+      second adapter type's demands conflict with a first's on one build.
+    - **THE KNOCK IS LOUD (Q5).** No venue ever supplied `boot_for`, so the
+      reap → knock → re-register → reroute loop rested on Modal's lazy boot
+      and would have degraded to a silent no-op anywhere else. The chassis
+      supplies one (spawn the keepalive — what `::up` did by hand), and a
+      knock with neither `boot_for` nor a plane address journals
+      `knock-refused` and returns the reason.
+    - **A DOOR'S RELEASE IS GUARDED (Q6, Samarth's rider: "an experiment
+      tearing down metal it acquired should obviously not tear it down if
+      other experiments are still running on it").** `Desk.release(name,
+      reason, force=False)` refuses, with the running work NAMED, when any run
+      routes through ANY listing on that metal — `metal_dependents` over the
+      one `dependents_on` body decommission already used. `force` is the
+      operator's, at `deploy/desk.py` alone. The IDLE rule releases with
+      force=True by ruling: its evidence (nothing busy for the metal's whole
+      limit) is stronger than the guard's, so ADR 0003's promise is not
+      weakened into "unless a journal row still says running". A CAMPAIGN door
+      never releases at all (three arms on one booted metal is the point);
+      only the check venues do, scoped to the metals they registered — under
+      one desk "the plane is empty" is no longer their promise to make.
+    - **THE CHASSIS.** `deploy/modal_venue.py` holds `metal_class(...)` — the
+      145 lines every venue had of bring-up, announce, duties, keepalive-as-
+      shift, rebirth and teardown — plus the campaign helpers
+      (`submit_spec`, `follow`, `submit_and_follow`, `progress_function`,
+      `wait_for_metal`, `export_blob`) and `guarded_release` / `take_down`.
+      #77's in-process rule became `MetalService.route`, which publishes each
+      carved host on the switchboard `transport_for` reads first, so the rule
+      is said once in the library instead of copied into every venue closure.
+      LINE COUNTS: concept_steer 868 → 460, steer_l4 948 → 555, stress_fleet
+      1226 → 881 (2 for 3 of the ADR's ≤220 target for concept_steer — see
+      UNPROVEN). `deploy/dapo_grpo.py` and `deploy/plora_l4.py` deleted (Q8;
+      both bypassed the desk and hand-built hosts in the driver's container);
+      `tasks_dapo.py` stays, it is content. `deploy/ui.py`'s `VolumeReadStore`
+      retired (Q7): the container mounts the volume and serves the CLI's own
+      app over `LocalStore`.
+    - **WHAT THE TESTS PIN.** 1050 on fakes (from 1003 before the ADR).
+      `tests/test_transports.py`: the grammar, the factory's two refusals by
+      name, the Modal branch imported only when taken (against a `sys.modules`
+      stub, so the suite stays stdlib-only). `tests/test_architecture.py`:
+      STYLE rule 7 PINNED (Q10) — nothing under `rlstack/` imports torch,
+      vllm, modal or a lazily-loaded file at module scope. `tests/test_desk.py`:
+      a bare metal registers, lists and is refused a carve (journaled); a
+      declaration rides the next carve and outlives the desk; the loud knock;
+      the guarded release, refused with the run named and proceeding when the
+      work is done; force; and the idle rule going through unguarded.
+      `tests/test_placement.py`: the join rule's two halves and its three
+      unknowns. `tests/test_chassis.py` (Q9): a bare fake metal at a
+      `local://` plane, a submit refused before the declaration, then place →
+      carve → adopt → extent, with no Modal import anywhere.
+      `tests/test_venues.py` + `venue_spec_rows.json`: PROMISE 7 — all NINE
+      canonical spec rows captured from the pre-rewrite files at 90bbc8e and
+      compared byte for byte against the rewritten ones (a cas uri is a hash
+      of plan bytes, so the plans are pinned too), plus the structural claims
+      (no Transport in `deploy/`, one Desk class, no `FLEET_LOG`, the
+      addresses parse, a campaign door calls no release). `tests/venue_stub.py`
+      stands the Modal SDK in, which is also the first time the venue files
+      are importable as Python at all.
+    - **WHAT IS UNPROVEN.** NO METAL WAS RUN. Per ADR 0007 Q9 the ADR is
+      `Implemented on fakes` only: `steer_l4::check` through the ONE desk is
+      what makes it `Implemented`, and `stress_fleet::topology` / `::latejoin`
+      / `::learner_sleep` are the rest of the regression proof. Specifically
+      unobserved: that a Modal container answers `door`/`door_ask` under the
+      new signature; that the desk's `boot_for` spawn actually wakes another
+      app's metal; that `deploy/ui.py` over the mount reads fresh (the SDK
+      reader it replaces was written BECAUSE a mid-scan `volume.reload()` made
+      runs hop root → subdir and timed /api/runs out at 60 s — the reload is
+      now taken only at the cache-rebuild boundary, under the rebuild lock,
+      which is a reasoned fix and not a measured one); and that
+      `concept_steer.py` at 460 lines rather than ≤220 is acceptable — the
+      remainder is its 66-line experiment docstring, five volume-side
+      functions (the corpus builder, the canonical-row builder, the
+      measurement pass, the export) and six doors, all of which are science or
+      a door but more of both than the ADR estimated. STYLE.md rule 8's tree
+      still names neither `runner/transports/` (new) nor the now-empty
+      `runner/sources/` — Samarth's edit; `tests/test_architecture.py` derives
+      its regions from its own table and enforces the new one either way.
+
 ## Open threads (do NOT treat as settled; flag when your answer touches them)
 
 - TODO (Samarth, settled intent — future, nothing now): BUNDLE LRU EVICTION
