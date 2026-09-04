@@ -21,6 +21,7 @@ from rlstack import (
     run_experiment,
 )
 from rlstack.observe import render_gpu, render_hosts, render_runs, store_for
+from rlstack.runner.remote import EngineService, LocalTransport, RemotePool
 
 SCHEMA = fake_qwen_schema(4, base="Qwen/Qwen3-0.6B")
 
@@ -443,3 +444,56 @@ class StoreForTest(unittest.TestCase):
         with self.assertRaises(NotImplementedError) as caught:
             store_for("modal://rlstack-store")
         self.assertIn("lives with its venue", str(caught.exception))
+
+
+class TrafficAcrossTheDoorTest(unittest.TestCase):
+    """ADR 0002 moved the engine into its own process and its meter went with
+    it: the host drained its own, never-fed meter and journaled zeros for
+    every window (found on the venue: 71 windows of a 32B generating at ~200
+    tok/s, all zero). The host now asks each resident for its window on the
+    stats tick and adds it to its own door's counts."""
+
+    def setUp(self) -> None:
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.store, _, _ = arith_store(tmp.name)
+
+    def test_a_residents_tokens_reach_the_hosts_traffic_row(self) -> None:
+        engine = FakeEngine()
+        engine.meter.opened_request(10)
+        engine.meter.first_token_after(0.05)
+        engine.meter.decoded(7)
+        behind_a_door = RemotePool(LocalTransport(EngineService(engine)),
+                                   base=engine.base, tp=1)
+        host = Host("metered", engines=(behind_a_door,), learner=None,
+                    store=self.store)
+        row = go(host.traffic_row(now=100.0))
+        self.assertEqual((row["prefill_tokens"], row["decode_tokens"],
+                          row["requests"]), (10, 7, 1))
+        self.assertAlmostEqual(row["ttft_ms_mean"], 50.0)
+        # the resident's window was DRAINED by the ask: the next tick starts at zero
+        again = go(host.traffic_row(now=130.0))
+        self.assertEqual((again["decode_tokens"], again["ttft_ms_mean"]), (0, None))
+
+    def test_an_in_process_engine_is_counted_once(self) -> None:
+        engine = FakeEngine()
+        host = Host("wired", engines=(engine,), learner=None, store=self.store)
+        engine.meter.decoded(3)          # wire_meter made this the host's meter
+        row = go(host.traffic_row(now=100.0))
+        self.assertEqual(row["decode_tokens"], 3)
+
+    def test_two_residents_and_the_door_make_one_window(self) -> None:
+        first, second = FakeEngine(), FakeEngine()
+        first.meter.opened_request(4); first.meter.first_token_after(0.010)
+        second.meter.opened_request(6); second.meter.first_token_after(0.030)
+        second.meter.opened_request(6); second.meter.first_token_after(0.030)
+        pools = tuple(RemotePool(LocalTransport(EngineService(e)), base=e.base, tp=1)
+                      for e in (first, second))
+        host = Host("shared", engines=pools, learner=None, store=self.store)
+        host.meter.admitted(0.002)       # the DOOR's own count: one admission, waited 2 ms
+        row = go(host.traffic_row(now=100.0))
+        self.assertEqual((row["prefill_tokens"], row["requests"]), (16, 3))
+        self.assertAlmostEqual(row["ttft_ms_mean"], (10 * 1 + 30 * 2) / 3)   # weighted by requests
+        self.assertAlmostEqual(row["admit_wait_ms_mean"], 2.0)             # the door's, untouched
+        self.assertEqual(row["inflight"], 1)
+

@@ -553,6 +553,16 @@ class EngineService:
                                    for name, mech in reach.items()}}
         if verb == "tokenize":
             return {"token_ids": list(self.engine.tokenize(payload["text"]))}
+        if verb == "traffic":
+            # THE RESIDENT'S OWN WINDOW, drained here and nowhere else. An
+            # engine counts its tokens in ITS process (ADR 0002), so the host
+            # that journals `traffic` asks each resident on its stats tick
+            # and adds the answer to its own door's counts (host.traffic_row).
+            # Found on the venue: 71 windows of a 32B generating at ~200
+            # tok/s, every one of them zero, because the host drained a
+            # meter nothing across the pipe had ever fed.
+            meter = getattr(self.engine, "meter", None)
+            return {} if meter is None else meter.drain(time.time()).row()
         raise ValueError(f"unknown admission-free verb {verb!r}")
 
 
@@ -815,6 +825,14 @@ class RemotePool:
         reply = self._transport.ask("tokenize", {
             **self._address(), "text": text})
         return tuple(reply["token_ids"])
+
+    def drain_traffic(self) -> dict:
+        """The resident's traffic window since its last drain, as a row — what
+        the host adds to its own on each stats tick, because the engine
+        behind this door counts in its own process (ADR 0002). Empty when
+        that engine keeps no meter. Only a host's OWN engines are asked:
+        a pool reached as another host's remote is that host's to drain."""
+        return self._transport.ask("traffic", self._address())
 
 
 class RemoteLearner:

@@ -23,6 +23,8 @@ Two records, two journal events:
 
 from __future__ import annotations
 
+from collections.abc import Sequence
+
 import time
 from dataclasses import dataclass
 
@@ -61,6 +63,30 @@ class TrafficWindow:
                 "admit_wait_ms_mean": self.admit_wait_ms_mean,
                 "admit_wait_ms_max": self.admit_wait_ms_max,
                 "inflight": self.inflight}
+
+
+def merged_traffic(own: dict, residents: Sequence[dict]) -> dict:
+    """ONE partition's window from the host's door plus its residents' meters.
+
+    Token and request counts SUM — each resident counted what its own engine
+    served, and the door counted nothing of that. The first-token mean is
+    weighted by each window's requests, the closest thing a row carries to
+    its sample count. The door's own gauges — admission waits and inflight —
+    stay the host's, because the door is the host's and no resident stands
+    behind a second one. A resident that answered nothing (no meter) adds
+    nothing."""
+    out = dict(own)
+    weighted, weight = 0.0, 0
+    for row in (own, *residents):
+        mean, requests = row.get("ttft_ms_mean"), int(row.get("requests") or 0)
+        if mean is not None and requests:
+            weighted += mean * requests
+            weight += requests
+    for row in residents:
+        for field in ("prefill_tokens", "decode_tokens", "requests"):
+            out[field] = int(out.get(field) or 0) + int(row.get(field) or 0)
+    out["ttft_ms_mean"] = weighted / weight if weight else None
+    return out
 
 
 class TrafficMeter:

@@ -39,7 +39,7 @@ from rlstack.runner.interfaces import Engine, Learner
 from rlstack.runner.loop import (
     RunReport, experiment_identity, run_experiment_async,
 )
-from rlstack.runner.meters import HostJournal, TrafficMeter
+from rlstack.runner.meters import HostJournal, TrafficMeter, merged_traffic
 
 if TYPE_CHECKING:
     from rlstack.runner.residents import Resident
@@ -295,12 +295,14 @@ class Host:
         return None
 
     def wire_meter(self) -> None:
-        """ONE meter per host: every engine it owns counts its tokens into
-        this meter and its arbiter counts admission into the same one, so a
+        """ONE meter per host: an in-process engine counts its tokens into
+        this meter and the arbiter counts admission into the same one, so a
         `traffic` event describes the PARTITION — which is what a shared
         engine's load is a property of. Wired by assignment at birth because
         engines and arbiters are built by the deploy that owns the metal and
-        handed to the host afterwards."""
+        handed to the host afterwards. A RESIDENT engine (ADR 0002) counts in
+        its own process, where this assignment cannot reach: its window is
+        asked for on every stats tick instead (`traffic_row`)."""
         for engine in self.engines:
             engine.meter = self.meter
         self.arbiter.meter = self.meter
@@ -695,8 +697,30 @@ class Host:
                 self.store.append_host_event(self.name, {
                     "event": "stats", "t": now, **sample})
             self.store.append_host_event(self.name, {
-                "event": "traffic", "t": now, **self.meter.drain(now).row()})
+                "event": "traffic", "t": now, **await self.traffic_row(now)})
             await asyncio.sleep(every)
+
+    async def traffic_row(self, now: float) -> dict:
+        """This partition's traffic window: the door's own meter, drained,
+        plus every RESIDENT's — an engine in its own process (ADR 0002)
+        counts there, and is asked for its window here rather than trusted
+        to have counted into a meter it never saw (`wire_meter` assigns one
+        to an in-process engine only; on a resident's handle the assignment
+        is inert). Asked on a thread, because a resident's door is a pipe
+        and a resident mid-death may answer late or never — and a window
+        that one resident could not give still journals the others'."""
+        own = self.meter.drain(now).row()
+        answers: list[dict] = []
+        for engine in self.engines:
+            drain = getattr(engine, "drain_traffic", None)
+            if drain is None:
+                continue                # in-process: it counts into `own`
+            try:
+                answers.append(await asyncio.to_thread(drain))
+            except Exception as refused:     # a dying resident; journaled by its own exit
+                print(f"[host {self.name}] traffic: {engine} answered nothing: "
+                      f"{refused}", flush=True)
+        return merged_traffic(own, answers)
 
     def status(self) -> dict:
         """The metal as this host sees it: the partition it was born onto
