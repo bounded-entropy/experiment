@@ -135,7 +135,11 @@ MICROBATCH_TOKENS = 4096
 # UNMEASURED, and the shakeout's first job (ADR 0005 non-promises): no number
 # here has been observed on metal.
 MAIN_GB = 44.0 * WIDTH          # 44 GB/device: ~35 weights + ~9 KV at 4096 ctx
-LEARNER_GB = 48.0 * WIDTH       # 48 GB/device: ~35 shard + recompute + Adam
+LEARNER_GB = 64.0 * WIDTH       # 64 GB/device — MEASURED on the venue: the
+                                # learner rank sits at 46.3 GiB (shard, recompute
+                                # state, the vector's moments) and the logprob
+                                # pass over a 4096-token microbatch takes 8.2 GiB
+                                # more in fp32 logits; 48 died there at update 1
 
 METAL = "concept-a100"
 IDLE_S = 1800.0                 # the desk's clock; the venue's scaledown is no shorter
