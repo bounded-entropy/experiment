@@ -3,7 +3,7 @@
 | | |
 |---|---|
 | **Date** | 2026-09-04 |
-| **Status** | **Part A IMPLEMENTED 2026-09-04** (the learner is a routable resident; the Trainer need not share its host — landed as CONTEXT #79); Part B (generation-only runs) ACCEPTED 2026-09-04 — Q1, Q4, Q5 agreed; Q6 DISAGREED and folded (every adapter type gets an init function; a no-learner run builds its v0 with it); Q2 refolded by Part A; Q3, Q7, Q8 stand on their recommendations, not raised — in implementation |
+| **Status** | **IMPLEMENTED 2026-09-04, both parts.** Part A: the learner is a routable resident; the Trainer need not share its host — CONTEXT #79. Part B: a run is a set of daemon needs, and a generation-only run is one — CONTEXT #80, closing the "generation-only runs" open thread WITHOUT a Sealer. Answers: Q1, Q4, Q5 agreed; Q6 DISAGREED and folded (every adapter type gets an init function; a no-learner run builds its v0 with it); Q2 refolded by Part A; Q3, Q7, Q8 stood on their recommendations |
 | **Author** | Claude Fable 5.1 (session: the SPAR introspection paper, 2026-09-04) |
 | **Touches** | Part A: `runner/remote.py` (`HostService` forwards the learner verbs; `RemoteLearner` over any transport), `runner/host.py` (`resolve_routes` learns the learner; `check_fit` accepts a routed one; custody journaled; the tenant is released at the end of `submit`), `runner/loop.py` (`attach_residents`: a remote learner is a free resident), `runner/interfaces.py` (`Learner.uninstall`), `runner/learners/torch_learner.py` + `runner/fakes.py` (the verb), `runner/campaign.py` (the learner demand yields a route; the anchor is a choice), `runner/desk.py` (`deliver` routes the learner demand), `deploy/` (one door: the runner beside the sampling host, the learner on another metal — written, unrun), `ARCHITECTURE.md` ("Resident / daemon", "Learner", "Wire" recoded), `tests/`. Part B: `runner/loop.py` (Phase 1 split, `plan_daemons` → the needs), `runner/daemons/generator.py` (the pacing rule takes its buffer from the caller), `spec/specs.py` (`Plans.train` optional; the extent), `runner/campaign.py` (the anchor rule), `runner/desk.py` (`finished`), `runner/host.py` (`submit` on a learner-less host; the journal's plan), `runner/refs.py` (`store://<run_id>/rollouts/<r>`), `observe/views.py` + `observe/series.py` (progress off the extent), `spec/validate.py` (one gate: a learner-less run's bank is frozen), `policy/adapters/base.py` (`AdapterType.initial_payload` — the init function; `torch_learner.install` builds v0 through it), `runner/fakes.py` (the fake world's init seam), `tests/` |
 | **Invariants** | I1 (a rollout is sealed data whether or not anything trains on it), I3 (`Plans.train=None` is a new value; every existing run's identity is unchanged), I10 (the store is the run: done-ness must be readable off it for every run kind), I12 (a learner-less run anchors on an inference host) |
@@ -476,14 +476,68 @@ untried. One local-transport-only limit is named in the code: a same-process
 serving host that alternates must not also carry engine work admitted from the
 caller's blocked loop.
 
-### Part B — answered 2026-09-04, not implemented
+### Part B — landed 2026-09-04, recorded as CONTEXT #80
 
-Q1, Q4 and Q5 agreed; Q6 disagreed and folded (the adapter type's init
-function); Q2 refolded by Part A; Q3, Q7 and Q8 stand on their
-recommendations. Nothing above implements them:
-`run_experiment_async`'s `algo is None` refusal stands, `Plans.train` is still
-mandatory, there is no `needs_of`, no `run_done`, no `store://<run>/rollouts/
-<r>` ref, and the Generator is still paced by the ledger. What Part A did for
-Part B is remove the door-level blocker: a learner-less spec is no longer
-refused at the desk for want of an anchor (it anchors on `main`), which is
-pinned by a test.
+**What landed.** `DaemonNeed` and `needs_of(spec)` in `runner/loop.py`, with
+`plan_daemons` kept as the EXECUTOR of needs (`needs=` defaults to asking
+`needs_of`); `run_experiment_async` derives the needs once, hands them to both
+phases, and its `algo is None` refusal is replaced by the dual — a run whose
+needs admit a learner and was handed none. Phase 1 split: `bank_entries`
+(the shared per-entry derivation under `parameterization_of`),
+`initial_adapters` (v0 with no learner), `warm_start_source` /
+`sealed_payloads` (one reader of a parent's sealed blobs, shared with
+`_warm_start`), `attach_residents(learner=None)`, and `write_frozen_blobs`
+over every servable delta where nothing advances. `AdapterType.initial_params`
+/ `initial_payload` in `policy/adapters/base.py`, with `TorchLearner.install`
+building its v0 through the first. `fake_initial_payload` + the `fake` adapter
+type in `runner/fakes.py`, which FakeLearner's frozen payload now also calls.
+`Plans.train: str | None` and `Plans.extent`; `RunProgress`, `run_progress`,
+`run_done`, `peek_rollout` and `peek_rollouts_sealed` in
+`data/stores/base.py`; `desk.finished`, `observe/views.py`,
+`observe/series.py` and `observe/web/run.js` reading them; `RunReport.
+completed` + `extent` with `Tenancy` and the host journal following (and
+`host_series` reading the detach event's old spelling as history).
+`store://<run_id>/rollouts/<r>#<i>` in `runner/refs.py`, read through the
+store's PEEK path. Three gate checks: `check_learnerless_bank_is_frozen`,
+`check_plans_declare_an_extent`, `check_a_train_plan_has_an_algo` (plus
+`learner-missing` in `check_members_match_their_shape`). Records:
+ARCHITECTURE.md (Plans/extent, run_done, DaemonNeed, Daemon, Blackboard, the
+leaf grammar replacing the retired `runner/sources/` entry),
+`runner/__init__.py`, a v4 delta note in `agent-context/rl-stack-spec.md`, and
+CONTEXT #80.
+
+**Tests.** 936 green on fakes (from 915 at Part A), 115 torch-gated skips,
+~7.5 s. New: `tests/test_initial_payload.py` (5, one torch-gated),
+`test_loop.GenerationOnlyTest` (6, including the teacher→student replay ADR
+0005 wants), `test_resume.GenerationOnlyResumeTest`, two desk cases (placed
+and run on a serve-only listing; the reaper leaving a finished ledger-less run
+alone), one observer case, and six gate cases. `tests/test_resume.py`'s
+existing equivalence test is untouched and green, and `arith_spec`'s run_id is
+pinned as a literal.
+
+**What the answers changed.** Q6's disagreement is the whole of the Phase-1
+shape: the ADR had proposed that a learner-less run may carry only WarmStart
+payloads, and the fold made every adapter type carry its own init function
+instead — so a generation-only run can serve a freshly-initialized bank, and
+the v0 bytes are provably the learner's. Q1 (unpaced) made `buffer` a
+caller's argument rather than a schedule read. Q7 renamed the report, the
+roster and the journal row.
+
+**What the shape's own questions decided, at implementation.** (a) A spec
+declaring a train plan with NO algo would have had an extent no daemon
+consumes — never finishable, eternally re-parked — so the gate refuses it, and
+a spec with neither gen nor algo (previously valid, and describing a run with
+no daemons at all) is refused with it. (b) `run_done`'s rollout half counts
+sealed rollouts rather than testing only the last, because the observer needs
+the numerator anyway and one `_list` serves both readers. (c) The rollouts ref
+reads through `peek_*`, and the waves ref moved to the same door: `open_run`
+on a parent ATTACHES to it, and attach sweeps work its ledger has not
+committed — a reader must not do that to another run.
+
+**Unproven.** No metal — nothing in Part B has run on a GPU, and the venue
+door for a generation-only run belongs to ADR 0005. The v0 byte-identity of
+real adapter types is torch-gated. `FakeLearner` ignores a warm start's
+payloads for a FROZEN entry where a real learner honors them (a fake-world
+divergence that predates this ADR; the learner-less path does not share it,
+since it reads the sealed blobs directly). `Campaigns.migrate` still refuses
+a run with no ledger — stated, not fixed.

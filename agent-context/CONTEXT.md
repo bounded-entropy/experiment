@@ -4049,6 +4049,127 @@ specs; backends (local/modal/skypilot) and GPU topology are semantics-neutral.
       a pool literally named `learner` (refused at the host door; the desk's
       placement reply has collided on that name since #43).
 
+80. **A RUN IS DAEMONS WITH RESOURCES; THE EXPERIMENT IS LOOP.PY'S SPECIAL
+    CASE — AND A GENERATION-ONLY RUN IS ONE OF THEM** (Samarth, 2026-09-04:
+    "yes, the structure should be: runs should require some daemons with some
+    resources. experiments are just a special case of this that's expressed in
+    loop.py. are there any abstractions preventing this? this should be a
+    common pattern across the repo."). ADR 0006 **Part B**, decided and
+    implemented; Part A (#79) is the same ADR's other half. This CLOSES the
+    "generation-only runs" open thread — without a Sealer, and without moving
+    a knob out of Schedule.
+    - **THE NEEDS.** `needs_of(spec) -> tuple[DaemonNeed, ...]` is the one
+      place a spec becomes daemons: a `DaemonNeed` is a typed record (the
+      daemon class, the plan it consumes, the pool names whose engines it
+      admits, whether it admits the learner, and the Generator's buffer), and
+      the rule is one line each — a Trainer iff `algo` is not None (it is the
+      ledger's only writer), a Scorer iff the post pipeline has a POOLED half,
+      a Generator iff there is a rollout plan. `plan_daemons` keeps its name
+      as the EXECUTOR of needs and gained a `needs=` argument that defaults to
+      asking `needs_of` itself. `run_experiment_async` derives the needs once,
+      hands them to Phase 1 and Phase 2, and is otherwise generic: the
+      `algo is None` refusal is GONE, replaced by its dual — a run whose needs
+      admit a learner and was handed none is refused by name, which is also
+      what keeps `check_members_match_their_shape` off `None.fsdp` (it now
+      reports `learner-missing` rather than raising).
+    - **PHASE 1 SPLITS IN TWO, AND EVERY ADAPTER TYPE HAS AN INIT FUNCTION**
+      (Q6, Samarth DISAGREED with the ADR's "sealed payloads only" and folded:
+      "we should separate out an init function for all adaptertypes, and then
+      use this init function when we have a no-learner run"). `AdapterType.
+      initial_params(sites, init)` is version zero of one bank entry said in
+      ONE place and `initial_payload` is that emitted; `TorchLearner.install`
+      builds its v0 through `initial_params`, and a run with no learner calls
+      `initial_payload` at Phase 1 (`loop.initial_adapters`) — so the bytes
+      and the content-addressed bundle id are identical whoever built them.
+      `bank_entries(spec, resolved)` is the shared derivation underneath
+      `parameterization_of`, so BOTH paths get the same per-entry seed.
+      A `WarmStart`, where given, supplies the parent's sealed payloads
+      instead (`sealed_payloads`, now shared with `_warm_start`). Nothing
+      advances in a run with no Trainer, so `write_frozen_blobs` writes every
+      servable delta's v0 — the store stays complete and `restore_bundle_on`
+      can rebuild what the main pool serves.
+    - **THE FAKE WORLD GOT THE SAME SEAM, NOT A COINCIDENCE.**
+      `fake_initial_payload(sites, init)` in `runner/fakes.py` is the fake
+      init function, and both the new `fake` ADAPTER TYPE (stdlib
+      params/emit, punica-servable, registered beside FakeEngine and
+      FakeLearner because "deterministic stand-ins behind the same protocols"
+      is exactly its charter) and FakeLearner's FROZEN-entry payload call it.
+      So the stdlib-only suite pins the byte-identity promise with no GPU; the
+      real adapter types' version of it is torch-gated. A frozen fake delta's
+      bytes therefore changed shape — they no longer carry the entry name or
+      the whole bank's digest, which is also more honest: two entries with the
+      same sites and the same seed ARE the same delta under torch too.
+    - **THE EXTENT** (Q4). `Plans.train` is `str | None` and `Plans.extent` is
+      a PROPERTY — "train" when there is a train plan, else "rollout" — so no
+      hashed record gained a field and every existing spec's run_id is
+      unchanged (pinned by a literal: `arith_spec` still hashes to
+      `2432682289f4`). Done-ness is ONE predicate for every kind of run:
+      `run_progress` / `run_done` in `data/stores/base.py` (Q3 — the data
+      layer is the one package the desk, the observer and the host may all
+      import), off the extent plan: the ledger tail against the train plan's
+      `wave_count`, or `peek_rollouts_sealed` against the rollout plan's.
+      `desk.finished`, `observe/views.py` and `observe/series.py` read it and
+      keep no copy. `RunReport.updates_completed` became `completed` +
+      `extent` (Q7); `Tenancy` and the host journal's attach `plan` (now the
+      EXTENT plan's uri) and detach row follow — `host_series` reads the
+      detach event's old spelling too, because journals are append-only
+      history. The run page says "N/M rollouts sealed" and tells a
+      rollout-extent run's empty ledger panels apart from a stalled run.
+    - **THE GENERATOR IS UNPACED WHEN NOTHING CONSUMES IT** (Q1). `buffer`
+      comes from the caller (`needs_of`), is the lag when a Trainer exists and
+      None otherwise, and `may_generate` is True for None: the buffer bounds
+      staleness against a MOVING policy, and with no Trainer the policy never
+      moves. `due_at` is `{}` with no train plan. Nothing else in generator.py
+      moved.
+    - **THE REF** (Q5). `store://<run_id>/rollouts/<r>#<i>` joins the leaf
+      grammar, because a generation-only run seals rollouts and NEVER writes
+      `waves/` (one writer per artifact). `RefReader` reads either store
+      section through the store's PEEK path rather than `open_run` — both are
+      sealed forever, and opening a parent would attach to it and sweep work
+      its ledger had not committed, which a reader has no business doing to
+      another run. A store ref still may not answer "not yet": absent is a
+      refusal naming the run and the rollout.
+    - **THREE GATE RULES, one per thing the shape made possible.**
+      `check_learnerless_bank_is_frozen` (a trainable entry with no declared
+      LearnerMember is refused by name), `check_plans_declare_an_extent`
+      (neither plan is a run with no length), and
+      `check_a_train_plan_has_an_algo` — the mirror of
+      `check_a_rollout_plan_has_gen`, so the extent's plan always has a daemon
+      to consume it. CONSEQUENCE, deliberate: a spec with neither gen nor algo
+      (which validated before, and would now describe a run with no daemons
+      at all) is refused; `test_validate` says so by name.
+    - **WHAT THE TESTS PIN.** 936 green on fakes (from 915), 115 torch-gated
+      skips, ~7.5 s. `tests/test_initial_payload.py` (new, 5 — one torch-gated
+      for lora): the init function is `emit ∘ initial_params`, version zero is
+      the sites and the init and nothing else, and a learner-built v0 and a
+      learner-less v0 compile to the SAME bundle id. `test_loop.
+      GenerationOnlyTest` (6): a spec with `algo=None`, `train=None` and a
+      rollout plan runs with no learner — manifest, dictionary, its own plan,
+      one sealed rollout per planned wave, an empty ledger, `run_done` true
+      without one; `needs_of` plans a Generator and nothing else (unpaced) and
+      over a training spec plans exactly what it always did; and ADR 0005's
+      shape end to end — an empty-bank TEACHER generates, then a lora STUDENT
+      trains on `store://<teacher>/rollouts/<r>#<i>`, both in one store, the
+      student sampling nothing. `test_resume.GenerationOnlyResumeTest`: killed
+      mid-generation at two points and resumed, the directory is byte-
+      identical to a straight run's (the pre-existing resume-equivalence test
+      is untouched and green). `test_desk`: the generation-only spec placed on
+      a SERVE-ONLY listing and run there, and Q8's obligation — its host is
+      reaped and NOTHING is parked. `test_ui`: the observer counts rollouts
+      and calls it done.
+    - **UNPROVEN, STATED.** No metal: nothing here has run on a GPU, and the
+      venue door for a generation-only run is ADR 0005's to write. The v0
+      byte-identity of REAL adapter types is torch-gated, so it is unrun
+      wherever torch is absent (it is, locally). `FakeLearner` still ignores a
+      warm start's payloads for a FROZEN entry (it emits the init payload)
+      where a real learner honors them — a fake-world divergence that predates
+      this entry and that the learner-less path does NOT share, since it reads
+      the sealed blobs directly. `Campaigns.migrate` refuses a run with no
+      ledger, by name and per-run: a generation-only run has nothing to
+      warm-start from, stated rather than fixed. And STYLE.md rule 8's tree
+      still lists `runner/sources/`, a folder #59 removed — ARCHITECTURE.md
+      now says what replaced it; the STYLE line is Samarth's to cut.
+
 ## Open threads (do NOT treat as settled; flag when your answer touches them)
 
 - TODO (Samarth, settled intent — future, nothing now): BUNDLE LRU EVICTION
@@ -4089,18 +4210,20 @@ specs; backends (local/modal/skypilot) and GPU topology are semantics-neutral.
   submit-time config (resume-across-hardware keeps identity)? #43 sharpens this:
   demands are capability (base, shape) — arguably identity — while fractions and
   grouping are placement hints — arguably not.
-- Generation-only runs (algo=None still NotImplementedError): the experiment
-  contract is identity + the sealed-by-ledger commit protocol + an extent +
-  self-description — none require gradients. Needs a committing Sealer daemon
-  (Trainer minus post/gradients) and the wave-shape/extent knobs (group_size,
-  trajectories_per_wave, n_waves) relocated out of Schedule (ties into the
-  schedule-split thread below). *(ADR 0006 is this thread, ANSWERED in its
-  Context: no Sealer is needed — `write_rollout` is atomic and attach never
-  sweeps `rollouts/`, so a Generator alone leaves the durable artifact. Part
-  A landed the half that was blocking it at the door — #79: a learner-less
-  spec now PLACES, anchored on main. Part B — `needs_of`, `Plans.train`
-  optional, `run_done`, the rollouts ref, the Generator's pacing — is open
-  on Q1 and Q3-Q8.)*
+- ~~Generation-only runs (algo=None still NotImplementedError)~~ **CLOSED BY
+  #80** (ADR 0006 Part B, 2026-09-04). The thread asked for a committing
+  Sealer daemon and for the wave-shape knobs to leave Schedule; neither was
+  needed. No Sealer: `write_rollout` is atomic and attach never sweeps
+  `rollouts/`, so a Generator alone leaves the durable artifact. No knob
+  relocation: #59 had already moved the shape into the plan, and the extent
+  is which PLAN is the run's length (`Plans.extent`). What actually landed is
+  `needs_of` — a run is a set of daemon needs, the experiment is the set read
+  off a spec — plus `Plans.train` optional, `run_done` in the data layer, the
+  adapter types' init function, and `store://<run_id>/rollouts/<r>#<i>`. Part
+  A (#79) had already unblocked the door. Still open from the same
+  neighborhood: the schedule-split thread below, and `Campaigns.migrate`
+  refuses a run with no ledger (it has nothing to warm-start from), stated
+  rather than fixed.
 - Schedule: split statistical (group_size, epochs_per_wave, max_policy_lag) from
   engineering (microbatch_tokens) knobs?
 - Wave / ArchiveContext typing for the advantage stage (least-specified interface;
