@@ -174,12 +174,19 @@ class SealTest(unittest.TestCase):
 
     BUNDLE = Bundle("bundle:s", {"nudge": 0}, payloads={"nudge": b"\x00"},
                     adapter_types={"nudge": "steer"})
+    BARE = Bundle("bundle:base:teacher", {})
 
-    def client(self) -> EnginePoolClient:
+    def bus(self, bundle: Bundle | None = None):
+        """The fake engine and a client pinned to it — the seal side of the
+        window, with no GPU."""
+        bundle = bundle or self.BUNDLE
         engine = FakeEngine(plugins=RESIDUAL)
-        engine.add_bundle(self.BUNDLE)
-        return EnginePoolClient({"main": (engine, self.BUNDLE)}, SamplingSpec(),
-                                episode_seed=5)
+        engine.add_bundle(bundle)
+        return engine, EnginePoolClient({"main": (engine, bundle)},
+                                        SamplingSpec(), episode_seed=5)
+
+    def client(self, bundle: Bundle | None = None) -> EnginePoolClient:
+        return self.bus(bundle)[1]
 
     def test_completion_only_seals_as_the_prompt_length(self) -> None:
         prompt = (Message(Role.USER, "2+3"),)
@@ -190,6 +197,28 @@ class SealTest(unittest.TestCase):
     def test_the_default_seals_too(self) -> None:
         turn = go(self.client().sample((Message(Role.USER, "2+3"),)))
         self.assertEqual(turn.turn_extras[STEER_RECORD], [0, None])
+
+    def test_every_bundle_carrying_a_steer_records_a_window(self) -> None:
+        """THE SEAL-SIDE ALARM (ADR 0005, Q3). The replay's "recorded
+        nothing" refusal is gone, so the claim that made it safe has to hold
+        here instead: a bundle carrying a steer records a window on EVERY
+        request, sampled or scored, directive or none. What is left over —
+        a row with no record — is then never a steer that forgot, but a
+        trajectory this policy never sampled."""
+        prompt = (Message(Role.USER, "2+3"),)
+        engine, client = self.bus()
+        for directives in ((), (SteerWindow(start=1),), (SteerWindow(0, 2),)):
+            turn = go(client.sample(prompt, directives=directives))
+            self.assertIn(STEER_RECORD, turn.turn_extras)
+        # score traffic rides the same bus and is recorded against too
+        facts = engine.record_directives(self.BUNDLE.bundle_id, (1, 2), None, ())
+        self.assertEqual(facts, {STEER_RECORD: [0, None]})
+
+    def test_a_bundle_with_no_steer_records_nothing(self) -> None:
+        """The teacher run's shape: an EMPTY bank serves the bare base, so
+        its turns carry no window and need none."""
+        turn = go(self.client(self.BARE).sample((Message(Role.USER, "2+3"),)))
+        self.assertEqual(dict(turn.turn_extras), {})
 
 
 class SteerResumeTest(unittest.TestCase):
@@ -306,16 +335,49 @@ class ReplayNumericsTest(unittest.TestCase):
         self.assertTrue(torch.allclose(out, expected))
         self.assertTrue(torch.equal(out[2], self.base_a[2]))   # transparent
 
-    def test_a_missing_or_disagreeing_record_refuses(self) -> None:
+    def test_a_disagreeing_record_refuses(self) -> None:
         state = a_state(5)
         steer_torch.install(self.model, state)
         slot = {PATHS[0]: state, PATHS[1]: state}
-        for recorded in (None, facts((0, None), (0, None), (0, None))[:2] + (
-                ({STEER_RECORD: [0, None]}, {STEER_RECORD: [1, None]}),)):
-            plan = rows_for([slot], [0, 0, 0], recorded)
-            with row_plan(self.model).route(plan):
-                with self.assertRaises(ValueError):
-                    self.model.block.a(self.x)
+        recorded = facts((0, None), (0, None))[:2] + (
+            ({STEER_RECORD: [0, None]}, {STEER_RECORD: [1, None]}),)
+        plan = rows_for([slot], [0, 0, 0], recorded)
+        with row_plan(self.model).route(plan):
+            with self.assertRaises(ValueError):
+                self.model.block.a(self.x)
+
+    def test_a_row_with_no_record_replays_at_every_position(self) -> None:
+        """ADR 0005 Q3, as redacted: a trajectory this policy never sampled
+        (a teacher's set, a fixed cas file) carries no window and replays at
+        the adapter type's own default — the same thing `(0, None)` means."""
+        state = a_state(5)
+        steer_torch.install(self.model, state)
+        slot = {PATHS[0]: state, PATHS[1]: state}
+        v = state.vectors[PATHS[0]].detach()
+        for recorded in (None, ((), (), ()), (({"other": 1},),) * 3):
+            with self.subTest(facts=recorded):
+                plan = rows_for([slot], [0, 0, 0], recorded)
+                with row_plan(self.model).route(plan):
+                    out = self.model.block.a(self.x)
+                self.assertTrue(torch.allclose(out, self.base_a + v))
+
+    def test_a_row_with_a_record_still_replays_its_record(self) -> None:
+        """The other half of the same rule: where there IS a record it is the
+        only truth, unchanged by the default's arrival."""
+        state = a_state(5)
+        steer_torch.install(self.model, state)
+        slot = {PATHS[0]: state, PATHS[1]: state}
+        plan = rows_for([slot], [0, 0, 0],
+                        (({STEER_RECORD: [1, 3]},), (),
+                         ({STEER_RECORD: [2, None]},)))
+        with row_plan(self.model).route(plan):
+            out = self.model.block.a(self.x)
+        v = state.vectors[PATHS[0]].detach()
+        expected = self.base_a.clone()
+        expected[0, 1:3] += v
+        expected[1] += v                 # no record: every position
+        expected[2, 2:] += v
+        self.assertTrue(torch.allclose(out, expected))
 
     def test_uninstall_restores_the_tree(self) -> None:
         state = a_state(6)

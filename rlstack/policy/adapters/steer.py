@@ -15,7 +15,9 @@ WHICH positions is a property of the REQUEST: a caller passes a
 sees and RECORDS the resolved window as a turn fact (I6), and replay reads
 that fact back — so no directive ever asks replay to remember anything. The
 default, no directive, is every position: prompt, completion, every decode
-step — "steer constantly on decode".
+step — "steer constantly on decode". A row with NO record gets that same
+default at replay: it is a trajectory this policy never sampled (a teacher's
+sealed set, a fixed cas file), not a recording bug (ADR 0005, Q3).
 
 init: d (the boundary's width — a boundary site has no shape, so the spec
 states it), tie (one vector shared across every matched boundary, else one

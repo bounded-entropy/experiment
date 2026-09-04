@@ -1,9 +1,10 @@
 """The steer's replay lowering: a site wrapper at the boundary that ADDS.
 
 `SteerSite` passes the module's output through with each routed row's vector
-added — at every position of the row, or inside the window that row's turns
-RECORDED (ReplayRows.facts, the rollout's own account of what it did) — and
-leaves every other row exactly as it was: a row whose slot carries no steer
+added — inside the window that row's turns RECORDED (ReplayRows.facts, the
+rollout's own account of what it did), or at every position when the row
+recorded none, which is a row this policy never sampled (ADR 0005, Q3) —
+and leaves every other row exactly as it was: a row whose slot carries no steer
 here gets zero, which is the identity, which is what it would have gotten
 anyway. That transparency is what lets a steer tenant share a learner with a
 lora tenant (I8), and zero-init is what makes version 0 the base bit for bit.
@@ -84,13 +85,14 @@ def _rows_delta(rows: ReplayRows, path: str,
 
 def window_mask(rows: ReplayRows, path: str, width: int,
                 device) -> torch.Tensor:
-    """[rows, width] — 1 where a row's RECORDED window covers the position,
-    for rows whose slot carries a steer here; 0 everywhere else.
+    """[rows, width] — 1 where a row's window covers the position, for rows
+    whose slot carries a steer here; 0 everywhere else.
 
-    The window is read, never re-derived (I6): every turn served by a steer
-    bundle recorded one, a row whose turns disagree is not replayable in one
-    forward (one trajectory is one window — plora's rule), and a row that
-    recorded none is a recording bug, refused with the row named.
+    The window is read, never re-derived (I6): every turn a steer bundle
+    served recorded one, and a row whose turns disagree is not replayable in
+    one forward (one trajectory is one window — plora's rule), so it is
+    refused with the row named. A row that recorded NOTHING is the other
+    case, and it is not an error: see `recorded_window`.
     """
     mask = torch.zeros(int(rows.index.shape[0]), width, device=device)
     for row in range(int(rows.index.shape[0])):
@@ -104,14 +106,28 @@ def window_mask(rows: ReplayRows, path: str, width: int,
 
 def recorded_window(rows: ReplayRows, row: int,
                     path: str) -> tuple[int, int | None]:
-    """One row's window, out of its turns' recorded extras."""
+    """One row's window, out of its turns' recorded extras — and THE DEFAULT
+    WHERE THERE IS NO RECORD (ADR 0005, Q3 as redacted).
+
+    A record, when there is one, is the only truth (ADR 0004, Q2): the
+    rollout resolved the caller's directive and sealed what it applied, so
+    replay never has to know what was asked. But a trajectory the policy
+    never sampled has no record at all and is NOT a recording bug — it is
+    the ordinary case of training a steer on foreign rows (a teacher's
+    sealed rollouts, a fixed cas file). Such a row replays at EVERY position,
+    `(0, None)`: the adapter type's own default, the same one the rollout
+    applies when no directive is passed, declared in no bank.
+
+    The alarm the refusal used to raise lives on the SEAL side instead,
+    where the fact is: every bundle carrying a steer records a window on
+    both buses, which is what makes "no record" mean "no steer sampled this"
+    rather than "a steer forgot".
+    """
     turns = () if rows.facts is None else rows.facts[row]
     windows = {tuple(turn[STEER_RECORD]) for turn in turns
                if STEER_RECORD in turn}
     if not windows:
-        raise ValueError(
-            f"site {path}: row {row} recorded no {STEER_RECORD!r} — every "
-            f"turn served by a steer bundle records the window it applied")
+        return 0, None
     if len(windows) > 1:
         raise ValueError(
             f"site {path}: row {row}'s turns recorded {len(windows)} different "
