@@ -179,24 +179,28 @@ function drawSteps(timing) {
 
 function drawWaves(waves, extent) {
   const rows = (waves || {}).waves || [];
-  document.getElementById("page").append(
-      el("h2", {}, "sealed waves <span>the ledger's tail — click one to read it</span>"));
   // a run whose extent is ROLLOUTS has no Trainer and so no ledger at all:
-  // its output is sealed rollouts, and every panel fed by the ledger is
-  // legitimately empty. Say that rather than reading as a stalled run.
-  if (!rows.length && extent === "rollout") {
-    note("this run only generates: no Trainer, no ledger, no committed "
-       + "waves — its output is the sealed rollouts counted above");
+  // its sealed waves are the rollouts themselves, each sealed the moment the
+  // Generator's atomic write lands, and the observer lists THOSE (ADR 0006
+  // Part B). Every panel fed by the ledger stays legitimately empty.
+  const generated = extent === "rollout";
+  document.getElementById("page").append(
+      el("h2", {}, generated
+        ? "sealed rollouts <span>the Generator's tail — click one to read it</span>"
+        : "sealed waves <span>the ledger's tail — click one to read it</span>"));
+  if (!rows.length && generated) {
+    note("this run only generates: no Trainer, no ledger — its output is "
+       + "the sealed rollouts, and none is sealed yet");
     return;
   }
   if (!rows.length) { note("no committed waves yet"); return; }
-  const table = el("table", {}, "<tr><th>update</th><th>trajectories</th>"
-      + "<th>groups</th><th>post means</th><th>bundle</th></tr>");
+  const table = el("table", {}, `<tr><th>${generated ? "rollout" : "update"}</th>`
+      + "<th>trajectories</th><th>groups</th><th>post means</th><th>bundle</th></tr>");
   for (const wave of rows.slice().reverse()) {
     const row = el("tr", {});
     row.append(el("td", {},
         `<a href="${wavePath(route.runId, wave.update, route.folder)}">`
-        + `wave ${wave.update}</a>`));
+        + `${generated ? "rollout" : "wave"} ${wave.update}</a>`));
     row.append(el("td", {class: "n"}, esc(wave.trajectories ?? "?")));
     row.append(el("td", {class: "n"}, esc(wave.groups ?? "?")));
     row.append(el("td", {class: "k"}, Object.entries(wave.post || {})

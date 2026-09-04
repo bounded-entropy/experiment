@@ -36,7 +36,7 @@ export async function drawWave() {
   }
   const s = wave.summary;
   ctx(`<a href="${runPath(route.runId, route.folder)}" style="color:#5fb2ff">${esc(route.runId)}</a>`
-    + `<span>wave ${wave.update}</span>`
+    + `<span>${wave.extent === "rollout" ? "rollout" : "wave"} ${wave.update}</span>`
     + `<span class="meta">${s.trajectories} trajectories · ${s.groups} groups`
     + ` · ${s.tokens} generated tokens</span>`
     + (s.kl_mean !== null && s.kl_mean !== undefined
@@ -45,8 +45,12 @@ export async function drawWave() {
   drawDistributions(s);
   drawColumns(s, wave.ledger);
   drawTrajectories(wave);
-  legend("this wave is sealed: runs/&lt;id&gt;/waves/" + String(wave.update).padStart(6, "0")
-    + ".jsonl.gz plus its postdata, read through the observer's peek verbs · "
+  const home = wave.extent === "rollout" ? "rollouts" : "waves";
+  legend("this wave is sealed: runs/&lt;id&gt;/" + home + "/" + String(wave.update).padStart(6, "0")
+    + (wave.extent === "rollout"
+        ? ".jsonl.gz, the Generator's own atomic write (no postdata, no ledger line — "
+          + "this run only generates), read through the observer's peek verbs · "
+        : ".jsonl.gz plus its postdata, read through the observer's peek verbs · ")
     + "hover a histogram bar for its edges and count · a bubble with a blue edge "
     + "was GENERATED (one Turn: one pinned bundle, one seed, one contiguous KV)");
 }

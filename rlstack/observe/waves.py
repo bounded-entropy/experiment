@@ -10,7 +10,12 @@ live state, never an attach, never a write.
 Two readings, one per question the page asks:
 
     wave_list    which waves exist — the ledger's own tail, a commit record
-                 that already carries each wave's shape and column means
+                 that already carries each wave's shape and column means;
+                 for a run that only GENERATES (ADR 0006 Part B) the sealed
+                 rollouts themselves, because there the Generator's atomic
+                 write is the seal and peek_rollout reads under the same
+                 licence (found on the venue: the first generation-only run
+                 sealed 17 waves the page counted and could not show)
     wave_detail  what happened inside one — every trajectory rebuilt from its
                  row (data/trajectory.py owns the record shapes; nothing here
                  invents a field), its postdata columns aligned BY WAVE ORDER,
@@ -21,7 +26,7 @@ from __future__ import annotations
 
 import math
 
-from rlstack.data.stores.base import Store
+from rlstack.data.stores.base import Store, run_progress
 from rlstack.data.trajectory import FINISH_REASONS, Trajectory, trajectory_from_row
 
 RECENT_WAVES = 20      # the run page lists the tail, never the whole history
@@ -35,14 +40,23 @@ TEACHER_COLUMN = "teacher_logprobs"
 
 
 def wave_list(store: Store, run_id: str, limit: int = RECENT_WAVES) -> dict | None:
-    """The most recent sealed waves, newest last. Committed updates only —
-    the ledger IS the seal, so a listed wave is one peek_wave can read.
-    None when the run does not exist in this store."""
+    """The most recent sealed waves, newest last, and which EXTENT they are.
+
+    A run that trains lists committed updates — the ledger IS the seal, so a
+    listed wave is one peek_wave can read. A run that only generates has no
+    ledger; its sealed waves are its rollouts, sealed one by one as the
+    Generator's atomic writes land, and `update` on each row is the rollout's
+    index (the number the wave page addresses). None when the run does not
+    exist in this store."""
     if store.peek_manifest(run_id) is None:
         return None
+    progress = run_progress(store, run_id)
+    if progress.extent == "rollout":
+        return rollout_list(store, run_id, progress.completed, limit)
     entries = store.peek_ledger(run_id)
     return {
         "run_id": run_id,
+        "extent": progress.extent,
         "committed": int(entries[-1]["update"]) if entries else 0,
         "waves": [{
             "update": int(entry["update"]),
@@ -56,15 +70,55 @@ def wave_list(store: Store, run_id: str, limit: int = RECENT_WAVES) -> dict | No
     }
 
 
+def rollout_list(store: Store, run_id: str, sealed: int, limit: int) -> dict:
+    """The generation-only reading of wave_list: the tail of the sealed
+    rollouts, each counted from its own rows. Indices are 1..sealed in order
+    because the Generator makes waves in order; a gap would be a rollout
+    still being written, which peek_rollout answers None for and this skips."""
+    waves = []
+    for index in range(max(1, sealed - limit + 1), sealed + 1):
+        rows = store.peek_rollout(run_id, index)
+        if rows is None:
+            continue
+        waves.append({
+            "update": index,
+            "trajectories": len(rows),
+            "groups": len({str(row.get("group")) for row in rows}),
+            "bundle_id": bundle_of(rows),
+            "versions": {}, "post": {}, "train": {},
+        })
+    return {"run_id": run_id, "extent": "rollout", "committed": sealed,
+            "waves": waves}
+
+
+def bundle_of(rows: list[dict]) -> str | None:
+    """The bundle the wave's first generated turn was sampled under — every
+    turn of a rollout pins one, and the Generator samples a wave under one."""
+    for row in rows:
+        for turn in row.get("turns", ()):
+            if turn.get("bundle_id"):
+                return str(turn["bundle_id"])
+    return None
+
+
 def wave_detail(store: Store, run_id: str, update: int) -> dict | None:
     """One sealed wave: its trajectories grouped as they were trained, their
-    postdata, and the distributions. None when that update has no wave."""
-    rows = store.peek_wave(run_id, update)
+    postdata, and the distributions. None when that update has no wave.
+
+    For a run that only generates, `update` is a rollout index and the wave
+    is read through peek_rollout: no postdata, no ledger line — the sealed
+    rows are the whole of what exists, and the distributions come out of
+    them exactly as they do for a trained wave."""
+    progress = run_progress(store, run_id)
+    generated = progress.extent == "rollout"
+    rows = (store.peek_rollout(run_id, update) if generated
+            else store.peek_wave(run_id, update))
     if rows is None:
         return None
-    columns = store.peek_postdata(run_id, update) or {}
-    entry = next((e for e in store.peek_ledger(run_id)
-                  if int(e.get("update", -1)) == update), None)
+    columns = {} if generated else (store.peek_postdata(run_id, update) or {})
+    entry = None if generated else next(
+        (e for e in store.peek_ledger(run_id)
+         if int(e.get("update", -1)) == update), None)
 
     shown = rows[:MAX_TRAJECTORIES]
     trajectories = [trajectory_from_row(row) for row in shown]
@@ -73,6 +127,7 @@ def wave_detail(store: Store, run_id: str, update: int) -> dict | None:
     return {
         "run_id": run_id,
         "update": update,
+        "extent": progress.extent,
         "ledger": entry,
         "truncated": len(rows) - len(shown),
         "groups": grouped(views),

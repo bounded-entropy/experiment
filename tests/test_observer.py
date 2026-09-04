@@ -220,6 +220,78 @@ class WaveBrowserTest(unittest.TestCase):
         self.assertEqual(histogram([])["bins"], [])
 
 
+GENERATED = "gen00000"
+
+
+def sealed_rollouts(store: LocalStore, count: int = 2, planned: int = 3) -> None:
+    """A run that only GENERATES (ADR 0006 Part B): a rollout plan of `planned`
+    waves copied into the run dir, no train plan, no ledger, and `count`
+    rollouts sealed by the Generator's own atomic writes — two groups of one,
+    the second cut off by length."""
+    from rlstack import GroupPlan, RunPlan, Sample, WavePlan, encode
+
+    wave = WavePlan((GroupPlan("t1", (Sample("t1", "single_turn"),)),
+                     GroupPlan("t2", (Sample("t2", "single_turn"),))))
+    run = store.open_run(GENERATED, {"run_id": GENERATED, "spec": "{}"})
+    run.write_plan("rollout", encode(RunPlan(tuple(wave for _ in range(planned)))))
+    for index in range(1, count + 1):
+        run.write_rollout(index, wave_to_rows(Wave([
+            Group("t1", [trajectory("t1", "42")]),
+            Group("t2", [trajectory("t2", "7", "length")])])))
+
+
+class GeneratedWaveReadingTest(unittest.TestCase):
+    """A generation-only run's sealed waves ARE its rollouts, and the page
+    lists and opens them exactly as it does a trainer's committed waves —
+    found on the venue, where the first such run sealed 17 waves the page
+    counted and could not show."""
+
+    def setUp(self) -> None:
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.store = LocalStore(tmp.name)
+        sealed_rollouts(self.store)
+        self.app = ui_app([self.store])
+
+    def test_the_sealed_rollouts_are_the_listed_waves(self) -> None:
+        listed = wave_list(self.store, GENERATED)
+        self.assertEqual(listed["extent"], "rollout")
+        self.assertEqual(listed["committed"], 2)
+        self.assertEqual([w["update"] for w in listed["waves"]], [1, 2])
+        first = listed["waves"][0]
+        self.assertEqual((first["trajectories"], first["groups"]), (2, 2))
+        opened = wave_detail(self.store, GENERATED, 1)
+        self.assertEqual(first["bundle_id"],
+                         opened["groups"][0]["trajectories"][0]["bundle_id"])
+        self.assertEqual(first["post"], {})          # no ledger line carries means
+
+    def test_a_rollout_opens_as_a_wave(self) -> None:
+        wave = wave_detail(self.store, GENERATED, 2)
+        self.assertEqual(wave["extent"], "rollout")
+        self.assertIsNone(wave["ledger"])
+        self.assertEqual(len(wave["groups"]), 2)
+        self.assertEqual(wave["summary"]["finish"],
+                         {"eos": 0, "length": 1, "stop": 1})
+        self.assertEqual(wave["summary"]["columns"], [])   # nothing postprocessed it
+        self.assertIsNone(wave_detail(self.store, GENERATED, 3))   # planned, unsealed
+
+    def test_the_routes_serve_a_generated_run(self) -> None:
+        status, _, body = call(self.app, f"/api/run/{GENERATED}/waves")
+        self.assertEqual(status, "200 OK")
+        self.assertEqual(json.loads(body)["extent"], "rollout")
+        status, _, body = call(self.app, f"/api/run/{GENERATED}/wave/1")
+        self.assertEqual(status, "200 OK")
+        self.assertEqual(len(json.loads(body)["groups"]), 2)
+        status, _, _ = call(self.app, f"/api/run/{GENERATED}/wave/3")
+        self.assertEqual(status, "404 Not Found")
+
+    def test_a_trained_run_still_lists_the_ledger(self) -> None:
+        sealed_wave(self.store)
+        listed = wave_list(self.store, RUN)
+        self.assertEqual([w["update"] for w in listed["waves"]], [1])
+        self.assertEqual(listed["waves"][0]["post"], {"reward": 0.625})
+
+
 TRAFFIC = {"event": "traffic", "t": 100.0, "window_s": 10.0,
            "prefill_tokens": 1000, "decode_tokens": 500, "requests": 5,
            "ttft_ms_mean": 42.5, "admit_wait_ms_mean": 1.5,
