@@ -170,7 +170,11 @@ the engine serves one version as an ensemble of drawn members plus the mean,
 records the noise it drew, and replay reparameterizes it against the current
 posterior. `basis="random"` is the frame control: the same top-k singular
 VALUES steering seeded random orthonormal directions — the arms differ in the
-basis and nothing else.
+basis and nothing else. The prior's scale has two recipes (`prior`):
+"fixed" keeps N(0, prior_std²) where the spec put it; "learned" makes its
+log-scale a parameter of its own — a third optimizer group, `prior`, moved
+by the KL alone, watched as `plora_prior_std` — empirical Bayes over the
+latent, the recipe `grpo_elbo` is written for.
 `rlstack/policy/adapters/{plora,plora_torch,plora_vllm,plora_factors}.py`
 
 **spectral / spectral_latent** — SVF: one trainable gain per singular
@@ -184,7 +188,8 @@ weight it holds at install. `spectral_latent` is the plora-style twin (gains
 GENERATED from a latent; posterior, KL, recorded draw, member ensemble) —
 the "does the latent help" ablation. Both provide `latent_kl`'s family:
 plora and spectral_latent share that channel name, so one latent-KL loss
-prices either.
+prices either — and both carry plora's prior recipes, fixed or learned
+(`spectral_prior_std` is the watched twin).
 `rlstack/policy/adapters/{spectral,spectral_torch,spectral_vllm,spectral_latent,spectral_latent_torch,spectral_latent_vllm}.py`
 
 **TaskMaker / Derive** — mint-then-make, the third leaf: a plan may name an

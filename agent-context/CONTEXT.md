@@ -4338,6 +4338,87 @@ specs; backends (local/modal/skypilot) and GPU topology are semantics-neutral.
       skipping sealed rollouts and never re-samples one, which is what
       identity needs.
 
+83. **THE LATENT'S PRIOR, LEARNED — EMPIRICAL BAYES OVER THE DISTRIBUTION OF
+    ADAPTERS, AND THE ELBO THAT FITS IT.** Samarth's prompt (2026-09-04):
+    "one variant i was running with was taking the KL wrt some distribution
+    with some fixed sigma, and then having the probabilistic lora. i feel
+    like the more natural approach is to run an empirical bayes-like
+    approach, and have the model also learn the prior sigma over the
+    distribution (but fix it to be smth small initially), and just use the
+    ELBO loss to push the model towards representing the posterior (z |
+    data)". An experiment in an existing shape, so no ADR (Samarth: "we
+    don't need an ADR since this is an experiment"): one code commit on
+    main, cherry-picked to gsm-campaign where the arm lives. UNRUN ON METAL.
+    (#82 is the FSDP-alternation entry a parallel session was writing the
+    same afternoon; this one took the next number.)
+    - **THE PRIOR HAS TWO RECIPES.** `plora(..., prior="fixed"|"learned")`
+      and `spectral_latent(..., prior=...)`: init key `prior`, default
+      "fixed", absent means fixed (every earlier init dict keeps its
+      meaning; the sugar now writes the key, so it hashes). "learned" makes
+      log(prior_std) a Parameter of its own — `PloraState.prior_log_std` /
+      `SlatentState.prior_log_std`, one field either way (a plain tensor
+      when fixed; `state.prior` says which trains, `plora_torch.build_prior`
+      builds it) — initialized at the spec's prior_std so the KL is exactly
+      zero at init under both recipes and version 0 stays the identity
+      element. `analytic_kl(mu, log_std, prior_log_std)` takes the prior's
+      log-scale as a TENSOR, so the KL is the prior's whole gradient; its
+      derivative in prior_log_std is d − Σ(σᵢ² + μᵢ²)/prior_std², zero at
+      prior_std² = the posterior's mean second moment — the empirical-Bayes
+      fixed point (pinned). At that point the KL is ½ Σ log(1 + μᵢ²/σᵢ²): it
+      prices the posterior's CONCENTRATION, not its distance from a scale
+      nobody chose. A third param group, `prior`, exists when learned, so
+      `overrides={"pi.prior": {"lr": ...}}` gives the one scalar its own
+      pace; the gate refuses any other word (`latent-prior-unknown`,
+      `check_latent_priors_are_a_recipe`, over plora AND spectral_latent —
+      the first check spectral_latent has). A third provided tensor per
+      family, `plora_prior_std` / `spectral_prior_std`, so the ledger
+      watches the prior move (a constant when fixed).
+    - **THE PAYLOAD CARRIES IT.** `prior.log_std` rides every plora and
+      spectral_latent payload and the head names the recipe; load restores
+      it, `resident` rebuilds it. A payload emitted before this entry has
+      neither and is REFUSED on load (KeyError on "prior") — a run on a
+      volume resumes under this code only from a bundle this code wrote.
+      The served members (lora_A, lora_B per draw) are unchanged bytes.
+    - **`grpo_elbo`: THE BOUND, ONCE PER OBSERVATION, NO BETA.**
+      `grpo_latent_kl` adds BETA·KL/microbatches with BETA = 1e-3, a scale
+      nobody derived. `grpo_elbo` is the negative ELBO of the RL-as-inference
+      reading: one trajectory is one observation, the grpo surrogate stands
+      in for its log-likelihood, and KL(q‖p) counts once against the
+      update's observations — per microbatch, `surrogate + KL /
+      documents_in_update`. The learner SUMS microbatch losses into one step
+      (#59) and the surrogate is a per-microbatch token mean, so over M
+      equal microbatches of D documents that sum is (M/D)·Σ_traj, and KL/D
+      added M times lands the KL at the same (M/D): the bound, whole,
+      however `pack` split the wave. `TokenBatch.documents_in_update` is
+      the new stamp beside `microbatches_in_update` — pack writes both, a
+      hand-built batch resolves to its own document count, the wire carries
+      it. At the sweep's shape (2 tasks × 8 samples = 16 documents per
+      update) the KL's weight is 1/16, ~60× the old BETA — with a learned
+      prior chasing the posterior, what that weight buys is diversity
+      relative to the mean, not a pin to 0.05. Per-token observations would
+      be the one-line alternative; trajectories were chosen because the
+      reward is per trajectory.
+    - **THE ARM (gsm-campaign only).** `elbo` joins the within-task sweep
+      beside grpo / spectral / slatent / sdpo: spectral_latent(k=16,
+      latent=64, members=4, prior_std=0.05, prior="learned"), loss
+      grpo_elbo, post (final_answer, grpo_advantage), lr 1e-3 with pi.mapper
+      weight_decay 1e-2 and pi.prior lr 1e-2 (one scalar; at 1e-3 Adam
+      would move its log-scale at most 0.2 in 200 updates, e^0.2 in scale —
+      too little to reach any fixed point the posterior finds). 10 families
+      × 5 methods = 50 runs. Watch `spectral_prior_std` against
+      `spectral_sigma_mean` in the ledger: prior ≫ sigma is the posterior
+      concentrating, prior ≈ sigma with mu ≈ 0 is the latent idle.
+    - **WHAT THE TESTS PIN.** 990 on fakes (from 984; 130 skipped
+      stdlib-only, all 990 run under a local CPU torch): the fixed prior
+      trains nothing (not a Parameter, in no group, no grad); the learned
+      prior is its own group, starts where the fixed one sits, is
+      stationary in the KL at the EB point and pushed wider when too
+      narrow, rides the payload and resumes; `grpo_elbo` is grpo verbatim
+      at init, prices the KL once per observation whatever the microbatch
+      split, has no beta, reaches a learned prior and not a fixed one; pack
+      stamps the document count; and spectral_latent's first suite
+      (tests/test_spectral_latent.py) pins the shared recipes on its side.
+
 ## Open threads (do NOT treat as settled; flag when your answer touches them)
 
 - TODO (Samarth, settled intent — future, nothing now): BUNDLE LRU EVICTION
