@@ -7,29 +7,43 @@ JSON-safe dict frames; RemotePool implements the whole Engine protocol over it,
 so the runner cannot tell remote from local. The verb split is the contract
 every transport implements against:
 
-    call (async)   sample_tokens / score_tokens — they occupy the metal, so
-                   the service wraps each in the owning host's arbiter.admit.
+    call (async)   sample_tokens / score_tokens, and at a HOST door every
+                   learner verb — they occupy the metal, so the service wraps
+                   each in the owning host's arbiter.admit.
     ask  (sync)    add_bundle / reachability / tokenize — additive
                    registration and build facts, which by the tenancy
                    invariant never disturb traffic, so they need no admission
-                   and may run from sync call sites.
+                   and may run from sync call sites — and, at a RESIDENT's
+                   door, that resident's learner verbs, which the runner
+                   beside it admitted before the first frame.
+
+THE LEARNER IS REACHED EXACTLY AS AN ENGINE IS (ADR 0006 Part A). Since ADR
+0002 it is a process INSIDE its host — every resident, engine or learner, is a
+child of the metal, so `EngineService`/`LearnerService` are the resident's end
+of that door and `RemoteLearner` is the Host's end for its learner
+(`RemotePool` already was for an engine). Since Part A its verbs also cross
+the HOST door: `HostService.serve` admits `install` / `uninstall` /
+`forward_backward` / `optim_step` / `emit` / `load` at the serving host's own
+arbiter and executes them through that host's learner, so a run anchored
+anywhere may join a standing learner and the learner's alternation is honored
+where the learner lives. The two hops are unchanged: admission at the host,
+then the resident.
 
 Costs, stated: sample replies are non-streamed (one reply carries the whole
-event list), add_bundle ships payload bytes as base64, and the learner is never
-remote ACROSS HOSTS — the runner goes to it. Since ADR 0002 the learner IS
-behind a wire INSIDE its host: every resident (engine or learner) is a child
-process of the metal, so `EngineService`/`LearnerService` are the resident's
-end of that door and `RemoteLearner` is the Host's end for its learner
-(`RemotePool` already was for an engine). `HostService` keeps admission and
-forwards through the proxy, so the two hops are: admission at the host, then
-the resident. LocalTransport round-trips every frame through json in both
-directions, so anything that works over it works over a real transport.
+event list), add_bundle ships payload bytes as base64, and a routed learner
+puts one frame on the wire per microbatch and per update (the TokenBatch out,
+the emitted payloads back). LocalTransport round-trips every frame through
+json in both directions, so anything that works over it works over a real
+transport.
 """
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import json
+import threading
+import time
 from collections.abc import AsyncIterator, Mapping, Sequence
 from dataclasses import asdict
 from typing import TYPE_CHECKING, Protocol
@@ -365,14 +379,22 @@ class Transport(Protocol):
         ...
 
 
+LEARNER_VERBS = ("install", "uninstall", "forward_backward", "optim_step",
+                 "emit", "load")
+"""The Learner protocol as frames — the whole of what crosses a host door to
+a learner. Host-addressed: a host wears at most one learner, so unlike an
+engine verb a learner verb carries no capability address, only its tenant."""
+
+
 class HostService:
     """The host-side end of the wire.
 
-    Executes pool verbs on this host's engines under this host's arbiter — the
-    physical resource owns admission, so a remote experiment is just one more
-    source of admitted work and never gets a vote. Engines are addressed by
-    CAPABILITY (base, tp), the fleet's demand vocabulary, never by pool name —
-    pool names are an experiment's private routing."""
+    Executes pool verbs on this host's engines — and learner verbs on this
+    host's learner — under this host's arbiter: the physical resource owns
+    admission, so a remote experiment is just one more source of admitted work
+    and never gets a vote. Engines are addressed by CAPABILITY (base, tp), the
+    fleet's demand vocabulary, never by pool name — pool names are an
+    experiment's private routing."""
 
     def __init__(self, host: Host) -> None:
         self.host = host
@@ -403,7 +425,9 @@ class HostService:
         `adopt` and `stop` ride this async path but are NOT admitted: adopt
         registers a tenancy whose daemons admit their own work, stop cancels
         one, so neither door occupies anything — and both are host-addressed,
-        so they resolve no engine."""
+        so they resolve no engine. The learner verbs ride it BECAUSE they are
+        admitted (serve_learner): they occupy this host's training metal, so
+        they are exactly the shape sample_tokens has."""
         if verb == "adopt":
             return await self.host.adopt(payload["spec"],
                                          payload.get("routes", {}),
@@ -411,6 +435,8 @@ class HostService:
                                          payload.get("subdir"))
         if verb == "stop":
             return await self.host.stop(payload["run_id"])
+        if verb in LEARNER_VERBS:
+            return await self.serve_learner(verb, payload)
         engine = self._engine(payload["base"], payload["tp"])
         if not self.host.arbiter.is_attached(engine):
             self.host.arbiter.attach(
@@ -419,6 +445,49 @@ class HostService:
             raise ValueError(f"unknown admitted verb {verb!r}")
         async with self.host.arbiter.admit(engine):
             return await EngineService(engine).serve(verb, payload)
+
+    async def serve_learner(self, verb: str, payload: dict) -> dict:
+        """One learner verb from ANOTHER host, admitted here (ADR 0006 A).
+
+        The learner is reached exactly as an engine is: this host owns the
+        metal, so THIS host's arbiter admits every frame — which is what makes
+        the learner's alternation group (a multi-member HostSpec) honored
+        where the learner lives, whoever is driving it. A bare host's learner
+        attaches on first remote use, at zero footprint, exactly as its
+        engines do. The verb itself is synchronous — a Learner's protocol is —
+        so the admitted frame executes through the learner's own service, and
+        a frame that raises is a refusal to the caller, never a state here."""
+        learner = self._learner()
+        if not self.host.arbiter.is_attached(learner):
+            self.host.arbiter.attach(learner, label=f"{self.host.name}:learner")
+        async with self.host.arbiter.admit(learner):
+            reply = LearnerService(learner).answer(verb, payload)
+        self.journal_custody(verb, payload["tenant"])
+        return reply
+
+    def _learner(self) -> Learner:
+        """Resolution's learner half — the wire's only addition to Host's own
+        custody rule is turning "wears no learner" into a refusal, exactly as
+        `_engine` turns "does not serve that address" into one."""
+        if self.host.learner is None:
+            raise KeyError(
+                f"host {self.host.name!r} wears no learner; it serves "
+                f"{[(e.base, e.tp) for e in self.host.engines]}")
+        return self.host.learner
+
+    def journal_custody(self, verb: str, tenant: str) -> None:
+        """WHO IS ON THIS LEARNER, journaled at its two ends: a foreign
+        `install` writes `learner-attach`, a foreign `uninstall` writes
+        `learner-detach` (run_id, t). A tenant of this learner may be a run
+        anchored on another host, whose attach/detach rows live in THAT
+        host's journal — so without these lines nothing here would say what
+        the training metal is holding. Observability only: the observer reads
+        it, correctness never does, and no run directory sees it."""
+        if verb not in ("install", "uninstall"):
+            return
+        self.host.store.append_host_event(self.host.name, {
+            "event": "learner-attach" if verb == "install" else "learner-detach",
+            "t": time.time(), "run_id": tenant})
 
     def answer(self, verb: str, payload: dict) -> dict:
         """One admission-free verb: additive registration (add_bundle never
@@ -477,25 +546,34 @@ class EngineService:
 
 
 class LearnerService:
-    """ONE learner's five verbs as frames: the learner resident's end of its
-    door. Every verb is synchronous and pins a tenant (I8), so all five ride
-    the `ask` path and arrive in the order the Trainer issued them; nothing
-    here admits — the Trainer admitted itself at its host's arbiter before
-    the first frame."""
+    """ONE learner's verbs as frames: the learner resident's end of its door.
+
+    Every verb is synchronous and pins a tenant (I8), so at the RESIDENT's
+    door they all ride the `ask` path and arrive in the order the Trainer
+    issued them; nothing here admits. Who admitted depends on which door the
+    frame came through: for the host's own learner the Trainer admitted at its
+    own arbiter before the first frame, and for a learner reached from another
+    host `HostService.serve_learner` admitted at the serving host's arbiter
+    and then called straight into `answer`."""
 
     def __init__(self, learner: Learner) -> None:
         self.learner = learner
 
     async def serve(self, verb: str, payload: dict) -> dict:
         raise ValueError(
-            f"{verb!r}: a learner's verbs are synchronous — they ride ask, "
-            f"never call")
+            f"{verb!r}: a learner's verbs are synchronous — at a RESIDENT's "
+            f"door they ride ask, never call; the admitted async path is the "
+            f"HOST door's (HostService.serve_learner), which admits and then "
+            f"answers here")
 
     def answer(self, verb: str, payload: dict) -> dict:
         tenant = payload["tenant"]
         if verb == "install":
             self.learner.install(
                 tenant, decode_parameterization(payload["parameterization"]))
+            return {}
+        if verb == "uninstall":
+            self.learner.uninstall(tenant)
             return {}
         if verb == "forward_backward":
             return encode_train_stats(self.learner.forward_backward(
@@ -612,38 +690,107 @@ class RemotePool:
 
 
 class RemoteLearner:
-    """A Learner served by a resident, reached through a Transport — the
-    Host's end of its learner's door, and RemotePool's twin.
+    """A Learner served by a resident or by another HOST, reached through a
+    Transport — RemotePool's twin, and the Host's end of a learner's door.
 
-    Implements the whole Learner protocol; `fsdp` is the build fact the
-    resident reported in its hello, which the host attests against its
-    training regime exactly as it did against an in-process learner. Every
-    verb is one `ask` frame, synchronous and blocking like the in-process
-    call it replaces (ADR 0002, Q6): the wire adds custody, never
-    scheduling."""
+    Implements the whole Learner protocol; `fsdp` is the build fact this
+    learner was declared at, which the submit gate attests exactly as it did
+    against an in-process learner. For a resident's own proxy the number comes
+    from the hello; for a routed one it comes from the LearnerMember, and it
+    is real for the same reason RemotePool's (base, tp) is: the desk places a
+    training demand only on a listing whose training regime has that shape,
+    and that host attested its learner against the regime at birth.
 
-    def __init__(self, transport: Transport, *, fsdp: int = 1) -> None:
+    TWO DOORS, ONE CLIENT, because admission lives with the metal:
+
+    `admitted=False` is THE RESIDENT'S door — the Host's own learner, a
+    process beside the runner (ADR 0002). The Trainer already admitted it at
+    its own arbiter before the first frame, and the resident runs asks inline
+    in arrival order, so every verb is one synchronous `ask`.
+
+    `admitted=True` is ANOTHER HOST'S door (ADR 0006 Part A). Every frame must
+    be admitted at the SERVING host's arbiter, and admission is the async path
+    there (`HostService.serve`, the one `sample_tokens` rides), so the verbs
+    ride `call` — driven to completion on this proxy's own thread, because the
+    Learner protocol is synchronous (ADR 0002 Q6, kept) and the caller is
+    usually an event loop that must not be re-entered.
+    """
+
+    def __init__(self, transport: Transport, *, fsdp: int = 1,
+                 admitted: bool = False) -> None:
         self.fsdp = fsdp
+        self.admitted = admitted
         self._transport = transport
+        self._frames: asyncio.AbstractEventLoop | None = None
+
+    # ---- the two doors, one named method each -------------------------------
+
+    def frame(self, verb: str, payload: dict) -> dict:
+        """One verb through whichever door this proxy speaks (see the class
+        docstring): the resident's takes it synchronously, another host's
+        takes it admitted."""
+        if not self.admitted:
+            return self._transport.ask(verb, payload)
+        return self.admitted_frame(verb, payload)
+
+    def admitted_frame(self, verb: str, payload: dict) -> dict:
+        """An admitted frame driven from a SYNCHRONOUS call site: the
+        coroutine runs on this proxy's OWN loop, on its own thread, and the
+        caller blocks for the reply — because the Trainer issuing it is
+        usually already inside an event loop, which may be neither re-entered
+        nor made to wait, and a Learner verb may not become async (ADR 0002
+        Q6, kept). The shape is every venue's own `blocking_ask`
+        (deploy/steer_l4.py: one blocking call on its own thread).
+
+        Costs and limits, stated: one thread hop beside a wire hop; a frame
+        in flight cannot be cancelled, exactly as an in-process
+        forward_backward cannot; and over a LOCAL transport — a fleet sharing
+        one process — the serving host's arbiter is entered from this loop
+        while the caller's loop is blocked, so a same-process serving host
+        that ALTERNATES must not also be carrying engine work admitted from
+        the caller's loop. Over a real transport the serving host admits
+        every frame on its own loop and the question does not arise."""
+        return asyncio.run_coroutine_threadsafe(
+            self._transport.call(verb, payload), self.frames_loop()).result()
+
+    def frames_loop(self) -> asyncio.AbstractEventLoop:
+        """This proxy's own loop, on its own daemon thread, alive for the
+        proxy's life. ONE loop, never one per frame: the serving host's
+        admission is built out of asyncio primitives that belong to the loop
+        they were first awaited on, so a caller that changed loops between
+        frames would find its own alternation door bound to a loop that no
+        longer turns. Daemonic because this thread holds no state — the
+        tenant's state is at the learner — so an exiting process may drop
+        it."""
+        if self._frames is None:
+            self._frames = asyncio.new_event_loop()
+            threading.Thread(target=self._frames.run_forever, daemon=True,
+                             name="learner-frames").start()
+        return self._frames
+
+    # ---- the Learner protocol -----------------------------------------------
 
     def install(self, tenant: str, parameterization: Parameterization) -> None:
-        self._transport.ask("install", {
+        self.frame("install", {
             "tenant": tenant,
             "parameterization": encode_parameterization(parameterization)})
 
+    def uninstall(self, tenant: str) -> None:
+        self.frame("uninstall", {"tenant": tenant})
+
     def forward_backward(self, tenant: str, batch: TokenBatch) -> TrainStats:
-        return decode_train_stats(self._transport.ask("forward_backward", {
+        return decode_train_stats(self.frame("forward_backward", {
             "tenant": tenant, "batch": encode_token_batch(batch)}))
 
     def optim_step(self, tenant: str) -> None:
-        self._transport.ask("optim_step", {"tenant": tenant})
+        self.frame("optim_step", {"tenant": tenant})
 
     def emit(self, tenant: str) -> Emitted:
-        return decode_emitted(self._transport.ask("emit", {"tenant": tenant}))
+        return decode_emitted(self.frame("emit", {"tenant": tenant}))
 
     def load(self, tenant: str, adapters: Mapping[str, bytes],
              optim: Mapping[str, bytes] | None) -> None:
-        self._transport.ask("load", {
+        self.frame("load", {
             "tenant": tenant, "adapters": encode_payloads(adapters),
             "optim": encode_payloads(optim)})
 

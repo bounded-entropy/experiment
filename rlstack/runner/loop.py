@@ -38,7 +38,7 @@ from rlstack.runner.signals import RunSignals
 from rlstack.spec.canonical import canonical_json, run_id
 from rlstack.spec.flow import flow_graph, split_pipeline
 from rlstack.spec.specs import ExperimentSpec, Plans, PoolMember, WarmStart
-from rlstack.runner.remote import RemotePool
+from rlstack.runner.remote import RemoteLearner, RemotePool
 from rlstack.spec.validate import (
     SpecError, check_members_match_their_shape, check_pools_serve_their_base,
     check_sites_reachable_on, site_space, traffic_pools, validate_or_raise,
@@ -368,7 +368,10 @@ def attach_residents(spec: ExperimentSpec, engine_map, learner,
     A REMOTE pool attaches as a zero-footprint free resident: its metal is
     another host's partition, so local admission is bookkeeping — the real
     admission, alternation included, happens host-side at the serving
-    partition's own arbiter, whatever HostSpec the pool came from.
+    partition's own arbiter, whatever HostSpec the pool came from. A ROUTED
+    LEARNER is the same rule on the training side (ADR 0006 Part A): the
+    Trainer runs where the run is anchored, and each of its learner verbs is
+    admitted per frame at the host that wears the learner.
 
     An alternation demand on metal the host ALREADY holds in an alternation
     group (a multi-regime host attached it at birth) is satisfied, not
@@ -407,8 +410,11 @@ def attach_residents(spec: ExperimentSpec, engine_map, learner,
             continue
         arbiter.attach(engine_map[name], label=f"engine:{name}",
                        group=deferred(engine_map[name], pool_group.get(name)))
-    arbiter.attach(learner, label="learner",
-                   group=deferred(learner, learner_group))
+    if isinstance(learner, RemoteLearner) and learner.admitted:
+        arbiter.attach(learner, label="remote:learner")
+    else:
+        arbiter.attach(learner, label="learner",
+                       group=deferred(learner, learner_group))
 
 
 def _warm_start(init: WarmStart, *, tenant: str, bank_names: set[str],

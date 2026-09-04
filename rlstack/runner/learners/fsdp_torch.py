@@ -20,7 +20,7 @@ which is never emitted — and `attest_emit_is_width_free` proves it at every
 emit instead of trusting it, because resume, warm starts and bundle compilation
 all read those bytes. Rank 0's copy is the truth; the other ranks exist to
 stand in the collectives and their answers are discarded, which is safe only
-while the five verbs stay deterministic functions of their arguments — a verb
+while every verb stays a deterministic function of its arguments — a verb
 consulting rank-local state the ranks do not share would desynchronize them.
 
 Out of scope, deliberately: alternation (a sleep would have to swing
@@ -68,6 +68,13 @@ class FsdpTorchLearner(TorchLearner):
         more — the chorus narrows with the protocol (ADR 0002, Q2)."""
         self.announce("install", (tenant, parameterization))
         super().install(tenant, parameterization)
+
+    def uninstall(self, tenant: str) -> None:
+        """Announced: install was, and every rank wired this tenant's params
+        into its own copy of the tree — a rank left holding them would route
+        rows the others no longer can."""
+        self.announce("uninstall", (tenant,))
+        super().uninstall(tenant)
 
     def forward_backward(self, tenant: str, batch: TokenBatch) -> TrainStats:
         """Announced: the forward all-gathers the base and the backward
@@ -263,6 +270,8 @@ class FsdpTorchLearner(TorchLearner):
         same TorchLearner code rank 0 runs, on the same arguments."""
         if command.verb == "install":
             super().install(*command.args)
+        elif command.verb == "uninstall":
+            super().uninstall(*command.args)
         elif command.verb == "forward_backward":
             super().forward_backward(*command.args)
         elif command.verb == "optim_step":

@@ -262,3 +262,17 @@ class Learner(Protocol):
              optim: Mapping[str, bytes] | None) -> None:
         """Restore `tenant`'s deltas (and moments, unless None → fresh)."""
         ...
+
+    def uninstall(self, tenant: str) -> None:
+        """Install's inverse: unwire `tenant` and forget its state — the end
+        of a tenancy, said out loud (ADR 0006 Part A).
+
+        A learner outlives the runs on it, and since a run may be anchored on
+        another host it can no longer be assumed that the process holding the
+        tenant dies with it: the host that ran the run uninstalls at the end,
+        done or failed, so a standing learner does not accumulate the dead.
+        IDEMPOTENT — a tenant that was never installed is already uninstalled,
+        because "gone" is the goal state, not an error. Resume is unaffected:
+        re-attaching installs again and restores from the store's blobs, as
+        every attach already does."""
+        ...

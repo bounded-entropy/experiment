@@ -100,6 +100,14 @@ class TorchLearner:
                     entry.name, params, adapter_type, parameterization.optim)
         self._tenants[tenant] = state
 
+    def uninstall(self, tenant: str) -> None:
+        """Install's inverse as a VERB (ADR 0006 Part A): the tenancy ends, so
+        the module tree goes back to the way install found it. Idempotent — a
+        tenant nobody installed is already uninstalled, which is what lets a
+        host uninstall in a `finally` without knowing how far its run got."""
+        if tenant in self._tenants:
+            self._remove(tenant)
+
     def _optimizer_for(self, entry: str, params: object, adapter_type: object,
                        optim) -> torch.optim.Optimizer:
         """ONE AdamW per trainable entry, over the adapter type's NAMED param

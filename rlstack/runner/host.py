@@ -5,13 +5,17 @@ with its Partition and its Regimes, attesting the metal it was handed against
 them and never growing or reshaping afterward (I12). One regime is a dedicated
 host; several make it ALTERNATE them on its own arbiter group — one host
 wearing masks, never two hosts coordinating. It owns its engines, at most ONE
-multi-tenant learner (never remote — the runner comes to it), its arbiter, its
-journal, and the one traffic meter both of the former count into.
+multi-tenant learner, its arbiter, its journal, and the one traffic meter both
+of the former count into. A run it holds may reach ANOTHER host's engines and,
+since ADR 0006 Part A, another host's learner: the Trainer sits where the run
+is ANCHORED, and every verb it issues is admitted at the host that owns the
+metal it occupies.
 
 `await host.submit(spec, schema, store)` is how an experiment reaches metal:
 BIND each declared pool onto an owned engine serving that base at that shape,
-FIT (a learner member finds a learner here — custody, never memory
-arithmetic), ATTEST (roster in memory, journal to
+FIT (a learner member finds a learner — this host's own, or one routed to
+another host's door: custody, never memory arithmetic), ATTEST (roster in
+memory, journal to
 hosts/<name>/log.jsonl — observability only, which correctness never reads),
 and RUN under the shared arbiter against the experiment's OWN run store. That
 last is the rule submit exists to enforce: one experiment, one store, for life
@@ -100,6 +104,24 @@ class Regime:
             raise ValueError(
                 f"Regime.capability must be 'inference' or 'training', "
                 f"got {self.capability!r}")
+
+
+LEARNER_ROUTE = "learner"
+"""The key a learner's ADDRESS rides under in a route table — the same name
+the desk gives the learner demand (`Demand.name`), so a route table reads as
+the placement it came from."""
+
+
+@dataclass(frozen=True)
+class Routed:
+    """What placement's routes resolve into at this host's door: the pools
+    ANOTHER host serves, and — since ADR 0006 Part A — the learner another
+    host wears. Both are live proxies behind the protocols the runner drives
+    locally, so nothing downstream can tell where they live; `learner` None
+    means this run trains on the host's own learner, or on none at all."""
+
+    pools: dict[str, Engine] = field(default_factory=dict)
+    learner: Learner | None = None
 
 
 @dataclass
@@ -315,11 +337,15 @@ class Host:
         return binding
 
     def check_fit(self, spec: ExperimentSpec, binding: dict[str, Engine],
-                  remotes: frozenset[str] = frozenset()) -> None:
+                  remotes: frozenset[str] = frozenset(),
+                  learner: Learner | None = None) -> None:
         """FIT is custody, not arithmetic: this host can HOLD the submission
         when every declared pool is bound (bind_pools' job, already done) and
-        a learner member finds an owned learner here. Memory is NOT summed at
-        this door — since ADR 0001 a spec declares GB and a partition owns a
+        a learner member finds a learner — this host's own, or the one ROUTED
+        to another host's door (ADR 0006 Part A), which is accepted here for
+        the same reason a routed pool is: the metal is another partition's,
+        and the run reaches it over the wire. Memory is NOT summed at this
+        door — since ADR 0001 a spec declares GB and a partition owns a
         fraction, the crossing happens once at the metal's build, and the
         residents enforce it per process (vLLM's reservation, torch's cap); a
         JOIN is always memory-free because the weights already live. A remote
@@ -328,10 +354,11 @@ class Host:
             for member in host.members:
                 if isinstance(member, PoolMember):
                     continue
-                if self.learner is None:
+                if learner is None and self.learner is None:
                     raise HostError(
-                        f"host {self.name!r} has no training regime; it "
-                        f"cannot serve this spec's learner member")
+                        f"host {self.name!r} has no training regime and no "
+                        f"learner was routed to it; it cannot serve this "
+                        f"spec's learner member")
 
     # ---- submit -------------------------------------------------------------
 
@@ -339,16 +366,19 @@ class Host:
                      store: Store | None = None,
                      max_inflight: int = 64,
                      remotes: Mapping[str, Engine] | None = None,
-                     subdir: str | None = None) -> RunReport:
+                     subdir: str | None = None,
+                     learner: Learner | None = None) -> RunReport:
         """Run one experiment on this host's metal: bind, fit, solo, attest, run.
-        `remotes` maps pool names served by OTHER hosts to their RemotePools —
-        the runner goes to the learner's host and reaches every other
-        partition over the wire — so this host binds, fits and journals only
-        what it serves."""
+        `remotes` maps pool names served by OTHER hosts to their RemotePools
+        and `learner` is a learner worn by another host (None: this host's
+        own) — the run is ANCHORED here and reaches every other partition over
+        the wire, so this host binds, fits and journals only what it serves."""
         run_store = store if store is not None else self.store
         remote_pools = dict(remotes or {})
+        learner = learner if learner is not None else self.learner
         binding = self.bind_pools(spec, remotes=frozenset(remote_pools))
-        self.check_fit(spec, binding, remotes=frozenset(remote_pools))
+        self.check_fit(spec, binding, remotes=frozenset(remote_pools),
+                       learner=learner)
         binding |= remote_pools
         rid = experiment_identity(spec, schema)
         self.check_solo(rid)
@@ -367,7 +397,7 @@ class Host:
             "subdir": subdir or ""})
         try:
             report = await run_experiment_async(
-                spec, schema, run_store, binding, self.learner,
+                spec, schema, run_store, binding, learner,
                 max_inflight, arbiter=self.arbiter, subdir=subdir,
                 # the tenant knows its own phases but not its metal: this is
                 # the door through which its update timings reach THIS host's
@@ -379,12 +409,34 @@ class Host:
                 "event": "detach", "t": time.time(), "run_id": rid,
                 "status": "failed"})
             raise
+        finally:
+            self.release_tenant(learner, rid)
         self.roster[rid].status = "done"
         self.roster[rid].updates_completed = report.updates_completed
         self.store.append_host_event(self.name, {
             "event": "detach", "t": time.time(), "run_id": rid,
             "status": "done", "updates_completed": report.updates_completed})
         return report
+
+    def release_tenant(self, learner: Learner | None, run_id: str) -> None:
+        """THE TENANCY'S END AT THE LEARNER, whichever host wears it: the run
+        is over — done or failed — so its parameterization leaves the training
+        metal instead of accumulating there (ADR 0006 Part A). It matters now
+        that a learner outlives the runner: a standing learner joined by runs
+        anchored elsewhere would otherwise carry every dead tenant of every
+        host that ever used it. Resume is unaffected — a re-submission
+        installs and restores from the store's blobs, as every attach does.
+
+        A learner that cannot be reached is a learner with nothing to
+        release: its process holds the tenant, so a dead one has already
+        forgotten it, and a run being torn down must not fail its teardown
+        over a frame to a host that is going away."""
+        if learner is None:
+            return
+        try:
+            learner.uninstall(run_id)
+        except Exception as unreachable:      # noqa: BLE001 — see the docstring
+            print(f"[host {self.name}] uninstall {run_id}: {unreachable}")
 
     # ---- adopt: the submission door -----------------------------------------
 
@@ -415,9 +467,10 @@ class Host:
             spec = self.decode_adoption(spec_row)
             self.check_code_agreement(spec, code)
             schema = self.derive_schema(spec)
-            remotes = self.resolve_routes(spec, routes or {})
-            binding = self.bind_pools(spec, remotes=frozenset(remotes))
-            self.check_fit(spec, binding, remotes=frozenset(remotes))
+            routed = self.resolve_routes(spec, routes or {})
+            binding = self.bind_pools(spec, remotes=frozenset(routed.pools))
+            self.check_fit(spec, binding, remotes=frozenset(routed.pools),
+                           learner=routed.learner)
             rid = experiment_identity(spec, schema)
             self.check_solo(rid)
         except (HostError, TypeError, ValueError) as refusal:
@@ -433,10 +486,11 @@ class Host:
         # in-memory custody only.
         self.roster[rid] = Tenancy(rid, pools={
             name: (engine.base or "*")
-            for name, engine in sorted((binding | remotes).items())},
+            for name, engine in sorted((binding | routed.pools).items())},
             store=self.store.describe())
         task = asyncio.create_task(
-            self.submit(spec, schema, remotes=remotes, subdir=subdir))
+            self.submit(spec, schema, remotes=routed.pools, subdir=subdir,
+                        learner=routed.learner))
         # a failed run already journals and rosters its failure (submit's own
         # except path) — but the EXCEPTION ITSELF would otherwise vanish into
         # a retrieved future, and a silent adoption death is undiagnosable
@@ -541,40 +595,77 @@ class Host:
         return self.schema_for(spec.policy.base)
 
     def resolve_routes(self, spec: ExperimentSpec,
-                       routes: Mapping[str, str]) -> dict[str, Engine]:
-        """Every route resolved into a live Engine, ONCE, at the door: the
-        venue's resolver turns the ADDRESS into a transport, and the pool's
-        declared capability (base, tp — read off the spec, the only side that
-        knows it) wraps it into the RemotePool the runner will route to. A
-        host born without a resolver refuses routed adoption rather than
-        guessing what an address means; a route naming no declared pool is a
-        placement bug and refused the same way."""
+                       routes: Mapping[str, str]) -> Routed:
+        """Every route resolved into a live proxy, ONCE, at the door: the
+        venue's resolver turns the ADDRESS into a transport, and the member's
+        declared capability (base, tp for a pool; fsdp for the learner — read
+        off the spec, the only side that knows it) wraps it into the
+        RemotePool or RemoteLearner the runner will drive. A host born without
+        a resolver refuses routed adoption rather than guessing what an
+        address means; a route naming no declared member is a placement bug
+        and refused the same way.
+
+        The `learner` key is the learner member's address (ADR 0006 Part A) —
+        the run is anchored HERE and its learner lives THERE, so every learner
+        verb crosses that host's door and is admitted at its arbiter."""
         if not routes:
-            return {}
+            return Routed()
         if self.transport_for is None:
             raise HostError(
                 f"host {self.name!r} was born with no transport_for: it "
-                f"cannot resolve pool addresses {sorted(routes)} (pass "
+                f"cannot resolve addresses {sorted(routes)} (pass "
                 f"transport_for= at construction — the deploy that owns the "
                 f"venue knows the address format)")
-        from rlstack.runner.remote import RemotePool
+        from rlstack.runner.remote import RemoteLearner, RemotePool
 
         members = {member.name: member
                    for host in spec.topology.hosts
                    for member in host.members
                    if isinstance(member, PoolMember)}
-        remotes: dict[str, Engine] = {}
+        self.check_learner_route_is_unambiguous(members, routes)
+        pools: dict[str, Engine] = {}
+        learner: Learner | None = None
         for name, address in sorted(routes.items()):
+            if name == LEARNER_ROUTE:      # never a pool: checked just above
+                learner = RemoteLearner(self.transport_for(address),
+                                        fsdp=self.learner_member(spec).fsdp,
+                                        admitted=True)
+                continue
             member = members.get(name)
             if member is None:
                 raise HostError(
                     f"route {name!r} names no pool this spec declares "
                     f"({sorted(members)}) — routes are placement's answer to "
                     f"the spec's own demands")
-            remotes[name] = RemotePool(self.transport_for(address),
-                                       base=member.base or spec.policy.base,
-                                       tp=member.tp)
-        return remotes
+            pools[name] = RemotePool(self.transport_for(address),
+                                     base=member.base or spec.policy.base,
+                                     tp=member.tp)
+        return Routed(pools=pools, learner=learner)
+
+    def check_learner_route_is_unambiguous(self, members: Mapping,
+                                           routes: Mapping[str, str]) -> None:
+        """A spec may not declare a pool named `learner` AND route one: the
+        learner's address rides under that key (the desk's own name for the
+        learner demand), so the two would be one entry and the wrong metal
+        would answer. Refused where it is still a name, not a proxy."""
+        if LEARNER_ROUTE in routes and LEARNER_ROUTE in members:
+            raise HostError(
+                f"this spec declares a pool named {LEARNER_ROUTE!r} and the "
+                f"placement routes a learner: one route key cannot address "
+                f"both — rename the pool")
+
+    def learner_member(self, spec: ExperimentSpec):
+        """The spec's ONE learner member — the build fact a routed learner is
+        attested against (its `fsdp`). A route to a learner the spec never
+        declared is a placement bug, refused here."""
+        for host in spec.topology.hosts:
+            for member in host.members:
+                if not isinstance(member, PoolMember):
+                    return member
+        raise HostError(
+            f"a learner was routed to host {self.name!r} but this spec "
+            f"declares no learner member — routes are placement's answer to "
+            f"the spec's own demands")
 
     # ---- observability ------------------------------------------------------
 

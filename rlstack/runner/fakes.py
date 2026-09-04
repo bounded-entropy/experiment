@@ -313,6 +313,11 @@ class FakeLearner:
                 for name in ADAPTER_TYPES.get(e.adapter_type).instance.provides}),
             init=init, state=init)
 
+    def uninstall(self, tenant: str) -> None:
+        """The tenancy ends and its digest state goes with it; a tenant
+        nobody installed is already uninstalled (the protocol's rule)."""
+        self._tenants.pop(tenant, None)
+
     def forward_backward(self, tenant: str, batch: TokenBatch) -> TrainStats:
         state = self._tenant(tenant)
         state.state = content_hash({
