@@ -9,6 +9,8 @@ learner mid-run, and bases that are not Qwen.
     PYTHONUNBUFFERED=1 modal run deploy/stress_fleet.py::latejoin   # A runs; B joins A's learner mid-run
     PYTHONUNBUFFERED=1 modal run deploy/stress_fleet.py::remote_learner  # UNRUN: anchored on main,
                                                       #   the learner on the other listing (ADR 0006 A)
+    PYTHONUNBUFFERED=1 modal run deploy/stress_fleet.py::learner_sleep   # UNRUN: the fsdp=2 learner
+                                                      #   hands both cards back and comes back (#82)
     modal run deploy/stress_fleet.py::status / ::sweep / ::down --call-id <id>
 
     RLSTACK_STRESS_GPU=L4 RLSTACK_STRESS_TP=1 RLSTACK_STRESS_FSDP=1 modal deploy ...   # the 1x1 shape
@@ -472,6 +474,254 @@ def learner_custody(host: str) -> list[dict]:
     store_volume.reload()
     return [e for e in a_store().read_host_log(host)
             if str(e.get("event", "")).startswith("learner-")]
+
+
+# ---------------------------------------------------------------------------
+# the sharded learner's sleep (#82): the memory, the numbers, the door
+# ---------------------------------------------------------------------------
+
+def gpu_memory_used() -> list[int]:
+    """Per-device memory in MiB as the DRIVER sees it, over every process on
+    the card. That is the only vantage from which a FOLLOWER rank's shard is
+    visible at all: ranks 1..n-1 are separate processes and nothing here can
+    read their allocators, so the claim "the base left the devices" has to be
+    made against the driver's books, not torch's."""
+    import subprocess
+
+    told = subprocess.run(
+        ["nvidia-smi", "--query-gpu=memory.used",
+         "--format=csv,noheader,nounits"],
+        capture_output=True, text=True, check=True)
+    return [int(line) for line in told.stdout.split()]
+
+
+def a_fixed_batch():
+    """One microbatch that depends on nothing: fixed ids, every token
+    trainable, behavior logprobs zero. No tokenizer and no engine, because
+    what is under test is a move — the same tokens through the same frozen
+    weights must be the same numbers before and after it."""
+    from rlstack.data.flatten import TokenBatch
+
+    ids = tuple(range(11, 11 + 64))
+    return TokenBatch(token_ids=ids, loss_mask=(1,) * len(ids),
+                      behavior_logprobs=(0.0,) * len(ids),
+                      segment_ids=(0,) * len(ids), doc_starts=(0,))
+
+
+def one_lora_tenant():
+    """The Parameterization a learner needs and nothing more: one trainable
+    lora entry on the resolved weighted sites, under `sft` — the one loss
+    that reads logprobs alone, so a forward's number is a pure function of
+    the weights the sleep moved."""
+    from rlstack.policy.siteschema import hf_schema, resolve
+    from rlstack.runner.interfaces import (
+        EntryInstall, OptimSettings, Parameterization,
+    )
+
+    return Parameterization(
+        base=BASE, loss="sft",
+        entries=(EntryInstall(name="pi", adapter_type="lora",
+                              init={"r": RANK, "seed": 82}, trainable=True,
+                              sites=resolve(hf_schema(BASE).sites, LORA_SITE)),),
+        optim=OptimSettings("adamw", lr=1e-5, betas=(0.9, 0.999),
+                            weight_decay=0.0, overrides={}))
+
+
+def rails_of(stats) -> dict:
+    """The numbers a forward is compared on. `loss` and `logprob_gap` are
+    pure functions of THIS forward (sft's gap is the mean |logprob| against
+    behavior zeros), so they are what bit-identity is asserted on;
+    `grad_norm` is not — grads ACCUMULATE across the two calls, and its
+    roughly doubling is its own evidence that the tenant's gradients came
+    back from host RAM rather than being quietly dropped."""
+    return {"loss": stats.loss, "logprob_gap": stats.logprob_gap,
+            "mean_ratio": stats.mean_ratio, "grad_norm": stats.grad_norm}
+
+
+@app.function(image=gpu_image, gpu=GPU,
+              volumes={"/store": store_volume, "/hf": hf_cache}, timeout=3600)
+def sleep_probe() -> dict:
+    """WRITTEN, UNRUN: can an fsdp=FSDP learner hand its devices back?
+
+    ADR 0002 called a sharded offload "its own proof" and a chorus reported
+    `sleeps: false`; #82 retires that non-promise on the argument that
+    `FSDPModule._apply` already reshards and re-aliases FSDP's flat view of
+    each shard, so the offload is a plain `Module.to`. Everything in that
+    sentence is checkable off metal except the two things that matter: that
+    the memory actually comes back off every rank's card, and that a forward
+    is the same number after the round trip.
+
+    TWO STAGES, because a learner is reached two ways. In-process is the
+    CHORUS — rank 0 here, ranks 1..n-1 as its children — where sleep and wake
+    are announced verbs and the driver's books say whether every rank put its
+    shard down. Through a RESIDENT is the DOOR: the same learner as a child
+    process, its hello reporting the PROBED `sleeps`, and `sleep`/`wake`
+    entering as door frames the way a host's arbiter sends them.
+
+    It takes no metal through the desk — it is a plain GPU function, like
+    `probe_base` — so there is nothing on the plane to release; the entrypoint
+    asserts the plane is empty anyway, because a door that leaves one standing
+    is the failure ADR 0003 exists for.
+
+    Samarth runs metal; this has never been run.
+    """
+    import torch
+
+    from rlstack.runner.learners.fsdp_torch import probe_sharded_sleep
+
+    report: dict = {"gpu": GPU, "fsdp": FSDP, "base": BASE,
+                    "torch": torch.__version__,
+                    "devices": torch.cuda.device_count()}
+    probe = probe_sharded_sleep()
+    report["probe"] = {"supported": probe.supported, "reason": probe.reason}
+    print(f"[probe] {json.dumps(report['probe'])}", flush=True)
+    if not probe.supported:
+        raise SystemExit("this torch cannot offload a shard: nothing below "
+                         "would be testing what it claims to test")
+
+    report["chorus"] = sleep_the_chorus()
+    report["door"] = sleep_through_the_door()
+    print(json.dumps(report, indent=1), flush=True)
+    return report
+
+
+def sleep_the_chorus() -> dict:
+    """STAGE ONE: the learner in this process, its followers beside it.
+
+    What it asserts: the base is on the cards (a shard report), one forward
+    lands, the sleep drops per-device memory to near the idle floor ON EVERY
+    DEVICE (the followers included — that is the whole point of announcing
+    the verb), the wake brings it back, and the SAME batch through the woken
+    learner gives bit-identical loss and logprob_gap.
+    """
+    import asyncio
+
+    import torch
+
+    from rlstack.runner.learners.fsdp_torch import lead_fsdp_learner
+
+    batch = a_fixed_batch()
+    idle = gpu_memory_used()
+    print(f"[memory] idle, before the learner: {idle} MiB", flush=True)
+
+    learner = lead_fsdp_learner(FSDP, dtype=torch.bfloat16)
+    told: dict = {"idle_mib": idle, "sleeps": learner.sleeps}
+    try:
+        learner.install("sleeper", one_lora_tenant())
+        told["shard_report"] = learner.shard_report()
+        told["loaded_mib"] = gpu_memory_used()
+        print(f"[memory] base sharded and a tenant installed: "
+              f"{told['loaded_mib']} MiB", flush=True)
+
+        before = rails_of(learner.forward_backward("sleeper", batch))
+        told["before"] = before
+
+        asyncio.run(learner.sleep())
+        told["asleep_mib"] = gpu_memory_used()
+        told["returned_mib"] = [held - slept for held, slept
+                                in zip(told["loaded_mib"], told["asleep_mib"])]
+        told["still_held_over_idle_mib"] = [
+            slept - free for slept, free in zip(told["asleep_mib"], idle)]
+        print(f"[memory] asleep: {told['asleep_mib']} MiB "
+              f"(returned {told['returned_mib']}, still held over idle "
+              f"{told['still_held_over_idle_mib']})", flush=True)
+
+        asyncio.run(learner.wake())
+        told["awake_mib"] = gpu_memory_used()
+        after = rails_of(learner.forward_backward("sleeper", batch))
+        told["after"] = after
+        told["loss_delta"] = abs(after["loss"] - before["loss"])
+        told["gap_delta"] = abs(after["logprob_gap"] - before["logprob_gap"])
+        told["grad_norm_ratio"] = (after["grad_norm"] / before["grad_norm"]
+                                   if before["grad_norm"] else None)
+        print(f"[numbers] before {json.dumps(before)} after {json.dumps(after)}",
+              flush=True)
+
+        if not (told["loss_delta"] == 0.0 and told["gap_delta"] == 0.0):
+            raise SystemExit(
+                f"the forward moved across the cycle: loss delta "
+                f"{told['loss_delta']}, gap delta {told['gap_delta']} — an "
+                f"offload may cost PCIe time and nothing else")
+        if any(returned <= 0 for returned in told["returned_mib"]):
+            raise SystemExit(
+                f"a device gave nothing back: {told['returned_mib']} MiB — a "
+                f"rank held its shard through the sleep (#82)")
+    finally:
+        learner.uninstall("sleeper")
+        learner.stop()
+    return told
+
+
+def sleep_through_the_door() -> dict:
+    """STAGE TWO: the same learner as a RESIDENT, driven through its door.
+
+    What it asserts that stage one cannot: the hello carries the PROBED
+    `sleeps` (and an empty `sleep_refusal`), so a host would wire the
+    alternation hooks; `sleep` and `wake` cross as door frames, which is
+    exactly how an arbiter's evict/wake reach a child; and the learner verbs
+    that bracket them go through `RemoteLearner`, the proxy a Host holds.
+    """
+    import asyncio
+
+    from rlstack.runner.host import Partition, Regime
+    from rlstack.runner.remote import RemoteLearner
+    from rlstack.runner.residents import LearnerBuild, Resident, ResidentBirth
+
+    batch = a_fixed_batch()
+    birth = ResidentBirth(
+        label="sleep-probe:learner",
+        partition=Partition(METAL, tuple(range(FSDP)), 0.9, GPU.split(":")[0]),
+        regime=Regime("learner", "training", BASE, FSDP),
+        build=LearnerBuild(), store=a_store().address())
+    resident = Resident.spawn(birth)
+    told: dict = {"hello": resident.hello}
+    print(f"[door] hello {json.dumps(resident.hello)}", flush=True)
+    try:
+        if not resident.hello.get("sleeps"):
+            raise SystemExit(
+                f"the resident says it cannot sleep: "
+                f"{resident.hello.get('sleep_refusal')!r} — no host would wire "
+                f"the alternation hooks, which is #82's whole claim")
+        learner = RemoteLearner(resident.transport, fsdp=FSDP)
+        learner.install("sleeper", one_lora_tenant())
+        told["loaded_mib"] = gpu_memory_used()
+        before = rails_of(learner.forward_backward("sleeper", batch))
+
+        async def a_switch() -> None:
+            await resident.sleep()
+            told["asleep_mib"] = gpu_memory_used()
+            await resident.wake()
+
+        asyncio.run(a_switch())
+        told["returned_mib"] = [held - slept for held, slept
+                                in zip(told["loaded_mib"], told["asleep_mib"])]
+        after = rails_of(learner.forward_backward("sleeper", batch))
+        told["before"], told["after"] = before, after
+        told["loss_delta"] = abs(after["loss"] - before["loss"])
+        print(f"[door] returned {told['returned_mib']} MiB, loss delta "
+              f"{told['loss_delta']}", flush=True)
+        if told["loss_delta"] != 0.0:
+            raise SystemExit("the forward moved across a door-driven cycle")
+        learner.uninstall("sleeper")
+    finally:
+        teardown = resident.stop()
+        told["teardown_graceful"] = teardown.graceful
+    return told
+
+
+@app.local_entrypoint()
+def learner_sleep() -> None:
+    """Can a SHARDED learner hand its devices back (#82)? — WRITTEN, UNRUN.
+
+    Needs the fsdp=2 shape: `RLSTACK_STRESS_GPU=L4:2 RLSTACK_STRESS_FSDP=2`,
+    which is this venue's default. Takes no metal through the desk, so the
+    plane check at the end is a check on everything ELSE this venue has been
+    running — a door that leaves metal standing is what ADR 0003 is for.
+    """
+    report = sleep_probe.remote()
+    print(json.dumps(report, indent=1), flush=True)
+    if not plane_is_empty():
+        raise SystemExit("metal left standing")
 
 
 # ---------------------------------------------------------------------------
