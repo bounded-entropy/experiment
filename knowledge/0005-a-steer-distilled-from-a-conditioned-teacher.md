@@ -6,7 +6,7 @@
 | **Status** | Accepted (2026-09-04 review; Q5, Q6, Q9 and Q11 stand on their recommendations) — implementation waits on ADR 0006 Part B landing |
 | **Author** | Claude Fable 5.1 (session: the SPAR introspection paper, 2026-09-04) |
 | **Touches** | `data/tasks/` (one new dataset file), `inference/environments/` (two one-file environments), `training/post/` (two processors in the existing shape), `runner/measure.py` (a measurement may route to a second pool), `deploy/concept_steer.py` (the venue), `tests/`. NO steer file, no `rollout.py`, no `replay.py`, no learner or engine file (Q2, Q3) |
-| **Invariants** | I3 (the hint is content, so it hashes; the teacher run's identity is the set's), I6 (the record is the only truth: the teacher's turns carry a real `steer_window` because they are sampled under the student's v0 bundle — nothing is declared, nothing is guessed), I9 (a processor scores through a declared pool under privileged conditioning — hinted + teacher, combined), I5 (a 32B student is new metal territory; the spec says nothing about where) |
+| **Invariants** | I3 (the hint is content, so it hashes; the teacher run's identity is the set's), I6 (a record, when one exists, is the truth; a row without one replays at the adapter type's default — nothing is declared in the bank), I9 (a processor scores through a declared pool under privileged conditioning — hinted + teacher, combined), I5 (a 32B student is new metal territory; the spec says nothing about where) |
 | **CONTEXT** | extends #40 (the scoring verb, hinted logprobs), #47 (the teacher is a pool), #60 (a dataset becomes content), #70 (measurement outside the run), #77 / ADR 0004 (the steer, UNCHANGED: the record is the only truth — Q3). DEPENDS ON ADR 0006 (a run is daemons with resources): the teacher's trajectory set is a generation-only RUN, not a content file |
 
 ## Original prompt
@@ -82,12 +82,11 @@ nothing". Measurement lives outside the run (#70, `runner/measure.py`). A
 3. *The steer's replay refuses a row that recorded no window.*
    `steer_torch.py:recorded_window` raises "every turn served by a steer
    bundle records the window it applied" — correct, and the rule the review
-   kept (Q3: the record is the only truth, nothing is declared in the
-   bank). A trajectory set sampled under a BARE base would carry no record
-   and be unreplayable under a steer; so the teacher's turns are sampled
-   under the student's own bank at version 0 — a zero steer, bit-exact the
-   base (#77) — and carry a real record. The first draft's fallback and its
-   bank-declared window are withdrawn.
+   kept in part (Q3: nothing is declared in the bank; a record, when one
+   exists, is the truth) and redacted in part: a trajectory the policy never
+   sampled carries no record and is NOT a bug — it replays at every
+   position, the default. One rule in `steer_torch.py` changes; the bank-
+   declared window is withdrawn.
 4. *"Prompt-only" is not sayable without a tokenizer.* Moot: the review
    chose every position (Q2), which is ADR 0004's default and needs no
    coordinates. Left as the record of why a prompt edge was considered.
@@ -115,30 +114,31 @@ many teacher samples a 5120-wide vector needs to saturate.
 that the record is the only truth and nothing is declared in the bank, and
 ADR 0006 Q6 gave a learner-less run its own init. The window machinery the
 first draft proposed — a symbolic prompt edge, a bank-declared default, prompt
-lengths threaded to replay — is gone; no steer file changes.)*
+lengths threaded to replay — is gone. One steer rule changes, at Samarth's
+redaction of Q3: a row with no record replays at every position.)*
 
 Two runs of machinery, in the repo's vocabulary. First, **the teacher's
 trajectory set is a generation-only run** (ADR 0006 Part B): a
 `concept_prompts` task set whose tasks carry the user prompt (chat-templated,
 no system block, thinking off) and the happiness system block as
-`meta["hint"]`; a `conditioned_teacher` environment that samples **`main`**
-under hint + prompt and seals prompt + turn; a spec with `algo=None`, a
-rollout plan of `Sample` leaves over the corpus, and **the student's own bank
-at version 0** — the steer entry, frozen, whose v0 payload the adapter type's
-init function builds (ADR 0006 Q6). At v0 the steer is zero and bit-exact the
-base (#77: max |Δ| = 0.00e+00 on both sides), so `main` under the hint IS the
-conditioned teacher — and because the bundle carries a steer, the bus records
-`steer_window` every position on every turn, honestly: steering occurred, with
-the zero vector. The hint is stripped at the seal; "every position" is
-coordinate-free, so the record means the same thing in the stripped document.
-Its sealed `rollouts/` are the set and its `run_id` is the set's identity.
+`meta["hint"]`; a `conditioned_teacher` environment that samples `main`
+under hint + prompt and seals prompt + turn; a spec with `algo=None`, an
+EMPTY bank (so `main` is the bare Qwen3-32B — the conditioned teacher, no
+steer anywhere), and a rollout plan of `Sample` leaves over the corpus. Its
+turns carry no `steer_window`, and need none: the hint is stripped at the
+seal, and at replay a row with no record is steered at every position — the
+adapter type's default, the same one the rollout applies when no directive is
+passed, declared in no bank (Q3, as redacted). Its sealed `rollouts/` are the
+set and its `run_id` is the set's identity.
 Second, **the student is an ordinary SFT run**: `Plans.rollout=None`, a train
 plan of `Replay("store://<teacher_run>/rollouts/<r>#<i>")` leaves, loss
 `sft`, an empty post pipeline, the same steer entry trainable at ONE anchor
 boundary (`resid_pre.10` / `.32` / `.54`, `d=5120`), one run per anchor, the
 same plan bytes in all three so only the bank differs. Replay reads each
-row's recorded window and applies the vector there — ADR 0004's rule,
-unchanged, its refusal on a missing record intact. The distillation is
+row's recorded window when there is one and applies the default when there
+is none — ADR 0004's record rule, with its "recorded nothing" refusal
+replaced by the default; a seal-side test keeps the alarm (every bundle
+carrying a steer records a window on both buses). The distillation is
 **measured outside the run** (#70): a Measurement whose env samples the
 student on held-out prompts and whose pipeline is
 `conditioned_teacher_logprobs` → `reverse_kl`, through a `measure_run` that
@@ -168,8 +168,8 @@ target proves too loose.
   directive, return `Rollout(task, messages=[prompt, turn.message],
   turns=[turn], env_extras={"hint": hint.content})`. The hint is in the
   record as provenance and out of the message stream by construction, so
-  `flatten` never tokenizes it into the student's document; the turn carries
-  the bus's own `steer_window` record because the bundle carries the steer.
+  `flatten` never tokenizes it into the student's document. The turn carries
+  no steer record — the teacher run's bank is empty — and needs none.
 - **Touched** — `rlstack/inference/environments/single_turn.py` (new): the
   one-sample environment under an honest name — `math_single_turn`'s body is
   exactly this, but its name says math and this corpus is not, and a word
@@ -186,6 +186,12 @@ target proves too loose.
   trajectory, the mean over generated tokens of (recorded behavior logprob −
   teacher logprob) — the one-sample reverse-KL estimate, the number the
   measurement reports and the number `opd`'s ledger `loss` already is.
+- **Touched** — `rlstack/policy/adapters/steer_torch.py`: ONE rule —
+  `recorded_window` answers `(0, None)` for a row whose turns recorded no
+  window (the default the rollout applies with no directive), instead of
+  refusing; the "two windows in one row" refusal stays. The "recorded
+  nothing under a steer bundle" alarm moves to the seal side: a test pins
+  that both buses record a window for every bundle carrying a steer.
 - **Touched** — `rlstack/runner/measure.py`: `measure_run(..., pools:
   Mapping[str, Engine] = {})` — every extra name routes to its engine under
   a payload-free base bundle, exactly `loop.py`'s `base_bundles` rule, so
@@ -199,11 +205,11 @@ target proves too loose.
   --version` (the vector's safetensors to the volume for the paper's
   harness), and `sweep` / `status` as every venue has. Everything
   semantics-bearing is in the spec (I5).
-- **Untouched** — `policy/adapters/steer.py`, `steer_torch.py`,
-  `steer_vllm.py`, `rollout.py`, `replay.py`, `runner/learners/
-  torch_learner.py`, `runner/engines/vllm_engine.py`: the steer's record is
-  the only truth (Q3), every teacher turn carries one, and the replay
-  refusal on a missing record stays — not a line moves. `spec/specs.py`: the
+- **Untouched** — `policy/adapters/steer.py`, `steer_vllm.py`,
+  `rollout.py`, `replay.py`, `runner/learners/torch_learner.py`,
+  `runner/engines/vllm_engine.py`: the rollout side records exactly as
+  before, the directive is unchanged, nothing is declared in the bank (Q3);
+  only the replay's missing-record rule moves, in `steer_torch.py`. `spec/specs.py`: the
   `steer(...)` sugar is unchanged; no window enters `init`.
   `training/losses/sft.py` and `opd.py`: the objectives are exactly right as
   written; SFT's rails on foreign rows read as the distance to the teacher
@@ -223,16 +229,16 @@ target proves too loose.
 
 ### Promises / non-promises
 
-- **Promises** — (1) No steer file changes: every steer spec keeps its
-  identity and its numbers. (2) An SFT run over the teacher's rollouts is
+- **Promises** — (1) One steer rule changes and no spec does: every steer
+  spec keeps its identity, and every row that recorded a window replays it
+  exactly as before. (2) An SFT run over the teacher's rollouts is
   resume-equivalent: the plan is Replay leaves, the rows are sealed content,
   the row plan and the recorded window are pure functions of (spec, rows),
   so a killed-and-resumed run's directory is byte-identical to a straight one
-  — `tests/test_resume.py` gains this shape. (3) The teacher run's turns each
-  record `steer_window` every position under the student's v0 bundle, and
-  that bundle's id equals the one the student run compiles at its own Phase
-  1 (the init function and the learner's install emit the same bytes — ADR
-  0006 Q6); pinned on fakes. (4) The fakes suite is green. (5) The teacher
+  — `tests/test_resume.py` gains this shape. (3) A row with no record replays at
+  every position and a row with one still replays its record (torch-gated,
+  in the image); the fake bus and the vLLM bus record a window for every
+  bundle carrying a steer (the seal-side alarm, on fakes). (4) The fakes suite is green. (5) The teacher
   run's `run_id` is the set's identity — its spec, its code, its corpus —
   and the SFT plans name its rollouts by ref, so the fingerprint names what
   was trained on (I3) and the submit gate refuses a rollout that is not
@@ -267,16 +273,17 @@ target proves too loose.
   `rollouts/<r>`, named by `Replay("store://<run_id>/rollouts/<r>#<i>")`
   leaves in the SFT train plan (ADR 0006's ref), checked resolvable at the
   submit gate as every store ref is.
-- **Pools:** the teacher run declares `main` alone (the student's bank at v0,
-  the conditioned teacher by identity); the SFT runs declare `main` (idle but
+- **Pools:** the teacher run declares `main` alone, with an empty bank (the
+  bare base under the hint is the conditioned teacher); the SFT runs declare `main` (idle but
   required); the measurement and the on-policy arm route `main` (the
   student's bundle) and `teacher` (`bundle:base:teacher`, payload-free) to
   ONE engine object — the Routes contract already says "one engine may back
   many pool names". Through the desk, a second inference demand with the
   same (base, tp) JOINS the same listing (`covers` is capability equality).
-- **The directive rule (ADR 0004 Q2): unchanged.** No directive = every
-  position; what applied is RECORDED; replay reads the record and refuses a
-  row without one. The environment's control is per request, decided before
+- **The directive rule (ADR 0004 Q2), one clause added.** No directive =
+  every position; what applied is RECORDED; replay reads the record — and a
+  row without one (a trajectory the policy never sampled) replays at every
+  position, the same default. Nothing is declared in the bank. The environment's control is per request, decided before
   decode; a per-token decision made DURING decode is not expressible in the
   engine's request model and is not needed here (Q3's note).
 - **The gate:** nothing new here; `check_sites_reachable_on` already holds
@@ -299,25 +306,22 @@ target proves too loose.
 ```python
 # the teacher: a generation-only run (ADR 0006 Part B) — its rollouts ARE the set
 ExperimentSpec(
-    policy=PolicySpec(base="Qwen/Qwen3-32B",
-                      bank={"v": AdapterSpec("steer", "resid_pre.10",
-                                             init={"d": 5120}, trainable=False)}),
+    policy=PolicySpec(base="Qwen/Qwen3-32B", bank={}),
     gen=GenSpec(envs=("conditioned_teacher",), tasks=(<corpus>,),
                 sampling=SamplingSpec(temperature=1.0, top_p=1.0, max_tokens=1024)),
     plans=Plans(train=None, rollout=<cas: 64 waves x 32 Sample(task, "conditioned_teacher")>),
     algo=None,
     topology=Topology(hosts=(HostSpec((pool("main", tp=2),)),)),
     seeds=Seeds(master=5))
-# one teacher run per anchor site is NOT needed: the v0 steer is zero at any
-# site, so one teacher run's rollouts serve all three student arms (their
-# recorded window is "every position", site-free)
+# one teacher run serves all three student arms: its rollouts carry no steer
+# record, and each arm's replay applies its own vector at every position
 
 # inference/environments/conditioned_teacher.py
 @environment("conditioned_teacher")
 class ConditionedTeacher(Environment):
     async def run(self, client: PoolClient, task: Task) -> Rollout:
         prompt = Message(Role.USER, task.prompt)
-        turn = await client.sample([hint_for(task), prompt])      # main, at v0
+        turn = await client.sample([hint_for(task), prompt])      # main: the bare base
         return Rollout(task=task, messages=[prompt, turn.message], turns=[turn],
                        env_extras={"hint": task.meta["hint"]})
 
@@ -338,12 +342,6 @@ Measurement(name="distill", env="single_turn", task_ids=<128 held-out>, samples=
             every=8, post=("conditioned_teacher_logprobs", "reverse_kl"), seed=3,
             temperature=1.0, max_tokens=1024)
 ```
-
-One check the sketch depends on, to pin at implementation: the teacher run's
-bank site must resolve on the 32B schema like the student's, and the recorded
-window must survive the seal with the hint removed — `record_directive`
-records `[0, None]` in slice coordinates, which is exactly "every position"
-of whatever document replay builds.
 
 The on-policy arm is the same spec with `gen=GenSpec(envs=("single_turn",),
 tasks=(<corpus>,), sampling=SamplingSpec(1.0, 1.0, 1024))`, a rollout plan of
@@ -399,7 +397,7 @@ If the other branch (refuse foreign rows, keep ADR 0004's rule intact): SFT
 on the teacher's set is impossible for a steer, and the experiment is the
 on-policy arm only (Q1's other branch).
 
-> **Samarth:** "it definitely shouldnt be declared in the bank. for replay purposes, the thing that should be logged should be the positions at which steering occurred (for replay). for the engine, when generating a new token, the environment should be able to specify whether to steer or not. for learning, the learner simply injects at the positions recorded alongside the sealed rollout (in meta information or whatever)" (2026-09-04). *Folded: ADR 0004's rule stands untouched — the record is the only truth and the refusal stays. The teacher's turns get a real record by being sampled under the student's v0 bank (zero steer = the base, #77); with ALL the record is coordinate-free after the hint is stripped. Per-request control via the window is what exists today; a per-token decision DURING decode is not expressible in the engine's request model and is not needed under Q2.*
+> **Samarth:** "it definitely shouldnt be declared in the bank. for replay purposes, the thing that should be logged should be the positions at which steering occurred (for replay). for the engine, when generating a new token, the environment should be able to specify whether to steer or not. for learning, the learner simply injects at the positions recorded alongside the sealed rollout (in meta information or whatever)" (2026-09-04). *Folded: ADR 0004's rule stands untouched — the record is the only truth and the refusal stays. The teacher's turns get a real record by being sampled under the student's v0 bank (zero steer = the base, #77); with ALL the record is coordinate-free after the hint is stripped. Per-request control via the window is what exists today; a per-token decision DURING decode is not expressible in the engine's request model and is not needed under Q2.* — then, REDACTED in part (2026-09-04): "i want to redact that the sft traces have to seal the tokens. just make the default that it applied for all the window." *Re-folded: a trajectory the policy never sampled carries no record and replays at EVERY position — the adapter type's own default, the same one the rollout applies with no directive, declared nowhere in the bank. The teacher run therefore needs no bank at all, and `steer_torch.py` changes in one rule: a row with no record is the default, not a refusal.*
 
 **Q4. The teacher's trajectory set is a generation-only RUN (ADR 0006), and
 this ADR waits on that one.**
