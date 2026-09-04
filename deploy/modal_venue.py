@@ -304,7 +304,7 @@ def export_blob(store, run_id: str, blob: str, key: str) -> dict:
 # the metal container: one class, built for a venue
 # ---------------------------------------------------------------------------
 
-def metal_class(app, app_name: str, metal: str, gpu, image, *,
+def metal_class(app, app_name: str, metal: str, gpu, image, *, module: str,
                 idle_s: float = 1800.0, recipe=None, cls: str = "MetalS",
                 secrets=(), max_containers: int = 1):
     """THE METAL CONTAINER, built for one venue — what every venue file used
@@ -312,7 +312,11 @@ def metal_class(app, app_name: str, metal: str, gpu, image, *,
 
     `app` is the venue's `modal.App` (the class must be declared on it), and
     `app_name`/`cls` are the same names as an ADDRESS, which is how the desk
-    reaches back. `recipe` is a `Builds` this venue PROPOSES — journaled by
+    reaches back. `module` is the VENUE's `__name__`, and the venue binds the
+    returned class under the name `cls`: a Modal container boots by importing
+    the class's `__module__` and reading `cls` off it, so a class built here
+    but left stamped `modal_venue` fails at the container's first breath
+    (found on the venue: "module 'modal_venue' has no attribute 'MetalS'"). `recipe` is a `Builds` this venue PROPOSES — journaled by
     the desk as its own `recipe` event and overwritten by the desk's door
     (Q4); None is a metal that boots bare and waits to be told.
 
@@ -463,6 +467,7 @@ def metal_class(app, app_name: str, metal: str, gpu, image, *,
     # address says (`modal://<app>/<cls>`). A `@app.cls` line above the class
     # body would freeze it as this function's local name instead.
     MetalS.__name__ = MetalS.__qualname__ = cls
+    MetalS.__module__ = module      # where the container will look it up
     return app.cls(
         image=image, gpu=gpu,
         volumes={STORE_MOUNT: store_volume, "/hf": hf_cache},

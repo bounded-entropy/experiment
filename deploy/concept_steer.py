@@ -97,7 +97,7 @@ tasks_image = (
     modal.Image.debian_slim(python_version="3.12")
     .pip_install("transformers==5.16.1", "huggingface_hub", "safetensors",
                  "numpy")
-    .pip_install("pyarrow")
+    .pip_install("pyarrow", "jinja2")   # jinja2: apply_chat_template needs it, found on the venue
     .env({"HF_HOME": "/hf"})
     .add_local_python_source("rlstack", "modal_venue")
 )
@@ -162,8 +162,8 @@ def proposed_recipe():
         learner=LearnerBuild(checkpoint_activations=True))
 
 
-MetalS = metal_class(app, APP, METAL, GPUS, gpu_image, idle_s=IDLE_S,
-                     recipe=proposed_recipe())
+MetalS = metal_class(app, APP, METAL, GPUS, gpu_image, module=__name__,
+                     idle_s=IDLE_S, recipe=proposed_recipe())
 
 
 # ---------------------------------------------------------------------------

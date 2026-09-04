@@ -108,8 +108,8 @@ def proposed_recipe():
         learner=LearnerBuild())
 
 
-MetalS = metal_class(app, APP, METAL, GPU, gpu_image, idle_s=IDLE_S,
-                     recipe=proposed_recipe(), secrets=SECRETS)
+MetalS = metal_class(app, APP, METAL, GPU, gpu_image, module=__name__,
+                     idle_s=IDLE_S, recipe=proposed_recipe(), secrets=SECRETS)
 
 
 # ---------------------------------------------------------------------------
