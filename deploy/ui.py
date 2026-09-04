@@ -64,10 +64,18 @@ def ui():
     import threading
     import time
 
-    from rlstack.data.stores.local import LocalStore
+    from rlstack.data.stores.modal_volume import ModalVolumeStore
     from rlstack.observe.ui import ui_app
 
-    inner = ui_app([LocalStore(STORE_MOUNT, locator=STORE)])
+    # The store the metal writes through, read here and never written: the
+    # LocalStore over the mount, named by the fleet's locator so `in_stores`
+    # says modal://rlstack-store the way every host journal does. Found on
+    # the venue: a bare LocalStore takes no locator, every container of the
+    # first mount deploy died on this line, and Modal kept serving the old
+    # SDK reader in its place — which is why the run page never learned
+    # about extents.
+    inner = ui_app([ModalVolumeStore(STORE_MOUNT, volume=store_volume,
+                                     locator=STORE)])
     cache: dict[str, tuple[float, str, list, bytes]] = {}
     building = threading.Lock()
 
