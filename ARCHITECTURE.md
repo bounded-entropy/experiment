@@ -945,7 +945,13 @@ One currency and one decider per rung (I12):
   resident is resident.
 - **sleep / wake** — a build fact of `VllmEngine` (and the learner's offload),
   deliberately NOT on the Engine protocol: the seam an alternating host's
-  arbiter hooks call to make a partition really hand the device back.
+  arbiter hooks call to make a partition really hand the device back. The
+  learner's half covers SHARDED builds too (#82): the base and every tenant's
+  params and moments go to host RAM, announced across the rank chorus so every
+  rank puts its shard down, and `sleeps` is a PROBE of the pinned torch's
+  FSDP2 (`FSDPModule._apply` re-aliases each shard's flat view) rather than a
+  statement about the width — a torch without the hook reports `sleeps: false`
+  and the reason travels in the resident's hello.
 - **adopt** — submit, without the submitter in-process: decode the frame's
   canonical spec, derive the schema HERE (`schema_for`), resolve the routes into
   RemotePools (`transport_for` turns an address into a transport; the pool's declared

@@ -605,7 +605,11 @@ no_robots schema was read off the hub API, not off a download. FOUND WHILE
 WRITING THE VENUE and stated rather than fixed: `FsdpTorchLearner.sleeps` is
 `ranks.width == 1`, so at fsdp=2 the alternating HostSpec's arbiter wires no
 sleep hook for the learner and only the engine hands its share back — whether
-Q7's one-A100-80GB:2 treaty holds is the shakeout's first finding. The
+Q7's one-A100-80GB:2 treaty holds is the shakeout's first finding. *Since
+CONTEXT #82 the sharded learner sleeps too (`sleeps` is a probe of the pinned
+torch, not the width), so both members hand the device back and Q7's partition
+sizes for the largest member rather than the sum — conditional on
+`stress_fleet.py::learner_sleep`, which is written and unrun.* The
 coverage confound (Q2) and the SFT ledger's `logprob_gap` reading as
 distillation distance rather than parity stand exactly as the non-promises
 state them.

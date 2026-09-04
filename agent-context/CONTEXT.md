@@ -4338,6 +4338,102 @@ specs; backends (local/modal/skypilot) and GPU topology are semantics-neutral.
       skipping sealed rollouts and never re-samples one, which is what
       identity needs.
 
+82. **A SHARDED LEARNER SLEEPS: THE ALIAS, THE REBIND, THE RELABEL.**
+    Samarth (2026-09-04): "i feel like the comments you made for why fsdp
+    learner sharding cant happen dont sound.... too deep? ... it seems like
+    'recognizing your own tensors' can be solved by some simple caching +
+    relabeling?" — then "yes let's do that". He was right, and the mechanism
+    is smaller than the refusal was: a commit, not an ADR, changing no shape.
+    - **THE MECHANISM IN THREE SENTENCES.** THE ALIAS: `fully_shard` turns
+      each base parameter into a DTensor whose local tensor is this rank's
+      chunk, and keeps a private flat view of that SAME storage
+      (`FSDPParam._sharded_param_data`) — the thing an all-gather actually
+      reads. THE REBIND: `nn.Module._apply`, which is what `Module.to` is,
+      replaces each parameter's tensor (for a DTensor, by
+      `torch.utils.swap_tensors`, which preserves the Python object), so a
+      naive move leaves that flat view aliasing the OLD storage: nothing
+      raises, the old storage stays alive so no memory comes back at all,
+      and the next all-gather reads a device the base has left. THE RELABEL:
+      `FSDPParam.reset_sharded_param()` re-derives the flat view from the
+      current local tensor — and `FSDPModule._apply` ALREADY calls it, after
+      resharding and after `nn.Module._apply`, over its own param group. So
+      the offload is a plain `.to()`; `nn.Module._apply` recurses into
+      children first, so ONE call at the root walks every decoder block's
+      wrap on the way down and the root's own group on the way out.
+    - **WHAT LANDED.** `TorchLearner`'s async door verbs keep their
+      signatures and their bodies move into `hand_the_device_back` /
+      `take_the_device_back`; `_move_everything` splits into `move_the_base`
+      (overridable) and `move_the_tenants` (per tensor, in place, because
+      the optimizer holds those Parameter objects by identity).
+      `FsdpTorchLearner` overrides `move_the_base` with the rule and
+      `attest_the_shards_are_realiased` behind it, and makes `sleep`/`wake`
+      ANNOUNCED verbs in `follow`'s table — the base leaves the devices only
+      if every rank puts its shard down, so a chorus verb it is. The async
+      door verb and the sync broadcast meet in that sync body: what crosses
+      the wire is the verb name and an empty argument tuple.
+      `sleeps` stops being `ranks.width == 1` and becomes
+      `probe_sharded_sleep()` — a torch missing
+      `FSDPModule._apply`/`reshard`/`_get_fsdp_state` or
+      `FSDPParam.reset_sharded_param` reports `sleeps: false` WITH THE
+      REASON, which the resident's hello now carries as `sleep_refusal`
+      (I7: certify the substrate, never crash at the first evict). Nothing
+      else moved: `Host._attach_regimes` already wired evict/wake off the
+      hello for engine and learner alike (#74), the `Door` already served
+      `sleep`/`wake` for both kinds, and a learner reached from another host
+      alternates at ITS OWN host's arbiter, which is where the hooks live.
+    - **THE RULE, RESTATED, AND TWO RECORDS CORRECTED.** `fsdp_torch.py` said
+      "never `Module.to()` a tree `fully_shard` already owns"; it now says
+      NEVER SWAP A SHARDED PARAMETER'S STORAGE WITHOUT RE-ALIASING FSDP'S
+      VIEW ONTO IT, which is the actual rule and the one that permits the
+      move. `move_what_no_block_owns` (#58) justified itself partly on the
+      old reading and now says so — it survives on its second reason (the
+      reach is not its business), which was always the load-bearing one, and
+      #58's measurement stands: swapping it changed the forward peak by
+      nothing. This entry SUPERSEDES the parenthetical in #74 ("a chorus
+      reports sleeps=false, DTensor offload is its own proof") and the
+      "found while writing the venue" note in #81; ADR 0002's non-promise
+      "Learner sleep at `fsdp > 1` is UNPROVEN ... a sharded learner reports
+      `sleeps: false` until it lands" is RETIRED by it. `deploy/
+      concept_steer.py`'s Q7 sizing is updated: with both members sleeping
+      the partition sizes for the LARGEST, not the sum — conditional on the
+      probe below, with the co-residence numbers left as the fallback.
+    - **A BUG FOUND ON THE WAY.** `sleeps = ranks.width == 1` promised a
+      sleep the old code would have performed WRONGLY: this build's base is
+      `fully_shard`-wrapped at every width, width 1 included, so a width-1
+      chorus reporting `sleeps: true` would have taken `TorchLearner`'s own
+      `self._model.to()` over a wrapped tree — the stale-alias case exactly.
+      Unreachable in production (`build_learner` leads a chorus only above
+      shape 1) and now moot: the probe asks the same question at every width.
+    - **WHAT THE TESTS PIN.** 1003 green, from 990. Stdlib: the alternation
+      wiring reads the HELLO and never the width, so an fsdp=2 learner that
+      sleeps is wired on the same code path an unsharded one is; and a
+      refusal carries its reason across the door (`sleep_refusal` on a
+      training resident's hello, absent from an engine's). Torch-gated
+      (`tests/test_learner_sleep.py`, runs in the image): the probe passes on
+      the pinned torch — the version assumption as a test, which goes red
+      HERE the day torch drops the relabel rather than on metal at the first
+      alternation — and a torch without the hooks refuses NAMING each one;
+      `sleep`/`wake` are announced, appear in `follow`'s table, a follower
+      never announces, and both are quiet on a learner holding no base.
+    - **UNPROVEN — NO METAL WAS RUN.** That the memory actually comes back
+      off every rank's card; that a forward is bit-identical across a cycle
+      at width 2; the PCIe cost per switch on a 32B (~32.5 GiB per device
+      each way, the same order as the engine's own sleep, but unmeasured);
+      and whether a 32B engine and a 32B fsdp=2 learner alternating really
+      fit one 80 GB card. `deploy/stress_fleet.py::learner_sleep` is written
+      for exactly that — two stages, the chorus in-process and the same
+      learner through a resident's door, per-device memory read from the
+      DRIVER (nvidia-smi: a follower's allocator lives in another process),
+      loss and logprob_gap asserted bit-identical, grad_norm reported as
+      evidence the tenant's gradients came back — and it is UNRUN. The
+      CUDA-gated half of `test_learner_sleep.py` (local tensors on the host,
+      the flat view re-aliased, allocated memory down, a sleep before the
+      first forward) skips everywhere today: neither `run_tests` door has a
+      card. Also untried: an alternation that sleeps a learner MID-RUN on
+      real metal, and whether `install` while asleep places a tenant's
+      deltas on the wrong device (the arbiter admits then wakes, so it
+      should not arise, and nothing checks).
+
 83. **THE LATENT'S PRIOR, LEARNED — EMPIRICAL BAYES OVER THE DISTRIBUTION OF
     ADAPTERS, AND THE ELBO THAT FITS IT.** Samarth's prompt (2026-09-04):
     "one variant i was running with was taking the KL wrt some distribution

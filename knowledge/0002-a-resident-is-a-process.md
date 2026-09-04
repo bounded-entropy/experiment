@@ -385,6 +385,9 @@ now, reasoned about later); the NCCL transfer verb; interconnect topology.
   blocking it. Learner sleep at `fsdp > 1` is UNPROVEN whatever Q8a decides:
   `fully_shard`'s DTensor parameters (`fsdp_torch.py:128`) make offload a
   separate proof, and a sharded learner reports `sleeps: false` until it lands.
+  *Retired by CONTEXT #82 (sharded sleep via `reset_sharded_param`): the
+  relabel is `FSDPModule._apply`'s own, `sleeps` became a probed build fact,
+  and the metal proof is `stress_fleet.py::learner_sleep`, written and unrun.*
 
 ### Interfaces
 
