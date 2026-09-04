@@ -132,9 +132,16 @@ class Demand:
     group: int
     # the ANCHOR is where a delivered frame lands — the one demand whose host
     # receives the workload. The desk never knows WHY (for an experiment it is
-    # the learner, because the learner is never remote — but that rule lives
-    # with whoever built the demands, not here).
+    # a CHOICE the campaign layer makes — ADR 0006 Part A — but that rule
+    # lives with whoever built the demands, not here).
     anchor: bool = False
+
+    def name(self) -> str:
+        """The key this demand's ADDRESS rides under — in a placement reply
+        and in a delivery's routes. A pool is its own name; the learner
+        member has none of its own, so it is "learner", the one name the
+        whole plane calls it by."""
+        return self.pool or "learner"
 
     def per_device_gb(self) -> float | None:
         """The memory this demand needs on EACH device it spans: the total
@@ -657,7 +664,7 @@ class Desk:
         placement, boot = await self.place_listings(demands)
         if boot:
             return {"placed": False, "boot": boot}
-        pools = {demand.pool or "learner": placement[demand.pool].address
+        pools = {demand.name(): placement[demand.pool].address
                  for demand in demands}
         self.store.append_fleet_event({
             "event": "place", "t": time.time(), "delivered": False,
@@ -695,14 +702,18 @@ class Desk:
                       rows: Sequence[Mapping], frame: Mapping) -> dict:
         """The delivery half of a submission — submit's and reroute's ONE
         copy: the frame lands at the anchor demand's host with every other
-        pool's address threaded as routes (read off the demand rows alone,
-        the blind relay), and the placement is journaled WITH the rows and
-        the frame — the archive a reroute replays without the desk ever
-        having decoded it."""
+        MEMBER's address threaded as routes under its own name (read off the
+        demand rows alone, the blind relay), and the placement is journaled
+        WITH the rows and the frame — the archive a reroute replays without
+        the desk ever having decoded it.
+
+        The learner is one such member since ADR 0006 Part A: its address is
+        threaded like a pool's whenever it did not land on the anchor's own
+        listing, and the desk still never learns what a learner is for."""
         anchor = next(d for d in demands if d.anchor)
         anchor_listing = placement[anchor.pool]
-        routes = {d.pool: placement[d.pool].address for d in demands
-                  if not d.anchor and d.pool is not None
+        routes = {d.name(): placement[d.pool].address for d in demands
+                  if not d.anchor
                   and placement[d.pool] is not anchor_listing}
         try:
             reply = await anchor_listing.host.adopt(

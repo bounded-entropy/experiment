@@ -2,9 +2,10 @@
 
 These are the fleet plane's pure functions — no desk, no metal, no store.
 The claims: a spec's topology reads as capability demands with the anchor
-on the learner (the learner is never remote, said ONCE, in campaign.py) and
-its GB passed through as declared (ADR 0001); ONE HostSpec is ONE placement
-unit; a unit's per-device GB is its largest member's, a whole device sized
+chosen by the campaign layer (ADR 0006 Part A — the learner's demand by
+default, `main` when there is no learner, the asked-for member when one is
+asked) and its GB passed through as declared (ADR 0001); ONE HostSpec is ONE
+placement unit; a unit's per-device GB is its largest member's, a whole device sized
 per metal; a GB figure becomes a fraction of the one device it lands on, and
 more than a device holds is the acquire rung; and coverage is capability
 equality — the ONE join rule, desk and metal alike.
@@ -42,10 +43,34 @@ class DemandsTest(unittest.TestCase):
                          ["inference", "training"])
         self.assertEqual([d.pool for d in demands], ["main", None])
 
-    def test_the_anchor_is_the_learner_and_only_the_learner(self) -> None:
+    def test_the_anchor_is_the_learner_unasked_and_only_the_learner(self) -> None:
         demands = demands_of(spec_with((
             HostSpec((pool("main"),)), HostSpec((learner(),)))))
         self.assertEqual([d.anchor for d in demands], [False, True])
+
+    def test_the_anchor_is_a_choice(self) -> None:
+        """Since ADR 0006 Part A every member is routable, so where the frame
+        lands — and therefore where the run's Trainer sits — is asked for by
+        name: a pool, or the learner."""
+        hosts = (HostSpec((pool("main"),)), HostSpec((learner(),)))
+        on_main = demands_of(spec_with(hosts), anchor="main")
+        self.assertEqual([d.anchor for d in on_main], [True, False])
+        on_learner = demands_of(spec_with(hosts), anchor="learner")
+        self.assertEqual([d.anchor for d in on_learner], [False, True])
+
+    def test_a_learner_less_spec_anchors_on_main(self) -> None:
+        """No learner declared, no special rule: the run's own serving host
+        is the seat. Whether such a run RUNS is ADR 0006 Part B; that it can
+        be PLACED is settled here."""
+        demands = demands_of(spec_with((HostSpec((pool("main"),)),)))
+        self.assertEqual([(d.name(), d.anchor) for d in demands],
+                         [("main", True)])
+
+    def test_an_anchor_the_spec_does_not_declare_is_refused(self) -> None:
+        with self.assertRaises(DeskError) as caught:
+            demands_of(spec_with((HostSpec((pool("main"),)), )),
+                       anchor="judge")
+        self.assertIn("names no member", str(caught.exception))
 
     def test_vram_gb_passes_through_as_declared(self) -> None:
         """GB in, GB out — total across shards, None for a whole device per

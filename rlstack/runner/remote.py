@@ -877,7 +877,7 @@ class RemoteDesk:
     """The client end of the standing fleet: a campaign's whole surface.
 
     The desk is workload-blind, so the SHAPING happens here, client-side:
-    `submit` turns a spec into demand rows (anchor on the learner) plus an
+    `submit` turns a spec into demand rows (one of them the anchor) plus an
     opaque frame via the campaign layer, and one frame carries both to the
     desk — which places, delivers to the anchor, and answers with where
     everything landed (or what to boot). `resolve` is the pure client's
@@ -887,13 +887,16 @@ class RemoteDesk:
     def __init__(self, transport: Transport) -> None:
         self._transport = transport
 
-    async def submit(self, spec: object,
-                     subdir: str | None = None) -> dict:
+    async def submit(self, spec: object, subdir: str | None = None,
+                     anchor: str | None = None) -> dict:
+        """`anchor` names the member the frame lands on — and therefore where
+        the run's Trainer sits (campaign.anchor_demand's rule): unasked, the
+        learner's host when the spec declares one, `main` otherwise."""
         from rlstack.runner.campaign import demands_of, frame_for
         from rlstack.runner.desk import demand_rows
 
         return await self._transport.call("submit", {
-            "demands": demand_rows(demands_of(spec)),
+            "demands": demand_rows(demands_of(spec, anchor)),
             "frame": frame_for(spec, subdir)})
 
     async def resolve(self, demands: Sequence) -> dict:

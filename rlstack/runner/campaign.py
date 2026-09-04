@@ -3,9 +3,9 @@
 The desk is workload-blind (runner/desk.py) — its vocabulary is Demands and
 frames. This module is the other side of that boundary, the only place that
 turns an ExperimentSpec INTO the desk's vocabulary: `demands_of` reads the
-topology as capability demands and marks the learner demand as the ANCHOR
-(the learner is never remote, so the frame lands where the learner builds —
-that rule lives here, with the spec, never at the desk), and `frame_for`
+topology as capability demands and marks ONE of them as the ANCHOR — where
+the frame lands, and therefore where the run's Trainer sits (ADR 0006 Part
+A). That choice lives here, with the spec, never at the desk. `frame_for`
 wraps the canonical row with the client's code claim.
 
 `Campaigns` is the desk's spec-aware sidecar: it owns the passes that need
@@ -19,6 +19,7 @@ not the class's.
 
 from __future__ import annotations
 
+import dataclasses
 import json
 from collections.abc import Mapping, Sequence
 
@@ -26,13 +27,17 @@ from rlstack.runner.desk import Demand, Desk, DeskError, demand_rows
 from rlstack.spec.specs import ExperimentSpec, PoolMember
 
 
-def demands_of(spec: ExperimentSpec) -> tuple[Demand, ...]:
-    """The spec's topology as capability demands, learner marked ANCHOR.
+def demands_of(spec: ExperimentSpec,
+               anchor: str | None = None) -> tuple[Demand, ...]:
+    """The spec's topology as capability demands, one of them marked ANCHOR.
     One HostSpec is one placement unit (its index is the demand's `group`),
     and `vram_gb` passes through AS DECLARED — total across shards, None for
     a whole device per shard. The spec speaks GB and so does the desk; the
     crossing to a partition's fraction happens once, at the metal's build,
-    where the card is known (ADR 0001) — never here."""
+    where the card is known (ADR 0001) — never here.
+
+    `anchor` names the member the frame lands on ("main", any declared pool,
+    or "learner"). Unasked, `anchor_demand` chooses."""
     out: list[Demand] = []
     for hi, host in enumerate(spec.topology.hosts):
         for member in host.members:
@@ -44,9 +49,35 @@ def demands_of(spec: ExperimentSpec) -> tuple[Demand, ...]:
             else:
                 out.append(Demand(
                     pool=None, capability="training", base=spec.policy.base,
-                    shape=member.fsdp, vram_gb=member.vram_gb, group=hi,
-                    anchor=True))
-    return tuple(out)
+                    shape=member.fsdp, vram_gb=member.vram_gb, group=hi))
+    chosen = anchor_demand(tuple(out), anchor)
+    return tuple(dataclasses.replace(d, anchor=True) if d is chosen else d
+                 for d in out)
+
+
+def anchor_demand(demands: Sequence[Demand], asked: str | None) -> Demand:
+    """WHERE THE RUN IS ANCHORED — and therefore where its Trainer sits, since
+    the runner goes with the frame (ADR 0006 Part A).
+
+    Unasked, the LEARNER's demand when the spec declares one: that is where a
+    training run has always run, and keeping it is what makes every existing
+    venue behave exactly as before. With no learner declared, the `main`
+    pool's demand — the run's own serving host, the natural seat for a runner
+    whose work is generation. Asked, the named member, because since Part A
+    every member is routable and the seat is a free choice: name a pool, or
+    "learner". A name the spec does not declare is a refusal, never a guess —
+    an anchor is where the work goes.
+    """
+    by_name = {d.name(): d for d in demands}
+    if asked is None:
+        asked = "learner" if "learner" in by_name else "main"
+    chosen = by_name.get(asked)
+    if chosen is None:
+        raise DeskError(
+            f"anchor {asked!r} names no member of this spec's topology "
+            f"({sorted(by_name)}) — the anchor is where the frame lands, so "
+            f"it must be something the spec declares")
+    return chosen
 
 
 def frame_for(spec: ExperimentSpec, subdir: str | None = None) -> dict:
@@ -69,9 +100,11 @@ class Campaigns:
         self.store = desk.store
 
     async def submit(self, spec: ExperimentSpec,
-                     subdir: str | None = None) -> dict:
-        """A spec through the blind door: shaped here, delivered there."""
-        return await self.desk.submit(demand_rows(demands_of(spec)),
+                     subdir: str | None = None,
+                     anchor: str | None = None) -> dict:
+        """A spec through the blind door: shaped here, delivered there.
+        `anchor` names the member the frame lands on (demands_of's rule)."""
+        return await self.desk.submit(demand_rows(demands_of(spec, anchor)),
                                       frame_for(spec, subdir))
 
     async def serve(self, verb: str, payload: dict) -> dict:
@@ -107,7 +140,6 @@ class Campaigns:
         parent record. Per-run failures land in the report; one bad run never
         stops the pass.
         """
-        import dataclasses
         import time
 
         from rlstack.runner.remote import spec_from_json

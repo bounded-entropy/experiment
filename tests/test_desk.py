@@ -12,7 +12,9 @@ produces is byte-identical to an in-process submit of the same spec.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import dataclasses
+import io
 import tempfile
 import unittest
 
@@ -128,7 +130,7 @@ class DeskFixture(unittest.TestCase):
         return service
 
     def stand_up(self, name: str, address: str, *, serves_pool: bool,
-                 trains: bool, solo: bool = False) -> Host:
+                 trains: bool, solo: bool = False, engine=None) -> Host:
         """One standing host: regimes it wears, a transport it answers on,
         and — for a learner host — the resolver that turns every OTHER
         address in this test's little world."""
@@ -136,7 +138,7 @@ class DeskFixture(unittest.TestCase):
         engines = ()
         if serves_pool:
             regimes.append(Regime(f"{name}-serve", "inference", BASE, 1))
-            engines = (FakeEngine(base=BASE),)
+            engines = (engine or FakeEngine(base=BASE),)
         if trains:
             regimes.append(Regime(f"{name}-train", "training", BASE, 1))
         host = Host(
@@ -906,6 +908,122 @@ class BlindDeskTest(DeskFixture):
                                {"spec": {}, "code": None, "subdir": None}))
         self.assertFalse(reply["accepted"])
         self.assertIn("anchor", reply["error"])
+
+
+class AnchorTest(DeskFixture):
+    """The anchor is a CHOICE (ADR 0006 Part A): the frame lands where the
+    campaign layer says, the learner's address is threaded like any other
+    member's, and one standing learner serves runs anchored anywhere."""
+
+    def test_the_frame_lands_on_main_and_the_learner_is_routed(self) -> None:
+        """The mirror of the default delivery: anchored on main, the run's
+        Trainer sits at the serving host and the LEARNER's address rides in
+        the routes — and the run commits over that wire."""
+        serving = self.stand_up("serve-a", "fleet://a", serves_pool=True,
+                                trains=False)
+        trainer = self.stand_up("train-b", "fleet://b", serves_pool=False,
+                                trains=True)
+        desk = self.desk()
+        desk.list_host("serve-a", serving.regimes, "fleet://a")
+        desk.list_host("train-b", trainer.regimes, "fleet://b")
+
+        async def drive():
+            reply = await Campaigns(desk).submit(self.split_spec(),
+                                                 anchor="main")
+            await serving._adoptions[reply["run_id"]]
+            return reply
+        reply = go(drive())
+        self.assertTrue(reply["accepted"], reply)
+        self.assertEqual(reply["host"], "serve-a")
+        self.assertEqual(reply["pools"],
+                         {"main": "serve-a", "learner": "train-b"})
+        self.assertEqual(
+            serving.status()["tenants"][reply["run_id"]]["status"], "done")
+        # the tenancy lives at the anchor; the learner host holds only custody
+        self.assertEqual(trainer.status()["tenants"], {})
+        delivered = [e for e in self.store.read_fleet_log()
+                     if e.get("event") == "place" and e.get("delivered")]
+        self.assertEqual(
+            [row for row in delivered[-1]["demands"] if row["anchor"]],
+            [row for row in delivered[-1]["demands"] if row["pool"] == "main"])
+
+    def test_two_anchors_join_one_learner_listing(self) -> None:
+        """Part A, promise 3: two runs anchored on two different serving
+        hosts train on ONE listed learner. Both commit, and the learner's
+        host journals both tenancies attaching and then both leaving — the
+        only place a run anchored elsewhere is visible on the metal it
+        trains on."""
+        gate = asyncio.Event()
+        busy = self.stand_up("serve-a", "fleet://a", serves_pool=True,
+                             trains=False, solo=True,
+                             engine=GatedEngine(gate, base=BASE))
+        spare = self.stand_up("serve-c", "fleet://c", serves_pool=True,
+                              trains=False)
+        trainer = self.stand_up("train-b", "fleet://b", serves_pool=False,
+                                trains=True)
+        desk = self.desk()
+        desk.list_host("serve-a", busy.regimes, "fleet://a", solo=True)
+        desk.list_host("serve-c", spare.regimes, "fleet://c")
+        desk.list_host("train-b", trainer.regimes, "fleet://b")
+
+        async def drive():
+            first = await Campaigns(desk).submit(self.split_spec(),
+                                                 anchor="main")
+            # while the first holds the solo listing, the second anchors
+            # on the OTHER serving host — and joins the same learner
+            second = await Campaigns(desk).submit(
+                arith_spec(self.train, seeds=Seeds(master=99),
+                           topology=self.split_spec().topology),
+                anchor="main")
+            gate.set()
+            await busy._adoptions[first["run_id"]]
+            await spare._adoptions[second["run_id"]]
+            return first, second
+        first, second = go(drive())
+        self.assertEqual(first["host"], "serve-a")
+        self.assertEqual(second["host"], "serve-c")
+        self.assertEqual(first["pools"]["learner"], "train-b")
+        self.assertEqual(second["pools"]["learner"], "train-b")
+        self.assertEqual(
+            busy.status()["tenants"][first["run_id"]]["status"], "done")
+        self.assertEqual(
+            spare.status()["tenants"][second["run_id"]]["status"], "done")
+        custody = [(e["event"], e["run_id"])
+                   for e in self.store.read_host_log("train-b")
+                   if str(e.get("event", "")).startswith("learner-")]
+        self.assertEqual(
+            sorted(custody),
+            sorted([("learner-attach", first["run_id"]),
+                    ("learner-attach", second["run_id"]),
+                    ("learner-detach", first["run_id"]),
+                    ("learner-detach", second["run_id"])]))
+
+    def test_a_learner_less_spec_is_placed_and_refused_by_the_loop(self) -> None:
+        """A spec with no learner member anchors on `main` and PLACES — the
+        desk's "exactly one anchor" is satisfied without a learner. Whether
+        it then RUNS is ADR 0006 Part B: today the loop refuses it, and that
+        refusal is the loop's, not the desk's."""
+        serving = self.stand_up("serve-a", "fleet://a", serves_pool=True,
+                                trains=False)
+        desk = self.desk()
+        desk.list_host("serve-a", serving.regimes, "fleet://a")
+        generation_only = arith_spec(
+            self.train, algo=None,
+            topology=Topology(hosts=(HostSpec((pool("main"),)),)))
+
+        async def drive():
+            reply = await Campaigns(desk).submit(generation_only)
+            with self.assertRaises(NotImplementedError) as caught:
+                await serving._adoptions[reply["run_id"]]
+            return reply, str(caught.exception)
+        # the host prints a dying adoption's traceback to its own stdout
+        # (Host.adopt's rule: a silent adoption death is undiagnosable) —
+        # here the death is the assertion, so the transcript stays quiet
+        with contextlib.redirect_stdout(io.StringIO()):
+            reply, refusal = go(drive())
+        self.assertTrue(reply["accepted"], reply)
+        self.assertEqual(reply["pools"], {"main": "serve-a"})
+        self.assertIn("algo is required", refusal)
 
 
 class DecommissionTest(DeskFixture):
