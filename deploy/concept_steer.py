@@ -40,15 +40,21 @@ hand the device back. The serving build also pays the steer's demands (our
 worker class, eager mode) because the gate holds the steer's boundary against
 the main engine's inventory even for a run that samples nothing.
 
-ONE THING THE ALTERNATION DOES NOT BUY, stated before it is run: a SHARDED
-learner reports that it cannot sleep — `FsdpTorchLearner.sleeps` is
-`ranks.width == 1`, because offloading a DTensor chorus is its own proof (ADR
-0002, non-promises) — so at fsdp=2 the arbiter wires no sleep hook for it and
-only the ENGINE hands its share back. The partition's fraction is the unit's
-LARGEST member either way, so a live learner and an awake engine would both
-be entitled to it. Whether the two fit on one 80 GB card at these numbers is
-the shakeout's first finding; the fallback is two HostSpecs on wider metal,
-or an engine share small enough to sit beside a resident learner.
+WHAT THE ALTERNATION BUYS, AND WHAT IT IS STILL WAITING ON. Since #82 a
+sharded learner sleeps too: `FsdpTorchLearner.sleeps` is a PROBE of the
+pinned torch, not `ranks.width == 1`, so at fsdp=2 the arbiter wires the
+learner's evict/wake exactly as it wires the engine's and ONE resident is
+live at a time. The partition then sizes for the unit's LARGEST member — the
+number both members are already entitled to — instead of for their sum.
+
+That holds ONCE THE METAL PROBE PASSES, and it has not been run:
+`deploy/stress_fleet.py::learner_sleep` is what shows the memory actually
+comes back off both cards and that a forward is bit-identical across the
+cycle. Until it does, the co-residence numbers stand as the fallback — a 32B
+is ~32.5 GiB per device either way, serving and training cannot co-reside on
+80 GB with a 1000-token activation budget, and the answer if the learner's
+sleep does not land is two HostSpecs on wider metal or an engine share small
+enough to sit beside a resident learner.
 
 Everything semantics-bearing is in the specs below — the banks, the loss, the
 plans, the corpus (I5); everything else here is venue.
@@ -441,7 +447,12 @@ def topology():
     at fsdp=2 on one partition (Q7). A 32B is ~32.5 GiB per device either
     way, so the two cannot co-reside on 80 GB with a 1000-token activation
     budget; alternating implies max_policy_lag=0, which an SFT run does not
-    care about because nothing it trains on is its own."""
+    care about because nothing it trains on is its own.
+
+    Since #82 BOTH members hand the device back — the sharded learner's sleep
+    is a probed build fact, not a refusal — so the members' declared GB is the
+    largest one's rather than their sum. Unproven on metal
+    (`stress_fleet.py::learner_sleep`); the header says what the fallback is."""
     from rlstack import HostSpec, LearnerMember, PoolMember, Topology
 
     return Topology(hosts=(HostSpec((
