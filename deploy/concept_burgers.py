@@ -153,7 +153,7 @@ def build_prompts(concept: str = CONCEPT, seed: int = SPLIT_SEED) -> dict:
 
 @app.function(image=cpu_image, volumes={"/store": store_volume}, timeout=600)
 def canonical(kind: str, train_tasks: str = "", teacher_run: str = "",
-              layer: int = 0, adapter: str = "nsteer") -> dict:
+              layer: int | str = 0, adapter: str = "nsteer") -> dict:
     """One spec as its canonical row, for the client to submit. The plan
     bytes go into the cas HERE, on the volume, which is where the host reads
     them (a client-minted plan never reaches it — found 2026-09-05)."""
@@ -204,21 +204,27 @@ def distill_set(train_tasks: str = "", timeout_s: float = 7200.0) -> None:
 
 @app.local_entrypoint()
 def submit(layer: int = 0, adapter: str = "nsteer", algo: str = "sft",
-           teacher_run: str = "", train_tasks: str = "") -> None:
+           teacher_run: str = "", train_tasks: str = "", site: str = "",
+           solo: bool = False) -> None:
     """ONE ARM, submitted and left running — the desk's reply printed, the
     run followed by `::follow_run` or watched at the observer. An SFT arm
     names the teacher's set; an on-policy arm names the train set."""
-    if layer not in ANCHORS:
-        raise SystemExit(f"--layer must be one of {list(ANCHORS)}")
+    if site and site not in THIRDS:
+        raise SystemExit(f"--site must be one of {list(THIRDS)}")
+    if not site and layer not in ANCHORS:
+        raise SystemExit(f"--layer must be one of {list(ANCHORS)} (or --site)")
+    where = site or layer
     if adapter not in ADAPTERS or algo not in ALGOS:
         raise SystemExit(f"--adapter in {ADAPTERS}, --algo in {ALGOS}")
     if algo == "sft" and not teacher_run:
         raise SystemExit("--teacher-run <run_id from ::distill_set>")
     if algo == "opd" and not train_tasks:
         raise SystemExit("--train-tasks <cas uri from ::prompts>")
-    row = (canonical.remote("opd", train_tasks, "", layer, adapter) if algo == "opd"
-           else canonical.remote("student", "", teacher_run, layer, adapter))
-    print(json.dumps(submit_spec(row, SUBDIR), default=str)[:600], flush=True)
+    row = (canonical.remote("opd", train_tasks, "", where, adapter) if algo == "opd"
+           else canonical.remote("student", "", teacher_run, where, adapter))
+    # --solo: joins nothing that stands, carves its own listings (a card of
+    # its own where one is registered bare) — "i want this to run fast"
+    print(json.dumps(submit_spec(row, SUBDIR, solo=solo), default=str)[:600], flush=True)
 
 
 @app.local_entrypoint()

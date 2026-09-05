@@ -2164,3 +2164,41 @@ class ReleaseTerminatesTheContainerTest(unittest.TestCase):
         told = asyncio.run(desk.release("m"))
         self.assertTrue(told["released"])
         self.assertFalse(told["terminated"])
+
+
+class SoloPlacementTest(DeskFixture):
+    """`submit(..., solo=True)` (2026-09-05): the placement joins NO listing
+    that stood before it, its carves are born solo so nothing later joins
+    them, and a metal with nothing on it is preferred."""
+
+    def test_a_solo_submit_carves_past_a_covering_listing(self) -> None:
+        service = self.metal_service(devices=4)
+        desk = self.desk_with_metal("fake-metal")
+        first = go(Campaigns(desk).submit(self.split_spec()))
+        self.assertTrue(first["accepted"], first)
+        other = dataclasses.replace(self.split_spec(), seeds=Seeds(master=99))
+        second = go(Campaigns(desk).submit(other, solo=True))
+        self.assertTrue(second["accepted"], second)
+        self.assertNotEqual(second["host"], first["host"])   # carved, not joined
+        self.assertEqual(len(desk.listings), 4)
+        self.assertTrue(desk.listings[second["host"]].solo)
+        self.assertTrue(service.hosts[second["host"]].solo)
+        requests = [e["request"] for e in self.store.read_fleet_log()
+                    if e["event"] == "provision"]
+        self.assertEqual([r["solo"] for r in requests], [False, False, True, True])
+        # a plain submit afterwards joins the first placement's listings, never the solo ones
+        third = go(Campaigns(desk).submit(
+            dataclasses.replace(self.split_spec(), seeds=Seeds(master=7))))
+        self.assertTrue(third["accepted"], third)
+        self.assertEqual(third["host"], first["host"])
+
+    def test_a_solo_carve_prefers_an_empty_metal(self) -> None:
+        self.metal_service("a-metal", devices=4)
+        self.metal_service("b-metal", devices=2)
+        desk = self.desk_with_metal("a-metal", "b-metal")
+        first = go(Campaigns(desk).submit(self.split_spec()))
+        self.assertEqual(desk.listings[first["host"]].metal, "a-metal")
+        solo = go(Campaigns(desk).submit(
+            dataclasses.replace(self.split_spec(), seeds=Seeds(master=99)), solo=True))
+        self.assertTrue(solo["accepted"], solo)
+        self.assertEqual(desk.listings[solo["host"]].metal, "b-metal")

@@ -587,6 +587,7 @@ class Desk:
 
     async def place_listings(self, demands: Sequence[Demand],
                              avoid: frozenset[str] = frozenset(),
+                             solo: bool = False,
                              ) -> tuple[dict[str | None, Listing], list[dict]]:
         """Every placement unit onto a listing, a fresh carve, or the boot
         list: what no listed host serves is CARVED on a registered metal that
@@ -598,9 +599,18 @@ class Desk:
         always a NEW name."""
         placement: dict[str | None, Listing] = {}
         boot: list[dict] = []
+        if solo:
+            # SOLO (2026-09-05): nothing that stood before this placement is
+            # joined — every unit carves, and the carves are born solo so no
+            # later submit joins them either. Listings born INSIDE this
+            # placement stay joinable (an on-policy arm's teacher pool joins
+            # the main it just carved: one experiment, one engine).
+            avoid = avoid | frozenset(self.listings)
+        standing = frozenset(self.listings)      # what stood before this placement
         for unit in placement_units(demands):
             listing = (self.find_listing(unit, avoid)
-                       or await self.provision_unit(unit))
+                       or await self.provision_unit(unit, solo=solo,
+                                                    standing=standing))
             if listing is None:
                 boot.append({
                     "regimes": [regime_of(d).name for d in unit],
@@ -617,19 +627,21 @@ class Desk:
                 placement[demand.pool] = listing
         return placement, boot
 
-    async def provision_unit(self, unit: tuple[Demand, ...]) -> Listing | None:
+    async def provision_unit(self, unit: tuple[Demand, ...],
+                             solo: bool = False,
+                             standing: frozenset[str] = frozenset()) -> Listing | None:
         """Rung two, in two attempts: CARVE on the carve-able metal, and — if
         nothing there holds the unit — KNOCK a metal the desk RELEASED whose
         recorded facts could, then carve again (ADR 0003, Q4). Re-acquiring
         metal the fleet already owns needs no human: the human act was the
         deploy. What no metal, released or live, can hold is still a boot
         instruction — the standing acquire, which stays a human's."""
-        listing = await self.carve_unit(unit)
+        listing = await self.carve_unit(unit, solo=solo, standing=standing)
         if listing is not None:
             return listing
         if not await self.knock_released(unit):
             return None
-        return await self.carve_unit(unit)
+        return await self.carve_unit(unit, solo=solo, standing=standing)
 
     def could_hold(self, unit: tuple[Demand, ...], metal: Metal) -> bool:
         """Could this metal hold the unit IF IT WERE BARE? Its recorded
@@ -653,7 +665,9 @@ class Desk:
                 return True
         return False
 
-    async def carve_unit(self, unit: tuple[Demand, ...]) -> Listing | None:
+    async def carve_unit(self, unit: tuple[Demand, ...],
+                         solo: bool = False,
+                         standing: frozenset[str] = frozenset()) -> Listing | None:
         """The standing CARVE, desk-issued: nothing listed serves this unit,
         so the desk asks each registered metal whether it can hold it (the
         residual, in GB per device — the DEDUCTION) and COMMANDS the first
@@ -669,7 +683,13 @@ class Desk:
         if not self.metal_remotes:
             return None
         need_devices = max(demand.shape for demand in unit)
-        for metal_name in sorted(self.metal_remotes):
+        # a solo carve wants a card of its own: metals with nothing STANDING
+        # on them (listed before this placement began — this placement's own
+        # carves keep its units together) come first, then the usual name order
+        occupied = {self.listings[host].metal for host in standing
+                    if host in self.listings}
+        for metal_name in sorted(self.metal_remotes,
+                                 key=lambda n: (solo and n in occupied, n)):
             recipe = self.recipe_for(metal_name)
             if recipe is None:
                 self.refuse_carve(metal_name,
@@ -686,7 +706,7 @@ class Desk:
                 continue
             remote = self.metal_remotes[metal_name]
             need_gb = unit_gb(unit, self.metal[metal_name])
-            request = self.carve_request(unit, metal_name, need_gb)
+            request = self.carve_request(unit, metal_name, need_gb, solo=solo)
             try:
                 free = remote.residual()
             except Exception:
@@ -732,7 +752,7 @@ class Desk:
             "reason": reason})
 
     def carve_request(self, unit: tuple[Demand, ...], metal_name: str,
-                      need_gb: float) -> dict:
+                      need_gb: float, solo: bool = False) -> dict:
         """The carve command as the metal verb speaks it: the regimes the
         host will wear, the per-device GB its partition must hold, and the
         recipe it builds from — this desk's journaled recipe for that metal,
@@ -745,6 +765,7 @@ class Desk:
                          "base": d.base, "shape": d.shape} for d in unit],
             "base": unit[0].base,
             "vram_gb": need_gb,
+            "solo": solo,               # born solo: one experiment, nobody joins
             "builds": recipe.row() if recipe is not None else None,
         }
 
@@ -767,7 +788,8 @@ class Desk:
                       for pool, listing in placement.items()}})
         return {"placed": True, "pools": pools}
 
-    async def submit(self, rows: Sequence[Mapping], frame: Mapping) -> dict:
+    async def submit(self, rows: Sequence[Mapping], frame: Mapping,
+                     solo: bool = False) -> dict:
         """Demand rows plus one OPAQUE FRAME: place, then DELIVER the frame to
         the anchor demand's host with every other pool's address threaded as
         routes. The desk reads the frame's envelope (spec/code/subdir are the
@@ -783,7 +805,7 @@ class Desk:
             return {"accepted": False,
                     "error": f"a delivery needs exactly one anchor demand "
                              f"(where the frame lands); got {len(anchored)}"}
-        placement, boot = await self.place_listings(demands)
+        placement, boot = await self.place_listings(demands, solo=solo)
         if boot:
             return {"accepted": False, "boot": boot,
                     "error": "no listed host serves these units and no "
@@ -1393,7 +1415,8 @@ class Desk:
 
     async def serve(self, verb: str, payload: dict) -> dict:
         if verb == "submit":
-            return await self.submit(payload["demands"], payload["frame"])
+            return await self.submit(payload["demands"], payload["frame"],
+                                     solo=bool(payload.get("solo", False)))
         if verb == "place":
             return await self.place(demands_from(payload["demands"]))
         if verb == "list":
@@ -1723,7 +1746,8 @@ class MetalService:
         self.pending.append(booking)
         try:
             host = await asyncio.to_thread(self.build, name, regimes,
-                                           devices, gb)
+                                           devices, gb,
+                                           bool(request.get("solo", False)))
             # booked -> built in one tick: no await between the thread's
             # return and these lines, so residual never blinks
             self.hosts[name] = host
@@ -1757,7 +1781,7 @@ class MetalService:
         self.builds = builds
 
     def build(self, name: str, regimes: tuple[Regime, ...],
-              devices: tuple[int, ...], gb: float) -> Host:
+              devices: tuple[int, ...], gb: float, solo: bool = False) -> Host:
         """(worker thread) THE crossing happens here, once: `gb` per device
         becomes this partition's fraction against the card this metal
         measured (fraction_for_gb — more than one device holds raises the
@@ -1783,7 +1807,7 @@ class MetalService:
             return Host(name, engines=tuple(engines),
                         learner=learners[0] if learners else None,
                         store=self.store, partition=partition, regimes=regimes,
-                        schema_for=self.schema_for,
+                        solo=solo, schema_for=self.schema_for,
                         transport_for=self.transport_for, residents=residents)
         except BaseException:
             for resident in residents:

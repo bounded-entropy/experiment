@@ -261,14 +261,15 @@ def take_down(names, call, reason: str) -> dict:
 # the campaign helpers: submit, and follow to the extent
 # ---------------------------------------------------------------------------
 
-def submit_spec(row: dict, subdir: str, anchor: str | None = None) -> dict:
+def submit_spec(row: dict, subdir: str, anchor: str | None = None,
+                solo: bool = False) -> dict:
     """One canonical spec row through THE desk. The reply is the placement:
     accepted, the run id, the anchor host and every pool's address."""
     import asyncio
 
     from rlstack.runner.remote import spec_from_json
 
-    reply = asyncio.run(desk().submit(spec_from_json(row), subdir=subdir,
+    reply = asyncio.run(desk().submit(spec_from_json(row), subdir=subdir, solo=solo,
                                       anchor=anchor))
     print(f"[submit] {json.dumps(reply, default=str)[:400]}", flush=True)
     if not reply.get("accepted"):

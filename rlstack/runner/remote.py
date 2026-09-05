@@ -1034,7 +1034,7 @@ class RemoteDesk:
         self._transport = transport
 
     async def submit(self, spec: object, subdir: str | None = None,
-                     anchor: str | None = None) -> dict:
+                     anchor: str | None = None, solo: bool = False) -> dict:
         """`anchor` names the member the frame lands on — and therefore where
         the run's Trainer sits (campaign.anchor_demand's rule): unasked, the
         learner's host when the spec declares one, `main` otherwise."""
@@ -1043,7 +1043,7 @@ class RemoteDesk:
 
         return await self._transport.call("submit", {
             "demands": demand_rows(demands_of(spec, anchor)),
-            "frame": frame_for(spec, subdir)})
+            "frame": frame_for(spec, subdir), "solo": solo})
 
     async def resolve(self, demands: Sequence) -> dict:
         """Demands in, addresses out — placement without a workload: the

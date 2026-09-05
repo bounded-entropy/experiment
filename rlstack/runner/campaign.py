@@ -127,11 +127,11 @@ class Campaigns:
 
     async def submit(self, spec: ExperimentSpec,
                      subdir: str | None = None,
-                     anchor: str | None = None) -> dict:
+                     anchor: str | None = None, solo: bool = False) -> dict:
         """A spec through the blind door: shaped here, delivered there.
         `anchor` names the member the frame lands on (demands_of's rule)."""
         return await self.desk.submit(demand_rows(demands_of(spec, anchor)),
-                                      frame_for(spec, subdir))
+                                      frame_for(spec, subdir), solo=solo)
 
     async def serve(self, verb: str, payload: dict) -> dict:
         if verb == "migrate":
