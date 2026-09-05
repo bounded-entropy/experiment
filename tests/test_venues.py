@@ -111,6 +111,7 @@ class VenueFixture(unittest.TestCase):
         sys.path.insert(0, str(DEPLOY))          # so `import modal_venue` works
         try:
             cls.concept_steer = load_venue("concept_steer")
+            cls.concept_burgers = load_venue("concept_burgers")
             cls.steer_l4 = load_venue("steer_l4")
             cls.stress_fleet = load_venue("stress_fleet")
             cls.gsm_a100 = load_venue("gsm_a100")
@@ -236,7 +237,7 @@ class SpecsAreUnchangedTest(VenueFixture):
 
     def test_the_fixture_covers_every_spec_the_venues_build(self) -> None:
         """A row nobody compares is a promise nobody keeps."""
-        self.assertEqual(len(ROWS), 14)
+        self.assertEqual(len(ROWS), 19)
 
 
 class ChassisTest(VenueFixture):
@@ -343,3 +344,37 @@ class DeskDoorTest(VenueFixture):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class BurgersTest(VenueFixture):
+    """The 0.6B proof of concept (2026-09-05): the same science off one
+    `Campaign` record, a burger for a concept, three anchors at ~15/50/85 %
+    of 28 layers, and the pool and the learner as two placement units."""
+
+    def test_the_campaign_pins_its_rows(self) -> None:
+        v = self.concept_burgers
+        self.assertRowUnchanged("concept_burgers.teacher_spec",
+                                v.teacher_spec(self.store, self.concept_tasks))
+        for layer in v.ANCHORS:
+            self.assertRowUnchanged(
+                f"concept_burgers.student_spec@{layer}",
+                v.student_spec(self.store, "teacher-run-0", layer, "nsteer"))
+        self.assertRowUnchanged("concept_burgers.opd_spec@14",
+                                v.opd_spec(self.store, self.concept_tasks, 14, "nsteer"))
+
+    def test_the_anchors_span_the_depth_and_the_placement_is_split(self) -> None:
+        v = self.concept_burgers
+        self.assertEqual(v.ANCHORS, (4, 14, 24))
+        self.assertEqual(v.BASE, "Qwen/Qwen3-0.6B")
+        spec = v.student_spec(self.store, "teacher-run-0", 14, "mlp_lora")
+        self.assertEqual(len(spec.topology.hosts), 2)        # the pool, the learner
+        opd = v.opd_spec(self.store, self.concept_tasks, 24, "nsteer")
+        self.assertEqual(len(opd.topology.hosts), 3)         # ... and the teacher
+        self.assertEqual(spec.policy.bank["v"].site, "layers.14.mlp.*")
+
+    def test_the_happiness_venue_still_speaks_its_own_names(self) -> None:
+        """The delegation kept every name the doors and this file use."""
+        v = self.concept_steer
+        self.assertEqual(v.HAPPINESS.anchors, v.ANCHORS)
+        self.assertFalse(v.HAPPINESS.split)
+        self.assertEqual(len(v.topology().hosts), 1)
