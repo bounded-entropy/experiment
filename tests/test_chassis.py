@@ -97,7 +97,7 @@ class ChassisTest(ChassisFixture):
         desk = self.a_desk()
 
         # announce: `metal_class`'s own registration, proposing nothing
-        go(desk.register_metal(service.metal, address=self.PLANE, idle_s=None))
+        desk.register_metal(service.metal, address=self.PLANE, idle_s=None)
         self.assertIsNone(desk.recipe_for(self.METAL))
         self.assertIsNone(service.builds)
 
@@ -130,7 +130,7 @@ class ChassisTest(ChassisFixture):
         so a stale address never routes."""
         service = self.bare_metal()
         desk = self.a_desk()
-        go(desk.register_metal(service.metal, address=self.PLANE, idle_s=None))
+        desk.register_metal(service.metal, address=self.PLANE, idle_s=None)
         desk.recipe(self.METAL, Builds.fakes())
         go(Campaigns(desk).submit(self.a_spec()))
 
@@ -142,7 +142,7 @@ class ChassisTest(ChassisFixture):
         self.assertIn(without_epoch(address), IN_PROCESS)
         self.assertTrue(RemoteHost(transport_for(address)).status())
 
-        go(service.decarve(listed[0]))
+        service.decarve(listed[0])
         self.assertNotIn(without_epoch(address), IN_PROCESS)
         with self.assertRaises(ValueError):
             transport_for(address)
@@ -152,7 +152,7 @@ class ChassisTest(ChassisFixture):
         published still answers — the state a reborn metal starts from."""
         service = self.bare_metal()
         desk = self.a_desk()
-        go(desk.register_metal(service.metal, address=self.PLANE, idle_s=None))
+        desk.register_metal(service.metal, address=self.PLANE, idle_s=None)
         desk.recipe(self.METAL, Builds.fakes())
         go(Campaigns(desk).submit(self.a_spec()))
         addresses = [listing.address for listing in desk.listings.values()]

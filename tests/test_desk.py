@@ -2170,7 +2170,7 @@ class ReleaseTerminatesTheContainerTest(unittest.TestCase):
         store = LocalStore(tempfile.mkdtemp())
         desk = Desk(store, host_for=lambda addr: None, terminate_for=end)
         metal = Metal(name="m", gpu="L4", devices=1, vram_gb=24.0)
-        asyncio.run(desk.register_metal(metal, container="ta-0001"))
+        desk.register_metal(metal, container="ta-0001")
         told = asyncio.run(desk.release("m"))
         self.assertTrue(told["released"])
         self.assertTrue(told["terminated"])
@@ -2183,8 +2183,8 @@ class ReleaseTerminatesTheContainerTest(unittest.TestCase):
         from rlstack.runner.desk import Desk, Metal
 
         desk = Desk(LocalStore(tempfile.mkdtemp()), host_for=lambda addr: None)
-        asyncio.run(desk.register_metal(
-            Metal(name="m", gpu="L4", devices=1, vram_gb=24.0), container="ta-1"))
+        desk.register_metal(
+            Metal(name="m", gpu="L4", devices=1, vram_gb=24.0), container="ta-1")
         told = asyncio.run(desk.release("m"))
         self.assertTrue(told["released"])
         self.assertFalse(told["terminated"])

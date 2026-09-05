@@ -37,7 +37,7 @@ import modal
 from concept_campaign import ADAPTERS, ALGOS, Campaign
 from modal_venue import (
     a_store, cpu_image_for, follow, gpu_image_for, hf_cache, metal_class,
-    metal_handle, progress_function, run_suite, store_volume, submit_and_follow,
+    canonical_row, metal_handle, run_suite, store_volume, submit_and_follow,
     submit_spec, wait_for_metal,
 )
 
@@ -156,23 +156,26 @@ def build_prompts(concept: str = CONCEPT, seed: int = SPLIT_SEED) -> dict:
     return uris
 
 
-@app.function(image=cpu_image, volumes={"/store": store_volume}, timeout=600)
-def canonical(kind: str, train_tasks: str = "", teacher_run: str = "",
-              layer: int | str = 0, adapter: str = "nsteer") -> dict:
-    """One spec as its canonical row, for the client to submit. The plan
-    bytes go into the cas HERE, on the volume, which is where the host reads
-    them (a client-minted plan never reaches it — found 2026-09-05)."""
-    from rlstack import canonical_json
-
-    store = a_store()
-    spec = (teacher_spec(store, train_tasks) if kind == "teacher"
-            else opd_spec(store, train_tasks, layer, adapter) if kind == "opd"
-            else student_spec(store, teacher_run, layer, adapter))
-    store_volume.commit()
-    return json.loads(canonical_json(spec))
+def teacher_row(train_tasks: str) -> dict:
+    """The teacher's spec as its canonical row, ON THE CLIENT (ADR 0008,
+    F6): the task set is borrowed through the desk (the rollout plan is one
+    group per prompt), the plan bytes go to the cas through the desk's
+    `put_plan`. No on-demand function is in this path."""
+    return canonical_row(lambda store: teacher_spec(store, train_tasks),
+                         borrow=(train_tasks,))
 
 
-progress = progress_function(app, cpu_image, module=__name__)
+def student_row(teacher_run: str, layer, adapter: str) -> dict:
+    """An SFT arm's row, on the client: it borrows nothing."""
+    return canonical_row(lambda store: student_spec(store, teacher_run, layer, adapter))
+
+
+def opd_row(train_tasks: str, layer, adapter: str) -> dict:
+    """An on-policy arm's row, on the client: it borrows the train set."""
+    return canonical_row(lambda store: opd_spec(store, train_tasks, layer, adapter),
+                         borrow=(train_tasks,))
+
+
 
 
 # ---------------------------------------------------------------------------
@@ -201,8 +204,7 @@ def distill_set(train_tasks: str = "", timeout_s: float = 7200.0) -> None:
         raise SystemExit("--train-tasks <cas uri from ::prompts>")
     metal_handle(APP).serve.spawn()
     print(json.dumps(wait_for_metal(METAL), indent=1), flush=True)
-    run_id = submit_and_follow(progress, canonical.remote("teacher", train_tasks),
-                               SUBDIR, timeout_s)
+    run_id = submit_and_follow(teacher_row(train_tasks), SUBDIR, timeout_s)
     print(f"[set] the teacher's rollouts are run {run_id} — "
           f"pass it to ::submit --teacher-run", flush=True)
 
@@ -225,8 +227,8 @@ def submit(layer: int = 0, adapter: str = "nsteer", algo: str = "sft",
         raise SystemExit("--teacher-run <run_id from ::distill_set>")
     if algo == "opd" and not train_tasks:
         raise SystemExit("--train-tasks <cas uri from ::prompts>")
-    row = (canonical.remote("opd", train_tasks, "", where, adapter) if algo == "opd"
-           else canonical.remote("student", "", teacher_run, where, adapter))
+    row = (opd_row(train_tasks, where, adapter) if algo == "opd"
+           else student_row(teacher_run, where, adapter))
     # --solo: joins nothing that stands, carves its own listings (a card of
     # its own where one is registered bare) — "i want this to run fast"
     print(json.dumps(submit_spec(row, SUBDIR, solo=solo), default=str)[:600], flush=True)
@@ -237,7 +239,7 @@ def follow_run(run_id: str = "", timeout_s: float = 14400.0) -> None:
     """RE-ATTACH to a run on the metal and follow it to its extent."""
     if not run_id:
         raise SystemExit("--run-id <rid>")
-    print(f"[follow] {follow(progress, run_id, timeout_s)} reached its extent",
+    print(f"[follow] {follow(run_id, timeout_s)} reached its extent",
           flush=True)
 
 
