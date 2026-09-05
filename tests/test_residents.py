@@ -190,8 +190,10 @@ class DoorTest(unittest.TestCase):
             async with host.arbiter.admit(host.engines[0]):
                 pass
         go(switch_twice())
+        # the first switch evicts the learner too (Arbiter._switch): it held
+        # the device from install, before any admit
         self.assertEqual(engine.naps, ["wake", "sleep", "wake"])
-        self.assertEqual(trainer.naps, ["wake", "sleep"])
+        self.assertEqual(trainer.naps, ["sleep", "wake", "sleep"])
 
     def test_a_sharded_learner_that_sleeps_is_wired_like_any_other(self) -> None:
         """The wiring reads the HELLO, never the width (#82): an fsdp=2
@@ -206,7 +208,7 @@ class DoorTest(unittest.TestCase):
             async with host.arbiter.admit(host.learner):
                 pass
         go(switch())
-        self.assertEqual(trainer.naps, ["wake"])
+        self.assertEqual(trainer.naps, ["sleep", "wake"])
         self.assertEqual(engine.naps, ["wake", "sleep"])
         self.assertEqual(host.learner.fsdp, 2)
 

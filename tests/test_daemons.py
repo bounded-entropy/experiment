@@ -73,8 +73,24 @@ class ArbiterTest(unittest.TestCase):
                 pass
             return log
 
+        # the first switch evicts the learner too: it holds the device from
+        # install, before any admit (see Arbiter._switch)
         self.assertEqual(go(scenario()),
-                         ["engine:wake", "engine:evict", "learner:wake"])
+                         ["learner:evict", "engine:wake",
+                          "engine:evict", "learner:wake"])
+
+    def test_first_switch_evicts_the_member_never_admitted(self) -> None:
+        """A learner that loaded its base at install was never the group's
+        resident, and the old rule evicted only the resident: the engine's
+        first sample then built over the learner's shard (metal, 2026-09-05).
+        Every other member with an evict hook goes to sleep on a switch."""
+        async def scenario():
+            arbiter, engine, trainer, log = self.two_residents()
+            async with arbiter.admit(engine):   # nobody was ever admitted
+                pass
+            return log
+
+        self.assertEqual(go(scenario()), ["learner:evict", "engine:wake"])
 
     def test_exclusive_residents_never_overlap(self) -> None:
         async def scenario():

@@ -249,10 +249,20 @@ class Arbiter:
                 return
 
     async def _switch(self, group: _Group, obj: object, entry: _Resident) -> None:
-        if group.resident is not None:
-            old = self._entry(group.resident)
-            if old.evict is not None:
-                await old.evict()
+        """THE DEVICE BELONGS TO ONE: every OTHER member of the group that can
+        hand it back is told to, then the newcomer wakes. Not only the member
+        last admitted — a learner loads its base at install, BEFORE any admit,
+        and holds the partition from then on; the group's first switch (an
+        engine's first sample in a run whose trainer has not stepped yet)
+        used to evict nobody and build the engine over the learner's shard
+        (concept venue, 2026-09-05: 33 GiB per device under a 64 GiB build,
+        every on-policy arm dead at its first wave). Every sleep is
+        idempotent, so a member already asleep costs one door verb."""
+        for oid, other in sorted(self._residents.items(),
+                                 key=lambda pair: pair[1].label):
+            if (other.group == entry.group and self._objects[oid] is not obj
+                    and other.evict is not None):
+                await other.evict()
         if entry.wake is not None:
             await entry.wake()
         group.resident = obj
