@@ -88,7 +88,7 @@ LEARNER_GB = 9.6
 
 METAL = "steer-l4"
 SUBDIR = "steer"
-IDLE_S = 1800.0                 # the desk's clock; the venue's scaledown is no shorter (ADR 0003 Q3)
+IDLE_S = 90.0                 # the desk's clock; the venue's scaledown is no shorter (ADR 0003 Q3)
 MINE = (METAL,)                 # the metals THIS venue registers, and the only ones it releases
 
 

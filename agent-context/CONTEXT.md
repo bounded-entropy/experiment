@@ -4654,6 +4654,47 @@ specs; backends (local/modal/skypilot) and GPU topology are semantics-neutral.
       `runner/sources/` — Samarth's edit; `tests/test_architecture.py` derives
       its regions from its own table and enforces the new one either way.
 
+86. **ONE MODAL WORKSPACE, A NINETY-SECOND IDLE CLOCK, AND THE NORM-SCALED STEER (2026-09-05).**
+    Three rulings from the night ADR 0005's arms ran, recorded here because
+    CLAUDE.md sits in another session's index. (#85 is ADR 0008's entry on
+    the `adr-0008-fleet-hardening` branch; this entry is numbered past it.)
+
+    - **THE WORKSPACE.** Every rlstack deploy, door, submit and volume lives in
+      the Modal profile `yu-masala-workspace` and no other (Samarth: "in the
+      future ALWAYS work in the other workspace ... stop runs that dont work
+      there"). The personal profile `samarthmbhargav` is retired for runs: its
+      desk, venues and metal were swept and stopped on 2026-09-05 (its
+      observer and store stay, read-only — the teacher e2ae3a58c5bf and the
+      six steer/nsteer-v1 arms live only on that volume; the teacher run and
+      its cas blobs were copied to the yu-masala store). `deploy/modal_venue.py`
+      ENFORCES it: `require_workspace()` at import refuses any other profile
+      by name, and `deploy/ui.py` checks the same. Set `MODAL_PROFILE=` per
+      command; never `modal profile activate`. Found on arrival: yu-masala
+      already held a desk, an observer and the gsm venue from another session,
+      so ONE desk there serves both campaigns now (ADR 0007 Q2 as designed) —
+      and a `modal deploy deploy/desk.py` from any checkout replaces it, so the
+      desk's code is whatever main says, and in-flight desk edits must merge
+      before they run.
+
+    - **THE IDLE CLOCK.** ADR 0003's limit was 1800 s, read only on the
+      reaper's fifteen-minute cron, so empty metal stood thirty to forty-five
+      minutes. It is 90 s now (`IDLE_S` in `runner/desk.py`, `deploy/desk.py`
+      and every venue) and the standing desk reads its own clock every 30 s
+      (`Desk.tick_idle` in `deploy/desk.py`). Safe at that length because
+      `listing_busy` counts a RUNNING tenancy, work in flight and moved
+      admitted traffic — a run mid-load is never idle. The reaper cron keeps
+      reaping the dead.
+
+    - **THE NORM-SCALED STEER** (`nsteer`, 82ba7e6 + e1b4328). The steer family
+      with `alpha`: the injection at a token is alpha times that token's live
+      residual norm along a learned UNIT direction (the paper's calibration).
+      v2 keeps the direction on the sphere (`AdapterType.after_step`, a new
+      learner hook) and trains alpha as a log-parameter written into each
+      version's payload metadata, which the engine hook reads. Measured on the
+      v1 arms (fixed alpha 0.1): the free vectors grew 0.36 -> 9..16 and
+      rotated 43..57 degrees; the fixed-alpha directions at norm 71 rotated 11;
+      every arm sat 0.22..0.24 nats above the teacher's 1.19-nat floor, flat.
+
 ## Open threads (do NOT treat as settled; flag when your answer touches them)
 
 - TODO (Samarth, settled intent — future, nothing now): BUNDLE LRU EVICTION

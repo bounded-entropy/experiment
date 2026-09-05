@@ -144,7 +144,7 @@ LEARNER_GB = 64.0 * WIDTH       # 64 GB/device — MEASURED on the venue: the
                                 # more in fp32 logits; 48 died there at update 1
 
 METAL = "concept-a100"
-IDLE_S = 1800.0                 # the desk's clock; the venue's scaledown is no shorter
+IDLE_S = 90.0                   # the desk's clock (ADR 0003, cut to a minute and a half on 2026-09-05); the venue's scaledown is no shorter
 
 
 def proposed_recipe():

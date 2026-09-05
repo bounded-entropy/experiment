@@ -95,7 +95,7 @@ class ChassisTest(ChassisFixture):
         desk = self.a_desk()
 
         # announce: `metal_class`'s own registration, proposing nothing
-        desk.register_metal(service.metal, address=self.PLANE, idle_s=None)
+        go(desk.register_metal(service.metal, address=self.PLANE, idle_s=None))
         self.assertIsNone(desk.recipe_for(self.METAL))
         self.assertIsNone(service.builds)
 
@@ -128,7 +128,7 @@ class ChassisTest(ChassisFixture):
         so a stale address never routes."""
         service = self.bare_metal()
         desk = self.a_desk()
-        desk.register_metal(service.metal, address=self.PLANE, idle_s=None)
+        go(desk.register_metal(service.metal, address=self.PLANE, idle_s=None))
         desk.recipe(self.METAL, Builds.fakes())
         go(Campaigns(desk).submit(self.a_spec()))
 
@@ -138,7 +138,7 @@ class ChassisTest(ChassisFixture):
         self.assertIn(address, IN_PROCESS)
         self.assertTrue(RemoteHost(transport_for(address)).status())
 
-        service.decarve(listed[0])
+        go(service.decarve(listed[0]))
         self.assertNotIn(address, IN_PROCESS)
         with self.assertRaises(ValueError):
             transport_for(address)
@@ -148,7 +148,7 @@ class ChassisTest(ChassisFixture):
         published still answers — the state a reborn metal starts from."""
         service = self.bare_metal()
         desk = self.a_desk()
-        desk.register_metal(service.metal, address=self.PLANE, idle_s=None)
+        go(desk.register_metal(service.metal, address=self.PLANE, idle_s=None))
         desk.recipe(self.METAL, Builds.fakes())
         go(Campaigns(desk).submit(self.a_spec()))
         addresses = [listing.address for listing in desk.listings.values()]
@@ -162,3 +162,38 @@ class ChassisTest(ChassisFixture):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+DEPLOY = __import__('pathlib').Path(__file__).resolve().parents[1] / "deploy"
+
+
+class OneWorkspaceTest(unittest.TestCase):
+    """Every deploy and door runs in the yu-masala workspace and no other
+    (Samarth, 2026-09-05): the chassis refuses another profile by name and
+    stands down where the profile is not a string (the stub)."""
+
+    def test_another_profile_is_refused_by_name(self) -> None:
+        import sys
+        import types
+
+        from venue_stub import modal_stubbed
+        with modal_stubbed():
+            sys.path.insert(0, str(DEPLOY))
+            try:
+                config = types.ModuleType("modal.config")
+                config._profile = "samarthmbhargav"
+                sys.modules["modal"].config = config
+                sys.modules["modal.config"] = config
+                import importlib
+                spec = importlib.util.spec_from_file_location("venue_modal_venue_ws", DEPLOY / "modal_venue.py")
+                module = importlib.util.module_from_spec(spec)
+                with self.assertRaisesRegex(SystemExit, "yu-masala-workspace.*samarthmbhargav"):
+                    spec.loader.exec_module(module)
+                config._profile = "yu-masala-workspace"
+                spec.loader.exec_module(module)          # the right one passes
+                module.require_workspace()
+            finally:
+                sys.path.remove(str(DEPLOY))
+                sys.modules.pop("modal.config", None)
+                sys.modules.pop("venue_modal_venue_ws", None)
+

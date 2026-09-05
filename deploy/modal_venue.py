@@ -30,6 +30,35 @@ try:                      # a released container STOPS FETCHING where it can
 except ImportError:       # the idle scaledown is the backstop
     stop_fetching_inputs = None
 
+WORKSPACE = "yu-masala-workspace"
+"""THE ONE WORKSPACE (Samarth, 2026-09-05): every rlstack deploy, door and
+volume lives in this Modal profile and no other. The personal profile is
+retired for runs — a day's GPU went there by accident on 2026-09-04 and the
+store split across two volumes. Enforced at import, below, so a `modal
+deploy` or `modal run` under any other profile refuses BY NAME instead of
+quietly standing a second fleet up."""
+
+
+def require_workspace() -> None:
+    """Refuse to run against any Modal profile but WORKSPACE.
+
+    Reads the active profile off the SDK's own config. Under the test
+    stand-in (tests/venue_stub.py) the profile is not a string and the check
+    stands down — the fakes suite deploys nothing. Set
+    `MODAL_PROFILE=yu-masala-workspace` on the command; never `modal profile
+    activate`, which changes the machine's default silently."""
+    from modal import config as modal_config
+
+    profile = getattr(modal_config, "_profile", None)
+    if isinstance(profile, str) and profile != WORKSPACE:
+        raise SystemExit(
+            f"rlstack runs in the Modal workspace {WORKSPACE!r} only; this "
+            f"command is running under {profile!r}. Prefix it with "
+            f"MODAL_PROFILE={WORKSPACE}.")
+
+
+require_workspace()
+
 DESK_APP = "rlstack-desk"
 DESK_CLS = "Desk"
 DESK_ADDRESS = f"modal://{DESK_APP}/{DESK_CLS}"

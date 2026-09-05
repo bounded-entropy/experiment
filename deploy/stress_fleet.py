@@ -81,7 +81,7 @@ LEARNER_GB = 9.6
 
 METAL = "stress-l4"
 SUBDIR = "stress"
-IDLE_S = 1800.0
+IDLE_S = 90.0
 MINE = (METAL,)                 # the metals THIS venue registers, and the only ones it releases
 
 # The base matrix (single L4 each, no desk). Gated bases need RLSTACK_HF_SECRET.

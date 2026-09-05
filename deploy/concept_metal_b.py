@@ -35,7 +35,7 @@ GPUS = [g for g in os.environ.get("RLSTACK_CONCEPT_GPU", "A100-80GB:2,H100:2"
 gpu_image = gpu_image_for()
 
 METAL = "concept-a100-b"
-IDLE_S = 1800.0
+IDLE_S = 90.0
 
 
 def proposed_recipe():
