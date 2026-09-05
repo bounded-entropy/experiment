@@ -27,9 +27,7 @@ from rlstack.observe.page import asset, document
 from rlstack.observe.panels import PanelError, evaluate, missing_args, panel_args
 from rlstack.observe.series import run_series
 from rlstack.observe.ui import ui_app
-from rlstack.observe.views import (
-    partition_metal, render_hosts, runs_data,
-)
+from rlstack.observe.views import (partition_metal, render_hosts, run_row, runs_data)
 
 SCHEMA = fake_qwen_schema(4, base="Qwen/Qwen3-0.6B")
 
@@ -518,3 +516,64 @@ class FleetPageTest(unittest.TestCase):
             status, headers, _ = call(app, page)
             self.assertEqual(status, "200 OK")     # same document, JS routes
             self.assertIn("text/html", headers["Content-Type"])
+
+
+class PageRoutesTest(unittest.TestCase):
+    """ONE REQUEST PER PAGE (observe/ui.py): a page route carries what its
+    page used to fetch as two or three requests, and the run page's row is
+    the index's row for that run, read without walking the index."""
+
+    def setUp(self) -> None:
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.store, train, heldout = arith_store(tmp.name)
+        self.report = run_experiment(arith_spec(train, heldout), SCHEMA,
+                                     self.store, FakeEngine(), FakeLearner())
+        self.run_id = self.report.run_id
+        # the index speaks of a run its HOST JOURNALS mention: one attach
+        self.store.append_host_event("l4-a", {
+            "event": "attach", "t": 1.0, "run_id": self.run_id})
+        self.app = ui_app([self.store])
+
+    def body(self, path: str) -> dict:
+        status, _, body = call(self.app, path)
+        self.assertEqual(status, "200 OK", path)
+        return json.loads(body)
+
+    def test_the_run_page_is_one_answer(self) -> None:
+        page = self.body(f"/api/run/{self.run_id}/page")
+        self.assertEqual(set(page), {"run", "timing", "waves", "row", "now"})
+        self.assertEqual(page["run"], self.body(f"/api/run/{self.run_id}"))
+        self.assertEqual(page["timing"], self.body(f"/api/run/{self.run_id}/timing"))
+        self.assertEqual(page["waves"], self.body(f"/api/run/{self.run_id}/waves"))
+        [row] = [r for r in self.body("/api/runs")["runs"]
+                 if r["run_id"] == self.run_id]
+        for key in ("run_id", "folder", "hosts", "name", "tags", "subdir",
+                    "committed", "target", "extent", "status"):
+            self.assertEqual(page["row"][key], row[key], key)
+
+    def test_an_unknown_run_has_no_page(self) -> None:
+        status, _, _ = call(self.app, "/api/run/nope/page")
+        self.assertEqual(status, "404 Not Found")
+
+    def test_run_row_is_the_index_row_without_the_walk(self) -> None:
+        [row] = [r for r in runs_data([self.store]) if r["run_id"] == self.run_id]
+        self.assertEqual(run_row([self.store], self.run_id, row["folder"]), row)
+        self.assertIsNone(run_row([self.store], "nope", row["folder"]))
+
+    def test_the_fleet_page_is_one_answer(self) -> None:
+        page = self.body("/api/fleet/page?hours=24")
+        self.assertEqual(set(page), {"fleet", "flow", "now"})
+        self.assertEqual(set(page["fleet"]), set(self.body("/api/hosts?hours=24")))
+        self.assertEqual(set(page["flow"]), set(self.body("/api/fleet?hours=24")))
+        self.assertIn(self.run_id, [r["run_id"] for r in page["fleet"]["runs"]])
+
+    def test_the_charts_page_draws_a_metric_that_exists(self) -> None:
+        page = self.body("/api/charts/page?metric=reward&q=")
+        self.assertEqual(set(page), {"metrics", "metric", "series"})
+        self.assertIn("reward", page["metrics"])
+        self.assertEqual(page["metric"], "reward")
+        self.assertIn(self.run_id, [s["run_id"] for s in page["series"]["series"]])
+        # a metric no run carries: the first that exists is drawn instead
+        page = self.body("/api/charts/page?metric=nonsense&q=")
+        self.assertEqual(page["metric"], page["metrics"][0])

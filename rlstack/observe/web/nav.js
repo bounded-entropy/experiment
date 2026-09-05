@@ -87,7 +87,7 @@ export function keepHours(path) {
 //
 // Each tab lights for its OWN family and no other: runs/run/wave light "runs",
 // fleet/host light "hosts", charts lights "charts".
-export function nav() {
+export function nav(refresh) {
   const hdr = document.getElementById("hdr");
   const runs = route.page === "runs" || route.page === "run" || route.page === "wave";
   const fleetish = route.page === "fleet" || route.page === "host";
@@ -100,13 +100,31 @@ export function nav() {
     +   tab("/charts", "charts", route.page === "charts")
     + `</nav>`
     + `<span class="tools">${fleetish ? rangeLinks() : ""}</span>`;
+  const tools = hdr.querySelector(".tools");
   if (route.runId) {
     const sel = el("select", {id: "switch", title: "switch experiment"});
+    sel.append(el("option", {value: here()}, esc(route.runId)));
+    // THE INDEX IS FETCHED WHEN THE SWITCHER IS REACHED FOR, not beside every
+    // page: hovering or focusing it asks once (headerIndex dedupes)
+    const fill = () => headerIndex(syncSwitcher);
+    sel.addEventListener("mouseenter", fill);
+    sel.addEventListener("focus", fill);
     sel.addEventListener("change", () => {
       if (sel.value && sel.value !== here()) location.href = sel.value;
     });
-    hdr.querySelector(".tools").append(sel);
+    tools.append(sel);
   }
+  const again = el("button", {id: "refresh", title: "refresh (r)"}, "&#x21bb;");
+  again.addEventListener("click", () => refresh());
+  tools.append(again, el("span", {id: "asof"}));
+}
+
+// WHEN THE PAGE'S BYTES WERE FETCHED, said in the bar. The venue serves a
+// reading from memory for up to 30 s and its snapshot is at most 12 s older,
+// so this is the newest the page can honestly claim.
+export function stamp(at) {
+  const node = document.getElementById("asof");
+  if (node) node.textContent = "as of " + new Date(at).toTimeString().slice(0, 8);
 }
 
 function here() {
@@ -122,13 +140,11 @@ export function ctx(html) {
 let switcherSignature = null;
 
 // THE INDEX IS HEADER FURNITURE, and never on a page's critical path.
-// /api/runs walks every run in the store — measured 13-48 s on a 75-run
-// volume — and the run and wave pages want two things out of it: the
-// switcher's list, and the run's own name and tags. A sealed wave answers in
-// 0.4 s beside it, so awaiting both meant showing neither. It is fetched
-// BESIDE the render now, at most one request at a time, at most once a
-// minute (a name does not change under the 3 s poll), and the last good list
-// is kept so a page that redraws still has one.
+// /api/runs walks every run in the store, and the only thing on a run or
+// wave page that wants it is the switcher's list (the run's own name and
+// tags now arrive with the page). So it is fetched when the switcher is
+// reached for — at most one request at a time, at most once a minute — and
+// the last good list is kept.
 const INDEX_EVERY_MS = 60000;
 let heldIndex = null;
 let indexAt = 0;

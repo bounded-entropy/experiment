@@ -71,37 +71,12 @@ RELOAD_EVERY_S = 12.0
 may be. The design's freshness bound, unchanged."""
 
 TTL = 30.0
-"""Seconds a GET's response is served from memory. One reader pays the walk;
-every poll inside the window answers instantly (measured before the rewrite:
-17 s -> instant). LONGER THAN A SWEEP PLUS ITS REST: a warmed key must be
-rebuilt before it expires, or a reader meets the very miss the prewarm exists
-to prevent — at 12 s against a 40 s sweep, every reader did. Freshness is
-RELOAD_EVERY_S's job, not this one's: the prewarm overwrites a held response
-the moment it rebuilds, whatever the response's age."""
-
-WARM = (("/api/runs", ""),
-        ("/api/hosts", "hours=24"), ("/api/fleet", "hours=24"),
-        ("/api/hosts", ""), ("/api/fleet", ""))
-"""The keys a reader ACTUALLY asks for, which is not the same as the routes.
-nav.js's withHours() appends the window to every fleet call, so warming a
-bare "/api/hosts?" warmed a key nothing requests: measured on the venue,
-/api/runs (whose key did match) answered in 0.20 s while /api/hosts?hours=24
-paid a 1.4 s rebuild on EVERY poll, forever. "hours=24" is the default a
-fresh visitor gets; "" is the "all" window, which withHours spells as the
-bare url."""
-
-WARM_EVERY_S = 6.0
-"""The FLOOR of the prewarm's rest between sweeps; rest_after() raises it to
-the sweep's own length. The old rule here ("a sweep costs ~0.4 s per key")
-was false on the venue — a sweep cost 15 to 48 s — so a 6 s rest had the
-walker holding the store nine tenths of the time, and every reload, and so
-every reader, waited on it."""
-
-
-def rest_after(sweep_s: float) -> float:
-    """THE WALKER HOLDS THE STORE AT MOST HALF THE TIME: it rests at least as
-    long as it just walked, and never less than WARM_EVERY_S."""
-    return max(WARM_EVERY_S, sweep_s)
+"""Seconds a GET's response is served from memory. The first reader after the
+window pays the walk; every reader inside it shares that answer. NOTHING
+WARMS A KEY IN THE BACKGROUND: a walk happens because a reader asked, and the
+page says when its bytes were fetched. The prewarm that used to sweep the
+index keys is gone — it held the store nine tenths of the time, every reload
+waited on it, and so did every reader's own click."""
 
 PULSE_DEADLINE_S = 15.0
 """How long ONE probe of the desk's pulse may take before it is abandoned. The
@@ -163,12 +138,18 @@ def ui():
         return latest["pulse"] if fresh else {}
 
     threading.Thread(target=keep_pulsing, daemon=True).start()
-    inner = ui_app([ModalVolumeStore(STORE_MOUNT, volume=store_volume,
-                                     locator=STORE)],
+    # MOUNT-ONLY, deliberately: the observer reads the snapshot and nothing
+    # else, so a key the snapshot lacks is ABSENT (at most RELOAD_EVERY_S
+    # stale), never a reason to ask the volume server. With the handle in,
+    # every peek that missed — a train plan on a rollout-only run, a
+    # manifest still landing — fell back to one RPC on the store's single
+    # worker thread: measured on the venue, two dozen misses per index walk,
+    # serialized, 35 to 150 s per walk after the walk itself was fixed.
+    inner = ui_app([ModalVolumeStore(STORE_MOUNT, volume=None, locator=STORE)],
                    desk=last_pulse)
     cache: dict[str, tuple[float, str, list, bytes]] = {}
     # ONE LOCK PER ENDPOINT: a run's page is never queued behind the hosts
-    # rebuild, and the prewarm's three keys never hold anyone else's
+    # rebuild
     locks: dict[str, threading.Lock] = {}
     locks_guard = threading.Lock()
 
@@ -240,22 +221,4 @@ def ui():
         start_response(status, headers)
         return [body]
 
-    def prewarm() -> None:
-        """The hot endpoints never go cold: the walker pays, readers do not."""
-        while True:
-            began = time.time()
-            for path, query in WARM:
-                key = path + "?" + query
-                try:
-                    with lock_for(key):
-                        call_inner(key, {
-                            "REQUEST_METHOD": "GET", "PATH_INFO": path,
-                            "QUERY_STRING": query, "SERVER_NAME": "prewarm",
-                            "SERVER_PORT": "80", "wsgi.url_scheme": "http",
-                            "wsgi.input": None, "wsgi.errors": None})
-                except Exception:
-                    pass
-            time.sleep(rest_after(time.time() - began))
-
-    threading.Thread(target=prewarm, daemon=True).start()
     return cached_app

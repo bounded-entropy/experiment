@@ -5,21 +5,17 @@
 // user's own panels, the measurements, and the tail of sealed waves.
 "use strict";
 
-import {C, brief, drawnOnce, el, esc, getAnswer, getJSON, lostTick, note,
-        okTick, section} from "./dom.js";
+import {C, brief, drawnOnce, el, esc, getAnswer, lostTick, note, okTick,
+        section} from "./dom.js";
 import {card, emptyCard, stackedCard} from "./charts.js";
-import {apiRun, ctx, drawAmbiguity, headerIndex, hostPath, route,
-        syncSwitcher, wavePath} from "./nav.js";
+import {apiRun, ctx, drawAmbiguity, hostPath, route, wavePath} from "./nav.js";
 
 const GAP = "logprob_gap";      // the parity alarm (#25's certificate, running)
 
-// What the SUBJECT BAR is built from, kept here rather than closed over: the
-// run's own payload arrives with the page, its row in the index arrives when
-// the index does (headerIndex, seconds later), and either may be redrawn
-// without the other. A closure would repaint one from a poll the other has
-// already moved past.
+// What the SUBJECT BAR is built from: the run's own payload and its own index
+// row, both of which arrive with the page (ONE request, /page).
 let told = null;                // {data, dict} as of the last good draw
-let mine = null;                // this run's row in the index, once it lands
+let mine = null;                // this run's index row: name, tags, hosts
 const PHASES = [{name: "collect", color: C.feed},
                 {name: "post", color: C.derived},
                 {name: "train", color: C.rail},
@@ -27,31 +23,23 @@ const PHASES = [{name: "collect", color: C.feed},
 
 export async function drawRun() {
   const runId = route.runId, folder = route.folder;
-  const [answer, timing, waves] = await Promise.all([
-    getAnswer(apiRun(runId, "", folder)),
-    getJSON(apiRun(runId, "/timing", folder)),
-    getJSON(apiRun(runId, "/waves", folder)),
-  ]);
-  const data = answer.data;
-  if (!data) {
-    // the freshness contract: a drawn page outranks a failed poll — even a
+  const answer = await getAnswer(apiRun(runId, "/page", folder));
+  const page = answer.data;
+  if (!page) {
+    // the freshness contract: a drawn page outranks a failed fetch — even a
     // POSITIVE 404 after a good render reads as transient (a volume reload
     // can hide a run dir for one scan), never as the run vanishing
     if (drawnOnce()) { lostTick(); return; }
     document.getElementById("page").textContent =
-        answer.missing ? "unknown run" : "observer unreachable — retrying";
+        answer.missing ? "unknown run" : "observer unreachable — press r";
     return;
   }
-  if (data.ambiguous) { drawAmbiguity(runId, data.ambiguous); return; }
+  if (page.ambiguous) { drawAmbiguity(runId, page.ambiguous); return; }
+  const data = page.run, timing = page.timing, waves = page.waves;
   const dict = data.dictionary || {columns: [], rails: []};
   told = {data: data, dict: dict};
+  mine = page.row || null;
   subject();
-  headerIndex(runs => {
-    syncSwitcher(runs);
-    mine = runs.find(r => r.run_id === runId
-        && (folder === null || r.folder === folder)) || null;
-    subject();
-  });
   document.getElementById("page").innerHTML = "";
 
   const cols = dict.columns || [];
@@ -138,9 +126,9 @@ export async function drawRun() {
 
 // ---- the subject bar ------------------------------------------------------
 // The run says what it IS (its loss, its lag, its pipeline, its progress) out
-// of its own payload; the INDEX says what it is CALLED (name, folder, tags)
-// and where it ran. The first arrives with the page and the second seconds
-// later, so this draws with whichever it has.
+// of its own payload; its index ROW says what it is CALLED (name, folder,
+// tags) and where it ran. Both arrive with the page; a run the journals never
+// mention has no row, and the bar says its id.
 
 function subject() {
   const {data, dict} = told;

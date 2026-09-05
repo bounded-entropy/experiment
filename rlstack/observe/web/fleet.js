@@ -9,12 +9,12 @@ import {card, emptyCard, residencyTip, timeline} from "./charts.js";
 import {ctx, hostPath, withHours} from "./nav.js";
 
 export async function drawFleet() {
-  const [fleet, flow] = await Promise.all([
-    getJSON(withHours("/api/hosts")), getJSON(withHours("/api/fleet"))]);
+  const page = await getJSON(withHours("/api/fleet/page"));   // ONE request
+  const fleet = page && page.fleet, flow = page && page.flow;
   if (!fleet) {                        // the freshness contract (dom.js)
     if (drawnOnce()) { lostTick(); return; }
     document.getElementById("page").textContent =
-        "observer unreachable — retrying";
+        "observer unreachable — press r";
     return;
   }
   const holder = document.getElementById("page");

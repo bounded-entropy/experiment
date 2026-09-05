@@ -25,7 +25,7 @@ export async function drawHost() {
   if (!host) {                         // the freshness contract (dom.js)
     if (drawnOnce()) { lostTick(); return; }
     holder.textContent = answer.missing ? "unknown host"
-                                        : "observer unreachable — retrying";
+                                        : "observer unreachable — press r";
     return;
   }
   holder.innerHTML = "";

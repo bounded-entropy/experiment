@@ -19,14 +19,22 @@ let names = null;
 
 export async function drawCharts() {
   frame();
+  let data;
   if (names === null) {
-    const listed = await getJSON("/api/metrics");
-    names = (listed && listed.metrics) || ["reward"];
-    if (!names.includes(metric)) metric = names[0] || "reward";
-    fillSelect();
+    // the first draw asks for the PAGE — the names, the metric actually
+    // drawn and its overlay, one request; every later draw is one series
+    const page = await getJSON("/api/charts/page?metric=" + encodeURIComponent(metric)
+                               + "&q=" + encodeURIComponent(expr));
+    if (page) {
+      names = page.metrics.length ? page.metrics : ["reward"];
+      metric = page.metric;
+      fillSelect();
+    }
+    data = page && page.series;
+  } else {
+    data = await getJSON("/api/series?metric=" + encodeURIComponent(metric)
+                         + "&q=" + encodeURIComponent(expr));
   }
-  const data = await getJSON("/api/series?metric=" + encodeURIComponent(metric)
-                             + "&q=" + encodeURIComponent(expr));
   if (!data) {                         // the freshness contract (dom.js)
     if (drawnOnce()) lostTick();
     return;

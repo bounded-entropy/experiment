@@ -54,7 +54,7 @@ from rlstack.observe.locate import Root, rooted
 from rlstack.observe.select import metric_names, overlay
 from rlstack.observe.page import WEB_PREFIX, asset, document
 from rlstack.observe.series import run_series
-from rlstack.observe.views import runs_data
+from rlstack.observe.views import run_row, runs_data
 from rlstack.observe.waves import wave_detail, wave_list
 
 NOT_FOUND = "404 Not Found"
@@ -204,15 +204,17 @@ def api(roots: Sequence[Root], route: list[str], folder: str | None,
             stall_runs(rows, pulses_for(roots, now, desk))
             return {"now": now, "runs": rows}, "200 OK"
         case ["api", "hosts"]:
-            data = fleet_data(roots, since=since, now=now)
-            pulses = pulses_for(roots, now, desk)
-            for host in data["hosts"]:
-                host["pulse"] = pulses.get(host["host"])
-            stall_runs(data["runs"], pulses)
-            for host in data["hosts"]:
-                stall_runs(host["tenancy"], pulses_of_lanes(host, pulses))
-            data["now"] = now
-            return data, "200 OK"
+            return fleet_pulsed(roots, since, now, desk), "200 OK"
+        case ["api", "fleet", "page"]:
+            return fleet_page(roots, since, now, desk), "200 OK"
+        case ["api", "charts", "page"]:
+            asked = params or {}
+            return charts_page(roots, (asked.get("metric") or ["reward"])[0],
+                               (asked.get("q") or [""])[0], now), "200 OK"
+        case ["api", "run", run_id, "page"]:
+            return run_route(roots, run_id, folder, "unknown run",
+                             lambda root: run_page(roots, root, run_id,
+                                                   panels, now))
         case ["api", "metrics"]:
             return {"metrics": metric_names(roots)}, "200 OK"
         case ["api", "series"]:
@@ -306,6 +308,62 @@ def host_page(roots: Sequence[Root], host: str,
     series["channels"] = traffic_channels(events)
     series["moments"] = moments(events)
     return series
+
+
+def fleet_pulsed(roots: Sequence[Root], since: float | None, now: float,
+                 desk: DeskLiveness | None) -> dict:
+    """The fleet listing as /api/hosts answers it: fleet_data with every host
+    pulsed, and every run and every lane stalled against those pulses."""
+    data = fleet_data(roots, since=since, now=now)
+    pulses = pulses_for(roots, now, desk)
+    for host in data["hosts"]:
+        host["pulse"] = pulses.get(host["host"])
+    stall_runs(data["runs"], pulses)
+    for host in data["hosts"]:
+        stall_runs(host["tenancy"], pulses_of_lanes(host, pulses))
+    data["now"] = now
+    return data
+
+
+# ONE REQUEST PER PAGE. Each page used to assemble itself from two or three
+# routes, every one paying its own dispatch, its own pass through the venue's
+# reload barrier and its own slot in the container's queue — found live: a
+# page ticking three requests every 3 s filled the 32 slots, and the reader's
+# own click waited a minute behind them. The single routes stay for anything
+# that wants one reading; a page asks for its page.
+
+def fleet_page(roots: Sequence[Root], since: float | None, now: float,
+               desk: DeskLiveness | None) -> dict:
+    """/hosts in one answer: the listing beside the two aggregates."""
+    return {"fleet": fleet_pulsed(roots, since, now, desk),
+            "flow": fleet_throughput([root.store for root in roots],
+                                     since=since),
+            "now": now}
+
+
+def charts_page(roots: Sequence[Root], metric: str, expr: str,
+                now: float) -> dict:
+    """/charts in one answer: the metric names, the metric actually drawn
+    (the asked one when some run carries it, else the first that exists),
+    and its overlay."""
+    names = metric_names(roots)
+    drawn = metric if metric in names else (names[0] if names else metric)
+    series = overlay(roots, drawn, expr)
+    series["now"] = now
+    return {"metrics": names, "metric": drawn, "series": series}
+
+
+def run_page(roots: Sequence[Root], root: Root, run_id: str,
+             panels: list[dict] | None, now: float) -> dict | None:
+    """/run/<id> in one answer: the series, the step timing, the sealed tail,
+    and the run's own index ROW (name, tags, folder, hosts), read by peeking
+    this run alone rather than walking the index."""
+    series = run_series(root.store, run_id, panels=panels)
+    if series is None:
+        return None
+    return {"run": series, "timing": run_timing(root.store, run_id),
+            "waves": wave_list(root.store, run_id),
+            "row": run_row(roots, run_id, root.folder), "now": now}
 
 
 def _found(payload: object | None, missing: str) -> tuple[object, str]:

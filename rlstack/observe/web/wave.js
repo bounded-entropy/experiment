@@ -4,14 +4,12 @@
 // the server computed once, and the trajectories themselves, grouped as they
 // were trained and readable as chat.
 //
-// This page never polls: a committed wave is immutable, so there is nothing to
-// poll for.
+// A committed wave is immutable: drawn once, never refreshed on return.
 "use strict";
 
 import {C, brief, el, esc, getAnswer, note, raw, section} from "./dom.js";
 import {head, histogramCard} from "./charts.js";
-import {apiRun, ctx, drawAmbiguity, headerIndex, route, runPath, syncSwitcher}
-  from "./nav.js";
+import {apiRun, ctx, drawAmbiguity, route, runPath} from "./nav.js";
 
 const FINISH_COLOR = {stop: C.rail, eos: C.feed, length: C.warn};
 
@@ -22,15 +20,13 @@ export async function drawWave() {
   const holder = document.getElementById("page");
   holder.innerHTML = "";
   if (wave && wave.ambiguous) { drawAmbiguity(route.runId, wave.ambiguous); return; }
-  headerIndex(syncSwitcher);
   if (!wave) {
     ctx(`<a href="${runPath(route.runId, route.folder)}">`
       + `${esc(route.runId)}</a>`);
-    // a sealed wave never polls — so a DOWN wire retries itself; only the
-    // server's own "no" (a positive 404) stands as the answer
+    // only the server's own "no" (a positive 404) stands as the answer; a
+    // DOWN wire is the reader's to retry
     holder.textContent = answer.missing ? "no such sealed wave"
-                                        : "observer unreachable — retrying";
-    if (!answer.missing) setTimeout(drawWave, 3000);
+                                        : "observer unreachable — press r";
     return;
   }
   const s = wave.summary;

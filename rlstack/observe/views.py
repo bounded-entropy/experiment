@@ -152,8 +152,39 @@ def runs_data(roots: Sequence[Store | Root]) -> list[dict]:
     with two histories. Each row carries the annotations its own root holds —
     read here, written by the CLI, and consulted by no experiment."""
     known = rooted(roots)
-    annotations = [root.store.read_annotations() for root in known]
-    filings = [root.store.run_subdirs() for root in known]
+    annotations, filings = _filing(known)
+    rows = journaled_rows(known)
+    for (folder, run_id), row in rows.items():
+        _settle(row, folder, run_id, known, annotations, filings)
+    return sorted(rows.values(), key=lambda r: r["t"])
+
+
+def run_row(roots: Sequence[Store | Root], run_id: str,
+            folder: str) -> dict | None:
+    """ONE run's index row without the index walk: the journals are read once
+    (cheap) and this run alone is peeked. What the run page's subject bar
+    says — name, tags, folder, hosts — used to cost the page a second request
+    for the whole index (measured 1.5 s warm beside a 0.5 s page)."""
+    known = rooted(roots)
+    row = journaled_rows(known).get((folder, run_id))
+    if row is None:
+        return None
+    annotations, filings = _filing(known)
+    _settle(row, folder, run_id, known, annotations, filings)
+    return row
+
+
+def _filing(known: Sequence[Root]) -> tuple[list[dict], list[dict[str, str]]]:
+    """What each root says about NAMES and PLACES, read once per listing: its
+    annotations (name, tags, note) and its filing ({run_id: subdir})."""
+    return ([root.store.read_annotations() for root in known],
+            [root.store.run_subdirs() for root in known])
+
+
+def journaled_rows(known: Sequence[Root]) -> dict[tuple[str, str], dict]:
+    """Every (folder, run_id) the host journals speak of, with what the
+    journals alone can say: hosts, residency, the newest event's status.
+    Nothing here peeks a run — _settle does, per row."""
     rows: dict[tuple[str, str], dict] = {}
     for root, host, events in _events_by_host(known):
         for event in events:
@@ -197,58 +228,62 @@ def runs_data(roots: Sequence[Store | Root]) -> list[dict]:
                 row["_attach_subdir"] = event.get("subdir") or ""
             row["t"] = max(row["t"], when)
 
-    for (folder, run_id), row in rows.items():
-        row.pop("_status_t", None)   # ordering scratch, not a view field
-        row["open_hosts"] = sorted(
-            host for host, open_ in row.pop("_open", {}).items() if open_)
-        # AN OPEN RESIDENCY IS PRESENCE: a host whose last word for this run
-        # is an attach is carrying it, whatever a later detach on ANOTHER
-        # host says. The newest-event rule above still settles the closed
-        # case, but a detach closes one host's residency and no other's
-        # (observed live: one submit input replayed twice placed the same arm
-        # on two metals; the copy on the second died a minute later and its
-        # failed detach, being newer, called the live copy failed).
-        if row["open_hosts"]:
-            row["status"] = "running"
-        # the same run_id in more than one root: legitimate under #58 (one
-        # spec, two folders), and the reason every link the observer emits
-        # carries its folder — a bare /run/<id> must never silently pick one
-        holding = [root for root in known
-                   if root.store.peek_manifest(run_id) is not None]
-        row["in_stores"] = [root.store.describe() for root in holding]
-        row["in_folders"] = [root.folder for root in holding]
-        row["forked"] = len(holding) > 1
-        own = next((root for root in holding if root.folder == folder),
-                   holding[0] if holding else None)
-        progress = (_progress(own.store, run_id) if own
-                    else RunProgress("", 0, None))
-        # `committed` and `target` are the page's own words for the extent's
-        # two numbers, and `extent` says which they count: a training run
-        # commits updates, a generation-only run seals rollouts
-        row["extent"] = progress.extent
-        row["committed"] = progress.completed
-        row["target"] = "?" if progress.planned is None else progress.planned
-        # THE PLAN IS TRUTH: a run whose extent is complete is done, whatever
-        # the journal's tail says — a crashed container loses its detach
-        # events, and observability must not let that read as failure
-        if progress.done:
-            row["status"] = "done"
-        # the SUBDIR the run's directory was filed under at birth ("" at the
-        # top): the directory scan is truth once the manifest exists; the
-        # attach event's word covers the birth window before it does
-        attach_subdir = row.pop("_attach_subdir", None)
-        row.pop("_subdir_t", None)
-        for index, root in enumerate(known):
-            if root.folder == folder:
-                row.update(annotated(annotations[index].get(run_id)))
-                filed = filings[index].get(run_id)
-                row["subdir"] = (filed if filed is not None
-                                 else attach_subdir or "")
-                break
-        else:
-            row["subdir"] = attach_subdir or ""
-    return sorted(rows.values(), key=lambda r: r["t"])
+    return rows
 
+
+def _settle(row: dict, folder: str, run_id: str, known: Sequence[Root],
+            annotations: list[dict], filings: list[dict[str, str]]) -> None:
+    """The row's PEEKED facts, filled in place: where the run is held, how
+    far it got (the plan is truth), and where it was filed."""
+    row.pop("_status_t", None)   # ordering scratch, not a view field
+    row["open_hosts"] = sorted(
+        host for host, open_ in row.pop("_open", {}).items() if open_)
+    # AN OPEN RESIDENCY IS PRESENCE: a host whose last word for this run
+    # is an attach is carrying it, whatever a later detach on ANOTHER
+    # host says. The newest-event rule above still settles the closed
+    # case, but a detach closes one host's residency and no other's
+    # (observed live: one submit input replayed twice placed the same arm
+    # on two metals; the copy on the second died a minute later and its
+    # failed detach, being newer, called the live copy failed).
+    if row["open_hosts"]:
+        row["status"] = "running"
+    # the same run_id in more than one root: legitimate under #58 (one
+    # spec, two folders), and the reason every link the observer emits
+    # carries its folder — a bare /run/<id> must never silently pick one
+    holding = [root for root in known
+               if root.store.peek_manifest(run_id) is not None]
+    row["in_stores"] = [root.store.describe() for root in holding]
+    row["in_folders"] = [root.folder for root in holding]
+    row["forked"] = len(holding) > 1
+    own = next((root for root in holding if root.folder == folder),
+               holding[0] if holding else None)
+    progress = (_progress(own.store, run_id) if own
+                else RunProgress("", 0, None))
+    # `committed` and `target` are the page's own words for the extent's
+    # two numbers, and `extent` says which they count: a training run
+    # commits updates, a generation-only run seals rollouts
+    row["extent"] = progress.extent
+    row["committed"] = progress.completed
+    row["target"] = "?" if progress.planned is None else progress.planned
+    # THE PLAN IS TRUTH: a run whose extent is complete is done, whatever
+    # the journal's tail says — a crashed container loses its detach
+    # events, and observability must not let that read as failure
+    if progress.done:
+        row["status"] = "done"
+    # the SUBDIR the run's directory was filed under at birth ("" at the
+    # top): the directory scan is truth once the manifest exists; the
+    # attach event's word covers the birth window before it does
+    attach_subdir = row.pop("_attach_subdir", None)
+    row.pop("_subdir_t", None)
+    for index, root in enumerate(known):
+        if root.folder == folder:
+            row.update(annotated(annotations[index].get(run_id)))
+            filed = filings[index].get(run_id)
+            row["subdir"] = (filed if filed is not None
+                             else attach_subdir or "")
+            break
+    else:
+        row["subdir"] = attach_subdir or ""
 
 def annotated(fields: dict | None) -> dict:
     """A run's annotation as the views spell it: always all three keys, so a
