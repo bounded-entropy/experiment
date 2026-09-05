@@ -112,6 +112,7 @@ class VenueFixture(unittest.TestCase):
         try:
             cls.concept_steer = load_venue("concept_steer")
             cls.concept_burgers = load_venue("concept_burgers")
+            cls.concept_anger = load_venue("concept_anger")
             cls.steer_l4 = load_venue("steer_l4")
             cls.stress_fleet = load_venue("stress_fleet")
             cls.gsm_a100 = load_venue("gsm_a100")
@@ -409,3 +410,33 @@ class BurgersTest(VenueFixture):
         self.assertEqual(v.HAPPINESS.anchors, v.ANCHORS)
         self.assertFalse(v.HAPPINESS.split)
         self.assertEqual(len(v.topology().hosts), 1)
+
+
+class AngerTest(VenueFixture):
+    """The 32B anger campaign (2026-09-05): six nsteer arms under SFT — three
+    anchors, three thirds — over the alternating placement."""
+
+    def test_every_arm_validates_and_alternates(self) -> None:
+        from rlstack.policy.siteschema import fake_qwen_schema
+        from rlstack.spec.validate import validate_or_raise
+
+        v = self.concept_anger
+        schema = fake_qwen_schema(64, base=v.BASE)
+        self.assertEqual((v.BASE, v.HIDDEN, v.WIDTH), ("Qwen/Qwen3-32B", 5120, 2))
+        self.assertEqual(v.THIRDS, ("0-20", "21-42", "43-63"))
+        for where in (*v.ANCHORS, *v.THIRDS):
+            spec = v.student_spec(self.store, "teacher-run-0", where, "nsteer")
+            self.assertEqual(spec.policy.bank["v"].site, f"resid_pre.{where}")
+            self.assertEqual(len(spec.topology.hosts), 1)          # alternating
+            self.assertEqual(len(spec.topology.hosts[0].members), 2)
+            validate_or_raise(spec, schema)
+        teacher = v.teacher_spec(self.store, self.concept_tasks)
+        self.assertIsNone(teacher.algo)
+        validate_or_raise(teacher, schema)
+
+    def test_the_anger_block_is_dense(self) -> None:
+        from rlstack.data.tasks.concept_prompts import SYSTEM_PROMPTS
+
+        block = SYSTEM_PROMPTS["anger"].format(concept="anger")
+        for word in ("FURIOUS", "as many individual words", "word by word"):
+            self.assertIn(word, block)
