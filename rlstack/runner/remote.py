@@ -1115,6 +1115,7 @@ class RemoteDesk:
                              vram_gb: float, address: str,
                              builds: Mapping | None = None,
                              idle_s: float | None | Undeclared = DESK_DEFAULT,
+                             container: str | None = None,
                              ) -> dict:
         """A metal container phones home its OWN existence — the other half
         of the deploy contract: after this the desk can deduce (residual)
@@ -1131,7 +1132,8 @@ class RemoteDesk:
         desk's default decides; None PINS it, never released."""
         payload = {"name": name, "gpu": gpu, "devices": devices,
                    "vram_gb": vram_gb, "address": address,
-                   "builds": dict(builds) if builds else None}
+                   "builds": dict(builds) if builds else None,
+                   "container": container}
         if not isinstance(idle_s, Undeclared):
             payload["idle_s"] = idle_s
         return await self._transport.call("metal", payload)

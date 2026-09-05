@@ -2125,3 +2125,42 @@ class GuardedReleaseTest(DeskFixture):
         self.assertEqual(holding, [reply["run_id"]])   # the guard would refuse
         self.assertEqual(due, ["fake-metal"])          # the clock does not
         self.assertIn("fake-metal", desk.released)
+
+
+class ReleaseTerminatesTheContainerTest(unittest.TestCase):
+    """A released metal is not merely deaf but GONE (2026-09-05): the desk
+    ends the container the metal registered with, through the hand the
+    deploy gave it, and a rebuilt desk still knows which container that
+    was."""
+
+    def test_release_terminates_the_registered_container(self) -> None:
+        from rlstack import LocalStore
+        from rlstack.runner.desk import Desk, Metal
+
+        ended: list[str] = []
+
+        async def end(container: str) -> bool:
+            ended.append(container)
+            return True
+
+        store = LocalStore(tempfile.mkdtemp())
+        desk = Desk(store, host_for=lambda addr: None, terminate_for=end)
+        metal = Metal(name="m", gpu="L4", devices=1, vram_gb=24.0)
+        asyncio.run(desk.register_metal(metal, container="ta-0001"))
+        told = asyncio.run(desk.release("m"))
+        self.assertTrue(told["released"])
+        self.assertTrue(told["terminated"])
+        self.assertEqual(ended, ["ta-0001"])
+        rebuilt = Desk.from_journal(store, host_for=lambda addr: None)
+        self.assertEqual(rebuilt.metal_containers, {"m": "ta-0001"})
+
+    def test_a_desk_without_the_hand_releases_and_says_so(self) -> None:
+        from rlstack import LocalStore
+        from rlstack.runner.desk import Desk, Metal
+
+        desk = Desk(LocalStore(tempfile.mkdtemp()), host_for=lambda addr: None)
+        asyncio.run(desk.register_metal(
+            Metal(name="m", gpu="L4", devices=1, vram_gb=24.0), container="ta-1"))
+        told = asyncio.run(desk.release("m"))
+        self.assertTrue(told["released"])
+        self.assertFalse(told["terminated"])

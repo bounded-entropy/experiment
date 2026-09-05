@@ -21,6 +21,7 @@ and never builds one; it names no loss, no adapter type, no plan.
 from __future__ import annotations
 
 import json
+import os
 import time
 
 import modal
@@ -402,7 +403,10 @@ def metal_class(app, app_name: str, metal: str, gpu, image, *, module: str,
         told = await RemoteDesk(transport_for(DESK_ADDRESS)).register_metal(
             card.name, card.gpu, card.devices, card.vram_gb,
             metal_address(app_name, cls),
-            builds=None if recipe is None else recipe.row(), idle_s=idle_s)
+            builds=None if recipe is None else recipe.row(), idle_s=idle_s,
+            # the container id Modal gave this metal: what the desk's release
+            # terminates, so a released metal is not merely deaf but gone
+            container=os.environ.get("MODAL_TASK_ID"))
         print(f"[{metal}] registered with the desk: {json.dumps(told)}",
               flush=True)
 

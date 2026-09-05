@@ -60,6 +60,27 @@ container, on its loop, because a ninety-second limit read every fifteen
 minutes by the reaper cron would still leave metal standing a quarter hour."""
 
 
+async def terminate_container(container_id: str) -> bool:
+    """THE HAND THAT ENDS A METAL'S CONTAINER: what `modal container stop`
+    does, from inside the desk. A released metal stops taking inputs, but a
+    container that takes no inputs still stands (billed) until the venue's
+    scaledown, and one whose residents wedged never heard the release at all
+    — so the desk terminates it by the id the metal registered with. Already
+    finished is success."""
+    from modal.client import _Client
+    from modal_proto import api_pb2
+
+    client = await _Client.from_env()
+    info = await client.stub.TaskGetInfo(
+        api_pb2.TaskGetInfoRequest(task_id=container_id))
+    if info.info.finished_at:
+        return True
+    await client.stub.ContainerStop(
+        api_pb2.ContainerStopRequest(task_id=container_id, graceful=False))
+    print(f"[desk] terminated container {container_id}", flush=True)
+    return True
+
+
 @app.cls(image=cpu_image, volumes={"/store": store_volume},
          timeout=3600, min_containers=1, max_containers=1,
          scaledown_window=1200)
@@ -83,7 +104,8 @@ class Desk:
             host_for=lambda address: RemoteHost(transport_for(address)),
             metal_for=lambda address: RemoteMetal(transport_for(address)),
             boot_for=self.boot,
-            idle_s=IDLE_S)
+            idle_s=IDLE_S,
+            terminate_for=terminate_container)
         self.campaigns = Campaigns(self.desk)
         self.idle_ticker = None      # started by the first async door: enter runs with no loop
         print(f"[desk] rebuilt from journal: {sorted(self.desk.listings)} "

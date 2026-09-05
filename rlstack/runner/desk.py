@@ -45,6 +45,7 @@ from __future__ import annotations
 import asyncio
 import time
 from collections.abc import Callable, Mapping, Sequence
+from typing import Any
 from dataclasses import dataclass
 
 from rlstack.data.stores.base import Store, run_done
@@ -299,6 +300,7 @@ class Desk:
                  metal_for: Callable[[str], "RemoteMetal"] | None = None,
                  boot_for: Callable[[str], None] | None = None,
                  *, idle_s: float | None = IDLE_S,
+                 terminate_for: Callable[[str], Any] | None = None,
                  ) -> None:
         self.store = store
         # address -> RemoteHost: how the desk reaches a listed host
@@ -314,6 +316,12 @@ class Desk:
         # means the knock IS the boot (Modal: a call to a stopped-but-deployed
         # container starts one), so the reaper knocks with `describe()`.
         self.boot_for = boot_for
+        # THE HAND THAT ENDS A CONTAINER (2026-09-05): an awaitable of the
+        # container id a metal registered with, which the substrate uses to
+        # terminate that container. Without it a released metal only stops
+        # taking inputs and stands, billed, until the venue's scaledown.
+        self.terminate_for = terminate_for
+        self.metal_containers: dict[str, str | None] = {}
         self.metal: dict[str, Metal] = {}
         self.metal_addresses: dict[str, str | None] = {}
         self.metal_remotes: dict[str, "RemoteMetal"] = {}
@@ -355,6 +363,7 @@ class Desk:
                      metal_for: Callable[[str], "RemoteMetal"] | None = None,
                      boot_for: Callable[[str], None] | None = None,
                      *, idle_s: float | None = IDLE_S,
+                     terminate_for: Callable[[str], Any] | None = None,
                      ) -> "Desk":
         """The desk, rebuilt from its own record: every `list` event resolves
         its address again, and so does every addressed `metal` event — the
@@ -369,7 +378,8 @@ class Desk:
         recovery shape as attach, on the fleet plane. The idle CLOCK is not
         replayed: it lives in memory by ruling (Q2), so a rebuilt desk starts
         every metal's clock again."""
-        desk = cls(store, host_for, metal_for, boot_for, idle_s=idle_s)
+        desk = cls(store, host_for, metal_for, boot_for, idle_s=idle_s,
+                   terminate_for=terminate_for)
         for event in store.read_fleet_log():
             if event.get("event") == "list":
                 desk.listings[event["host"]] = _listing_from(event, host_for)
@@ -382,6 +392,7 @@ class Desk:
                     vram_gb=float(event.get("vram_gb", 24.0)))
                 address = event.get("address")
                 desk.metal_addresses[event["name"]] = address
+                desk.metal_containers[event["name"]] = event.get("container")
                 if address and metal_for is not None:
                     desk.metal_remotes[event["name"]] = metal_for(address)
                 desk.declare_idle(
@@ -420,6 +431,7 @@ class Desk:
     def register_metal(self, metal: Metal, address: str | None = None,
                        builds: Builds | None = None,
                        idle_s: float | None | Undeclared = DESK_DEFAULT,
+                       container: str | None = None,
                        ) -> list[str]:
         """The acquire rung, recorded at the desk: what the fleet OWNS and may
         carve against. Journaled like a listing, so a rebuilt desk knows its
@@ -459,6 +471,9 @@ class Desk:
                 f"not a restart — deregister or rename it")
         self.metal[metal.name] = metal
         self.metal_addresses[metal.name] = address
+        # the container this metal lives in, as the substrate names it: what
+        # `release` terminates once the metal has handed everything back
+        self.metal_containers[metal.name] = container
         if address and self.metal_for is not None:
             self.metal_remotes[metal.name] = self.metal_for(address)
         self.declare_idle(metal.name, idle_s)
@@ -466,7 +481,8 @@ class Desk:
         self.idle_since.pop(metal.name, None)
         row = {"event": "metal", "t": time.time(), "name": metal.name,
                "gpu": metal.gpu, "devices": metal.devices,
-               "vram_gb": metal.vram_gb, "address": address}
+               "vram_gb": metal.vram_gb, "address": address,
+               "container": container}
         if not isinstance(idle_s, Undeclared):
             row["idle_s"] = idle_s          # absent = the desk's own default
         self.store.append_fleet_event(row)
@@ -1300,10 +1316,32 @@ class Desk:
                 told = True
             except Exception:
                 pass            # the container is gone: released, physically
+        terminated = await self.terminate(name)
         self.released.add(name)
         self.idle_since.pop(name, None)
         return {"released": True, "metal": name, "listings": listings,
-                "told": told, "running": holding}
+                "told": told, "terminated": terminated, "running": holding}
+
+    async def terminate(self, name: str) -> bool:
+        """THE CONTAINER ENDS. `release` told the metal to hand everything
+        back, and a metal that heard it stops taking inputs — but a container
+        that stops taking inputs is still a container, billed until the
+        venue's scaledown, and one whose residents wedged never hears the
+        verb at all (found live, 2026-09-05: released metal standing for an
+        hour). So the desk ends it itself, by the container id the metal
+        registered with, through the hand the deploy gave it. Best effort by
+        design: no id (a hand-built metal) or no hand (a test desk) is False,
+        and a refusal is printed, never raised — the release above already
+        stands on the journal."""
+        container = self.metal_containers.get(name)
+        if container is None or self.terminate_for is None:
+            return False
+        try:
+            return bool(await self.terminate_for(container))
+        except Exception as refused:
+            print(f"[desk] terminate {name} ({container}): {refused}",
+                  flush=True)
+            return False
 
     async def reacquire(self, name: str) -> bool:
         """A RELEASED METAL BROUGHT BACK, with no human in it (ADR 0003, Q4):
@@ -1392,7 +1430,8 @@ class Desk:
                       devices=int(payload.get("devices", 1)),
                       vram_gb=float(payload.get("vram_gb", 24.0))),
                 address=payload.get("address"),
-                builds=builds_proposed(payload))
+                builds=builds_proposed(payload),
+                container=payload.get("container"))
             retried = await self.retry_parked()
             return {"registered": payload["name"], "reaped": reaped,
                     "retried": retried}
