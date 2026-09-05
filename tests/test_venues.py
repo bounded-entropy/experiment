@@ -372,6 +372,20 @@ class BurgersTest(VenueFixture):
         self.assertEqual(len(opd.topology.hosts), 3)         # ... and the teacher
         self.assertEqual(spec.policy.bank["v"].site, "layers.14.mlp.*")
 
+    def test_a_third_of_the_depth_is_one_arm(self) -> None:
+        """`layer` may be a range: one direction per boundary of the third,
+        one alpha; validates like any anchor arm."""
+        from rlstack.spec.validate import validate_or_raise
+        from rlstack.policy.siteschema import fake_qwen_schema
+
+        v = self.concept_burgers
+        schema = fake_qwen_schema(28, base=v.BASE)
+        for third in v.THIRDS:
+            spec = v.student_spec(self.store, "teacher-run-0", third, "nsteer")
+            self.assertEqual(spec.policy.bank["v"].site, f"resid_pre.{third}")
+            validate_or_raise(spec, schema)
+        self.assertEqual(v.THIRDS, ("0-8", "9-17", "18-27"))
+
     def test_the_happiness_venue_still_speaks_its_own_names(self) -> None:
         """The delegation kept every name the doors and this file use."""
         v = self.concept_steer

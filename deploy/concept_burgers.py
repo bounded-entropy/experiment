@@ -65,6 +65,9 @@ BASE = "Qwen/Qwen3-0.6B"
 HIDDEN = 1024
 SUBDIR = "burgers"
 ANCHORS = (4, 14, 24)           # of 28: 15 %, 50 %, 85 % of the depth, rounded
+THIRDS = ("0-8", "9-17", "18-27")
+"""The depth in three ranges, one direction per boundary and alpha shared
+across a range: the second campaign on this base (2026-09-05)."""
 CONCEPT = "burgers"
 SPLIT_SEED = 5
 TRAIN_ASK, HELDOUT_ASK = 2304, 160
@@ -111,15 +114,15 @@ def teacher_spec(store, train_tasks: str):
     return BURGERS.teacher_spec(store, train_tasks)
 
 
-def student_spec(store, teacher_run: str, layer: int, adapter: str = "nsteer"):
+def student_spec(store, teacher_run: str, layer: int | str, adapter: str = "nsteer"):
     return BURGERS.student_spec(store, teacher_run, layer, adapter)
 
 
-def opd_spec(store, train_tasks: str, layer: int, adapter: str = "nsteer"):
+def opd_spec(store, train_tasks: str, layer: int | str, adapter: str = "nsteer"):
     return BURGERS.opd_spec(store, train_tasks, layer, adapter)
 
 
-def bank_entry(adapter: str, layer: int):
+def bank_entry(adapter: str, layer: int | str):
     return BURGERS.bank_entry(adapter, layer)
 
 

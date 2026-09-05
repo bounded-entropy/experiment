@@ -142,13 +142,16 @@ class Campaign:
 
     # ---- the bank -----------------------------------------------------------
 
-    def bank_entry(self, adapter: str, layer: int):
+    def bank_entry(self, adapter: str, layer: int | str):
         """ONE LAYER, THREE WAYS: the bank's one entry for an arm. `steer` and
         `nsteer` sit at the boundary the paper adds at (`resid_pre.<layer>`,
         the output of model.layers[layer]); `mlp_lora` is a rank-LORA_RANK
         delta on that layer's gate, up and down projections — the same
         layer's own computation, changed a little, instead of its output,
-        pushed."""
+        pushed. `layer` may be a RANGE in the site grammar ("0-8": one
+        direction per boundary of the first third, alpha shared) — the
+        2026-09-05 ask, "steer the first 1/3 of the layers, the second 1/3,
+        and the third 1/3"."""
         from rlstack import lora, nsteer, steer
 
         if adapter == "steer":
@@ -194,7 +197,7 @@ class Campaign:
             topology=self.serving_topology(),
             seeds=Seeds(master=self.teacher_seed))
 
-    def student_spec(self, store, teacher_run: str, layer: int,
+    def student_spec(self, store, teacher_run: str, layer: int | str,
                      adapter: str = "steer"):
         """ONE ARM: the same base with ONE delta at one anchor, SFT over the
         teacher's rows, sampling nothing of its own. The arms share plan
@@ -217,7 +220,7 @@ class Campaign:
             topology=self.topology(),
             seeds=Seeds(master=self.student_seed))
 
-    def opd_spec(self, store, train_tasks: str, layer: int,
+    def opd_spec(self, store, train_tasks: str, layer: int | str,
                  adapter: str = "nsteer"):
         """ON-POLICY DISTILLATION, one arm: the student samples the train
         prompts under its own delta (no hint), the conditioned teacher scores
