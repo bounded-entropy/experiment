@@ -183,6 +183,7 @@ class OneWorkspaceTest(unittest.TestCase):
                 config = types.ModuleType("modal.config")
                 config._profile = "samarthmbhargav"
                 sys.modules["modal"].config = config
+                sys.modules["modal"].is_local = lambda: True      # the client
                 sys.modules["modal.config"] = config
                 import importlib
                 spec = importlib.util.spec_from_file_location("venue_modal_venue_ws", DEPLOY / "modal_venue.py")
@@ -191,6 +192,10 @@ class OneWorkspaceTest(unittest.TestCase):
                     spec.loader.exec_module(module)
                 config._profile = "yu-masala-workspace"
                 spec.loader.exec_module(module)          # the right one passes
+                module.require_workspace()
+                # inside a container the check stands down whatever the profile
+                config._profile = "default"
+                sys.modules["modal"].is_local = lambda: False
                 module.require_workspace()
             finally:
                 sys.path.remove(str(DEPLOY))

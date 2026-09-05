@@ -42,13 +42,18 @@ quietly standing a second fleet up."""
 def require_workspace() -> None:
     """Refuse to run against any Modal profile but WORKSPACE.
 
-    Reads the active profile off the SDK's own config. Under the test
-    stand-in (tests/venue_stub.py) the profile is not a string and the check
-    stands down — the fakes suite deploys nothing. Set
+    Reads the active profile off the SDK's own config, ON THE CLIENT ONLY:
+    inside a container `modal.is_local()` is false and the SDK reports the
+    profile 'default', and a check there crash-looped every container of
+    the first deploy (found on the venue). Under the test stand-in
+    (tests/venue_stub.py) the profile is not a string and the check stands
+    down — the fakes suite deploys nothing. Set
     `MODAL_PROFILE=yu-masala-workspace` on the command; never `modal profile
     activate`, which changes the machine's default silently."""
     from modal import config as modal_config
 
+    if not modal.is_local():
+        return                # inside a container the SDK reports no profile
     profile = getattr(modal_config, "_profile", None)
     if isinstance(profile, str) and profile != WORKSPACE:
         raise SystemExit(
