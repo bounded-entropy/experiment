@@ -4742,6 +4742,26 @@ specs; backends (local/modal/skypilot) and GPU topology are semantics-neutral.
       tenants for the redeploy — they resume from their ledger tails — which
       is the price of a venue image that cannot be patched in place.
 
+    - **THE FIRST SWITCH EVICTED NOBODY** (82103e2). With the blob on the
+      store, the on-policy arms reached their first sample and the engine's
+      lazy vLLM build found 46 GiB free per device where it wanted 64: the
+      learner's shard, 33 GiB, still resident. Not a sleep that failed —
+      `deploy/sleep_exam_a100.py` measured the sharded offload on two A100s,
+      30.5 -> 1.1 GiB untrained and 45.6 -> 1.15 GiB after a real tenant's
+      two steps, both ranks — but a learner never EVICTED: `Arbiter._switch`
+      evicted only `group.resident`, and a learner holds the partition from
+      install, before any admit, so the group's first switch (an engine's
+      first sample in a run whose trainer had not stepped) woke the engine
+      over an awake learner. The host then wedged: the engine resident
+      rebuilt vLLM every 36 s into the same 46 GiB while every trainer
+      waited on a switch that could not drain. The rule now: a switch tells
+      EVERY other member with an evict hook to hand the device back (the
+      sleeps are idempotent). The SFT-first ordering hides the bug (a
+      trainer's admit makes the learner the resident), which is why the
+      pre-recycle arms never saw it and why metal b's live container, whose
+      image predates the fix, could still take the on-policy arms after its
+      SFT tenants had stepped.
+
     - **THE DESK IS THE WORKING TREE'S.** Deploying the desk from a clean
       worktree replaced the one another session had deployed from the shared
       checkout (its `pulse` verb unknown to main) and broke that session's
