@@ -14,8 +14,9 @@ import types
 import unittest
 
 from rlstack.runner.remote import (
-    IN_PROCESS, Address, LocalTransport, parse_address, serve_in_process,
-    stop_serving_in_process, transport_for,
+    EPOCH_KEY, IN_PROCESS, Address, LocalTransport, WrongEpoch, check_epoch,
+    parse_address, serve_in_process, stop_serving_in_process, transport_for,
+    with_epoch,
 )
 
 
@@ -47,6 +48,28 @@ class GrammarTest(unittest.TestCase):
     def test_a_local_address_is_a_name_in_this_process(self) -> None:
         self.assertEqual(parse_address("local://carved-1"),
                          Address(scheme="local", host="carved-1"))
+
+    def test_an_address_may_name_one_instance(self) -> None:
+        """ADR 0008, Q2: the epoch is one optional segment on the grammar the
+        desk already keeps, so a journaled address says WHICH LIFE of a
+        container it was written about."""
+        self.assertEqual(
+            parse_address("modal://rlstack-concept-steer/MetalS#c:0.main.c1@e7"),
+            Address(scheme="modal", app="rlstack-concept-steer", cls="MetalS",
+                    host="c:0.main.c1", epoch="e7"))
+        self.assertEqual(parse_address("local://carved-1@e7"),
+                         Address(scheme="local", host="carved-1", epoch="e7"))
+        self.assertEqual(parse_address("local://carved-1").epoch, "")
+
+    def test_an_epoch_is_composed_onto_an_address_and_never_into_it(self) -> None:
+        """A metal's PLANE address stays epoch-free on the row — a
+        re-registration must read as one metal turning over, not two deploys
+        colliding on a name — so the desk composes the two where it builds
+        the remote."""
+        self.assertEqual(with_epoch("modal://app/MetalS", "e7"),
+                         "modal://app/MetalS@e7")
+        self.assertEqual(with_epoch("modal://app/MetalS", ""),
+                         "modal://app/MetalS")
 
     def test_a_half_address_is_refused_by_name(self) -> None:
         """A modal address that names no class is a venue bug, and the frame
@@ -110,6 +133,29 @@ class FactoryTest(unittest.TestCase):
             (transport.app, transport.cls, transport.host),
             ("rlstack-desk", "Desk", "a-host"))
 
+    def test_a_transport_built_from_an_epoch_stamps_every_frame(self) -> None:
+        """F2's mechanism, said once: the epoch travels IN the payload, under
+        a reserved key no verb's own argument may be, because every rlstack
+        door has the same three-argument shape."""
+        serve_in_process("local://echo", Echo())
+        transport = transport_for("local://echo")
+        self.assertNotIn(EPOCH_KEY, transport.ask("who", {}))
+
+        address = "local://echo@e7"
+        serve_in_process(address, Echo())
+        self.addCleanup(stop_serving_in_process, address)
+        self.assertEqual(transport_for(address).ask("who", {})[EPOCH_KEY], "e7")
+
+    def test_the_modal_branch_carries_the_epoch_too(self) -> None:
+        stub = types.ModuleType("modal")
+        stub.Cls = None
+        sys.modules["modal"] = stub
+        self.addCleanup(sys.modules.pop, "modal", None)
+        self.addCleanup(sys.modules.pop,
+                        "rlstack.runner.transports.modal_cls", None)
+        transport = transport_for("modal://rlstack-desk/Desk#a-host@e7")
+        self.assertEqual((transport.host, transport.epoch), ("a-host", "e7"))
+
     def test_the_switchboard_is_empty_between_tests(self) -> None:
         """A service published here is unpublished when it stops standing —
         a decarve, a release — so a stale address never routes."""
@@ -120,3 +166,23 @@ class FactoryTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class EpochRefusalTest(unittest.TestCase):
+    """ADR 0008, F2 — the refusal itself, as a rule with two deliberate
+    silences: a frame naming no epoch is served (a registration is exactly
+    that frame), and a receiver wearing no epoch serves anything (a
+    hand-built host in a test process is one instance forever)."""
+
+    def test_a_mismatch_is_refused_and_names_both_lives(self) -> None:
+        with self.assertRaises(WrongEpoch) as caught:
+            check_epoch({EPOCH_KEY: "old"}, "new", "metal 'concept-a100'")
+        said = str(caught.exception)
+        self.assertIn("concept-a100", said)
+        self.assertIn("'old'", said)
+        self.assertIn("'new'", said)
+
+    def test_an_unaddressed_frame_and_an_epochless_receiver_are_served(self) -> None:
+        check_epoch({}, "new", "metal 'x'")
+        check_epoch({EPOCH_KEY: "old"}, "", "a hand-built host")
+        check_epoch({EPOCH_KEY: "same"}, "same", "metal 'x'")

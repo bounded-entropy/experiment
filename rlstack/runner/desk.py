@@ -58,7 +58,8 @@ from rlstack.runner.residents import (
 from rlstack.runner.remote import (
     DESK_DEFAULT, RemoteLearner, RemotePool,
     HostService, LocalTransport, RemoteHost, RemotePool, Transport, Undeclared,
-    serve_in_process, stop_serving_in_process,
+    check_epoch, serve_in_process, stop_serving_in_process, with_epoch,
+    without_epoch,
 )
 
 # The desk's default idle limit, in seconds (ADR 0003): metal that nothing has
@@ -67,10 +68,65 @@ from rlstack.runner.remote import (
 # (`Desk(idle_s=)`) and a registration overrides it per metal.
 IDLE_S = 90.0
 
+# THE FLEET'S LEASE (ADR 0008, F1 and Q1). A metal and every host on it renew
+# their lease by heartbeat every HEARTBEAT_S; a silence longer than LEASE_S is
+# no longer belief, and the thing is delisted, unplaceable, and reaped. Long
+# enough to survive a slow tick, short enough that a dead container is off the
+# listings before the next campaign door submits. Both are the DESK's — a
+# registration journals them, so the record says what the fleet was promising
+# at the time — and a metal may declare a longer lease of its own.
+LEASE_S = 60.0
+HEARTBEAT_S = 20.0
+
 
 class DeskError(RuntimeError):
     """A placement the fleet may not decide alone (acquire is a human's) or
     a plan it cannot execute."""
+
+
+def mint_epoch() -> str:
+    """A BOOT IDENTITY, minted once by a container at bring-up and dying with
+    it (ADR 0008, Q2). A name is not an instance: `concept-a100` is a metal
+    the fleet owns, and the epoch is which of its lives is answering. Random
+    rather than a counter, because there is nowhere durable to count in — the
+    only thing that must be true is that two lives never share one."""
+    import uuid
+
+    return uuid.uuid4().hex[:12]
+
+
+@dataclass(frozen=True)
+class Lease:
+    """WHAT THE DESK IS STILL ENTITLED TO BELIEVE about one metal or one host
+    (ADR 0008, F1).
+
+    `epoch` is the instance the belief is about, `heard_t` the last time that
+    instance said anything, and `lease_s` how long a silence is still belief.
+    Past that the row is not deleted — it is DISBELIEVED: delisted from every
+    listing placement reads, passed over by the carve rung, and reaped. The
+    cure is one heartbeat.
+
+    Frozen, because a lease is a reading rather than a state: renewing one is
+    replacing it, which is what makes "the desk's memory is the single
+    writer's cache" true of this table too."""
+
+    epoch: str
+    heard_t: float
+    lease_s: float
+
+    def live(self, now: float) -> bool:
+        """Has this thing spoken within its lease?"""
+        return now - self.heard_t <= self.lease_s
+
+    def renewed(self, now: float) -> "Lease":
+        """The same lease, heard just now."""
+        return Lease(self.epoch, now, self.lease_s)
+
+    def row(self) -> dict:
+        """The lease as `status()` shows it — three fields, no derivation, so
+        an operator reading the row can do the subtraction themselves."""
+        return {"epoch": self.epoch, "heard_t": self.heard_t,
+                "lease_s": self.lease_s}
 
 
 @dataclass(frozen=True)
@@ -301,8 +357,28 @@ class Desk:
                  boot_for: Callable[[str], None] | None = None,
                  *, idle_s: float | None = IDLE_S,
                  terminate_for: Callable[[str], Any] | None = None,
+                 lease_s: float = LEASE_S,
+                 heartbeat_s: float = HEARTBEAT_S,
+                 clock: Callable[[], float] = time.time,
                  ) -> None:
         self.store = store
+        # THE CLOCK, injectable (ADR 0008): every lease reading goes through
+        # `now()`, so a test can drive a whole lease's worth of silence in a
+        # millisecond instead of sleeping through a minute of it.
+        self.clock = clock
+        # THE LEASE TABLE (F1): name -> Lease, over metal names AND host
+        # names, because both renew by heartbeat and both are disbelieved the
+        # same way. One table because there is one rule; the two kinds never
+        # collide in practice (a carve name embeds its metal, its devices and
+        # a counter), and `heartbeat` names which kind it found.
+        self.leases: dict[str, Lease] = {}
+        self.lease_s = lease_s
+        self.heartbeat_s = heartbeat_s
+        # metal name -> the residual its last heartbeat carried. FOR THE ROW
+        # ONLY (Q3, as amended): placement reads residuals LIVE, because a
+        # live read also proves the metal is reachable now. This is what the
+        # observer shows between reads.
+        self.residuals: dict[str, list[float]] = {}
         # address -> RemoteHost: how the desk reaches a listed host
         self.host_for = host_for
         # address -> RemoteMetal: how it reaches the METAL PLANE — the verbs
@@ -364,6 +440,9 @@ class Desk:
                      boot_for: Callable[[str], None] | None = None,
                      *, idle_s: float | None = IDLE_S,
                      terminate_for: Callable[[str], Any] | None = None,
+                     lease_s: float = LEASE_S,
+                     heartbeat_s: float = HEARTBEAT_S,
+                     clock: Callable[[], float] = time.time,
                      ) -> "Desk":
         """The desk, rebuilt from its own record: every `list` event resolves
         its address again, and so does every addressed `metal` event — the
@@ -377,14 +456,27 @@ class Desk:
         0003). Kill -9 the desk and nothing was lost but a process — the same
         recovery shape as attach, on the fleet plane. The idle CLOCK is not
         replayed: it lives in memory by ruling (Q2), so a rebuilt desk starts
-        every metal's clock again."""
+        every metal's clock again.
+
+        NEITHER IS THE LEASE CLOCK (ADR 0008, F1). Each replayed row gets its
+        EPOCH off the journal and a lease heard AT REBUILD TIME: the rule is
+        "believe nothing you have not heard from within the lease", and a
+        desk that has been alive for a millisecond has not had a chance to
+        hear anyone. So the rebuilt desk grants one lease of grace and then
+        disbelieves whatever did not heartbeat inside it — which, at a 20 s
+        cadence, is every container that is really gone."""
         desk = cls(store, host_for, metal_for, boot_for, idle_s=idle_s,
-                   terminate_for=terminate_for)
+                   terminate_for=terminate_for,
+                   lease_s=lease_s, heartbeat_s=heartbeat_s, clock=clock)
+        born = desk.now()
         for event in store.read_fleet_log():
             if event.get("event") == "list":
                 desk.listings[event["host"]] = _listing_from(event, host_for)
+                desk.grant(event["host"], event.get("epoch", ""), born,
+                           float(event.get("lease_s", lease_s)))
             elif event.get("event") == "delist":
                 desk.listings.pop(event["host"], None)
+                desk.leases.pop(event["host"], None)
             elif event.get("event") == "metal":
                 desk.metal[event["name"]] = Metal(
                     name=event["name"], gpu=event.get("gpu", "L4"),
@@ -393,8 +485,11 @@ class Desk:
                 address = event.get("address")
                 desk.metal_addresses[event["name"]] = address
                 desk.metal_containers[event["name"]] = event.get("container")
+                desk.grant(event["name"], event.get("epoch", ""), born,
+                           float(event.get("lease_s", lease_s)))
                 if address and metal_for is not None:
-                    desk.metal_remotes[event["name"]] = metal_for(address)
+                    desk.metal_remotes[event["name"]] = metal_for(
+                        with_epoch(address, event.get("epoch", "")))
                 desk.declare_idle(
                     event["name"],
                     event["idle_s"] if "idle_s" in event else DESK_DEFAULT)
@@ -405,7 +500,92 @@ class Desk:
             elif event.get("event") == "release":
                 desk.released.add(event["metal"])
                 desk.metal_remotes.pop(event["metal"], None)
+                desk.leases.pop(event["metal"], None)
         return desk
+
+    # ---- the lease: what the desk is still entitled to believe (F1) ---------
+
+    def now(self) -> float:
+        """This desk's clock, through the one seam every lease reading takes."""
+        return self.clock()
+
+    def grant(self, name: str, epoch: str, heard_t: float,
+              lease_s: float | None = None) -> Lease:
+        """A lease opened or REPLACED for `name` at `epoch` (F1). A new epoch
+        is a new instance, so the lease is a new one — there is nothing to
+        renew, because the thing that held the old one is gone."""
+        lease = Lease(epoch=epoch, heard_t=heard_t,
+                      lease_s=self.lease_s if lease_s is None else lease_s)
+        self.leases[name] = lease
+        return lease
+
+    def leased(self, name: str) -> bool:
+        """IS THIS THING STILL BELIEVED? The one liveness gate, consulted by
+        the join rung, the carve rung and the reaper.
+
+        It is not folded into `covers` because a lease is not a property of
+        the DESCRIPTION a listing is — `covers` compares regimes and recipes,
+        which are birth facts and never change — but of what the desk has
+        HEARD, which lives here with the heartbeats that renew it. Something
+        this desk holds no lease for at all is believed: a hand-built host
+        listed by a deploy that never heartbeats is exactly the case F1 has
+        no opinion about, and a rule refuses on evidence or not at all."""
+        lease = self.leases.get(name)
+        return lease is None or lease.live(self.now())
+
+    def lapsed(self) -> list[str]:
+        """Every name whose lease has run out, in name order — the reaper's
+        first pass, and the whole of F1's teeth."""
+        now = self.now()
+        return sorted(name for name, lease in self.leases.items()
+                      if not lease.live(now))
+
+    def epoch_of(self, name: str) -> str:
+        """The instance the desk believes answers for `name` — what it stamps
+        into every frame it addresses there (F2). Empty where nothing has
+        announced an epoch, which addresses whoever answers."""
+        lease = self.leases.get(name)
+        return lease.epoch if lease is not None else ""
+
+    async def heartbeat(self, name: str, epoch: str,
+                        residual: Sequence[float] | None = None) -> dict:
+        """ONE RENEWAL (F1): `name` is still there, and it is still `epoch`.
+
+        A metal heartbeats for its container and for every host carved on it,
+        because a host is an object inside that container's one control
+        process and its residency is exactly as alive as the container is. The
+        residual rides along FOR THE ROW (Q3, as amended): placement reads it
+        live, so what is cached here is only what the observer shows between
+        placements.
+
+        A heartbeat for a name this desk has no lease for is REFUSED rather
+        than silently opening one: a lease is opened by a registration or a
+        listing, and a heartbeat from nowhere means the container is talking
+        to a desk that has forgotten it — which is a re-registration's job,
+        and the reply says so. A heartbeat at the WRONG epoch is refused the
+        same way: whoever sent it is a life the desk has already replaced.
+
+        Not journaled. A heartbeat every 20 s per metal is a cadence, not a
+        fact — the fleet journal records what the fleet DID, and the lease
+        constants that make this readable are journaled at registration."""
+        lease = self.leases.get(name)
+        if lease is None:
+            return {"heard": False, "name": name,
+                    "error": f"{name!r} holds no lease at this desk — "
+                             f"register the metal again (a registration is "
+                             f"what opens a lease)"}
+        if epoch and lease.epoch and epoch != lease.epoch:
+            return {"heard": False, "name": name, "epoch": lease.epoch,
+                    "error": f"{name!r} is epoch {lease.epoch!r} at this "
+                             f"desk; a heartbeat from epoch {epoch!r} is a "
+                             f"life this desk has already replaced"}
+        now = self.now()
+        self.leases[name] = lease.renewed(now)
+        if residual is not None and name in self.metal:
+            self.residuals[name] = [float(gb) for gb in residual]
+        return {"heard": True, "name": name, "epoch": lease.epoch,
+                "heard_t": now, "lease_s": lease.lease_s,
+                "heartbeat_s": self.heartbeat_s}
 
     # ---- the recipe: declared at the desk, journaled, carried by the carve --
 
@@ -432,7 +612,7 @@ class Desk:
                        builds: Builds | None = None,
                        idle_s: float | None | Undeclared = DESK_DEFAULT,
                        container: str | None = None,
-                       ) -> list[str]:
+                       epoch: str = "") -> list[str]:
         """The acquire rung, recorded at the desk: what the fleet OWNS and may
         carve against. Journaled like a listing, so a rebuilt desk knows its
         inventory too. `address` is where that metal's own container answers
@@ -461,7 +641,16 @@ class Desk:
         fresh row on replay, and its idle clock starts again — a container
         that just announced itself has run nothing yet, but it has not been
         watched either. `idle_s` is this metal's own limit: unsaid, the
-        desk's default decides; None PINS it."""
+        desk's default decides; None PINS it.
+
+        A REGISTRATION IS WHERE AN EPOCH IS ANNOUNCED AND A LEASE OPENS (ADR
+        0008, F1/F2). The container mints its epoch at bring-up and says it
+        here; the desk grants a fresh lease at that epoch, journals both plus
+        the lease constants (so the record says what the fleet was promising),
+        and stamps the epoch into every frame it sends that metal from now on.
+        A NEW epoch at the SAME address is a container generation turning
+        over, which is what the corpse reconciliation below is for — and the
+        old epoch's frames are refused by the newborn from that moment."""
         known = metal.name in self.metal
         if known and self.metal_addresses.get(metal.name) != address:
             raise DeskError(
@@ -474,15 +663,21 @@ class Desk:
         # the container this metal lives in, as the substrate names it: what
         # `release` terminates once the metal has handed everything back
         self.metal_containers[metal.name] = container
+        now = self.now()
+        self.grant(metal.name, epoch, now)
+        self.residuals.pop(metal.name, None)
         if address and self.metal_for is not None:
-            self.metal_remotes[metal.name] = self.metal_for(address)
+            self.metal_remotes[metal.name] = self.metal_for(
+                with_epoch(address, epoch))
         self.declare_idle(metal.name, idle_s)
         self.released.discard(metal.name)
         self.idle_since.pop(metal.name, None)
-        row = {"event": "metal", "t": time.time(), "name": metal.name,
+        row = {"event": "metal", "t": now, "name": metal.name,
                "gpu": metal.gpu, "devices": metal.devices,
                "vram_gb": metal.vram_gb, "address": address,
-               "container": container}
+               "container": container,
+               "epoch": epoch, "lease_s": self.lease_s,
+               "heartbeat_s": self.heartbeat_s}
         if not isinstance(idle_s, Undeclared):
             row["idle_s"] = idle_s          # absent = the desk's own default
         self.store.append_fleet_event(row)
@@ -521,14 +716,21 @@ class Desk:
 
     def list_host(self, name: str, regimes: Sequence[Regime], address: str,
                   solo: bool = False, partition: Mapping | None = None,
-                  metal: str = "") -> None:
+                  metal: str = "", epoch: str = "") -> None:
         """A host enters the standing fleet: the deploy that booted it lists
         it here, once, and the desk journals the listing so a rebuilt desk
         knows it too. `partition` and `metal` are the capacity VIEW — the row
         the host was born onto and the registered Metal it lives on — carried
         so the desk can deduce and the reaper can free; enforcement stays at
         the metal's own books. Refuses a taken name — a listing
-        is never replaced."""
+        is never replaced.
+
+        `epoch` is the INSTANCE this host is (ADR 0008, F1/F2): its metal
+        container's, because a host is an object inside that container's one
+        control process. It opens the host's own lease — a host that stops
+        being heartbeated for is delisted within one lease and its runs are
+        parked, which is the whole of Q7 — and it rides the listing's address
+        already, so every frame the desk sends this host names it."""
         if name in self.listings:
             raise DeskError(
                 f"host {name!r} is already listed with this desk; a listing "
@@ -539,9 +741,12 @@ class Desk:
                                       partition=dict(partition) if partition
                                       else None,
                                       metal=metal)
+        now = self.now()
+        self.grant(name, epoch, now)
         self.store.append_fleet_event({
-            "event": "list", "t": time.time(), "host": name,
+            "event": "list", "t": now, "host": name,
             "address": address, "solo": solo,
+            "epoch": epoch, "lease_s": self.lease_s,
             "partition": dict(partition) if partition else None,
             "metal": metal,
             "regimes": [{"name": r.name, "capability": r.capability,
@@ -555,8 +760,9 @@ class Desk:
         if name not in self.listings:
             raise DeskError(f"host {name!r} is not listed with this desk")
         del self.listings[name]
+        self.leases.pop(name, None)
         self.store.append_fleet_event({
-            "event": "delist", "t": time.time(), "host": name,
+            "event": "delist", "t": self.now(), "host": name,
             "reason": reason})
 
     # ---- placement over listings (the join rung; carve is a venue action) ---
@@ -565,8 +771,11 @@ class Desk:
                      avoid: frozenset[str] = frozenset()) -> Listing | None:
         """Rung one over listings: sorted-name order, coverage by `covers()`
         — the one join rule, capability equality plus the metal recipe's
-        `serves`, matched against descriptions — solo-and-occupied skipped,
-        and so is a listing whose container no longer ANSWERS: placement must
+        `serves`, matched against descriptions — a listing whose LEASE has
+        lapsed skipped (F1: the desk places nothing on a host it has not
+        heard from within its lease, which is the cheap half of the same
+        question), solo-and-occupied skipped, and so is a listing whose
+        container no longer ANSWERS: placement must
         never offer a host it cannot reach, and a dead listing is a fact
         discovered here, reported by the boot refusal, and cured by a delist
         or a reboot. Names in `avoid` are off the table — a reroute excluding
@@ -578,6 +787,8 @@ class Desk:
             recipe = self.recipe_for(listing.metal)
             if not all(covers(listing, d, recipe) for d in unit):
                 continue
+            if not self.leased(name):
+                continue        # F1: a lapsed lease is not a host, it is a row
             if not listing.alive():
                 continue
             if listing.solo and listing.occupied():
@@ -692,6 +903,8 @@ class Desk:
                     if host in self.listings}
         for metal_name in sorted(self.metal_remotes,
                                  key=lambda n: (solo and n in occupied, n)):
+            if not self.leased(metal_name):
+                continue        # F1: a silent metal's residual is not a fact
             recipe = self.recipe_for(metal_name)
             if recipe is None:
                 self.refuse_carve(metal_name,
@@ -740,7 +953,10 @@ class Desk:
                 tuple(Regime(r["name"], r["capability"], r["base"], r["shape"])
                       for r in born["regimes"]),
                 born["address"], solo=bool(born.get("solo", False)),
-                partition=born.get("partition"), metal=metal_name)
+                partition=born.get("partition"), metal=metal_name,
+                # a carved host IS its metal's container (F2): one process,
+                # one epoch, one lease renewed by the same heartbeat
+                epoch=born.get("epoch") or self.epoch_of(metal_name))
             return self.listings[born["host"]]
         return None
 
@@ -955,10 +1171,8 @@ class Desk:
                                  f"a pure client) — resubmit it through its "
                                  f"campaign instead"}
             stopped = await self.stop_anchored(run_id)
-            self.store.append_fleet_event({
-                "event": "parked", "t": time.time(), "run_id": run_id,
-                "reason": "no archived delivery to replay — resubmit "
-                          "through its campaign"})
+            self.park(run_id, "no archived delivery to replay — resubmit "
+                              "through its campaign", avoiding=avoiding)
             return {"rerouted": False, "parked": True, "run_id": run_id,
                     "stopped": stopped}
         demands = demands_from(rows)
@@ -971,16 +1185,15 @@ class Desk:
                              "— the run keeps running where it is"}
         stopped = await self.stop_anchored(run_id)
         if boot:
-            self.store.append_fleet_event({
-                "event": "parked", "t": time.time(), "run_id": run_id,
-                "boot": boot, "avoiding": avoiding})
+            self.park(run_id, "nothing serves these units and no registered "
+                              "metal can hold them", avoiding=avoiding,
+                      boot=boot)
             return {"rerouted": False, "parked": True, "run_id": run_id,
                     "boot": boot, "stopped": stopped}
         reply = await self.deliver(demands, placement, rows, frame)
         if not reply.get("accepted"):
-            self.store.append_fleet_event({
-                "event": "parked", "t": time.time(), "run_id": run_id,
-                "reason": f"redelivery refused: {reply.get('error')}"})
+            self.park(run_id, f"redelivery refused: {reply.get('error')}",
+                      avoiding=avoiding)
             return {"rerouted": False, "parked": True, "run_id": run_id,
                     **reply}
         return {"rerouted": True, **reply}
@@ -1052,14 +1265,31 @@ class Desk:
         carve-able metal, release what has been idle past its limit — so the
         probing below never chases a listing this desk has just taken down —
         and a RELEASED metal is skipped by the knock, because it is parked,
-        not silent. Verdicts: per listing alive | recovered | reaped; per
-        knocked metal whether it answered; per stranded or parked run
+        not silent.
+
+        AND IT REAPS LAPSED LEASES BEFORE IT PROBES ANYTHING (ADR 0008, F1).
+        A probe asks "does this address answer"; a lease asks "has this
+        INSTANCE spoken", which is the stronger question and the cheaper one —
+        a released container that still answers its door, a metal whose name
+        now resolves to a container that has not registered, a host whose
+        process is wedged: all of them answer a probe and none of them
+        renewed a lease. A listing whose lease lapsed is concluded without a
+        retry (the retries exist to give a REBOOTING container its window, and
+        a lease already gave it three of them), and a metal whose lease lapsed
+        is knocked. Verdicts: per listing alive | recovered | reaped | lapsed;
+        per knocked metal whether it answered; per stranded or parked run
         rerouted | parked; plus the metal released."""
         now = time.time()
         self.observe_idle(now)
         released = await self.release_idle(now)
         listings: dict[str, str] = {}
         reaped_by_metal: dict[str, list[str]] = {}
+        expired = set(self.lapsed())
+        for name in sorted(name for name in expired if name in self.listings):
+            listing = self.listings[name]
+            await self.conclude(listing, reason="lease lapsed")
+            listings[name] = "lapsed"
+            reaped_by_metal.setdefault(listing.metal, []).append(name)
         for name in sorted(self.listings):
             listing = self.listings.get(name)
             if listing is None:
@@ -1073,6 +1303,8 @@ class Desk:
             await self.conclude(listing)
             listings[name] = "reaped"
             reaped_by_metal.setdefault(listing.metal, []).append(name)
+        for name in sorted(expired & set(self.metal)):
+            reaped_by_metal.setdefault(name, [])
         reaped = [name for names in reaped_by_metal.values() for name in names]
         self.strand(reaped)
         knocked = {metal_name: await self.knock(metal_name)
@@ -1094,10 +1326,11 @@ class Desk:
                 return True
         return False
 
-    async def conclude(self, listing: Listing) -> None:
+    async def conclude(self, listing: Listing, reason: str = "reaped") -> None:
         """A listing concluded dead: decarved at its metal when the metal
-        answers, delisted with reason "reaped" either way. Idempotent — a
-        listing another path already delisted is left alone."""
+        answers, delisted with `reason` either way — "reaped" when a probe
+        found nobody home, "lease lapsed" when nobody renewed (F1).
+        Idempotent — a listing another path already delisted is left alone."""
         if listing.name not in self.listings:
             return
         if listing.metal and listing.metal in self.metal_remotes:
@@ -1106,7 +1339,7 @@ class Desk:
             except Exception:
                 pass            # the metal is as dead as the host: the
                                 # memory freed itself when the container did
-        self.delist(listing.name, reason="reaped")
+        self.delist(listing.name, reason=reason)
 
     async def knock(self, name: str) -> bool:
         """Boot a metal whose container is gone (Q5b) — or one this desk
@@ -1151,6 +1384,52 @@ class Desk:
 
     # ---- the recontinue: strand, the queue, retry --------------------------
 
+    def park(self, run_id: str, reason: str, *, avoiding: str = "",
+             boot: Sequence[Mapping] | None = None) -> dict:
+        """THE PARKED STATE, WRITTEN IN ONE PLACE (ADR 0008, F6 and Q7).
+
+        A run is parked when the fleet cannot run it right now: its host's
+        lease lapsed, its host was reaped or decommissioned, or a redelivery
+        was refused. The row says WHY (`reason`), what it is avoiding, WHAT IT
+        WANTS (regimes, devices, GB — read off its own archived demand rows,
+        so an operator can tell at a glance what metal would free it), and
+        SINCE when.
+
+        `since` is the start of the waiting, not of this row: a retry that
+        parks the run again carries the FIRST park's instant forward, because
+        "parked since 19:17" is the number an operator needs and a run
+        re-parked every reaper tick would otherwise look freshly stuck for as
+        long as it waited."""
+        standing = self.parked_rows().get(run_id, {})
+        now = self.now()
+        row = {"event": "parked", "t": now, "run_id": run_id,
+               "reason": reason, "avoiding": avoiding,
+               "since": float(standing.get("since", now)),
+               "wants": self.wants_of(run_id)}
+        if boot:
+            row["boot"] = [dict(entry) for entry in boot]
+        self.store.append_fleet_event(row)
+        return row
+
+    def wants_of(self, run_id: str) -> list[dict]:
+        """WHAT A PARKED RUN IS WAITING FOR, per placement unit: the regimes
+        it wears, how many devices one unit spans, and the GB each of them
+        must hold. Read off the run's own archived demand rows — the same
+        projection a boot instruction carries, because they are the same
+        question asked at two moments — and empty for a delivery from before
+        the archive, which has nothing to say."""
+        rows = self.placements().get(run_id, {}).get("demands")
+        if not rows:
+            return []
+        return [{"regimes": [regime_of(d).name for d in unit],
+                 "capabilities": sorted({d.capability for d in unit}),
+                 "base": unit[0].base,
+                 "devices": max(d.shape for d in unit),
+                 "vram_gb": max((d.per_device_gb() for d in unit
+                                 if d.per_device_gb() is not None),
+                                default=None)}
+                for unit in placement_units(demands_from(rows))]
+
     def strand(self, hosts: Sequence[str]) -> list[str]:
         """Every UNFINISHED run whose latest placement touched one of `hosts`
         is journaled `parked` — written BEFORE any reroute is attempted, so a
@@ -1164,9 +1443,7 @@ class Desk:
             lost = [host for host in hosts if host in row["pools"].values()]
             if not lost or run_id in already or self.finished(run_id):
                 continue
-            self.store.append_fleet_event({
-                "event": "parked", "t": time.time(), "run_id": run_id,
-                "reason": f"host {lost[0]!r} reaped", "avoiding": lost[0]})
+            self.park(run_id, f"host {lost[0]!r} reaped", avoiding=lost[0])
             stranded.append(run_id)
         return stranded
 
@@ -1184,7 +1461,15 @@ class Desk:
         is `parked` — by a decommission with nowhere to go, a stranding, or a
         redelivery refused — mapped to the host it is avoiding ("" if none).
         A later delivered placement supersedes the park."""
-        queue: dict[str, str] = {}
+        return {run_id: row.get("avoiding") or ""
+                for run_id, row in self.parked_rows().items()}
+
+    def parked_rows(self) -> dict[str, dict]:
+        """THE QUEUE, WHOLE: the standing `parked` event per run — reason,
+        what it is avoiding, what it wants and since when (ADR 0008, F6).
+        `parked()` is this read down to its one key; the observer and the
+        park writer read the rest."""
+        queue: dict[str, dict] = {}
         for event in self.store.read_fleet_log():
             run_id = event.get("run_id")
             if not run_id:
@@ -1193,7 +1478,7 @@ class Desk:
                     and event.get("accepted"):
                 queue.pop(run_id, None)
             elif event.get("event") == "parked":
-                queue[run_id] = event.get("avoiding") or ""
+                queue[run_id] = dict(event)
         return queue
 
     async def retry_parked(self) -> dict[str, str]:
@@ -1390,12 +1675,18 @@ class Desk:
 
     def status(self) -> dict:
         """The desk's inventory, no wire calls: what is listed and what it
-        wears, and the registered metal. Occupancy and residual are asked per
-        placement, never cached here."""
+        wears, the registered metal, and every row's LEASE (ADR 0008, F1) —
+        the epoch it is, when it was last heard, how long a silence is still
+        belief, and whether it is believed right now. Occupancy is asked per
+        placement and never cached; the residual shown here is the last
+        HEARTBEAT's, because placement's own read is live (Q3, amended) and
+        this is what the row says between placements."""
+        now = self.now()
         return {"listings": {name: {
             "address": listing.address, "solo": listing.solo,
             "regimes": [r.name for r in listing.regimes],
-            "partition": listing.partition, "metal": listing.metal}
+            "partition": listing.partition, "metal": listing.metal,
+            **self.lease_row(name, now)}
             for name, listing in sorted(self.listings.items())},
             "metal": {name: {"gpu": m.gpu, "devices": m.devices,
                              "vram_gb": m.vram_gb,
@@ -1403,8 +1694,22 @@ class Desk:
                              "plane": name in self.metal_remotes,
                              "released": name in self.released,
                              "idle_s": self.idle_limit(name),
-                             "builds": self.recipe_row(name)}
+                             "residual": self.residuals.get(name),
+                             "builds": self.recipe_row(name),
+                             **self.lease_row(name, now)}
                       for name, m in sorted(self.metal.items())}}
+
+    def lease_row(self, name: str, now: float) -> dict:
+        """One row's lease as `status()` shows it: the three fields the Lease
+        carries plus the verdict they add up to. A name this desk holds no
+        lease for shows nulls and `live: true` — nothing has promised to
+        heartbeat for it, so nothing about it has lapsed (`leased`'s rule,
+        said in the row)."""
+        lease = self.leases.get(name)
+        if lease is None:
+            return {"epoch": "", "heard_t": None, "lease_s": None,
+                    "live": True}
+        return {**lease.row(), "live": lease.live(now)}
 
     def recipe_row(self, metal: str) -> dict | None:
         """This metal's declared recipe as a WIRE ROW, or None where nothing
@@ -1431,8 +1736,12 @@ class Desk:
                       for r in payload["regimes"]),
                 payload["address"], solo=bool(payload.get("solo", False)),
                 partition=payload.get("partition"),
-                metal=payload.get("metal", ""))
-            return {"listed": payload["host"]}
+                metal=payload.get("metal", ""),
+                epoch=payload.get("epoch", ""))
+            return {"listed": payload["host"],
+                    "epoch": self.epoch_of(payload["host"]),
+                    "lease_s": self.lease_s,
+                    "heartbeat_s": self.heartbeat_s}
         if verb == "delist":
             self.delist(payload["host"], reason=payload.get("reason", ""))
             return {"delisted": payload["host"]}
@@ -1456,10 +1765,22 @@ class Desk:
                       vram_gb=float(payload.get("vram_gb", 24.0))),
                 address=payload.get("address"),
                 builds=builds_proposed(payload),
-                container=payload.get("container"))
+                container=payload.get("container"),
+                idle_s=(payload["idle_s"] if "idle_s" in payload
+                        else DESK_DEFAULT),
+                epoch=payload.get("epoch", ""))
             retried = await self.retry_parked()
+            # THE LEASE CONSTANTS TRAVEL BACK (ADR 0008, Q1): the desk owns
+            # them, so the container learns its own cadence from the reply
+            # rather than from a constant of its own that could drift
             return {"registered": payload["name"], "reaped": reaped,
-                    "retried": retried}
+                    "retried": retried, "epoch": self.epoch_of(payload["name"]),
+                    "lease_s": self.lease_s, "heartbeat_s": self.heartbeat_s}
+        if verb == "heartbeat":
+            # THE RENEWAL (F1). One frame per metal and per host on it, every
+            # `heartbeat_s`; the residual rides along for the row.
+            return await self.heartbeat(payload["name"], payload.get("epoch", ""),
+                                        payload.get("residual"))
         if verb == "recipe":
             # WHAT A METAL BUILDS, declared through the desk's own door (ADR
             # 0007, Q4) — and through the desk, because the fleet journal has
@@ -1595,9 +1916,17 @@ class MetalService:
                  builds: Builds | None = None,
                  schema_for: Callable[[str], SiteSchema] | None = None,
                  transport_for: Callable[[str], Transport] | None = None,
-                 spawn: Callable[[ResidentBirth], Resident] = Resident.spawn
+                 spawn: Callable[[ResidentBirth], Resident] = Resident.spawn,
+                 epoch: str | None = None,
                  ) -> None:
         self.metal = metal
+        # THE EPOCH, MINTED AT BRING-UP (ADR 0008, F2): this container's boot
+        # identity, worn by every host it carves and every resident under
+        # them, said at registration, and refused at this door when a frame
+        # names another. It is minted HERE and not handed in because minting
+        # it is what bringing a container up MEANS — a venue that supplied one
+        # could supply the same one twice, which is the hazard exactly.
+        self.epoch = epoch or mint_epoch()
         self.store = store
         # THE METAL BOOTS BARE (ADR 0007, Q4). The recipe is everything a
         # partition cannot tell you — and it is a DECLARATION, which is the
@@ -1768,7 +2097,7 @@ class MetalService:
         finally:
             self.pending.remove(booking)
         return {"carved": True, "host": name, "address": address,
-                "solo": host.solo,
+                "solo": host.solo, "epoch": self.epoch,
                 "partition": host.partition.row(),
                 "regimes": [{"name": r.name, "capability": r.capability,
                              "base": r.base, "shape": r.shape}
@@ -1800,7 +2129,7 @@ class MetalService:
                 residents.append(self.spawn(ResidentBirth(
                     label=f"{name}:{regime.name}", partition=partition,
                     regime=regime, build=self.builds.for_regime(regime),
-                    store=self.store.address())))
+                    store=self.store.address(), epoch=self.epoch)))
             engines = [RemotePool(r.transport, base=r.hello["base"],
                                   tp=int(r.hello["tp"]))
                        for r in residents if r.regime.capability == "inference"]
@@ -1810,7 +2139,8 @@ class MetalService:
                         learner=learners[0] if learners else None,
                         store=self.store, partition=partition, regimes=regimes,
                         solo=solo, schema_for=self.schema_for,
-                        transport_for=self.transport_for, residents=residents)
+                        transport_for=self.transport_for, residents=residents,
+                        epoch=self.epoch)
         except BaseException:
             for resident in residents:
                 resident.stop(grace_s=SIGNAL_GRACE_S,
@@ -1918,16 +2248,22 @@ class MetalService:
         loop and asks reachability through the transport's SYNC verb). That
         rule used to be a closure copied into every venue file; publishing it
         here is what lets `transport_for` be the one factory everywhere (ADR
-        0007, Q3)."""
+        0007, Q3).
+
+        The switchboard is keyed by the address's ROUTE, without its epoch
+        (ADR 0008, F2): a container answers at its name whatever life it is
+        on, and the refusal belongs at the door rather than in the dial — so
+        a frame minted for a dead epoch REACHES this host and is refused BY
+        NAME, instead of failing as an address nothing serves."""
         self.services[address] = service
-        serve_in_process(address, service)
+        serve_in_process(without_epoch(address), service)
 
     def unroute(self, address: str) -> None:
         """Nothing answers there any more: a decarve, a release, a teardown.
         The switchboard entry goes with it, so a stale address never routes
         to a host that has come down."""
         self.services.pop(address, None)
-        stop_serving_in_process(address)
+        stop_serving_in_process(without_epoch(address))
 
     def service_for(self, address: str) -> HostService:
         """The venue's router: host frames arrive addressed, and an address
@@ -1941,6 +2277,23 @@ class MetalService:
                 f"{sorted(self.services)}")
         return service
 
+    def service_for_host(self, name: str) -> HostService:
+        """The venue's router BY HOST NAME — what a door actually holds.
+
+        A frame arrives naming a host, not an address: the `#host` fragment is
+        the routing key and the epoch travels in the payload (F2). Looking the
+        host up in this metal's own address book, rather than re-minting the
+        address from the venue's format, is what keeps the door out of the
+        address grammar's business — and what stops a container whose epoch
+        turned over from reconstructing an address that no longer exists."""
+        address = self.addresses.get(name)
+        if address is None:
+            raise DeskError(
+                f"no host named {name!r} on metal {self.metal.name!r} "
+                f"(decarved, or never carved); carrying "
+                f"{sorted(self.addresses)}")
+        return self.service_for(address)
+
     def describe(self) -> dict:
         """The registration row plus the books — what a phone-home ships and
         what an observer renders. `builds` is null on a metal that is still
@@ -1948,7 +2301,7 @@ class MetalService:
         like since ADR 0007."""
         return {"name": self.metal.name, "gpu": self.metal.gpu,
                 "devices": self.metal.devices, "vram_gb": self.metal.vram_gb,
-                "residual": self.residual(),
+                "epoch": self.epoch, "residual": self.residual(),
                 "builds": None if self.builds is None else self.builds.row(),
                 "hosts": {name: {"address": self.addresses[name],
                                  "partition": host.partition.row(),
@@ -1956,6 +2309,7 @@ class MetalService:
                           for name, host in sorted(self.hosts.items())}}
 
     async def serve(self, verb: str, payload: dict) -> dict:
+        check_epoch(payload, self.epoch, f"metal {self.metal.name!r}")
         if verb == "carve":
             return await self.carve(payload)
         if verb == "decarve":
@@ -1967,6 +2321,7 @@ class MetalService:
         raise ValueError(f"unknown metal verb {verb!r}")
 
     def answer(self, verb: str, payload: dict) -> dict:
+        check_epoch(payload, self.epoch, f"metal {self.metal.name!r}")
         if verb == "residual":
             return {"residual": self.residual()}
         if verb == "describe":

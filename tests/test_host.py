@@ -523,3 +523,92 @@ class TrafficAcrossTheDoorTest(unittest.TestCase):
         self.assertGreaterEqual(kinds.count("stats"), 4)   # the cadence held
         self.assertLessEqual(kinds.count("traffic"), 1)    # at most one drain in flight
 
+
+
+class ResidentWatchdogTest(unittest.TestCase):
+    """ADR 0008, F1 — THE INNERMOST LEASE. The metal heartbeats for its
+    container, the host for its residency, and each resident for its own
+    process: a resident that answers nothing past its phase's known bound is
+    ENDED and journaled `stalled`, because nothing else on this host noticed
+    the twelve minutes a `.to()` sat there on the venue."""
+
+    def setUp(self) -> None:
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.store, _, _ = arith_store(tmp.name)
+
+    def a_resident(self, engine, label: str = "h:serve"):
+        from rlstack.runner.residents import Resident, ResidentBirth
+
+        return Resident.in_process(ResidentBirth(
+            label=label, partition=Partition("m", (0,), 1.0, "L4"),
+            regime=Regime("serve", "inference", None, 1),
+            build=None, store=self.store.address(), epoch="e1"), engine)
+
+    def test_a_resident_answers_its_own_heartbeat(self) -> None:
+        """One round trip, on the admission-free path, naming the instance."""
+        resident = self.a_resident(FakeEngine())
+        beat = resident.heartbeat()
+        self.assertEqual((beat["label"], beat["epoch"]), ("h:serve", "e1"))
+        self.assertGreater(beat["t"], 0.0)
+
+    def test_a_silent_resident_past_its_bound_is_killed_and_journaled(self) -> None:
+        """PROMISE: the stall becomes a FACT. A resident whose door never
+        answers is ended and one `stalled` line says how long it was silent
+        and what bound it broke — which is the whole difference between a
+        twelve-minute mystery and a twelve-minute record."""
+        import threading
+
+        wedged = threading.Event()
+        self.addCleanup(wedged.set)
+
+        class Wedged(FakeEngine):
+            """A door that never answers: the stall, made deterministic."""
+
+            def __init__(self) -> None:
+                super().__init__()
+                self.stopped = False
+
+            def shutdown(self) -> None:
+                self.stopped = True
+                wedged.set()
+
+        engine = Wedged()
+        resident = self.a_resident(engine)
+        resident.transport.door.beat = lambda: wedged.wait() or {}
+        host = Host("wedged", engines=(engine,), learner=None,
+                    store=self.store, residents=(resident,))
+
+        async def a_few_ticks():
+            task = asyncio.create_task(
+                host.watch_residents(every=0.02, stall_s=0.05))
+            await asyncio.sleep(0.3)
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+        go(a_few_ticks())
+
+        stalls = [e for e in self.store.read_host_log("wedged")
+                  if e.get("event") == "stalled"]
+        self.assertTrue(stalls, "no stall was journaled")
+        self.assertEqual(stalls[0]["resident"], "h:serve")
+        self.assertEqual(stalls[0]["bound_s"], 0.05)
+        self.assertGreaterEqual(stalls[0]["silent_s"], 0.05)
+        self.assertTrue(engine.stopped)      # ended, not merely reported
+
+    def test_a_resident_that_answers_is_left_alone(self) -> None:
+        """Silence is the evidence, not slowness: a resident answering its
+        heartbeat is never killed however long the watchdog runs."""
+        engine = FakeEngine()
+        host = Host("well", engines=(engine,), learner=None, store=self.store,
+                    residents=(self.a_resident(engine),))
+
+        async def a_few_ticks():
+            task = asyncio.create_task(
+                host.watch_residents(every=0.02, stall_s=0.05))
+            await asyncio.sleep(0.25)
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+        go(a_few_ticks())
+        self.assertEqual([e for e in self.store.read_host_log("well")
+                          if e.get("event") == "stalled"], [])
+        self.assertFalse(engine.down)

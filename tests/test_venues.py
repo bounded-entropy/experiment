@@ -283,6 +283,31 @@ class ChassisTest(VenueFixture):
         self.assertEqual(parse_address(host).host, "steer:0.main")
         self.assertEqual(parse_address(host).cls, "MetalS")
 
+    def test_a_host_address_may_name_one_instance(self) -> None:
+        """ADR 0008, Q2: a carved host's address carries the EPOCH of the
+        container that carved it — carve names recycle when a metal is
+        reborn, and the epoch is what tells the corpse from the newborn."""
+        from rlstack.runner.remote import parse_address
+
+        address = self.modal_venue.host_address(
+            "rlstack-concept-steer", "concept-a100:0.main.c1", epoch="e7")
+        parsed = parse_address(address)
+        self.assertEqual((parsed.host, parsed.epoch),
+                         ("concept-a100:0.main.c1", "e7"))
+        # the PLANE address stays epoch-free: it is the container's stable
+        # name, and a re-registration must read as one metal turning over
+        self.assertEqual(
+            parse_address(self.modal_venue.metal_address(
+                "rlstack-concept-steer")).epoch, "")
+
+    def test_the_chassis_renews_at_the_desk_s_cadence(self) -> None:
+        """F1: the lease constants are the desk's; the venue carries only the
+        fallback it uses until the registration reply tells it otherwise."""
+        self.assertEqual(self.modal_venue.HEARTBEAT_S, 20.0)
+        source = (DEPLOY / "modal_venue.py").read_text()
+        self.assertIn("heartbeat_s", source)
+        self.assertIn("watch_residents", source)
+
     def test_a_campaign_door_never_releases(self) -> None:
         """Q6: `concept_steer` and `gsm_a100` are CAMPAIGN venues — arms on
         one booted metal — so no door of either hands metal back. Idle metal

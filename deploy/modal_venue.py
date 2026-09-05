@@ -64,6 +64,11 @@ def require_workspace() -> None:
 
 
 require_workspace()
+HEARTBEAT_S = 20.0
+"""THE CADENCE A METAL RENEWS ITS LEASE AT (ADR 0008, Q1) — the fallback only.
+The desk owns the number and hands it back in the registration reply, because
+two clocks that can drift apart is one clock too many; this is what a
+container uses until it has been told."""
 
 DESK_APP = "rlstack-desk"
 DESK_CLS = "Desk"
@@ -147,14 +152,19 @@ def metal_address(app_name: str, cls: str = "MetalS") -> str:
     return f"modal://{app_name}/{cls}"
 
 
-def host_address(app_name: str, host: str, cls: str = "MetalS") -> str:
-    """ONE HOST inside a metal container, by the address's `#host` fragment.
+def host_address(app_name: str, host: str, cls: str = "MetalS",
+                 epoch: str = "") -> str:
+    """ONE HOST inside a metal container, by the address's `#host` fragment,
+    at ONE EPOCH of that container (ADR 0008, Q2).
 
-    The venue is IN the address (Q3), which is what lets the one desk command
-    metal deployed in this app and in the next one — the journal's `address`
-    fields are self-describing and a desk rebuilt from them reaches every
-    metal it ever registered."""
-    return f"modal://{app_name}/{cls}#{host}"
+    The venue is IN the address (ADR 0007, Q3), which is what lets the one
+    desk command metal deployed in this app and in the next one — the
+    journal's `address` fields are self-describing and a desk rebuilt from
+    them reaches every metal it ever registered. The epoch is what tells two
+    LIVES of one container apart: carve names recycle when a metal is reborn
+    (the counter resets), so without it a frame minted for a corpse would be
+    served by its successor."""
+    return f"modal://{app_name}/{cls}#{host}" + (f"@{epoch}" if epoch else "")
 
 
 # ---------------------------------------------------------------------------
@@ -380,24 +390,37 @@ def metal_class(app, app_name: str, metal: str, gpu, image, *, module: str,
     """
     def bring_up_metal():
         """This container's books and router. Bare unless the venue proposed
-        a recipe — and even then the desk's row is what the carve carries."""
+        a recipe — and even then the desk's row is what the carve carries.
+
+        THE EPOCH IS MINTED HERE (ADR 0008, F2), once, before anything is
+        addressable: it is what this container IS for its whole life, it goes
+        into every host address this metal mints, and it is what the desk
+        stamps into every frame it sends back."""
         from rlstack.policy.siteschema import hf_schema
-        from rlstack.runner.desk import MetalService
+        from rlstack.runner.desk import MetalService, mint_epoch
         from rlstack.runner.remote import transport_for
 
+        epoch = mint_epoch()
         service = MetalService(
             MetalService.measure(metal), store=a_store(), builds=recipe,
-            address_of=lambda host: host_address(app_name, host, cls),
-            schema_for=hf_schema, transport_for=transport_for)
-        print(f"[{metal}] up, bare: {service.metal.gpu} "
+            address_of=lambda host: host_address(app_name, host, cls, epoch),
+            schema_for=hf_schema, transport_for=transport_for, epoch=epoch)
+        print(f"[{metal}] up, bare, epoch {epoch}: {service.metal.gpu} "
               f"x{service.metal.devices} at {service.metal.vram_gb:g} GB; "
               f"residual {service.residual()}", flush=True)
         return service
 
-    async def announce(service) -> None:
+    async def announce(service) -> dict:
         """The metal REGISTERS ITSELF the moment it exists (ADR 0001, Q5a),
-        at its plane address, with its idle limit declared — and with the
-        venue's recipe as a PROPOSAL when it has one (ADR 0007, Q4)."""
+        at its plane address, with its idle limit and its EPOCH declared — and
+        with the venue's recipe as a PROPOSAL when it has one (ADR 0007, Q4).
+
+        The PLANE address carries no epoch: it is this metal's stable name,
+        and a re-registration at a new epoch must read as the same metal
+        turning over rather than as a second deploy colliding on the name.
+        The epoch travels as its own field, and the desk composes the two when
+        it builds the remote it sends frames through (ADR 0008, F2). The reply
+        carries the lease constants this container then heartbeats at."""
         from rlstack.runner.remote import RemoteDesk, transport_for
 
         card = service.metal
@@ -407,36 +430,76 @@ def metal_class(app, app_name: str, metal: str, gpu, image, *, module: str,
             builds=None if recipe is None else recipe.row(), idle_s=idle_s,
             # the container id Modal gave this metal: what the desk's release
             # terminates, so a released metal is not merely deaf but gone
-            container=os.environ.get("MODAL_TASK_ID"))
+            container=os.environ.get("MODAL_TASK_ID"),
+            epoch=service.epoch)
         print(f"[{metal}] registered with the desk: {json.dumps(told)}",
               flush=True)
+        return told
 
     async def metal_duties(service) -> None:
-        """Announce, then follow every carved host's stats and commit the
-        volume — until the desk releases this metal, at which point the
-        duties end with the shift."""
+        """Announce, then RENEW THE LEASE every `heartbeat_s` (ADR 0008, F1)
+        while following every carved host's stats and committing the volume —
+        until the desk releases this metal, at which point the duties end with
+        the shift.
+
+        The cadence is the desk's, learned from the registration reply: two
+        clocks that could drift apart is one clock too many, and the desk is
+        the one that decides when a silence stops being belief. A heartbeat
+        the desk refuses (it has forgotten this metal, or replaced this epoch)
+        is ANNOUNCED AGAIN — a registration is what opens a lease, so saying
+        it again is the whole of the cure."""
         import asyncio
 
+        from rlstack.runner.remote import RemoteDesk, transport_for
+
+        desk_handle = RemoteDesk(transport_for(DESK_ADDRESS))
+        every = float(HEARTBEAT_S)
         try:
-            await announce(service)
+            told = await announce(service)
+            every = float(told.get("heartbeat_s") or HEARTBEAT_S)
         except Exception as refused:
             print(f"[{metal}] REGISTRATION REFUSED: {refused}", flush=True)
-        stats: dict[str, asyncio.Task] = {}
+        duties: dict[str, asyncio.Task] = {}
         tick = 0
         try:
             while not service.released.is_set():
                 for host_service in list(service.services.values()):
                     host = host_service.host
-                    if host.name not in stats:
-                        stats[host.name] = asyncio.create_task(host.run_stats())
-                await asyncio.sleep(30)
+                    if host.name not in duties:
+                        duties[host.name] = asyncio.create_task(
+                            host_duties(host))
+                await asyncio.sleep(every)
                 tick += 1
-                if tick % 2 == 0:
+                try:
+                    if not await beat(service, desk_handle):
+                        await announce(service)
+                except Exception as unheard:
+                    print(f"[{metal}] heartbeat unheard: {unheard}", flush=True)
+                if tick % 3 == 0:
                     await store_volume.commit.aio()
         finally:
-            for task in stats.values():
+            for task in duties.values():
                 task.cancel()
             await store_volume.commit.aio()
+
+    async def beat(service, desk_handle) -> bool:
+        """One renewal round, and whether the desk believed it."""
+        told = await desk_handle.heartbeat(service.metal.name, service.epoch,
+                                           service.residual())
+        for host_name in sorted(service.hosts):
+            await desk_handle.heartbeat(host_name, service.epoch)
+        return bool(told.get("heard"))
+
+    async def host_duties(host) -> None:
+        """One carved host's two standing duties: its stats tick (gpu samples
+        and traffic windows) and its RESIDENT WATCHDOG (ADR 0008, F1) — the
+        innermost lease, where a resident that answers nothing past its phase
+        bound is ended and journaled `stalled`."""
+        import asyncio
+
+        async with asyncio.TaskGroup() as duties:
+            duties.create_task(host.run_stats())
+            duties.create_task(host.watch_residents())
 
     class MetalS:
         @modal.enter()
@@ -486,8 +549,7 @@ def metal_class(app, app_name: str, metal: str, gpu, image, *, module: str,
             live = self.live()
             if not host:
                 return await live.serve(verb, payload)
-            return await live.service_for(
-                host_address(app_name, host, cls)).serve(verb, payload)
+            return await live.service_for_host(host).serve(verb, payload)
 
         @modal.method()
         def door_ask(self, host: str, verb: str, payload: dict) -> dict:
@@ -495,8 +557,7 @@ def metal_class(app, app_name: str, metal: str, gpu, image, *, module: str,
             live = self.live()
             if not host:
                 return live.answer(verb, payload)
-            return live.service_for(
-                host_address(app_name, host, cls)).answer(verb, payload)
+            return live.service_for_host(host).answer(verb, payload)
 
         @modal.method()
         async def serve(self) -> dict:

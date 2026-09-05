@@ -56,7 +56,7 @@ from rlstack.data.stores.base import Store, StoreAddress
 from rlstack.runner.host import Partition, Regime
 from rlstack.runner.interfaces import Engine, Learner
 from rlstack.runner.remote import (
-    EngineService, LearnerService, Transport, json_roundtrip,
+    EngineService, LearnerService, Transport, check_epoch, json_roundtrip,
 )
 
 
@@ -183,6 +183,11 @@ class ResidentBirth:
     regime: Regime
     build: Build
     store: StoreAddress
+    # THE INSTANCE THIS RESIDENT IS (ADR 0008, F2): its host's epoch, which is
+    # its metal container's. A resident's door refuses a frame addressed to
+    # any other, so a proxy held past a decarve fails by name instead of
+    # reaching whatever was born at the same label afterwards.
+    epoch: str = ""
 
     def row(self) -> dict:
         return {"label": self.label, "partition": self.partition.row(),
@@ -190,7 +195,8 @@ class ResidentBirth:
                            "capability": self.regime.capability,
                            "base": self.regime.base,
                            "shape": self.regime.shape},
-                "build": encode_build(self.build), "store": self.store.row()}
+                "build": encode_build(self.build), "store": self.store.row(),
+                "epoch": self.epoch}
 
     @classmethod
     def from_row(cls, row: dict) -> "ResidentBirth":
@@ -201,7 +207,8 @@ class ResidentBirth:
                                 p.get("gpu", "")),
             regime=Regime(r["name"], r["capability"], r["base"], int(r["shape"])),
             build=decode_build(row["build"]),
-            store=StoreAddress.from_row(row["store"]))
+            store=StoreAddress.from_row(row["store"]),
+            epoch=row.get("epoch", ""))
 
 
 # ---------------------------------------------------------------------------
@@ -325,6 +332,7 @@ def hello_of(birth: ResidentBirth, obj: Engine | Learner,
     row: dict[str, Any] = {
         "label": birth.label, "kind": birth.regime.capability,
         "pid": os.getpid(), "sleeps": bool(obj.sleeps),
+        "epoch": birth.epoch,
         "devices_seen": seen, "devices": list(birth.partition.devices),
         "memory": birth.partition.memory}
     if birth.regime.capability == "inference":
@@ -345,17 +353,25 @@ def hello_of(birth: ResidentBirth, obj: Engine | Learner,
 
 class Door:
     """The resident-side dispatch: `sleep`/`wake` are the door's (the
-    alternation seam, both kinds); `hello` is answered from the birth facts;
-    everything else is the object's own service. `stop` is the serving
-    loop's, because it ends the loop."""
+    alternation seam, both kinds); `hello` and `heartbeat` are answered from
+    the birth facts and the clock; everything else is the object's own
+    service. `stop` is the serving loop's, because it ends the loop.
+
+    THE EPOCH IS CHECKED HERE (ADR 0008, F2) and not inside EngineService or
+    LearnerService: the Door is the resident's WHOLE door — it owns sleep,
+    wake and hello, which reach no service at all — and the services are also
+    constructed inline by `HostService`, which has already checked at its own
+    door. One receiver, one check."""
 
     def __init__(self, obj: Engine | Learner,
                  service: EngineService | LearnerService, hello: dict) -> None:
         self.obj = obj
         self.service = service
         self.hello = hello
+        self.epoch = str(hello.get("epoch") or "")
 
     async def call(self, verb: str, payload: dict) -> dict:
+        check_epoch(payload, self.epoch, f"resident {self.hello['label']!r}")
         if verb == "sleep":
             self.check_sleeps(verb)
             await self.obj.sleep()
@@ -367,9 +383,22 @@ class Door:
         return await self.service.serve(verb, payload)
 
     def answer(self, verb: str, payload: dict) -> dict:
+        check_epoch(payload, self.epoch, f"resident {self.hello['label']!r}")
         if verb == "hello":
             return dict(self.hello)
+        if verb == "heartbeat":
+            return self.beat()
         return self.service.answer(verb, payload)
+
+    def beat(self) -> dict:
+        """THE RESIDENT'S PULSE (ADR 0008, F1): I am here, at this instant,
+        and I am this instance. Answered on the ADMISSION-FREE path so it
+        costs the resident nothing but a dispatch — and so a resident wedged
+        inside one long synchronous verb cannot answer it, which is exactly
+        the reading the host's watchdog wants: silence past a phase's known
+        bound is a stall, not a pause."""
+        return {"t": time.time(), "label": self.hello["label"],
+                "epoch": self.epoch}
 
     def check_sleeps(self, verb: str) -> None:
         if not self.hello["sleeps"]:
@@ -779,6 +808,15 @@ class Resident:
 
     async def wake(self) -> None:
         await self.transport.call("wake", {})
+
+    def heartbeat(self) -> dict:
+        """One round trip to the child and back — the host's watchdog asks
+        this every RESIDENT_HEARTBEAT_S (ADR 0008, F1). Synchronous, on the
+        ask path, because the point is to learn whether the child's own loop
+        is still turning; the host runs it off its loop, at most one in
+        flight, so a resident that never answers holds up nothing but its own
+        verdict."""
+        return self.transport.ask("heartbeat", {})
 
     def row(self) -> dict:
         """The resident as status() and describe() report it, and as the

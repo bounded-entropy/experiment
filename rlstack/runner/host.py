@@ -106,6 +106,18 @@ class Regime:
                 f"got {self.capability!r}")
 
 
+RESIDENT_HEARTBEAT_S = 10.0
+"""How often a host asks each of its residents whether it is still there (ADR
+0008, Q1) — the third and innermost lease: the metal heartbeats for its
+container, the host for its residency, and each resident for its process."""
+
+RESIDENT_STALL_S = 600.0
+"""THE PHASE BOUND: how long a resident may answer nothing before the host
+concludes it is stalled and ends it. Generous, because an engine's weight load
+and a learner's device move are legitimately long synchronous stretches — and
+finite, because the twelve minutes a `.to()` sat on the venue were nobody's
+phase and nothing noticed."""
+
 LEARNER_ROUTE = "learner"
 """The key a learner's ADDRESS rides under in a route table — the same name
 the desk gives the learner demand (`Demand.name`), so a route table reads as
@@ -150,8 +162,17 @@ class Host:
                  transport_for: Callable[[str], "Transport"] | None = None,
                  schema_for: Callable[[str], SiteSchema] | None = None,
                  sampler=None,
-                 residents: Sequence["Resident"] = ()) -> None:
+                 residents: Sequence["Resident"] = (),
+                 epoch: str = "") -> None:
         self.name = name
+        # THE INSTANCE THIS HOST IS (ADR 0008, F2): the epoch of the container
+        # that carved it, because a host is an object inside the metal's one
+        # control process and dies with it. Carve names recycle when a
+        # container is reborn, so the epoch is the only thing that tells the
+        # corpse from the newborn — `HostService` refuses a frame addressed to
+        # any other. Empty on a hand-built host: one instance forever, and
+        # nothing for the rule to be about.
+        self.epoch = epoch
         self.engines = tuple(engines)
         self.learner = learner
         # The processes behind `engines` and `learner` when this host was
@@ -712,6 +733,75 @@ class Host:
             if draining is not None:
                 draining.cancel()
 
+    async def watch_residents(self, every: float = RESIDENT_HEARTBEAT_S,
+                              stall_s: float = RESIDENT_STALL_S) -> None:
+        """THE RESIDENT WATCHDOG (ADR 0008, F1): every `every` seconds, ask
+        each resident whether its door is still turning; a resident that has
+        not answered for `stall_s` is KILLED and journaled `stalled`.
+
+        Why a poll and not a push: a resident's door is one pipe carrying
+        replies by request id, and a child that pushed unsolicited frames
+        would be inventing a second protocol for a question one round trip
+        already answers. Why it is bounded rather than immediate: an engine's
+        weight load and a learner's forward are long SYNCHRONOUS stretches
+        that hold the child's own loop, so silence inside a phase's known
+        bound is work, and only silence past it is a stall. `stall_s` is that
+        bound — the 12-minute `.to()` found on the venue is the case it is
+        set for, and nothing else on this host noticed it at all.
+
+        At most ONE ask in flight per resident, on a thread: a wedged pipe
+        never answers, and a watchdog that waited for it would be the very
+        stall it is watching for."""
+        asked: dict[str, asyncio.Task] = {}
+        heard = {resident.label: time.time() for resident in self.residents}
+        try:
+            while True:
+                now = time.time()
+                for resident in self.residents:
+                    if not resident.alive():
+                        continue
+                    pending = asked.get(resident.label)
+                    if pending is None or pending.done():
+                        asked[resident.label] = asyncio.create_task(
+                            self.ask_heartbeat(resident, heard))
+                    if now - heard[resident.label] > stall_s:
+                        self.kill_stalled(resident, now - heard[resident.label],
+                                          stall_s)
+                        heard[resident.label] = now
+                await asyncio.sleep(every)
+        finally:
+            for task in asked.values():
+                task.cancel()
+
+    async def ask_heartbeat(self, resident: "Resident",
+                            heard: dict[str, float]) -> None:
+        """One round trip to one resident, off this loop. A refusal is a
+        silence like any other — the bound above is what decides."""
+        try:
+            await asyncio.to_thread(resident.heartbeat)
+        except Exception:
+            return
+        heard[resident.label] = time.time()
+
+    def kill_stalled(self, resident: "Resident", silent_s: float,
+                     bound_s: float) -> None:
+        """A resident past its bound, ENDED and journaled `stalled` (Q7).
+
+        Killed rather than waited on, because a host is atomic: a resident
+        that exits takes its host down (`MetalService.resident_exited`), the
+        desk's next probe reaps the listing and the run is parked and
+        rerouted — which is the recovery path this fleet already has. The
+        journal line is what makes the twelve silent minutes a fact instead
+        of a mystery."""
+        self.store.append_host_event(self.name, {
+            "event": "stalled", "t": time.time(), "resident": resident.label,
+            "kind": resident.regime.capability, "pid": resident.pid(),
+            "silent_s": round(silent_s, 1), "bound_s": bound_s})
+        print(f"[host {self.name}] resident {resident.label!r} has answered "
+              f"nothing for {silent_s:.0f}s (bound {bound_s:.0f}s): stalled, "
+              f"ending it", flush=True)
+        resident.stop()
+
     async def journal_traffic(self) -> None:
         """One traffic window, drained and journaled — the stats tick's own
         task, so a resident that answers late holds up this row and nothing
@@ -758,6 +848,7 @@ class Host:
         the tenant roster."""
         return {
             "host": self.name,
+            "epoch": self.epoch,
             "engines": [engine.base or "*" for engine in self.engines],
             "partition": self.partition.row() if self.partition else None,
             "regimes": [regime.name for regime in self.regimes],

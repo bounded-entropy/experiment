@@ -37,7 +37,8 @@ from rlstack.runner.desk import (
 )
 from rlstack.runner.remote import (
     DESK_DEFAULT, HostService, LocalTransport, RemoteDesk, RemoteHost,
-    RemoteMetal,
+    RemoteMetal, WrongEpoch, serve_in_process, stamped,
+    stop_serving_in_process, transport_for,
 )
 from rlstack.runner.residents import (
     Builds, EngineBuild, LearnerBuild, Resident, ResidentBirth,
@@ -90,20 +91,31 @@ class DeskFixture(unittest.TestCase):
                 return LocalTransport(service.services[address])
         raise KeyError(address)
 
+    @staticmethod
+    def routed(address: str) -> tuple[str, str]:
+        """An address split into what it ROUTES to and the INSTANCE it names
+        (ADR 0008, F2) — exactly what a real transport does: the `@epoch`
+        suffix never reaches the wire, it is stamped into the payload."""
+        head, at, epoch = address.rpartition("@")
+        return (head, epoch) if at else (address, "")
+
     class LazyTransport:
         """Resolves the address on EVERY frame — the venue truth
         (MetalTransport looks its handle up lazily), and what lets a test
-        kill a container by shadowing its address after it was listed."""
+        kill a container by shadowing its address after it was listed. The
+        epoch rides in the payload, as it does on the wire."""
 
         def __init__(self, fixture: "DeskFixture", address: str) -> None:
             self.fixture, self.address = fixture, address
+            self.epoch = DeskFixture.routed(address)[1]
 
         async def call(self, verb: str, payload: dict) -> dict:
             return await self.fixture._transport(self.address).call(
-                verb, payload)
+                verb, stamped(payload, self.epoch))
 
         def ask(self, verb: str, payload: dict) -> dict:
-            return self.fixture._transport(self.address).ask(verb, payload)
+            return self.fixture._transport(self.address).ask(
+                verb, stamped(payload, self.epoch))
 
     def metal_service(self, name: str = "fake-metal", devices: int = 2,
                       build_gate=None, broken: bool = False,
@@ -127,7 +139,8 @@ class DeskFixture(unittest.TestCase):
         service = MetalService(
             Metal(name, "L4", devices, 24.0), store=self.store,
             builds=Builds.fakes(), spawn=spawn,
-            address_of=lambda host_name: f"fleet://carved/{host_name}",
+            address_of=lambda host_name: f"fleet://carved/{host_name}"
+                                          f"@{service.epoch}",
             schema_for=lambda base: fake_qwen_schema(4, base=base),
             transport_for=lambda address: self._transport(address))
         self.metal_services[name] = service
@@ -158,17 +171,20 @@ class DeskFixture(unittest.TestCase):
     class LazyPlane:
         """The metal PLANE resolved on every frame, like LazyTransport: a
         test kills a metal's container by shadowing its plane address with
-        a Dead transport, and revives it by putting the service back."""
+        a Dead transport, and revives it by putting the service back. The
+        `@epoch` the desk composed routes nowhere and rides the payload."""
 
         def __init__(self, fixture: "DeskFixture", address: str) -> None:
-            self.fixture, self.address = fixture, address
+            self.fixture = fixture
+            self.address, self.epoch = DeskFixture.routed(address)
 
         async def call(self, verb: str, payload: dict) -> dict:
             return await self.fixture.metal_transports[self.address].call(
-                verb, payload)
+                verb, stamped(payload, self.epoch))
 
         def ask(self, verb: str, payload: dict) -> dict:
-            return self.fixture.metal_transports[self.address].ask(verb, payload)
+            return self.fixture.metal_transports[self.address].ask(
+                verb, stamped(payload, self.epoch))
 
     def desk(self, boot_for=None, idle_s: float | None = IDLE_S) -> Desk:
         return Desk(
@@ -1327,9 +1343,13 @@ class ReRegistrationTest(DeskFixture):
         # recipe (a redeploy): both are the desk's canon from here
         told = go(remote.register_metal(
             "fake-metal", "H100", 2, 80.0, "metal://fake-metal",
-            builds=Builds.fakes(engine_sleeps=True).row()))
+            builds=Builds.fakes(engine_sleeps=True).row(), epoch="e2"))
+        # the reply also carries the LEASE the desk just opened and the
+        # cadence it expects (ADR 0008, Q1): a container learns its heartbeat
+        # from the desk rather than from a constant of its own
         self.assertEqual(told, {"registered": "fake-metal", "reaped": [],
-                                "retried": {}})
+                                "retried": {}, "epoch": "e2",
+                                "lease_s": 60.0, "heartbeat_s": 20.0})
         self.assertEqual(desk.metal["fake-metal"].vram_gb, 80.0)
         self.assertEqual(desk.status()["metal"]["fake-metal"]["gpu"], "H100")
         # a redeploy's PROPOSAL lands as a `recipe` event of its own (ADR
@@ -2220,3 +2240,247 @@ class SoloPlacementTest(DeskFixture):
             dataclasses.replace(self.split_spec(), seeds=Seeds(master=99)), solo=True))
         self.assertTrue(solo["accepted"], solo)
         self.assertEqual(desk.listings[solo["host"]].metal, "b-metal")
+class FakeClock:
+    """A clock a test winds by hand — the whole of what makes a 60-second
+    lease testable in a millisecond (ADR 0008, promise 1)."""
+
+    def __init__(self, t: float = 1_000_000.0) -> None:
+        self.t = t
+
+    def __call__(self) -> float:
+        return self.t
+
+    def tick(self, seconds: float) -> float:
+        self.t += seconds
+        return self.t
+
+
+class LeaseTest(DeskFixture):
+    """ADR 0008, F1 — A FACT ABOUT THE FLEET IS TRUE ONLY WHILE ITS LEASE IS
+    RENEWED. Every claim here runs on a fake clock: registering opens a lease,
+    a heartbeat renews it, a silence longer than the lease delists the thing,
+    unplaces it, parks its runs with what they want, and knocks its metal."""
+
+    def leased_desk(self, *names, clock=None, lease_s: float = 60.0) -> Desk:
+        clock = clock or FakeClock()
+        desk = Desk(
+            self.store,
+            host_for=lambda addr: RemoteHost(self.LazyTransport(self, addr)),
+            metal_for=lambda addr: RemoteMetal(self.LazyPlane(self, addr)),
+            idle_s=None, lease_s=lease_s, clock=clock)
+        for name in names:
+            service = self.metal_services[name]
+            desk.register_metal(service.metal, address=f"metal://{name}",
+                                builds=service.builds, epoch=service.epoch)
+        return desk
+
+    def test_registering_opens_a_lease_and_a_heartbeat_renews_it(self) -> None:
+        service = self.metal_service(devices=2)
+        clock = FakeClock()
+        desk = self.leased_desk("fake-metal", clock=clock)
+        self.assertTrue(desk.leased("fake-metal"))
+        self.assertEqual(desk.epoch_of("fake-metal"), service.epoch)
+
+        clock.tick(59.0)
+        self.assertTrue(desk.leased("fake-metal"))
+        told = go(desk.heartbeat("fake-metal", service.epoch, [24.0, 24.0]))
+        self.assertTrue(told["heard"], told)
+        clock.tick(59.0)
+        self.assertTrue(desk.leased("fake-metal"))   # the renewal moved it
+        # the residual rides the heartbeat FOR THE ROW (Q3, as amended)
+        self.assertEqual(desk.status()["metal"]["fake-metal"]["residual"],
+                         [24.0, 24.0])
+
+    def test_a_lapsed_lease_is_not_placeable(self) -> None:
+        """The whole of F1's teeth at the carve rung: a metal nobody has
+        heard from within its lease is passed over, and one heartbeat brings
+        it back — no re-registration, no journal row."""
+        self.metal_service(devices=2)
+        clock = FakeClock()
+        desk = self.leased_desk("fake-metal", clock=clock)
+        clock.tick(61.0)
+        self.assertFalse(desk.leased("fake-metal"))
+        placed = go(Campaigns(desk).submit(self.split_spec()))
+        self.assertFalse(placed["accepted"], placed)
+        self.assertTrue(placed["boot"])
+
+        go(desk.heartbeat("fake-metal",
+                          self.metal_services["fake-metal"].epoch))
+        self.assertTrue(desk.leased("fake-metal"))
+        again = go(Campaigns(desk).submit(self.split_spec()))
+        self.assertTrue(again["accepted"], again)
+
+    def test_a_lapsed_host_is_off_every_listing_within_one_lease(self) -> None:
+        """PROMISE 1. A carved host's lease is its metal's — one container,
+        one epoch, one heartbeat — so a metal that goes quiet takes its hosts
+        off the listings, parks their runs with what those runs WANT, and
+        gets knocked, all inside one reaper tick and with no probe at all."""
+        service = self.metal_service(devices=2, sample_gate=asyncio.Event())
+        clock = FakeClock()
+        knocked: list[str] = []
+        desk = self.leased_desk("fake-metal", clock=clock)
+        desk.boot_for = knocked.append
+
+        reply = go(Campaigns(desk).submit(self.split_spec()))
+        self.assertTrue(reply["accepted"], reply)
+        self.assertEqual(len(desk.listings), 2)
+
+        clock.tick(61.0)
+        told = go(desk.reap())
+        self.assertEqual(sorted(set(told["listings"].values())), ["lapsed"])
+        self.assertEqual(desk.listings, {})
+        self.assertEqual(knocked, ["fake-metal"])
+
+        self.assertEqual(sorted({e["reason"] for e in self.store.read_fleet_log()
+                                 if e.get("event") == "delist"}),
+                         ["lease lapsed"])
+        parked = desk.parked_rows()[reply["run_id"]]
+        self.assertTrue(parked["wants"], parked)
+        self.assertEqual(sorted(w["capabilities"][0] for w in parked["wants"]),
+                         ["inference", "training"])
+        self.assertEqual(parked["since"], parked["t"])
+        for host in list(service.hosts):
+            service.decarve(host)
+
+    def test_a_heartbeat_for_an_unknown_name_or_a_replaced_epoch_is_refused(self) -> None:
+        """A heartbeat never opens a lease: a container talking to a desk
+        that has forgotten it must REGISTER, and the refusal says so. An
+        epoch the desk has already replaced is refused the same way."""
+        service = self.metal_service(devices=1)
+        desk = self.leased_desk("fake-metal")
+        stranger = go(desk.heartbeat("nobody", "e1"))
+        self.assertFalse(stranger["heard"])
+        self.assertIn("holds no lease", stranger["error"])
+
+        stale = go(desk.heartbeat("fake-metal", "an-older-life"))
+        self.assertFalse(stale["heard"])
+        self.assertIn("already replaced", stale["error"])
+        self.assertEqual(stale["epoch"], service.epoch)
+
+    def test_the_lease_constants_are_journaled_at_registration(self) -> None:
+        """Q1: the values are the DESK's, and the record says what the fleet
+        was promising when the row was written."""
+        self.metal_service(devices=1)
+        desk = self.leased_desk("fake-metal", lease_s=45.0)
+        row = [e for e in self.store.read_fleet_log()
+               if e.get("event") == "metal"][-1]
+        self.assertEqual(row["lease_s"], 45.0)
+        self.assertEqual(row["heartbeat_s"], 20.0)
+        self.assertEqual(row["epoch"], self.metal_services["fake-metal"].epoch)
+
+    def test_a_rebuilt_desk_grants_one_lease_of_grace(self) -> None:
+        """A desk that has been alive for a millisecond has heard from
+        nobody, so it believes its replayed rows for exactly one lease and
+        then disbelieves whatever did not heartbeat inside it."""
+        self.metal_service(devices=2)
+        clock = FakeClock()
+        self.leased_desk("fake-metal", clock=clock)
+        clock.tick(10_000.0)                       # hours of journal age
+        reborn = Desk.from_journal(
+            self.store,
+            host_for=lambda addr: RemoteHost(self.LazyTransport(self, addr)),
+            metal_for=lambda addr: RemoteMetal(self.LazyPlane(self, addr)),
+            clock=clock)
+        self.assertTrue(reborn.leased("fake-metal"))
+        self.assertEqual(reborn.epoch_of("fake-metal"),
+                         self.metal_services["fake-metal"].epoch)
+        clock.tick(61.0)
+        self.assertFalse(reborn.leased("fake-metal"))
+
+    def test_status_carries_every_row_s_lease(self) -> None:
+        self.metal_service(devices=2)
+        clock = FakeClock()
+        desk = self.leased_desk("fake-metal", clock=clock)
+        go(Campaigns(desk).submit(self.split_spec()))
+        told = desk.status()
+        metal = told["metal"]["fake-metal"]
+        self.assertEqual(metal["epoch"],
+                         self.metal_services["fake-metal"].epoch)
+        self.assertEqual(metal["lease_s"], 60.0)
+        self.assertEqual(metal["heard_t"], clock.t)
+        self.assertTrue(metal["live"])
+        for row in told["listings"].values():
+            self.assertEqual(row["epoch"], metal["epoch"])
+            self.assertTrue(row["live"])
+        clock.tick(61.0)
+        self.assertFalse(desk.status()["metal"]["fake-metal"]["live"])
+
+
+class EpochTest(DeskFixture):
+    """ADR 0008, F2 — A FRAME NAMES THE INSTANCE IT MEANS. A name is not an
+    instance: a released container, a redeployed venue and a reborn metal all
+    answer at the same address, and only the epoch tells them apart."""
+
+    def test_the_metal_door_refuses_a_frame_from_another_life(self) -> None:
+        """PROMISE 2, at the plane door. The refusal NAMES both epochs, which
+        is what turns 'the desk hung' into 'the desk is talking to a corpse'."""
+        service = self.metal_service(devices=1)
+        with self.assertRaises(WrongEpoch) as caught:
+            LocalTransport(service, "an-older-life").ask("residual", {})
+        self.assertIn(service.epoch, str(caught.exception))
+        self.assertIn("an-older-life", str(caught.exception))
+        # the SAME frame at this life's epoch is served
+        self.assertEqual(
+            LocalTransport(service, service.epoch).ask("residual", {}),
+            {"residual": [24.0]})
+
+    def test_a_host_door_refuses_a_frame_from_another_life(self) -> None:
+        """A carved host wears its container's epoch, so a proxy held across
+        a rebirth fails by name instead of reaching the newborn."""
+        service = self.metal_service(devices=2)
+        desk = self.desk_with_metal("fake-metal")
+        go(Campaigns(desk).submit(self.split_spec()))
+        host = next(iter(service.hosts.values()))
+        self.assertEqual(host.epoch, service.epoch)
+        with self.assertRaises(WrongEpoch):
+            LocalTransport(HostService(host), "an-older-life").ask("status", {})
+        self.assertTrue(
+            LocalTransport(HostService(host), service.epoch).ask("status", {}))
+
+    def test_a_frame_naming_no_epoch_is_served(self) -> None:
+        """The suffix is optional by design: a registration is exactly the
+        frame that cannot name an epoch yet, because it is announcing one."""
+        service = self.metal_service(devices=1)
+        self.assertEqual(LocalTransport(service).ask("residual", {}),
+                         {"residual": [24.0]})
+
+    def test_the_epoch_rides_the_address_and_the_factory_reads_it(self) -> None:
+        """Q2: the epoch is a suffix on the address the desk already keeps, so
+        a journaled address is self-describing about the instance too."""
+        service = self.metal_service(devices=1)
+        address = f"local://fake-plane@{service.epoch}"
+        serve_in_process(address, service)
+        self.addCleanup(stop_serving_in_process, address)
+        transport = transport_for(address)
+        self.assertEqual(transport.epoch, service.epoch)
+        self.assertEqual(transport.ask("residual", {}), {"residual": [24.0]})
+
+    def test_the_desk_addresses_the_metal_at_the_epoch_it_registered(self) -> None:
+        """The plane address stays epoch-free on the row (a re-registration
+        must read as one metal turning over, not two deploys colliding), and
+        the desk composes the two when it builds the remote."""
+        service = self.metal_service(devices=1)
+        seen: list[str] = []
+
+        def metal_for(address: str):
+            seen.append(address)
+            return RemoteMetal(self.LazyPlane(self, address.partition("@")[0]))
+        desk = Desk(self.store, host_for=lambda a: RemoteHost(a),
+                    metal_for=metal_for)
+        desk.register_metal(service.metal, address="metal://fake-metal",
+                            epoch=service.epoch)
+        self.assertEqual(seen, [f"metal://fake-metal@{service.epoch}"])
+        self.assertEqual(desk.metal_addresses["fake-metal"],
+                         "metal://fake-metal")
+
+    def test_a_released_container_is_a_lapsed_epoch(self) -> None:
+        """The rebirth hazard, as a claim: a released metal stands a FRESH
+        service up under a NEW epoch, and every frame minted for the released
+        one is refused by name — which is what the deaf-metal hour needed."""
+        service = self.metal_service(devices=1)
+        was = service.epoch
+        service.release()
+        reborn = self.metal_service(devices=1)       # the next knock's container
+        self.assertNotEqual(reborn.epoch, was)
+        with self.assertRaises(WrongEpoch):
+            LocalTransport(reborn, was).ask("residual", {})

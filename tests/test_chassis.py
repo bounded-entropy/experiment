@@ -29,8 +29,8 @@ from rlstack import (
 from rlstack.runner.campaign import Campaigns
 from rlstack.runner.desk import Desk, MetalService
 from rlstack.runner.remote import (
-    IN_PROCESS, RemoteHost, RemoteMetal, serve_in_process,
-    stop_serving_in_process, transport_for,
+    IN_PROCESS, RemoteDesk, RemoteHost, RemoteMetal, WrongEpoch,
+    serve_in_process, stop_serving_in_process, transport_for, without_epoch,
 )
 from rlstack.runner.residents import Builds, Resident
 
@@ -47,6 +47,7 @@ class ChassisFixture(unittest.TestCase):
 
     METAL = "fake-l4"
     PLANE = "local://fake-l4/plane"
+    DESK = "local://fake-desk"
 
     def setUp(self) -> None:
         tmp = tempfile.TemporaryDirectory()
@@ -54,14 +55,15 @@ class ChassisFixture(unittest.TestCase):
         self.store, self.train, self.heldout = arith_store(tmp.name)
         self.addCleanup(stop_serving_in_process, self.PLANE)
 
-    def bare_metal(self) -> MetalService:
+    def bare_metal(self, epoch: str | None = None) -> MetalService:
         """`metal_class`'s bring-up, minus Modal: measured facts (typed here
         because there is no card), the store, `transport_for` as the router,
         and NO RECIPE — the container does not know what it is for until the
         desk says (ADR 0007, Q4)."""
         service = MetalService(
-            Metal(self.METAL, "L4", 2, 24.0), store=self.store,
-            address_of=lambda host: f"local://{self.METAL}/{host}",
+            Metal(self.METAL, "L4", 2, 24.0), store=self.store, epoch=epoch,
+            address_of=lambda host: (f"local://{self.METAL}/{host}"
+                                     f"@{service.epoch}"),
             schema_for=lambda base: fake_qwen_schema(4, base=base),
             transport_for=transport_for,
             spawn=lambda birth: Resident.in_process(
@@ -135,11 +137,13 @@ class ChassisTest(ChassisFixture):
         listed = sorted(desk.listings)
         self.assertEqual(len(listed), 1)
         address = desk.listings[listed[0]].address
-        self.assertIn(address, IN_PROCESS)
+        # keyed by the address's ROUTE: the epoch names the instance, not the
+        # dial, and is stamped into the frame instead (ADR 0008, F2)
+        self.assertIn(without_epoch(address), IN_PROCESS)
         self.assertTrue(RemoteHost(transport_for(address)).status())
 
         go(service.decarve(listed[0]))
-        self.assertNotIn(address, IN_PROCESS)
+        self.assertNotIn(without_epoch(address), IN_PROCESS)
         with self.assertRaises(ValueError):
             transport_for(address)
 
@@ -155,7 +159,7 @@ class ChassisTest(ChassisFixture):
 
         go(desk.release(self.METAL, reason="the door is done", force=True))
         for address in addresses:
-            self.assertNotIn(address, IN_PROCESS)
+            self.assertNotIn(without_epoch(address), IN_PROCESS)
         self.assertTrue(service.released.is_set())     # the keepalive returns
         self.assertEqual(service.hosts, {})
 
@@ -202,3 +206,92 @@ class OneWorkspaceTest(unittest.TestCase):
                 sys.modules.pop("modal.config", None)
                 sys.modules.pop("venue_modal_venue_ws", None)
 
+class ChassisLeaseTest(ChassisFixture):
+    """ADR 0008 through a venue-shaped fleet, with no Modal anywhere: the
+    metal announces an EPOCH, renews a LEASE by heartbeat, and a frame minted
+    for a life that has ended is refused by name at the plane door."""
+
+    def PLANE_DESK(self, desk: Desk) -> str:
+        """The desk published on the in-process switchboard, the way a venue
+        reaches it — so this test's heartbeat crosses a transport rather than
+        calling a method."""
+        serve_in_process(self.DESK, Campaigns(desk))
+        self.addCleanup(stop_serving_in_process, self.DESK)
+        return self.DESK
+
+    def stood_up(self, desk: Desk, service: MetalService) -> None:
+        """`metal_class`'s announce, minus Modal: register at the plane
+        address with this container's epoch, then declare the recipe."""
+        desk.register_metal(service.metal, address=self.PLANE, idle_s=None,
+                            epoch=service.epoch)
+        desk.recipe(self.METAL, Builds.fakes())
+
+    def test_the_metal_announces_an_epoch_and_renews_by_heartbeat(self) -> None:
+        clock = [1_000_000.0]
+        desk = Desk(self.store,
+                    host_for=lambda a: RemoteHost(transport_for(a)),
+                    metal_for=lambda a: RemoteMetal(transport_for(a)),
+                    clock=lambda: clock[0])
+        service = self.bare_metal()
+        self.stood_up(desk, service)
+        told = go(RemoteDesk(transport_for(self.PLANE_DESK(desk))).heartbeat(
+            self.METAL, service.epoch, service.residual()))
+        self.assertTrue(told["heard"], told)
+        self.assertEqual(desk.status()["metal"][self.METAL]["residual"],
+                         [24.0, 24.0])
+
+        clock[0] += 61.0
+        self.assertFalse(desk.leased(self.METAL))
+
+        async def drive():
+            early = await Campaigns(desk).submit(self.a_spec())
+            self.assertFalse(early["accepted"], early)
+            # one heartbeat, and the metal is placeable again — no
+            # re-registration, no journal row, nothing but being heard
+            await desk.heartbeat(self.METAL, service.epoch, service.residual())
+            reply = await Campaigns(desk).submit(self.a_spec())
+            self.assertTrue(reply["accepted"], reply)
+            await service.hosts[reply["host"]]._adoptions[reply["run_id"]]
+        go(drive())
+
+    def test_a_frame_for_a_retired_container_is_refused_at_the_plane(self) -> None:
+        """The deaf-metal hour, retired (F2). A released container is a
+        lapsed epoch: the knock boots a FRESH one, and every frame the desk
+        still holds for the old life fails by name instead of queueing for a
+        container that fetches nothing."""
+        was = self.bare_metal(epoch="e1")
+        was.release()
+        stop_serving_in_process(self.PLANE)
+        reborn = self.bare_metal(epoch="e2")
+        self.assertIs(IN_PROCESS[self.PLANE], reborn)
+
+        stale = transport_for(f"{self.PLANE}@e1")
+        with self.assertRaises(WrongEpoch) as caught:
+            stale.ask("describe", {})
+        self.assertIn("e1", str(caught.exception))
+        fresh = transport_for(f"{self.PLANE}@e2")
+        self.assertEqual(fresh.ask("describe", {})["epoch"], "e2")
+
+    def test_a_carved_host_wears_its_containers_epoch(self) -> None:
+        """One container, one epoch, one lease: the host's address carries it,
+        the desk's listing lease holds it, and the host's own door refuses
+        anything else."""
+        desk = self.a_desk()
+        service = self.bare_metal()
+        self.stood_up(desk, service)
+
+        async def drive():
+            reply = await Campaigns(desk).submit(self.a_spec())
+            self.assertTrue(reply["accepted"], reply)
+            await service.hosts[reply["host"]]._adoptions[reply["run_id"]]
+        go(drive())
+
+        name = next(iter(desk.listings))
+        self.assertEqual(desk.epoch_of(name), service.epoch)
+        self.assertTrue(desk.listings[name].address.endswith(
+            f"@{service.epoch}"))
+        self.assertEqual(desk.status()["listings"][name]["epoch"],
+                         service.epoch)
+        with self.assertRaises(WrongEpoch):
+            RemoteHost(transport_for(
+                f"local://{self.METAL}/{name}@an-older-life")).status()

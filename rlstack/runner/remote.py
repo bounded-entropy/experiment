@@ -379,7 +379,11 @@ DESK_DEFAULT = Undeclared()
 
 class Transport(Protocol):
     """Carries dict frames to one host's service. Frames are JSON-safe by
-    contract; LocalTransport enforces it, real transports inherit it free."""
+    contract; LocalTransport enforces it, real transports inherit it free.
+
+    A transport built from an address that names an EPOCH stamps that epoch
+    into every frame it carries (F2), so the receiving container can refuse a
+    frame meant for an instance that no longer exists."""
 
     async def call(self, verb: str, payload: dict) -> dict:
         """An admitted verb: the serving host wraps it in its arbiter."""
@@ -388,6 +392,55 @@ class Transport(Protocol):
     def ask(self, verb: str, payload: dict) -> dict:
         """An admission-free verb: registration and build facts."""
         ...
+
+
+# ---------------------------------------------------------------------------
+# the epoch: a frame names the instance it means (ADR 0008, F2)
+# ---------------------------------------------------------------------------
+
+EPOCH_KEY = "@epoch"
+"""THE RESERVED PAYLOAD KEY the epoch rides under.
+
+Every rlstack door has the same three-argument shape (host, verb, payload),
+so the instance a frame is addressed to travels IN the payload rather than
+beside it — under a key beginning with "@", which no verb's own argument name
+may be, so it can never collide with one."""
+
+
+class WrongEpoch(RuntimeError):
+    """A frame addressed to an instance this container is not (F2).
+
+    A name is not an instance: a released container, a redeployed venue and a
+    reborn metal all answer at the same address, and a frame minted for the
+    one that is gone must fail BY NAME rather than be served by its
+    successor."""
+
+
+def stamped(payload: Mapping, epoch: str) -> dict:
+    """`payload` addressed to one instance — what every transport built from
+    an `@epoch` address sends. An epoch-free transport stamps nothing, which
+    is how a registration (the frame that ANNOUNCES an epoch) reaches a
+    container that has not told anyone its epoch yet."""
+    return dict(payload) if not epoch else {**payload, EPOCH_KEY: epoch}
+
+
+def check_epoch(payload: Mapping, mine: str, who: str) -> None:
+    """THE REFUSAL, one named function and one home for the rule (F2): a
+    frame naming an epoch that is not this instance's is refused by name.
+
+    Both silences are deliberate. A frame naming NO epoch is served — the
+    grammar's suffix is optional, and a registration is exactly the frame
+    that cannot name one yet. A receiver with no epoch of its own serves
+    anything — a hand-built host in a test process is one instance forever,
+    and there is nothing for the rule to be about."""
+    asked = payload.get(EPOCH_KEY)
+    if not asked or not mine or asked == mine:
+        return
+    raise WrongEpoch(
+        f"{who} is epoch {mine!r}; this frame is addressed to epoch "
+        f"{asked!r}, which is an instance that no longer answers here — "
+        f"re-resolve the address (the desk relists a metal at its new epoch "
+        f"on its next registration)")
 
 
 LEARNER_VERBS = ("install", "uninstall", "forward_backward", "optim_step",
@@ -438,7 +491,13 @@ class HostService:
         one, so neither door occupies anything — and both are host-addressed,
         so they resolve no engine. The learner verbs ride it BECAUSE they are
         admitted (serve_learner): they occupy this host's training metal, so
-        they are exactly the shape sample_tokens has."""
+        they are exactly the shape sample_tokens has.
+
+        THE EPOCH IS CHECKED FIRST (F2): a frame minted for a host that died
+        with its container is refused before anything is admitted, because a
+        carve name recycles and the successor must not serve its corpse's
+        mail."""
+        check_epoch(payload, self.host.epoch, f"host {self.host.name!r}")
         if verb == "adopt":
             return await self.host.adopt(payload["spec"],
                                          payload.get("routes", {}),
@@ -505,7 +564,10 @@ class HostService:
         disturbs traffic — the multi-tenancy invariant) and build facts
         (reachability, tokenize), all callable from sync call sites. `status`
         is host-addressed (the roster, the partition, the adoptions' fates)
-        and resolves no engine."""
+        and resolves no engine. The epoch is checked here too (F2): a probe
+        is a frame like any other, and a corpse's address answering `status`
+        is exactly the deaf-metal hazard."""
+        check_epoch(payload, self.host.epoch, f"host {self.host.name!r}")
         if verb == "status":
             return self.host.status()
         engine = self._engine(payload["base"], payload["tp"])
@@ -638,18 +700,25 @@ class Service(Protocol):
 class LocalTransport:
     """Same-process transport that still crosses the serialization boundary
     (json round-trip both ways), so a fleet whose hosts share one process is
-    indistinguishable, from above, from one whose hosts do not."""
+    indistinguishable, from above, from one whose hosts do not.
 
-    def __init__(self, service: Service) -> None:
+    `epoch` is the instance the frames are addressed to (F2), stamped exactly
+    as a real transport stamps it — so the epoch refusal is exercisable with
+    no container anywhere, which is what the fakes suite needs it to be."""
+
+    def __init__(self, service: Service, epoch: str = "") -> None:
         self.service = service
+        self.epoch = epoch
 
     async def call(self, verb: str, payload: dict) -> dict:
         return _json_roundtrip(
-            await self.service.serve(verb, _json_roundtrip(payload)))
+            await self.service.serve(
+                verb, _json_roundtrip(stamped(payload, self.epoch))))
 
     def ask(self, verb: str, payload: dict) -> dict:
         return _json_roundtrip(
-            self.service.answer(verb, _json_roundtrip(payload)))
+            self.service.answer(
+                verb, _json_roundtrip(stamped(payload, self.epoch))))
 
 
 # ---------------------------------------------------------------------------
@@ -658,24 +727,34 @@ class LocalTransport:
 
 @dataclass(frozen=True)
 class Address:
-    """A wire address in parts. The grammar, stated once (ADR 0007, Q3):
+    """A wire address in parts. The grammar, stated once (ADR 0007, Q3;
+    the epoch is ADR 0008, Q2):
 
         modal://<app>/<cls>#<host>   one host's door inside a Modal class
         modal://<app>/<cls>          that container's own plane (a desk, a
                                      metal)
         local://<host>               the IN-PROCESS wire: a service standing
                                      in this very process under that name
+        ...@<epoch>                  any of the above, addressed to ONE
+                                     INSTANCE of it
 
     THE VENUE IS IN THE ADDRESS. One desk serves metal in many apps, so the
     app a frame goes to cannot be baked into a transport class the way each
-    venue's own transports baked it before this ADR — the journal's `address`
+    venue's own transports baked it before ADR 0007 — the journal's `address`
     fields become self-describing, and a desk rebuilt from them can reach
-    every metal it ever registered."""
+    every metal it ever registered.
+
+    AND THE INSTANCE IS IN THE ADDRESS (F2). A name is not an instance: a
+    container mints an EPOCH at bring-up, and a frame that names an epoch is
+    refused by any container wearing another one. The suffix is optional —
+    an address without it addresses whoever answers, which is what a
+    registration frame must do, because the epoch is what it is announcing."""
 
     scheme: str
     app: str = ""
     cls: str = ""
     host: str = ""
+    epoch: str = ""
 
 
 def parse_address(address: str) -> Address:
@@ -685,14 +764,19 @@ def parse_address(address: str) -> Address:
     half-address is a venue bug and the frame that would ride it is a lost
     hour. An unfamiliar scheme parses (everything after `://` is its host)
     and is refused by `transport_for`, which is where the closed set of
-    substrates actually lives."""
+    substrates actually lives. A trailing `@<epoch>` is read off first,
+    whatever the scheme: it names the INSTANCE, never the route."""
     scheme, sep, rest = address.partition("://")
     if not sep or not scheme or not rest:
         raise ValueError(
             f"{address!r} is not an address: the grammar is "
-            f"modal://<app>/<cls>[#<host>] or local://<host>")
+            f"modal://<app>/<cls>[#<host>][@<epoch>] or "
+            f"local://<host>[@<epoch>]")
+    rest, at, epoch = rest.rpartition("@")
+    if not at:
+        rest, epoch = epoch, ""
     if scheme != "modal":
-        return Address(scheme=scheme, host=rest)
+        return Address(scheme=scheme, host=rest, epoch=epoch)
     path, _, host = rest.partition("#")
     app, slash, cls = path.partition("/")
     if not slash or not app or not cls:
@@ -700,7 +784,31 @@ def parse_address(address: str) -> Address:
             f"{address!r} names no Modal class: a modal address is "
             f"modal://<app>/<cls>[#<host>] — the app and the class are what "
             f"one desk needs to reach metal in another venue's app")
-    return Address(scheme="modal", app=app, cls=cls, host=host)
+    return Address(scheme="modal", app=app, cls=cls, host=host, epoch=epoch)
+
+
+def with_epoch(address: str, epoch: str) -> str:
+    """An address addressed to ONE INSTANCE of what it names (F2).
+
+    The desk journals a metal's PLANE address without an epoch — the address
+    is the container's stable name, and a re-registration at a new epoch must
+    read as the same metal, not as a second deploy colliding on it — and
+    composes the two here when it builds the remote it will actually send
+    frames through. A host's address, minted by the venue at carve, carries
+    its epoch already: carve names recycle when a container is reborn, and
+    the epoch is what tells the corpse from the newborn."""
+    return f"{address}@{epoch}" if epoch else address
+
+
+def without_epoch(address: str) -> str:
+    """`with_epoch`'s inverse: what an address ROUTES to.
+
+    The epoch is never part of the route — a container answers at its name
+    whatever life it is on, and the refusal happens at the door, not in the
+    dial. So every transport dials the route and STAMPS the epoch, and the
+    in-process switchboard is keyed by the route for the same reason."""
+    head, at, _ = address.rpartition("@")
+    return head if at else address
 
 
 IN_PROCESS: dict[str, Service] = {}
@@ -735,14 +843,15 @@ def transport_for(address: str) -> Transport:
     once), then the scheme names the substrate; the heavy region is imported
     inside its branch, so `import rlstack` never imports a venue SDK
     (STYLE rule 7)."""
-    standing = IN_PROCESS.get(address)
-    if standing is not None:
-        return LocalTransport(standing)
     parsed = parse_address(address)
+    standing = IN_PROCESS.get(address) or IN_PROCESS.get(without_epoch(address))
+    if standing is not None:
+        return LocalTransport(standing, parsed.epoch)
     if parsed.scheme == "modal":
         from rlstack.runner.transports.modal_cls import ModalClsTransport
 
-        return ModalClsTransport(parsed.app, parsed.cls, parsed.host)
+        return ModalClsTransport(parsed.app, parsed.cls, parsed.host,
+                                 parsed.epoch)
     if parsed.scheme == "local":
         raise ValueError(
             f"nothing answers {address!r} in this process: a local:// address "
@@ -1060,19 +1169,33 @@ class RemoteDesk:
         """{host: alive} for every listing, probed by the desk just now."""
         return self._transport.ask("liveness", {})
 
+    async def heartbeat(self, name: str, epoch: str,
+                        residual: Sequence[float] | None = None) -> dict:
+        """ONE RENEWAL (ADR 0008, F1): `name` — a metal, or a host carved on
+        one — is still there, and it is still `epoch`. A metal's duty sends
+        one of these per name every `heartbeat_s`; the residual rides along
+        for the row the observer shows. The reply says whether the desk
+        believed it, and a refusal names why (an unknown name, a replaced
+        epoch) so the container can register again instead of heartbeating
+        into a desk that has forgotten it."""
+        payload: dict = {"name": name, "epoch": epoch}
+        if residual is not None:
+            payload["residual"] = [float(gb) for gb in residual]
+        return await self._transport.call("heartbeat", payload)
+
     async def list_host(self, name: str, regimes: Sequence,
                         address: str, solo: bool = False,
                         partition: Mapping | None = None,
-                        metal: str = "") -> dict:
+                        metal: str = "", epoch: str = "") -> dict:
         """A booted host enters the standing fleet over the wire — the
         phone-home half of the deploy contract: the container that stood the
-        host tells the desk what it wears, where it answers, and (the
-        capacity view) the partition row it was born onto and the metal it
-        lives on."""
+        host tells the desk what it wears, where it answers, (the capacity
+        view) the partition row it was born onto and the metal it lives on,
+        and (ADR 0008) the EPOCH it is — which opens its lease."""
         return await self._transport.call("list", {
             "host": name, "address": address, "solo": solo,
             "partition": dict(partition) if partition else None,
-            "metal": metal,
+            "metal": metal, "epoch": epoch,
             "regimes": [{"name": r.name, "capability": r.capability,
                          "base": r.base, "shape": r.shape} for r in regimes]})
 
@@ -1116,7 +1239,7 @@ class RemoteDesk:
                              builds: Mapping | None = None,
                              idle_s: float | None | Undeclared = DESK_DEFAULT,
                              container: str | None = None,
-                             ) -> dict:
+                             epoch: str = "") -> dict:
         """A metal container phones home its OWN existence — the other half
         of the deploy contract: after this the desk can deduce (residual)
         and command (carve/decarve) against it at `address`. The facts are
@@ -1129,9 +1252,15 @@ class RemoteDesk:
         what it reaped and retried. A registration also RE-ACQUIRES a metal
         the desk had released (ADR 0003) — the row goes back on the
         carve-able set. `idle_s` is this metal's own idle limit: unsaid, the
-        desk's default decides; None PINS it, never released."""
+        desk's default decides; None PINS it, never released.
+
+        `epoch` is this CONTAINER's boot identity (ADR 0008, F2), minted at
+        bring-up: it opens the metal's lease, rides every frame the desk sends
+        back, and is what lets the desk address two lives of one metal name as
+        two instances. The reply carries the lease constants the desk holds,
+        so the container heartbeats at the desk's cadence and not its own."""
         payload = {"name": name, "gpu": gpu, "devices": devices,
-                   "vram_gb": vram_gb, "address": address,
+                   "vram_gb": vram_gb, "address": address, "epoch": epoch,
                    "builds": dict(builds) if builds else None,
                    "container": container}
         if not isinstance(idle_s, Undeclared):

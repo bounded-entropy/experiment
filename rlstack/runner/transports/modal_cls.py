@@ -33,12 +33,17 @@ def blocking_ask(fn):
 class ModalClsTransport:
     """Frames to one deployed Modal class, optionally addressed to one host
     inside it. `app`/`cls` name the deployed container; `host` is the name a
-    metal container routes by, and None is that container's own plane."""
+    metal container routes by, and None is that container's own plane;
+    `epoch` is the INSTANCE the frames are addressed to (ADR 0008, F2) —
+    stamped into every payload, refused by a container wearing another one,
+    and empty for the frames that cannot name one yet (a registration)."""
 
-    def __init__(self, app: str, cls: str, host: str | None = None) -> None:
+    def __init__(self, app: str, cls: str, host: str | None = None,
+                 epoch: str = "") -> None:
         self.app = app
         self.cls = cls
         self.host = host or ""
+        self.epoch = epoch
         self._handle = None
 
     def handle(self):
@@ -53,9 +58,15 @@ class ModalClsTransport:
 
     async def call(self, verb: str, payload: dict) -> dict:
         """An admitted verb: awaited on the caller's own loop."""
-        return await self.handle().door.remote.aio(self.host, verb, payload)
+        from rlstack.runner.remote import stamped
+
+        return await self.handle().door.remote.aio(
+            self.host, verb, stamped(payload, self.epoch))
 
     def ask(self, verb: str, payload: dict) -> dict:
         """An admission-free verb: blocking, on its own thread (#77)."""
+        from rlstack.runner.remote import stamped
+
+        frame = stamped(payload, self.epoch)
         return blocking_ask(
-            lambda: self.handle().door_ask.remote(self.host, verb, payload))
+            lambda: self.handle().door_ask.remote(self.host, verb, frame))
