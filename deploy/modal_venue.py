@@ -198,13 +198,26 @@ def boot_by_spawn(app_name: str, cls: str = "MetalS"):
     return boot
 
 
+def fleet() -> dict:
+    """The desk's inventory, from a driver's synchronous entrypoint.
+
+    NEVER A CLIENT-SIDE TIMEOUT ON A DESK CALL (ADR 0008, Q4): cancelling an
+    input of a concurrent container is what shut the desk down three times on
+    2026-09-04, so a helper here waits patiently and the DEADLINE is the
+    desk's own, server-side. `asyncio.run` drives one call to completion and
+    cancels nothing."""
+    import asyncio
+
+    return asyncio.run(desk().status())
+
+
 def wait_for_metal(name: str, timeout_s: float = 900.0) -> dict:
     """Block until `name` is registered with the desk AND reachable on the
     metal plane — the container's own announce is what says so, never the
-    spawn's return."""
+    spawn's return. A POLL, not a timeout: each ask is allowed to finish."""
     deadline = time.time() + timeout_s
     while time.time() < deadline:
-        held = desk().status().get("metal", {})
+        held = fleet().get("metal", {})
         if name in held and held[name].get("plane"):
             return held[name]
         time.sleep(10)
@@ -223,7 +236,7 @@ def guarded_release(names, reason: str) -> dict:
     """
     import asyncio
 
-    held = desk().status().get("metal", {})
+    held = fleet().get("metal", {})
     out: dict[str, dict] = {}
     for name in sorted(names):
         if not held.get(name, {}).get("plane"):
@@ -238,7 +251,7 @@ def mine_are_released(names) -> bool:
     """The check venues' promise, SCOPED (Q2): the metals this door acquired
     are released. Not "the plane is empty" — under one desk the plane may
     legitimately hold metal this venue never registered."""
-    held = desk().status().get("metal", {})
+    held = fleet().get("metal", {})
     standing = [name for name in sorted(names)
                 if held.get(name, {}).get("plane")]
     print(f"[plane] mine still standing: {standing or 'none'}", flush=True)
@@ -552,12 +565,18 @@ def metal_class(app, app_name: str, metal: str, gpu, image, *, module: str,
             return await live.service_for_host(host).serve(verb, payload)
 
         @modal.method()
-        def door_ask(self, host: str, verb: str, payload: dict) -> dict:
-            """The admission-free verbs, same addressing."""
+        async def door_ask(self, host: str, verb: str, payload: dict) -> dict:
+            """The admission-free verbs, same addressing — and ASYNC like its
+            twin (ADR 0008, Q4). A cancelled input of a SYNCHRONOUS method on
+            a concurrent container has no clean interruption, so Modal shuts
+            the container down; an async one is a task the loop drops. The
+            answers themselves are synchronous, so they run on a thread and
+            the container's loop keeps turning under them."""
+            import asyncio
+
             live = self.live()
-            if not host:
-                return live.answer(verb, payload)
-            return live.service_for_host(host).answer(verb, payload)
+            service = live if not host else live.service_for_host(host)
+            return await asyncio.to_thread(service.answer, verb, payload)
 
         @modal.method()
         async def serve(self) -> dict:

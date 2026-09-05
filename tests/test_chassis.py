@@ -267,10 +267,10 @@ class ChassisLeaseTest(ChassisFixture):
 
         stale = transport_for(f"{self.PLANE}@e1")
         with self.assertRaises(WrongEpoch) as caught:
-            stale.ask("describe", {})
+            go(stale.ask("describe", {}))
         self.assertIn("e1", str(caught.exception))
         fresh = transport_for(f"{self.PLANE}@e2")
-        self.assertEqual(fresh.ask("describe", {})["epoch"], "e2")
+        self.assertEqual(go(fresh.ask("describe", {}))["epoch"], "e2")
 
     def test_a_carved_host_wears_its_containers_epoch(self) -> None:
         """One container, one epoch, one lease: the host's address carries it,
@@ -293,5 +293,5 @@ class ChassisLeaseTest(ChassisFixture):
         self.assertEqual(desk.status()["listings"][name]["epoch"],
                          service.epoch)
         with self.assertRaises(WrongEpoch):
-            RemoteHost(transport_for(
-                f"local://{self.METAL}/{name}@an-older-life")).status()
+            go(RemoteHost(transport_for(
+                f"local://{self.METAL}/{name}@an-older-life")).status())

@@ -161,9 +161,16 @@ class Desk:
         return await self.campaigns.serve(verb, payload)
 
     @modal.method()
-    def door_ask(self, host: str, verb: str, payload: dict) -> dict:
-        """The admission-free verbs (status, placements, liveness)."""
-        return self.campaigns.answer(verb, payload)
+    async def door_ask(self, host: str, verb: str, payload: dict) -> dict:
+        """The admission-free verbs (status, placements) — ASYNC like its
+        twin since ADR 0008 (Q4): a cancelled input of a synchronous method
+        on THIS container, which is `@modal.concurrent(max_inputs=32)` on one
+        process, shuts the whole desk down. That happened three times on
+        2026-09-04. The answer itself reads memory and a journal, so it runs
+        on a thread and this container's loop keeps turning."""
+        import asyncio
+
+        return await asyncio.to_thread(self.campaigns.answer, verb, payload)
 
 
 # ---------------------------------------------------------------------------
@@ -220,9 +227,11 @@ def declared(engine: str, learner: str):
 @app.local_entrypoint()
 def status() -> None:
     """Everything this desk knows, no wire calls into the metal."""
-    told = desk().status()
+    import asyncio
+
+    told = asyncio.run(desk().status())
     print(json.dumps({"listings": told["listings"], "metal": told["metal"],
-                      "liveness": desk().liveness()}, indent=2))
+                      "liveness": asyncio.run(desk().liveness())}, indent=2))
 
 
 @app.local_entrypoint()
@@ -263,13 +272,13 @@ def sweep(reason: str = "sweep", force: bool = False) -> None:
     than metal left standing — so `--force` is how you mean it."""
     import asyncio
 
-    held = desk().status().get("metal", {})
+    held = asyncio.run(desk().status()).get("metal", {})
     for name, row in sorted(held.items()):
         if not row.get("plane"):
             continue
         told = asyncio.run(desk().release(name, reason=reason, force=force))
         print(f"[sweep] {name}: {json.dumps(told)}")
-    print(json.dumps(desk().status()["metal"], indent=1))
+    print(json.dumps(asyncio.run(desk().status())["metal"], indent=1))
 
 
 @app.local_entrypoint()

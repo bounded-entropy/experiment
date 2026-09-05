@@ -1,33 +1,29 @@
 """The Modal transport: dict frames to one deployed Modal class's door.
 
 ONE class serves every Modal address this fleet speaks, because every rlstack
-Modal container wears the SAME two methods — `door` (async, the admitted
-verbs) and `door_ask` (sync, the admission-free ones), each taking
-(host, verb, payload). A desk container answers with host "" and so does a
-metal's own plane; a host inside a metal container is named by the address's
-`#host` fragment. What differs between venues is the app and the class, and
-both are IN the address (ADR 0007, Q3), which is what lets one desk command
-metal in many apps.
+Modal container wears the SAME two methods — `door` and `door_ask`, each ASYNC
+since ADR 0008 (Q4) and each taking (host, verb, payload). A desk container
+answers with host "" and so does a metal's own plane; a host inside a metal
+container is named by the address's `#host` fragment. What differs between
+venues is the app and the class, and both are IN the address (ADR 0007, Q3),
+which is what lets one desk command metal in many apps.
+
+WHY BOTH DOORS ARE ASYNC AND BOTH CALLS ARE BOUNDED. A cancelled input of a
+SYNCHRONOUS method on a concurrent container has no clean interruption, so
+Modal shuts the container down — the desk died that way three times on
+2026-09-04, once to a harness kill and twice to a human's own timed probe. An
+async method is one task the loop drops. And a wait with no bound is how one
+unreachable metal wedges every submit behind it, so the deadline is the
+CALLER's own and `Unreachable` is what an expired one raises (F3).
 """
 
 from __future__ import annotations
 
-import concurrent.futures
+import asyncio
 
 import modal
 
-
-def blocking_ask(fn):
-    """One BLOCKING Modal call on its OWN thread.
-
-    The admission-free half of the Transport contract is synchronous by
-    design (registration and build facts, callable from sync call sites), and
-    a blocking Modal portal call made from a thread that is running an event
-    loop wedges that loop — an hour of silence on the venue, #77. So the call
-    is handed to a thread that owns nothing.
-    """
-    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as one:
-        return one.submit(fn).result()
+from rlstack.runner.remote import DEADLINE_S, bounded, stamped
 
 
 class ModalClsTransport:
@@ -46,27 +42,40 @@ class ModalClsTransport:
         self.epoch = epoch
         self._handle = None
 
-    def handle(self):
+    async def handle(self):
         """The deployed class's handle, resolved on first use and kept.
 
         Lazily, because a transport is constructed wherever an address is
         read — inside a desk rebuilding from its journal, for instance — and
-        resolving a name is a network act that must not happen there."""
+        resolving a name is a network act that must not happen there. On a
+        THREAD, because that resolution is blocking and this coroutine runs
+        on a loop with other frames in flight."""
         if self._handle is None:
-            self._handle = modal.Cls.from_name(self.app, self.cls)()
+            self._handle = await asyncio.to_thread(
+                lambda: modal.Cls.from_name(self.app, self.cls)())
         return self._handle
 
-    async def call(self, verb: str, payload: dict) -> dict:
-        """An admitted verb: awaited on the caller's own loop."""
-        from rlstack.runner.remote import stamped
+    def what(self, verb: str) -> str:
+        """How a refusal names this transport's other end."""
+        return f"modal://{self.app}/{self.cls}#{self.host}::{verb}"
 
-        return await self.handle().door.remote.aio(
+    async def call(self, verb: str, payload: dict, *,
+                   deadline_s: float = DEADLINE_S) -> dict:
+        """An admitted verb, awaited on the caller's own loop under its own
+        deadline."""
+        return await bounded(self.frame("door", verb, payload), deadline_s,
+                             self.what(verb))
+
+    async def ask(self, verb: str, payload: dict, *,
+                  deadline_s: float = DEADLINE_S) -> dict:
+        """An admission-free verb — async since ADR 0008, because `door_ask`
+        is an async method now and there is nothing left to put on a thread."""
+        return await bounded(self.frame("door_ask", verb, payload), deadline_s,
+                             self.what(verb))
+
+    async def frame(self, door: str, verb: str, payload: dict) -> dict:
+        """One frame to one of the container's two doors — the only place
+        this module knows their names."""
+        handle = await self.handle()
+        return await getattr(handle, door).remote.aio(
             self.host, verb, stamped(payload, self.epoch))
-
-    def ask(self, verb: str, payload: dict) -> dict:
-        """An admission-free verb: blocking, on its own thread (#77)."""
-        from rlstack.runner.remote import stamped
-
-        frame = stamped(payload, self.epoch)
-        return blocking_ask(
-            lambda: self.handle().door_ask.remote(self.host, verb, frame))

@@ -42,7 +42,7 @@ import time
 import modal
 
 from modal_venue import (
-    a_store, cpu_image_for, desk, gpu_image_for, hf_cache, metal_class,
+    a_store, cpu_image_for, desk, fleet, gpu_image_for, hf_cache, metal_class,
     metal_handle, progress_function, run_suite, store_volume, submit_spec,
     take_down, wait_for_metal,
 )
@@ -512,7 +512,9 @@ def finish(call_id: str = "") -> None:
     """The check's second half, for runs already delivered (a driver that
     died mid-check): the runs off the desk's placements, their ledgers, then
     the takedown — with the keepalive's call id, its return observed."""
-    placed = desk().placements()
+    import asyncio
+
+    placed = asyncio.run(desk().placements())
     runs = {rid[:12]: rid for rid in sorted(placed)}
     print(f"[finish] runs on the desk: {runs}", flush=True)
     call = modal.FunctionCall.from_id(call_id) if call_id else None
@@ -533,14 +535,14 @@ def knock() -> None:
 
     from rlstack.runner.desk import Demand
 
-    before = desk().status().get("metal", {}).get(METAL, {})
+    before = fleet().get("metal", {}).get(METAL, {})
     print(f"[knock] before: released={before.get('released')} plane={before.get('plane')}")
     try:
         placed = asyncio.run(desk().resolve((
             Demand(pool="main", capability="inference", base=BASE, shape=TP,
                    vram_gb=MAIN_GB * TP, group=0),)))
         print(f"[knock] placed: {json.dumps(placed, default=str)[:400]}")
-        after = desk().status().get("metal", {}).get(METAL, {})
+        after = fleet().get("metal", {}).get(METAL, {})
         print(f"[knock] after: released={after.get('released')} plane={after.get('plane')}")
         if not after.get("plane"):
             raise SystemExit("the knock did not bring the metal back")

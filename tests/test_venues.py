@@ -308,6 +308,33 @@ class ChassisTest(VenueFixture):
         self.assertIn("heartbeat_s", source)
         self.assertIn("watch_residents", source)
 
+    def test_both_doors_of_every_container_are_async(self) -> None:
+        """ADR 0008, Q4: a cancelled input of a SYNCHRONOUS method on a
+        concurrent container has no clean interruption, so Modal shuts the
+        container down — which is how the desk died three times on
+        2026-09-04. Both doors are async methods now, on the metal and on the
+        desk alike."""
+        for path in (DEPLOY / "modal_venue.py", DEPLOY / "desk.py"):
+            source = path.read_text()
+            self.assertIn("async def door(", source, path.name)
+            self.assertIn("async def door_ask(", source, path.name)
+            self.assertNotIn("\n    def door_ask(", source, path.name)
+
+    def test_no_venue_helper_wraps_a_desk_call_in_a_timeout(self) -> None:
+        """Q4's other half: a client NEVER cancels a fleet input — the
+        deadline is the desk's own, server-side. The chassis' helpers poll
+        patiently (`wait_for_metal`) and drive one call to completion
+        (`fleet`); nothing here puts a timeout on a door."""
+        source = (DEPLOY / "modal_venue.py").read_text()
+        self.assertIn("def fleet()", source)
+        for banned in ("wait_for(", "timeout=", ".cancel("):
+            for line in source.splitlines():
+                if banned in line and "call.get(" not in line:
+                    self.assertNotIn(
+                        "desk()", line,
+                        f"a desk call is wrapped in a client-side bound: "
+                        f"{line.strip()}")
+
     def test_a_campaign_door_never_releases(self) -> None:
         """Q6: `concept_steer` and `gsm_a100` are CAMPAIGN venues — arms on
         one booted metal — so no door of either hands metal back. Idle metal

@@ -30,15 +30,15 @@ from rlstack import (
 )
 from rlstack.runner.host import Partition
 from rlstack.spec.canonical import canonical_json
-from rlstack.runner.campaign import Campaigns, demands_of
+from rlstack.runner.campaign import Campaigns, demands_of, frame_for
 from rlstack.runner.desk import (
     IDLE_S, Demand, Desk, DeskError, Listing, MetalService, covers,
-    demand_rows,
+    demand_rows, submit_key,
 )
 from rlstack.runner.remote import (
-    DESK_DEFAULT, HostService, LocalTransport, RemoteDesk, RemoteHost,
-    RemoteMetal, WrongEpoch, serve_in_process, stamped,
-    stop_serving_in_process, transport_for,
+    DEADLINE_S, DESK_DEFAULT, HostService, LocalTransport, RemoteDesk,
+    RemoteHost, RemoteMetal, Unreachable, WrongEpoch, bounded,
+    serve_in_process, stamped, stop_serving_in_process, transport_for,
 )
 from rlstack.runner.residents import (
     Builds, EngineBuild, LearnerBuild, Resident, ResidentBirth,
@@ -109,13 +109,15 @@ class DeskFixture(unittest.TestCase):
             self.fixture, self.address = fixture, address
             self.epoch = DeskFixture.routed(address)[1]
 
-        async def call(self, verb: str, payload: dict) -> dict:
+        async def call(self, verb: str, payload: dict, *,
+                       deadline_s: float = DEADLINE_S) -> dict:
             return await self.fixture._transport(self.address).call(
-                verb, stamped(payload, self.epoch))
+                verb, stamped(payload, self.epoch), deadline_s=deadline_s)
 
-        def ask(self, verb: str, payload: dict) -> dict:
-            return self.fixture._transport(self.address).ask(
-                verb, stamped(payload, self.epoch))
+        async def ask(self, verb: str, payload: dict, *,
+                      deadline_s: float = DEADLINE_S) -> dict:
+            return await self.fixture._transport(self.address).ask(
+                verb, stamped(payload, self.epoch), deadline_s=deadline_s)
 
     def metal_service(self, name: str = "fake-metal", devices: int = 2,
                       build_gate=None, broken: bool = False,
@@ -178,13 +180,15 @@ class DeskFixture(unittest.TestCase):
             self.fixture = fixture
             self.address, self.epoch = DeskFixture.routed(address)
 
-        async def call(self, verb: str, payload: dict) -> dict:
+        async def call(self, verb: str, payload: dict, *,
+                       deadline_s: float = DEADLINE_S) -> dict:
             return await self.fixture.metal_transports[self.address].call(
-                verb, stamped(payload, self.epoch))
+                verb, stamped(payload, self.epoch), deadline_s=deadline_s)
 
-        def ask(self, verb: str, payload: dict) -> dict:
-            return self.fixture.metal_transports[self.address].ask(
-                verb, stamped(payload, self.epoch))
+        async def ask(self, verb: str, payload: dict, *,
+                      deadline_s: float = DEADLINE_S) -> dict:
+            return await self.fixture.metal_transports[self.address].ask(
+                verb, stamped(payload, self.epoch), deadline_s=deadline_s)
 
     def desk(self, boot_for=None, idle_s: float | None = IDLE_S) -> Desk:
         return Desk(
@@ -489,7 +493,7 @@ class ProvisionTest(DeskFixture):
             metal_for=lambda addr: RemoteMetal(
                 self.metal_transports[addr]))
         self.assertEqual(reborn.metal["fake-metal"].devices, 2)
-        self.assertEqual(reborn.metal_remotes["fake-metal"].residual(),
+        self.assertEqual(go(reborn.metal_remotes["fake-metal"].residual()),
                          [24.0, 24.0])                         # GB per device
 
 
@@ -599,10 +603,10 @@ class LivenessVerbTest(DeskFixture):
                                trains=True)
 
         class Dead:
-            async def call(self, verb, payload):
+            async def call(self, verb, payload, *, deadline_s: float = 0.0):
                 raise ConnectionError("gone")
 
-            def ask(self, verb, payload):
+            async def ask(self, verb, payload, *, deadline_s: float = 0.0):
                 raise ConnectionError("gone")
 
         self.transports["fleet://dead"] = Dead()
@@ -610,7 +614,7 @@ class LivenessVerbTest(DeskFixture):
         desk.list_host("alive-a", living.regimes, "fleet://a")
         desk.list_host("dead-z", living.regimes, "fleet://dead")
         remote = RemoteDesk(LocalTransport(Campaigns(desk)))
-        self.assertEqual(remote.liveness(),
+        self.assertEqual(go(remote.liveness()),
                          {"alive-a": True, "dead-z": False})
 
 
@@ -619,10 +623,10 @@ class LivenessTest(DeskFixture):
         """A listing whose container stopped answering is invisible to
         placement; a delist is journaled, so the rebuilt desk agrees."""
         class Dead:
-            async def call(self, verb, payload):
+            async def call(self, verb, payload, *, deadline_s: float = 0.0):
                 raise ConnectionError("container gone")
 
-            def ask(self, verb, payload):
+            async def ask(self, verb, payload, *, deadline_s: float = 0.0):
                 raise ConnectionError("container gone")
 
         living = self.stand_up("alive-a", "fleet://a", serves_pool=True,
@@ -788,10 +792,10 @@ class ReapTest(DeskFixture):
         def __init__(self) -> None:
             self.attempts = 0
 
-        async def call(self, verb, payload):
+        async def call(self, verb, payload, *, deadline_s: float = 0.0):
             raise ConnectionError("gone")
 
-        def ask(self, verb, payload):
+        async def ask(self, verb, payload, *, deadline_s: float = 0.0):
             self.attempts += 1
             raise ConnectionError("gone")
 
@@ -802,14 +806,14 @@ class ReapTest(DeskFixture):
         def __init__(self, inner, fail: int) -> None:
             self.inner, self.fail, self.attempts = inner, fail, 0
 
-        async def call(self, verb, payload):
+        async def call(self, verb, payload, *, deadline_s: float = 0.0):
             return await self.inner.call(verb, payload)
 
-        def ask(self, verb, payload):
+        async def ask(self, verb, payload, *, deadline_s: float = 0.0):
             self.attempts += 1
             if self.attempts <= self.fail:
                 raise ConnectionError("booting")
-            return self.inner.ask(verb, payload)
+            return await self.inner.ask(verb, payload)
 
     def test_retries_then_recovers_or_reaps(self) -> None:
         """The three verdicts: a listing that answers is alive; one that
@@ -1252,7 +1256,7 @@ class RerouteTest(DeskFixture):
         self.assertNotEqual(landed, reply["host"])
         self.assertNotIn(reply["host"], desk.listings)
         self.assertEqual(service.hosts[landed].roster[rid].status, "done")
-        table = RemoteDesk(LocalTransport(Campaigns(desk))).placements()
+        table = go(RemoteDesk(LocalTransport(Campaigns(desk))).placements())
         self.assertEqual(table[rid]["host"], landed)  # the binding moved
         self.assertIn("demands", table[rid])          # and stayed replayable
 
@@ -1621,9 +1625,9 @@ class IdleReleaseTest(DeskFixture):
         self.carved_and_finished(desk, service)
 
         async def sweep():
-            desk.observe_idle(1000.0)        # first sight: nothing to compare
+            await desk.observe_idle(1000.0)        # first sight: nothing to compare
             unread = dict(desk.idle_since)
-            desk.observe_idle(1060.0)        # quiet through a whole tick
+            await desk.observe_idle(1060.0)        # quiet through a whole tick
             started = dict(desk.idle_since)
             early = await desk.release_idle(1600.0)      # 540 s < 600
             late = await desk.release_idle(1661.0)       # 601 s >= 600
@@ -1678,8 +1682,8 @@ class IdleReleaseTest(DeskFixture):
         self.carved_and_finished(desk, service)
 
         async def sweep():
-            desk.observe_idle(10.0)
-            desk.observe_idle(20.0)
+            await desk.observe_idle(10.0)
+            await desk.observe_idle(20.0)
             return await desk.release_idle(1e9)
         self.assertEqual(go(sweep()), [])
         self.assertEqual(desk.idle_since, {"fake-metal": 20.0})
@@ -1702,14 +1706,14 @@ class IdleReleaseTest(DeskFixture):
             pool = RemotePool(self.LazyTransport(self, placed["pools"]["main"]),
                               base=BASE, tp=1)
             pool.add_bundle(Bundle("bundle:x", {"pi": 0}))
-            desk.observe_idle(100.0)         # first sight: a reading, no clock
-            desk.observe_idle(200.0)         # quiet: the clock starts
+            await desk.observe_idle(100.0)         # first sight: a reading, no clock
+            await desk.observe_idle(200.0)         # quiet: the clock starts
             started = dict(desk.idle_since)
             async for _ in pool.sample_tokens((Message(Role.USER, "2+2?"),),
                                               SamplingSpec(), (), "bundle:x",
                                               seed=7):
                 pass
-            desk.observe_idle(300.0)         # the counter moved: not idle
+            await desk.observe_idle(300.0)         # the counter moved: not idle
             return placed, started, dict(desk.idle_since), \
                 await desk.release_idle(1e9)
         placed, started, after, released = go(drive())
@@ -2032,9 +2036,9 @@ class ServesJoinTest(DeskFixture):
         listing = self.listing()
         desk = self.desk_under_test
         desk.recipe("fake-metal", self.serving("lora"))
-        self.assertIsNone(desk.find_listing((self.demand(*self.STEER),)))
+        self.assertIsNone(go(desk.find_listing((self.demand(*self.STEER),))))
         desk.recipe("fake-metal", self.serving("steer"))
-        self.assertEqual(desk.find_listing((self.demand(*self.STEER),)),
+        self.assertEqual(go(desk.find_listing((self.demand(*self.STEER),))),
                          listing)
 
 
@@ -2099,7 +2103,7 @@ class GuardedReleaseTest(DeskFixture):
 
         async def drive():
             reply = await Campaigns(desk).submit(self.split_spec())
-            holding = desk.metal_dependents("fake-metal")
+            holding = await desk.metal_dependents("fake-metal")
             await service.hosts[reply["host"]]._adoptions[reply["run_id"]]
             return reply, holding
         reply, holding = go(drive())
@@ -2137,7 +2141,7 @@ class GuardedReleaseTest(DeskFixture):
 
         async def drive():
             reply = await Campaigns(desk).submit(self.split_spec())
-            holding = desk.metal_dependents("fake-metal")
+            holding = await desk.metal_dependents("fake-metal")
             desk.idle_since["fake-metal"] = 0.0        # the quiet began long ago
             due = await desk.release_idle(1000.0)
             return reply, holding, due
@@ -2416,12 +2420,12 @@ class EpochTest(DeskFixture):
         is what turns 'the desk hung' into 'the desk is talking to a corpse'."""
         service = self.metal_service(devices=1)
         with self.assertRaises(WrongEpoch) as caught:
-            LocalTransport(service, "an-older-life").ask("residual", {})
+            go(LocalTransport(service, "an-older-life").ask("residual", {}))
         self.assertIn(service.epoch, str(caught.exception))
         self.assertIn("an-older-life", str(caught.exception))
         # the SAME frame at this life's epoch is served
         self.assertEqual(
-            LocalTransport(service, service.epoch).ask("residual", {}),
+            go(LocalTransport(service, service.epoch).ask("residual", {})),
             {"residual": [24.0]})
 
     def test_a_host_door_refuses_a_frame_from_another_life(self) -> None:
@@ -2433,15 +2437,16 @@ class EpochTest(DeskFixture):
         host = next(iter(service.hosts.values()))
         self.assertEqual(host.epoch, service.epoch)
         with self.assertRaises(WrongEpoch):
-            LocalTransport(HostService(host), "an-older-life").ask("status", {})
-        self.assertTrue(
-            LocalTransport(HostService(host), service.epoch).ask("status", {}))
+            go(LocalTransport(HostService(host),
+                              "an-older-life").ask("status", {}))
+        self.assertTrue(go(
+            LocalTransport(HostService(host), service.epoch).ask("status", {})))
 
     def test_a_frame_naming_no_epoch_is_served(self) -> None:
         """The suffix is optional by design: a registration is exactly the
         frame that cannot name an epoch yet, because it is announcing one."""
         service = self.metal_service(devices=1)
-        self.assertEqual(LocalTransport(service).ask("residual", {}),
+        self.assertEqual(go(LocalTransport(service).ask("residual", {})),
                          {"residual": [24.0]})
 
     def test_the_epoch_rides_the_address_and_the_factory_reads_it(self) -> None:
@@ -2453,7 +2458,8 @@ class EpochTest(DeskFixture):
         self.addCleanup(stop_serving_in_process, address)
         transport = transport_for(address)
         self.assertEqual(transport.epoch, service.epoch)
-        self.assertEqual(transport.ask("residual", {}), {"residual": [24.0]})
+        self.assertEqual(go(transport.ask("residual", {})),
+                         {"residual": [24.0]})
 
     def test_the_desk_addresses_the_metal_at_the_epoch_it_registered(self) -> None:
         """The plane address stays epoch-free on the row (a re-registration
@@ -2483,4 +2489,253 @@ class EpochTest(DeskFixture):
         reborn = self.metal_service(devices=1)       # the next knock's container
         self.assertNotEqual(reborn.epoch, was)
         with self.assertRaises(WrongEpoch):
-            LocalTransport(reborn, was).ask("residual", {})
+            go(LocalTransport(reborn, was).ask("residual", {}))
+
+
+class SilentTransport:
+    """A transport that NEVER ANSWERS — the fakes suite's whole account of an
+    unreachable container (ADR 0008, promise 3). It answers no frame and
+    raises no error: exactly the shape that wedged the desk for an hour on
+    2026-09-04, and exactly what a deadline is for."""
+
+    def __init__(self) -> None:
+        self.frames: list[str] = []
+
+    async def call(self, verb: str, payload: dict, *,
+                   deadline_s: float = DEADLINE_S) -> dict:
+        return await self.silence(verb, deadline_s)
+
+    async def ask(self, verb: str, payload: dict, *,
+                  deadline_s: float = DEADLINE_S) -> dict:
+        return await self.silence(verb, deadline_s)
+
+    async def silence(self, verb: str, deadline_s: float) -> dict:
+        """Nothing, forever — under the deadline the caller passed, exactly
+        as every real transport puts its own frames under `bounded`."""
+        self.frames.append(verb)
+        return await bounded(asyncio.sleep(3600), deadline_s,
+                             f"a container that fetches nothing::{verb}")
+
+
+class BoundedWireTest(DeskFixture):
+    """ADR 0008, F3 — EVERY WIRE VERB HAS A DEADLINE, AND NO LOCK IS HELD
+    ACROSS THE WIRE. The claims: an expired wait raises `Unreachable` and is
+    journaled on the row it was about; placement reads every metal's residual
+    live, concurrently, BEFORE its lock, and passes a silent one over; and a
+    silent metal does not delay a placement by more than one deadline however
+    many silent metals there are."""
+
+    def quick_desk(self, *names, deadline_s: float = 0.05) -> Desk:
+        desk = self.desk()
+        desk.residual_deadline_s = deadline_s
+        desk.probe_deadline_s = deadline_s
+        for name in names:
+            desk.register_metal(self.metal_services[name].metal,
+                                address=f"metal://{name}",
+                                builds=self.metal_services[name].builds,
+                                epoch=self.metal_services[name].epoch)
+        return desk
+
+    def test_an_expired_wait_is_unreachable_and_names_what_it_asked(self) -> None:
+        silent = SilentTransport()
+        with self.assertRaises(Unreachable) as caught:
+            go(RemoteMetal(silent).residual(deadline_s=0.05))
+        self.assertIn("0.05", str(caught.exception))
+        self.assertEqual(silent.frames, ["residual"])
+
+    def test_a_silent_metal_is_journaled_unreachable_and_passed_over(self) -> None:
+        """PROMISE 3. Two metals, one of them a container that fetches
+        nothing: the placement reads both, waits one deadline, journals the
+        silent one and carves on the other. Before this, the ask was
+        unbounded and under the lock, and the submit never returned."""
+        self.metal_service(name="living", devices=2)
+        self.metal_service(name="deaf", devices=2)
+        desk = self.quick_desk("living", "deaf")
+        self.metal_transports["metal://deaf"] = SilentTransport()
+
+        reply = go(Campaigns(desk).submit(self.split_spec()))
+        self.assertTrue(reply["accepted"], reply)
+        self.assertTrue(all(host.startswith("living")
+                            for host in reply["pools"].values()), reply)
+        missed = [e for e in self.store.read_fleet_log()
+                  if e.get("event") == "unreachable"]
+        self.assertTrue(missed, "nothing was journaled unreachable")
+        self.assertEqual({e["metal"] for e in missed}, {"deaf"})
+        self.assertEqual(missed[0]["deadline_s"], 0.05)
+
+    def test_the_residual_read_is_concurrent_and_costs_ONE_deadline(self) -> None:
+        """Q3, as amended: every LIVE metal is asked at once, so the worst
+        case per submit is one deadline and not one per metal. Three deaf
+        metals at a 0.3 s deadline take 0.3 s, not 0.9."""
+        for name in ("deaf-a", "deaf-b", "deaf-c"):
+            self.metal_service(name=name, devices=2)
+        desk = self.quick_desk("deaf-a", "deaf-b", "deaf-c", deadline_s=0.3)
+        for name in ("deaf-a", "deaf-b", "deaf-c"):
+            self.metal_transports[f"metal://{name}"] = SilentTransport()
+
+        started = time.monotonic()
+        reply = go(Campaigns(desk).submit(self.split_spec()))
+        waited = time.monotonic() - started
+        self.assertFalse(reply["accepted"], reply)      # nowhere to go: boot
+        self.assertLess(waited, 0.75, f"the reads serialized: {waited:.2f}s")
+        self.assertEqual(
+            {e["metal"] for e in self.store.read_fleet_log()
+             if e.get("event") == "unreachable"},
+            {"deaf-a", "deaf-b", "deaf-c"})
+
+    def test_a_silent_metal_never_holds_the_placement_lock(self) -> None:
+        """The wedge, as a claim: one placement waiting on a deaf metal must
+        not queue another. Two submits are driven CONCURRENTLY and the one
+        with somewhere to go finishes while the other is still waiting out
+        its deadline — which could not happen if the read were under the
+        lock, and did not happen on 2026-09-04."""
+        self.metal_service(name="living", devices=2)
+        self.metal_service(name="deaf", devices=2)
+        desk = self.quick_desk("living", "deaf", deadline_s=0.6)
+        self.metal_transports["metal://deaf"] = SilentTransport()
+
+        async def race():
+            slow = asyncio.create_task(desk.read_fleet())
+            await asyncio.sleep(0.05)               # the read is in flight
+            started = time.monotonic()
+            reply = await Campaigns(desk).submit(self.split_spec())
+            return reply, time.monotonic() - started, slow
+        reply, waited, slow = go(self._finish(race()))
+        self.assertTrue(reply["accepted"], reply)
+        self.assertLess(waited, 1.4, "a submit queued behind a silent read")
+
+    async def _finish(self, work):
+        reply, waited, slow = await work
+        await slow                       # let the deaf read expire quietly
+        return reply, waited, slow
+
+    def test_the_lock_is_the_only_one_and_covers_no_wire_call(self) -> None:
+        """The audit, said as a test: `desk.py` takes exactly one lock, and
+        `decide` — the only thing under it — is a pure function of the
+        snapshot. Read off the source, because the claim is about the SHAPE
+        of the file and not about one execution of it."""
+        import inspect
+
+        from rlstack.runner import desk as module
+
+        source = inspect.getsource(module)
+        self.assertEqual(source.count("asyncio.Lock()"), 1)
+        decided = inspect.getsource(module.Desk.decide) \
+            + inspect.getsource(module.Desk.join_rung) \
+            + inspect.getsource(module.Desk.carve_rung)
+        for wire in ("await ", "async ", "append_fleet_event"):
+            self.assertNotIn(wire, decided,
+                             f"the placement lock's body reaches {wire!r}")
+
+
+class IdempotentSubmitTest(DeskFixture):
+    """ADR 0008, F4 — EVERY STATE-CHANGING VERB IS IDEMPOTENT BY ITS KEY,
+    because every wire is at-least-once. On 2026-09-04 Modal replayed a
+    submit input off a container it had shut down, the same run was adopted
+    on two metals, and the observer took the dead copy's word for it."""
+
+    def test_the_intent_is_journaled_before_the_placement(self) -> None:
+        """The order is the point: a desk that dies between the intent and
+        the delivery leaves the attempt on the record."""
+        self.metal_service(devices=2)
+        desk = self.desk_with_metal("fake-metal")
+        go(Campaigns(desk).submit(self.split_spec()))
+        kinds = [e["event"] for e in self.store.read_fleet_log()
+                 if e["event"] in ("submit-intent", "place")]
+        self.assertEqual(kinds[0], "submit-intent")
+        intent = next(e for e in self.store.read_fleet_log()
+                      if e["event"] == "submit-intent")
+        place = [e for e in self.store.read_fleet_log()
+                 if e["event"] == "place" and e.get("delivered")][-1]
+        self.assertEqual(intent["key"], place["key"])
+        self.assertEqual(intent["folder"], "")
+
+    def test_the_same_frame_twice_places_once_and_answers_twice(self) -> None:
+        """PROMISE 4, exactly: one placement, two identical replies. The
+        second frame is a REPLAY — Modal rescheduling an input off a dead
+        container — and it must not adopt the run a second time."""
+        gate = asyncio.Event()
+        self.addCleanup(gate.set)
+        service = self.metal_service(devices=2, sample_gate=gate)
+        desk = self.desk_with_metal("fake-metal")
+        rows = demand_rows(demands_of(self.split_spec()))
+        frame = frame_for(self.split_spec())
+
+        async def twice():
+            first = await desk.submit(rows, frame)
+            second = await desk.submit(rows, dict(frame))
+            # ONE tenancy, on ONE host: the duplicate adoption of 2026-09-04
+            # is what this whole rule exists to make impossible
+            return first, second, await desk.running_runs()
+        first, second, running = go(twice())
+        self.assertTrue(first["accepted"], first)
+        self.assertEqual(second["run_id"], first["run_id"])
+        self.assertEqual(second["host"], first["host"])
+        self.assertEqual(second["pools"], first["pools"])
+        # ONE placement on the record, and the replay named as one
+        delivered = [e for e in self.store.read_fleet_log()
+                     if e["event"] == "place" and e.get("delivered")]
+        self.assertEqual(len(delivered), 1)
+        replays = [e for e in self.store.read_fleet_log()
+                   if e["event"] == "submit-replayed"]
+        self.assertEqual(len(replays), 1)
+        self.assertEqual(replays[0]["run_id"], first["run_id"])
+        self.assertEqual(running, {first["run_id"]})
+        gate.set()
+
+    def test_a_resubmit_after_the_run_stopped_places_again(self) -> None:
+        """The other half of the same rule, and the reason the predicate is
+        "still running" and not "has been delivered": resubmitting a spec is
+        how a stopped run RESUMES on this fleet, so a delivery whose run is
+        no longer running must not be replayed at the caller."""
+        service = self.metal_service(devices=2)
+        desk = self.desk_with_metal("fake-metal")
+        rows = demand_rows(demands_of(self.split_spec()))
+        frame = frame_for(self.split_spec())
+
+        async def twice():
+            first = await desk.submit(rows, frame)
+            await service.hosts[first["host"]]._adoptions[first["run_id"]]
+            return first, await desk.submit(rows, dict(frame))
+        first, second = go(twice())
+        self.assertTrue(second["accepted"], second)
+        delivered = [e for e in self.store.read_fleet_log()
+                     if e["event"] == "place" and e.get("delivered")]
+        self.assertEqual(len(delivered), 2)         # placed again: a resume
+        self.assertEqual([e for e in self.store.read_fleet_log()
+                          if e["event"] == "submit-replayed"], [])
+
+    def test_a_second_frame_while_the_first_is_in_flight_refuses_loudly(self) -> None:
+        """The race the ADR does not name, resolved the way the repo's rule
+        says: refuse loudly over waiting silently. The second frame finds an
+        intent with no outcome and is told so by name, rather than placing a
+        second time or blocking on the first."""
+        self.metal_service(devices=2)
+        desk = self.desk_with_metal("fake-metal")
+        frame = frame_for(self.split_spec())
+        key = submit_key(frame)
+        desk.journal_intent(key, frame)             # the first, mid-flight
+
+        reply = go(desk.submit(demand_rows(demands_of(self.split_spec())),
+                               frame))
+        self.assertFalse(reply["accepted"], reply)
+        self.assertTrue(reply["in_flight"])
+        self.assertIn(key, reply["error"])
+        self.assertEqual([e for e in self.store.read_fleet_log()
+                          if e["event"] == "place"], [])
+
+    def test_a_missed_placement_closes_its_intent(self) -> None:
+        """An attempt that found nowhere to go is OVER: the next frame with
+        the same key is a fresh attempt, not a replay of a submission that
+        never happened."""
+        desk = self.desk()                           # no metal at all
+        rows = demand_rows(demands_of(self.split_spec()))
+        frame = frame_for(self.split_spec())
+        self.assertFalse(go(desk.submit(rows, frame))["accepted"])
+        missed = [e for e in self.store.read_fleet_log()
+                  if e["event"] == "submit-missed"]
+        self.assertEqual(len(missed), 1)
+        self.assertEqual(missed[0]["key"], submit_key(frame))
+        # and the retry is not refused as a replay
+        again = go(desk.submit(rows, dict(frame)))
+        self.assertFalse(again.get("in_flight"), again)

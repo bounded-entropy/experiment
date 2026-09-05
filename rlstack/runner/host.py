@@ -764,10 +764,10 @@ class Host:
                     if pending is None or pending.done():
                         asked[resident.label] = asyncio.create_task(
                             self.ask_heartbeat(resident, heard))
-                    if now - heard[resident.label] > stall_s:
-                        self.kill_stalled(resident, now - heard[resident.label],
-                                          stall_s)
+                    silent = now - heard[resident.label]
+                    if silent > stall_s:
                         heard[resident.label] = now
+                        await self.kill_stalled(resident, silent, stall_s)
                 await asyncio.sleep(every)
         finally:
             for task in asked.values():
@@ -783,8 +783,8 @@ class Host:
             return
         heard[resident.label] = time.time()
 
-    def kill_stalled(self, resident: "Resident", silent_s: float,
-                     bound_s: float) -> None:
+    async def kill_stalled(self, resident: "Resident", silent_s: float,
+                           bound_s: float) -> None:
         """A resident past its bound, ENDED and journaled `stalled` (Q7).
 
         Killed rather than waited on, because a host is atomic: a resident
@@ -800,7 +800,10 @@ class Host:
         print(f"[host {self.name}] resident {resident.label!r} has answered "
               f"nothing for {silent_s:.0f}s (bound {bound_s:.0f}s): stalled, "
               f"ending it", flush=True)
-        resident.stop()
+        # OFF THE LOOP: the teardown ladder is a stop frame, a SIGTERM and a
+        # SIGKILL, each joining what it signalled — up to half a minute, and
+        # this host's other duties are still its own meanwhile.
+        await asyncio.to_thread(resident.stop)
 
     async def journal_traffic(self) -> None:
         """One traffic window, drained and journaled — the stats tick's own

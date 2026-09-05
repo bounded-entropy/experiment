@@ -36,7 +36,7 @@ import time
 import modal
 
 from modal_venue import (
-    a_store, cpu_image_for, desk, gpu_image_for, hf_cache, metal_class,
+    a_store, cpu_image_for, desk, fleet, gpu_image_for, hf_cache, metal_class,
     metal_handle, progress_function, store_volume, submit_spec, take_down,
     wait_for_metal,
 )
@@ -805,7 +805,7 @@ def latejoin(master: int = 51) -> None:
         joined = a["pools"] == b["pools"]
         print(f"[join] {'B joined A: one serving host, one learner' if joined else 'NOT joined: ' + json.dumps([a['pools'], b['pools']])}",
               flush=True)
-        learner_address = desk().status()["listings"][a["pools"]["learner"]]["address"]
+        learner_address = fleet()["listings"][a["pools"]["learner"]]["address"]
         roster = host_status.remote(learner_address).get("tenants", {})
         print(f"[roster] the learner host after B's arrival: "
               f"{json.dumps(roster)}", flush=True)
@@ -856,7 +856,7 @@ def remote_learner(master: int = 61) -> None:
         rails = report_rails(runs, progress)
         # the tenancy lives at the anchor; the learner host holds only custody
         anchor_roster = host_status.remote(
-            desk().status()["listings"][pools["main"]]["address"]
+            fleet()["listings"][pools["main"]]["address"]
         ).get("tenants", {})
         custody = learner_custody.remote(pools["learner"])
         print(json.dumps({"away": away, "pools": pools,

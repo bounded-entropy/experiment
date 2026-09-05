@@ -377,19 +377,99 @@ class Undeclared:
 DESK_DEFAULT = Undeclared()
 
 
+class Unreachable(RuntimeError):
+    """A WIRE VERB THAT DID NOT ANSWER IN TIME (ADR 0008, F3).
+
+    Not "it failed" and not "it will never answer" — only that the caller
+    stopped waiting, which is the whole of what a deadline can tell you. The
+    caller journals `unreachable` on the row it was about and carries on: the
+    placement ladder passes that metal over, the reaper concludes that
+    listing. An unbounded wait under the placement lock wedged the desk for
+    an hour on 2026-09-04 — status, reap and every submit queued behind one
+    silent metal, twice."""
+
+
+DEADLINE_S = 60.0
+"""THE DEFAULT BOUND on a wire verb: long enough for a busy container to get
+round to a frame, short enough that a caller finds out inside a lease."""
+
+BUILD_DEADLINE_S = 1800.0
+"""The bound on a verb that BUILDS: a carve boots an engine and an adopt runs
+Phase 0 and Phase 1, and both are minutes on a 32B. Still finite — a build
+that has not answered in half an hour is not building."""
+
+
+async def bounded(work, deadline_s: float, what: str):
+    """One awaited frame with a DEADLINE (F3), and one place the refusal is
+    worded. Every transport's `call` and `ask` goes through here, so "every
+    wire verb has a deadline" is a property of the protocol rather than a
+    habit of its implementations."""
+    try:
+        return await asyncio.wait_for(work, deadline_s)
+    except (TimeoutError, asyncio.TimeoutError) as expired:
+        raise Unreachable(
+            f"{what} did not answer within {deadline_s:g}s") from expired
+
+
+class Blocking:
+    """THE ONE BRIDGE from a synchronous call site onto the async wire.
+
+    Since ADR 0008 (Q4) a Transport's verbs are both coroutines — a door that
+    can be cancelled without taking its container down has to be — but two
+    protocols this library owns are synchronous by contract and stay that
+    way: an Engine's registration and build facts (`add_bundle`,
+    `reachability`, `tokenize`), and every Learner verb (ADR 0002, Q6). Those
+    call sites run one coroutine on THIS loop — one loop, on one daemon
+    thread, for the process's life — and block for the reply, which is
+    exactly what they did before, one thread hop later.
+
+    ONE loop and never one per call: a waiter, a future and an admission are
+    all bound to the loop they were first awaited on, so a caller that
+    changed loops between frames would find its own door bound to a loop that
+    no longer turns. Daemonic because nothing durable lives here."""
+
+    _loop: asyncio.AbstractEventLoop | None = None
+    _minting = threading.Lock()
+
+    @classmethod
+    def loop(cls) -> asyncio.AbstractEventLoop:
+        with cls._minting:
+            if cls._loop is None:
+                cls._loop = asyncio.new_event_loop()
+                threading.Thread(target=cls._loop.run_forever, daemon=True,
+                                 name="blocking-wire").start()
+            return cls._loop
+
+    @classmethod
+    def run(cls, work):
+        """One coroutine, driven to its reply, from a thread that owns
+        nothing. The caller blocks; the wire's own deadline is what bounds
+        the block."""
+        return asyncio.run_coroutine_threadsafe(work, cls.loop()).result()
+
+
 class Transport(Protocol):
     """Carries dict frames to one host's service. Frames are JSON-safe by
     contract; LocalTransport enforces it, real transports inherit it free.
 
     A transport built from an address that names an EPOCH stamps that epoch
     into every frame it carries (F2), so the receiving container can refuse a
-    frame meant for an instance that no longer exists."""
+    frame meant for an instance that no longer exists.
 
-    async def call(self, verb: str, payload: dict) -> dict:
+    BOTH VERBS ARE COROUTINES AND BOTH CARRY A DEADLINE (ADR 0008, F3/Q4). A
+    cancelled SYNCHRONOUS input on a concurrent Modal container shuts the
+    container down — observed three times on 2026-09-04 — where a cancelled
+    async one is a task the loop drops; and a wait with no bound is how one
+    unreachable metal wedges a desk. Synchronous call sites bridge through
+    `Blocking`."""
+
+    async def call(self, verb: str, payload: dict, *,
+                   deadline_s: float = DEADLINE_S) -> dict:
         """An admitted verb: the serving host wraps it in its arbiter."""
         ...
 
-    def ask(self, verb: str, payload: dict) -> dict:
+    async def ask(self, verb: str, payload: dict, *,
+                  deadline_s: float = DEADLINE_S) -> dict:
         """An admission-free verb: registration and build facts."""
         ...
 
@@ -710,15 +790,31 @@ class LocalTransport:
         self.service = service
         self.epoch = epoch
 
-    async def call(self, verb: str, payload: dict) -> dict:
+    async def call(self, verb: str, payload: dict, *,
+                   deadline_s: float = DEADLINE_S) -> dict:
+        return await bounded(self.served(verb, payload), deadline_s,
+                             f"{type(self.service).__name__}.{verb}")
+
+    async def ask(self, verb: str, payload: dict, *,
+                  deadline_s: float = DEADLINE_S) -> dict:
+        return await bounded(self.answered(verb, payload), deadline_s,
+                             f"{type(self.service).__name__}.{verb}")
+
+    async def served(self, verb: str, payload: dict) -> dict:
         return _json_roundtrip(
             await self.service.serve(
                 verb, _json_roundtrip(stamped(payload, self.epoch))))
 
-    def ask(self, verb: str, payload: dict) -> dict:
+    async def answered(self, verb: str, payload: dict) -> dict:
+        """The admission-free half, ON A THREAD. A `Service.answer` is
+        synchronous by contract, and running it inline would hold the loop
+        that is meant to be bounding it — so the deadline above could never
+        fire, and a slow in-process answer would starve every other frame on
+        that loop. The hop is what makes "LocalTransport honours the
+        deadline" true rather than nominal (ADR 0008, F3)."""
+        frame = _json_roundtrip(stamped(payload, self.epoch))
         return _json_roundtrip(
-            self.service.answer(
-                verb, _json_roundtrip(stamped(payload, self.epoch))))
+            await asyncio.to_thread(self.service.answer, verb, frame))
 
 
 # ---------------------------------------------------------------------------
@@ -882,14 +978,27 @@ class RemotePool:
     so this meter exists only to satisfy the protocol and stays at zero."""
 
     def __init__(self, transport: Transport, *, base: str | None = None,
-                 tp: int = 1) -> None:
+                 tp: int = 1, deadline_s: float = BUILD_DEADLINE_S) -> None:
         self.base = base
         self.tp = tp
+        # THE BOUND ON THIS POOL'S FRAMES (ADR 0008, F3). Generous, because a
+        # sampling request behind a full batch legitimately waits — and
+        # finite, because the Engine protocol has no deadline argument of its
+        # own and every wire verb must have one.
+        self.deadline_s = deadline_s
         self.meter = TrafficMeter()
         self._transport = transport
 
     def _address(self) -> dict:
         return {"base": self.base, "tp": self.tp}
+
+    def _asked(self, verb: str, payload: dict) -> dict:
+        """One admission-free frame from a SYNCHRONOUS call site: the Engine
+        protocol's registration and build facts are sync by contract (they
+        are called from Phase 0, off any loop of their own), so they bridge
+        through `Blocking` onto the async wire."""
+        return Blocking.run(self._transport.ask(
+            verb, payload, deadline_s=self.deadline_s))
 
     async def sample_tokens(self, messages, sampling, stop, bundle_id,
                             seed, directives: Sequence[Directive] = (),
@@ -898,7 +1007,8 @@ class RemotePool:
             **self._address(), "messages": encode_messages(messages),
             "sampling": encode_sampling(sampling), "stop": list(stop),
             "bundle_id": bundle_id, "seed": seed,
-            "directives": encode_directives(directives)})
+            "directives": encode_directives(directives)},
+            deadline_s=self.deadline_s)
         for event in decode_events(reply["events"]):
             yield event
 
@@ -908,11 +1018,12 @@ class RemotePool:
         reply = await self._transport.call("score_tokens", {
             **self._address(), "messages": encode_messages(messages),
             "token_ids": list(token_ids), "bundle_id": bundle_id,
-            "directives": encode_directives(directives)})
+            "directives": encode_directives(directives)},
+            deadline_s=self.deadline_s)
         return tuple(reply["logprobs"])
 
     def add_bundle(self, bundle: Bundle) -> None:
-        self._transport.ask("add_bundle", {
+        self._asked("add_bundle", {
             **self._address(), "bundle": encode_bundle(bundle)})
 
     def knows_bundle(self, bundle_id: str) -> bool:
@@ -920,18 +1031,18 @@ class RemotePool:
         holds never disturbs traffic, and the answer is about the SERVING
         engine's residency — which is why it has to cross the wire rather than
         be remembered here."""
-        reply = self._transport.ask("knows_bundle", {
+        reply = self._asked("knows_bundle", {
             **self._address(), "bundle_id": bundle_id})
         return bool(reply["known"])
 
     def reachability(self, sites: Sequence[SiteMeta]) -> Mapping[str, Mechanism]:
-        reply = self._transport.ask("reachability", {
+        reply = self._asked("reachability", {
             **self._address(), "sites": encode_sites(sites)})
         return {name: Mechanism[mech]
                 for name, mech in reply["mechanisms"].items()}
 
     def tokenize(self, text: str) -> tuple[int, ...]:
-        reply = self._transport.ask("tokenize", {
+        reply = self._asked("tokenize", {
             **self._address(), "text": text})
         return tuple(reply["token_ids"])
 
@@ -941,7 +1052,7 @@ class RemotePool:
         behind this door counts in its own process (ADR 0002). Empty when
         that engine keeps no meter. Only a host's OWN engines are asked:
         a pool reached as another host's remote is that host's to drain."""
-        return self._transport.ask("traffic", self._address())
+        return self._asked("traffic", self._address())
 
 
 class RemoteLearner:
@@ -972,9 +1083,15 @@ class RemoteLearner:
     """
 
     def __init__(self, transport: Transport, *, fsdp: int = 1,
-                 admitted: bool = False) -> None:
+                 admitted: bool = False,
+                 deadline_s: float = BUILD_DEADLINE_S) -> None:
         self.fsdp = fsdp
         self.admitted = admitted
+        # THE BOUND ON A LEARNER FRAME (ADR 0008, F3): a 32B's install and one
+        # microbatch's forward are both minutes, so the bound is the build's
+        # — but it is a bound, and an expired one is `Unreachable` rather than
+        # a Trainer waiting for a process that is never coming back.
+        self.deadline_s = deadline_s
         self._transport = transport
         self._frames: asyncio.AbstractEventLoop | None = None
 
@@ -982,10 +1099,13 @@ class RemoteLearner:
 
     def frame(self, verb: str, payload: dict) -> dict:
         """One verb through whichever door this proxy speaks (see the class
-        docstring): the resident's takes it synchronously, another host's
-        takes it admitted."""
+        docstring): the resident's takes it admission-free, another host's
+        takes it admitted. Both bridge from this synchronous call site onto
+        the async wire (ADR 0008, Q4) — a Learner verb may not become async
+        (ADR 0002, Q6), so the hop is here."""
         if not self.admitted:
-            return self._transport.ask(verb, payload)
+            return Blocking.run(self._transport.ask(
+                verb, payload, deadline_s=self.deadline_s))
         return self.admitted_frame(verb, payload)
 
     def admitted_frame(self, verb: str, payload: dict) -> dict:
@@ -1006,7 +1126,8 @@ class RemoteLearner:
         the caller's loop. Over a real transport the serving host admits
         every frame on its own loop and the question does not arise."""
         return asyncio.run_coroutine_threadsafe(
-            self._transport.call(verb, payload), self.frames_loop()).result()
+            self._transport.call(verb, payload, deadline_s=self.deadline_s),
+            self.frames_loop()).result()
 
     def frames_loop(self) -> asyncio.AbstractEventLoop:
         """This proxy's own loop, on its own daemon thread, alive for the
@@ -1065,7 +1186,8 @@ class RemoteHost:
     async def adopt(self, spec: object,
                     routes: Mapping[str, str] | None = None,
                     code: Mapping[str, str] | None = None,
-                    subdir: str | None = None) -> dict:
+                    subdir: str | None = None,
+                    deadline_s: float = BUILD_DEADLINE_S) -> dict:
         """`spec` may be a live ExperimentSpec (encoded here, hashes computed
         here) or an already-canonical row (forwarded as-is — the DESK's case,
         relaying a client's frame with the CLIENT's claimed hashes)."""
@@ -1080,16 +1202,21 @@ class RemoteHost:
                 code = code_hashes(spec)
         return await self._transport.call("adopt", {
             "spec": row, "routes": dict(routes or {}),
-            "code": dict(code or {}), "subdir": subdir})
+            "code": dict(code or {}), "subdir": subdir},
+            deadline_s=deadline_s)
 
-    async def stop(self, run_id: str) -> dict:
+    async def stop(self, run_id: str, deadline_s: float = DEADLINE_S) -> dict:
         """Tell the host to stop a tenancy — cancellation awaited host-side,
         so the reply means the death is complete and the run_id is free to
         adopt again, here or elsewhere (a reroute's first half)."""
-        return await self._transport.call("stop", {"run_id": run_id})
+        return await self._transport.call("stop", {"run_id": run_id},
+                                          deadline_s=deadline_s)
 
-    def status(self) -> dict:
-        return self._transport.ask("status", {})
+    async def status(self, deadline_s: float = DEADLINE_S) -> dict:
+        """The roster over the wire, BOUNDED (ADR 0008, F3): a probe that
+        never returns is how one wedged host stalls a whole reaper tick, so
+        the caller stops waiting and journals `unreachable` instead."""
+        return await self._transport.ask("status", {}, deadline_s=deadline_s)
 
 
 class RemoteMetal:
@@ -1107,25 +1234,37 @@ class RemoteMetal:
     def __init__(self, transport: Transport) -> None:
         self._transport = transport
 
-    def residual(self) -> list[float]:
-        return list(self._transport.ask("residual", {})["residual"])
+    async def residual(self, deadline_s: float = DEADLINE_S) -> list[float]:
+        """Free GB per device, LIVE and BOUNDED (ADR 0008, Q3 as amended). A
+        live read is the stronger check — it proves the metal is reachable
+        NOW and sees a decarve a cached number would miss — and the whole of
+        what makes it safe is that it is bounded and taken OUTSIDE the
+        placement lock."""
+        reply = await self._transport.ask("residual", {},
+                                          deadline_s=deadline_s)
+        return list(reply["residual"])
 
-    def describe(self) -> dict:
-        return self._transport.ask("describe", {})
+    async def describe(self, deadline_s: float = DEADLINE_S) -> dict:
+        return await self._transport.ask("describe", {},
+                                         deadline_s=deadline_s)
 
-    async def carve(self, request: Mapping) -> dict:
-        return await self._transport.call("carve", dict(request))
+    async def carve(self, request: Mapping,
+                    deadline_s: float = BUILD_DEADLINE_S) -> dict:
+        return await self._transport.call("carve", dict(request),
+                                          deadline_s=deadline_s)
 
-    async def decarve(self, name: str) -> dict:
-        return await self._transport.call("decarve", {"host": name})
+    async def decarve(self, name: str,
+                      deadline_s: float = DEADLINE_S) -> dict:
+        return await self._transport.call("decarve", {"host": name},
+                                          deadline_s=deadline_s)
 
-    async def release(self) -> dict:
+    async def release(self, deadline_s: float = DEADLINE_S) -> dict:
         """The acquire rung inverted at the metal (ADR 0003): every resident
         down the ladder, the books emptied, and the SHIFT ENDED so the venue
         reclaims the container. Idempotent — a bare or already-released
         metal answers released just the same, so a desk unsure whether its
         release landed may simply say it again."""
-        return await self._transport.call("release", {})
+        return await self._transport.call("release", {}, deadline_s=deadline_s)
 
 
 class RemoteDesk:
@@ -1162,12 +1301,18 @@ class RemoteDesk:
         return await self._transport.call("place",
                                           {"demands": demand_rows(demands)})
 
-    def status(self) -> dict:
-        return self._transport.ask("status", {})
+    async def status(self, deadline_s: float = DEADLINE_S) -> dict:
+        return await self._transport.ask("status", {}, deadline_s=deadline_s)
 
-    def liveness(self) -> dict:
-        """{host: alive} for every listing, probed by the desk just now."""
-        return self._transport.ask("liveness", {})
+    async def liveness(self, deadline_s: float = DEADLINE_S) -> dict:
+        """{host: alive} for every listing, probed by the desk just now.
+
+        It rides the ADMITTED path since ADR 0008: probing every listing is a
+        fan of wire calls, and a verb that goes to the wire belongs where the
+        desk can bound and cancel it, not on the door that is supposed to
+        answer off memory alone."""
+        return await self._transport.call("liveness", {},
+                                          deadline_s=deadline_s)
 
     async def heartbeat(self, name: str, epoch: str,
                         residual: Sequence[float] | None = None) -> dict:
@@ -1228,11 +1373,13 @@ class RemoteDesk:
         return await self._transport.call("reroute", {
             "run_id": run_id, "avoiding": avoiding, "park": park})
 
-    def placements(self) -> dict:
+    async def placements(self) -> dict:
         """The desk's current-binding table: the latest delivered placement
         per run_id — pools to listings, plus the archived demand rows and
         frame where the delivery carried them."""
-        return self._transport.ask("placements", {})["placements"]
+        reply = await self._transport.ask("placements", {},
+                                          deadline_s=DEADLINE_S)
+        return reply["placements"]
 
     async def register_metal(self, name: str, gpu: str, devices: int,
                              vram_gb: float, address: str,

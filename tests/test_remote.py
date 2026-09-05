@@ -154,12 +154,12 @@ class Recorder:
         self.called: list[str] = []
         self.asked: list[str] = []
 
-    async def call(self, verb: str, payload: dict) -> dict:
+    async def call(self, verb: str, payload: dict, *, deadline_s: float = 0.0) -> dict:
         json.dumps(payload)
         self.called.append(verb)
         return {"events": [], "logprobs": []}
 
-    def ask(self, verb: str, payload: dict) -> dict:
+    async def ask(self, verb: str, payload: dict, *, deadline_s: float = 0.0) -> dict:
         json.dumps(payload)
         self.asked.append(verb)
         return {"mechanisms": {}, "token_ids": []}
@@ -206,9 +206,10 @@ class VerbSplitTest(unittest.TestCase):
         addressed: list[dict] = []
 
         class Address(Recorder):
-            def ask(self, verb: str, payload: dict) -> dict:
+            async def ask(self, verb: str, payload: dict, *,
+                          deadline_s: float = 0.0) -> dict:
                 addressed.append({"base": payload["base"], "tp": payload["tp"]})
-                return super().ask(verb, payload)
+                return await super().ask(verb, payload)
 
         RemotePool(Address(), base="Qwen/Qwen3-8B", tp=4).tokenize("a")
         self.assertEqual(addressed, [{"base": "Qwen/Qwen3-8B", "tp": 4}])

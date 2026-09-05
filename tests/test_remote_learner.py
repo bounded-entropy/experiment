@@ -168,12 +168,16 @@ class Recorder:
         self.called: list[str] = []
         self.asked: list[str] = []
 
-    async def call(self, verb: str, payload: dict) -> dict:
+    async def call(self, verb: str, payload: dict, *,
+
+                   deadline_s: float = 0.0) -> dict:
         json.dumps(payload)
         self.called.append(verb)
         return {"adapters": {}, "optim": {}}
 
-    def ask(self, verb: str, payload: dict) -> dict:
+    async def ask(self, verb: str, payload: dict, *,
+
+                    deadline_s: float = 0.0) -> dict:
         json.dumps(payload)
         self.asked.append(verb)
         return {"adapters": {}, "optim": {}}

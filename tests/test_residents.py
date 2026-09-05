@@ -38,7 +38,7 @@ from rlstack import (
 from rlstack.runner.campaign import Campaigns
 from rlstack.runner.desk import Desk, MetalService
 from rlstack.runner.remote import (
-    RemoteHost, RemoteMetal, decode_emitted, decode_parameterization,
+    DEADLINE_S, RemoteHost, RemoteMetal, decode_emitted, decode_parameterization,
     decode_token_batch, encode_emitted, encode_parameterization,
     encode_token_batch, json_roundtrip,
 )
@@ -277,13 +277,15 @@ class ProcessFixture(unittest.TestCase):
         def __init__(self, service: MetalService, address: str) -> None:
             self.service, self.address = service, address
 
-        async def call(self, verb, payload):
+        async def call(self, verb, payload, *, deadline_s: float = DEADLINE_S):
             return await LocalTransport(
-                self.service.service_for(self.address)).call(verb, payload)
+                self.service.service_for(self.address)).call(
+                    verb, payload, deadline_s=deadline_s)
 
-        def ask(self, verb, payload):
-            return LocalTransport(
-                self.service.service_for(self.address)).ask(verb, payload)
+        async def ask(self, verb, payload, *, deadline_s: float = DEADLINE_S):
+            return await LocalTransport(
+                self.service.service_for(self.address)).ask(
+                    verb, payload, deadline_s=deadline_s)
 
     def metal(self, builds: Builds | None = None) -> MetalService:
         service = MetalService(

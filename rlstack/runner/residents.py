@@ -56,7 +56,8 @@ from rlstack.data.stores.base import Store, StoreAddress
 from rlstack.runner.host import Partition, Regime
 from rlstack.runner.interfaces import Engine, Learner
 from rlstack.runner.remote import (
-    EngineService, LearnerService, Transport, check_epoch, json_roundtrip,
+    DEADLINE_S, Blocking, EngineService, LearnerService, Transport,
+    Unreachable, bounded, check_epoch, json_roundtrip,
 )
 
 
@@ -415,14 +416,31 @@ class DoorTransport:
     def __init__(self, door: Door) -> None:
         self.door = door
 
-    async def call(self, verb: str, payload: dict) -> dict:
+    async def call(self, verb: str, payload: dict, *,
+                   deadline_s: float = DEADLINE_S) -> dict:
+        return await bounded(self.served(verb, payload), deadline_s,
+                             f"{self.door.hello['label']}::{verb}")
+
+    async def ask(self, verb: str, payload: dict, *,
+                  deadline_s: float = DEADLINE_S) -> dict:
+        return await bounded(self.answered(verb, payload), deadline_s,
+                             f"{self.door.hello['label']}::{verb}")
+
+    async def served(self, verb: str, payload: dict) -> dict:
         return json_roundtrip(await self.door.call(verb, json_roundtrip(payload)))
 
-    def ask(self, verb: str, payload: dict) -> dict:
+    async def answered(self, verb: str, payload: dict) -> dict:
+        """ON A THREAD, for LocalTransport's reason: a door's `answer` is
+        synchronous, and a resident's synchronous stretch (a learner's
+        forward, an engine's load) must not hold the loop that is bounding
+        it — which is also how a wedged in-process resident is observable at
+        all (ADR 0008, F1/F3)."""
         if verb == "stop":
             self.door.obj.shutdown()
             return {}
-        return json_roundtrip(self.door.answer(verb, json_roundtrip(payload)))
+        frame = json_roundtrip(payload)
+        return json_roundtrip(
+            await asyncio.to_thread(self.door.answer, verb, frame))
 
 
 # ---------------------------------------------------------------------------
@@ -520,20 +538,33 @@ class PipeTransport:
             raise ResidentError(f"no hello from the resident within {timeout_s:g}s")
         return _unwrap(waiter.frame)
 
-    def ask(self, verb: str, payload: dict) -> dict:
-        waiter = _Waiter()
-        request_id = self._register(waiter)
-        self._send({"id": request_id, "path": "ask", "verb": verb,
-                    "payload": payload})
-        waiter.event.wait()
-        return _unwrap(waiter.frame)
+    async def ask(self, verb: str, payload: dict, *,
+                  deadline_s: float = DEADLINE_S) -> dict:
+        return await self.frame("ask", verb, payload, deadline_s)
 
-    async def call(self, verb: str, payload: dict) -> dict:
+    async def call(self, verb: str, payload: dict, *,
+                   deadline_s: float = DEADLINE_S) -> dict:
+        return await self.frame("call", verb, payload, deadline_s)
+
+    async def frame(self, path: str, verb: str, payload: dict,
+                    deadline_s: float) -> dict:
+        """One frame down the pipe and its reply back, BOUNDED (ADR 0008,
+        F3). Both paths await a Future on the caller's loop: the child
+        dispatches calls concurrently and answers asks inline, so the two
+        differ at the child's end and not at this one. A reply that does not
+        come inside the deadline is `Unreachable` — the resident is wedged,
+        and its host's watchdog is what ends it."""
         waiter = _Waiter(asyncio.get_running_loop())
         request_id = self._register(waiter)
-        self._send({"id": request_id, "path": "call", "verb": verb,
+        self._send({"id": request_id, "path": path, "verb": verb,
                     "payload": payload})
-        return _unwrap(await waiter.future)
+        try:
+            return _unwrap(await bounded(waiter.future, deadline_s,
+                                         f"the resident's door::{verb}"))
+        except Unreachable:
+            with self._pending_lock:
+                self._pending.pop(request_id, None)
+            raise
 
     def close(self) -> None:
         try:
@@ -650,6 +681,12 @@ def resident_main(birth_row: dict, conn) -> None:
 # ---------------------------------------------------------------------------
 # the ladder: ending a process that holds a GPU, bounded (lifted from #53)
 # ---------------------------------------------------------------------------
+
+HEARTBEAT_DEADLINE_S = 5.0
+"""The bound on ONE watchdog tick's round trip (ADR 0008, F3). Short, because
+the tick is every RESIDENT_HEARTBEAT_S and a resident that cannot answer in
+five seconds has not answered this tick — which is all the watchdog is
+asking. Silence past the PHASE bound is what ends it, not one missed tick."""
 
 GRACE_S = 10.0
 """How long a child gets to hear the polite word and leave on its own. Short
@@ -809,6 +846,13 @@ class Resident:
     async def wake(self) -> None:
         await self.transport.call("wake", {})
 
+    def say(self, verb: str, payload: dict, deadline_s: float) -> dict:
+        """One admission-free frame to this resident from a SYNCHRONOUS call
+        site — a watchdog tick, a teardown ladder's rung — bridged onto the
+        async wire through the one bridge (ADR 0008, Q4)."""
+        return Blocking.run(
+            self.transport.ask(verb, payload, deadline_s=deadline_s))
+
     def heartbeat(self) -> dict:
         """One round trip to the child and back — the host's watchdog asks
         this every RESIDENT_HEARTBEAT_S (ADR 0008, F1). Synchronous, on the
@@ -816,7 +860,7 @@ class Resident:
         is still turning; the host runs it off its loop, at most one in
         flight, so a resident that never answers holds up nothing but its own
         verdict."""
-        return self.transport.ask("heartbeat", {})
+        return self.say("heartbeat", {}, HEARTBEAT_DEADLINE_S)
 
     def row(self) -> dict:
         """The resident as status() and describe() report it, and as the
@@ -856,7 +900,7 @@ class Resident:
         Idempotent; bounded by grace_s + 2 x signal_grace_s."""
         self.stopping = True
         if self.process is None:
-            self.transport.ask("stop", {})
+            self.say("stop", {}, grace_s)
             return Teardown()
         if not self.process.is_alive():
             return Teardown()
@@ -873,7 +917,7 @@ class Resident:
 
         def say_it() -> None:
             try:
-                self.transport.ask("stop", {})
+                self.say("stop", {}, timeout_s)
                 spoken.append(True)
             except Exception:       # noqa: BLE001 — past hearing is the verdict
                 pass

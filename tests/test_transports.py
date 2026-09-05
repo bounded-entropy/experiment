@@ -9,6 +9,7 @@ it belongs to, never needs the Modal SDK installed.
 
 from __future__ import annotations
 
+import asyncio
 import sys
 import types
 import unittest
@@ -18,6 +19,10 @@ from rlstack.runner.remote import (
     parse_address, serve_in_process, stop_serving_in_process, transport_for,
     with_epoch,
 )
+
+
+def go(coro):
+    return asyncio.run(coro)
 
 
 class Echo:
@@ -92,7 +97,7 @@ class FactoryTest(unittest.TestCase):
         serve_in_process("local://echo", Echo())
         transport = transport_for("local://echo")
         self.assertIsInstance(transport, LocalTransport)
-        self.assertEqual(transport.ask("who", {"x": 1}),
+        self.assertEqual(go(transport.ask("who", {"x": 1})),
                          {"answered": "who", "x": 1})
 
     def test_a_modal_address_served_here_is_still_local(self) -> None:
@@ -139,12 +144,13 @@ class FactoryTest(unittest.TestCase):
         door has the same three-argument shape."""
         serve_in_process("local://echo", Echo())
         transport = transport_for("local://echo")
-        self.assertNotIn(EPOCH_KEY, transport.ask("who", {}))
+        self.assertNotIn(EPOCH_KEY, go(transport.ask("who", {})))
 
         address = "local://echo@e7"
         serve_in_process(address, Echo())
         self.addCleanup(stop_serving_in_process, address)
-        self.assertEqual(transport_for(address).ask("who", {})[EPOCH_KEY], "e7")
+        self.assertEqual(
+            go(transport_for(address).ask("who", {}))[EPOCH_KEY], "e7")
 
     def test_the_modal_branch_carries_the_epoch_too(self) -> None:
         stub = types.ModuleType("modal")

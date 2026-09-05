@@ -144,7 +144,7 @@ class AdoptTest(unittest.TestCase):
             return reply
         reply = go(drive())
         self.assertTrue(reply["accepted"])
-        status = remote.status()
+        status = go(remote.status())
         self.assertEqual(status["tenants"][reply["run_id"]]["status"], "done")
 
     def test_routes_are_resolved_into_engines(self) -> None:
