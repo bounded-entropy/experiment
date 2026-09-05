@@ -38,6 +38,7 @@ from rlstack.policy.adapters.rollout import Request
 from rlstack.policy.siteschema import SiteMeta
 
 STEER_RECORD = "steer_window"     # the per-turn fact: [start, end], slice coordinates
+ALPHA_PROVIDED = "alpha"          # nsteer's provided scalar: the fraction of ||h_t|| injected
 # The request's extra_args, read by the engine image's hook: the bundle's
 # steer FILE (its address on this build) and the resolved window.
 STEER_FILE = "rlstack_steer"
@@ -160,6 +161,17 @@ class NSteer(Steer):
     def rollout_lowering(self, build):
         from rlstack.policy.adapters import steer_vllm
         return steer_vllm.NSteerRollout(build)
+
+    provides = frozenset({ALPHA_PROVIDED})
+
+    def provide(self, params) -> Mapping[str, Any]:
+        """The fraction this forward injects, as a tensor — the learner
+        summarizes it into the ledger's train block every update (`provides`
+        is an observability channel), which is where a plot of alpha over
+        training reads it; with train_alpha it is the parameter's exp and
+        moves, without it the constant."""
+        fraction = params.fraction()
+        return {} if fraction is None else {ALPHA_PROVIDED: fraction}
 
     def after_step(self, params) -> None:
         from rlstack.policy.adapters import steer_torch

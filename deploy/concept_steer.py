@@ -111,8 +111,16 @@ SUBDIR = "concept"
 # model.layers[n], which is where the harness adds (Q8, confirmed).
 ANCHORS = (10, 32, 54)
 ENTRY = "v"                     # the bank's one name; `export` copies v@<version>
-ALPHA = 0.1                     # nsteer: the injection is this fraction of ||h_t|| per token
-ADAPTERS = ("steer", "nsteer")  # the two arms' families: a free vector, a norm-scaled direction
+ALPHA = 0.1                     # nsteer: the injection STARTS at this fraction of ||h_t|| per token
+LORA_RANK = 4                   # mlp_lora: a rank-4 delta on one layer's three MLP matrices
+ADAPTERS = ("steer", "nsteer", "mlp_lora")
+"""The arms' families: a free vector at the boundary, a norm-scaled direction
+there (alpha trained, unit direction), and a small LoRA on the MLP of the
+same layer — the paper's anchors, three ways of touching one layer."""
+ALGOS = ("sft", "opd")
+"""How an arm learns: SFT over the teacher's sealed set (ADR 0005), or ON-POLICY
+distillation — the student samples its own rollouts and the conditioned
+teacher scores those very tokens (opd: sampled-token reverse KL)."""
 
 CONCEPT = "happiness"
 SPLIT_SEED = 5                  # the split draw's seed; a task's split is h(this, id)
@@ -163,7 +171,7 @@ def proposed_recipe():
 
     return Builds(
         engine=EngineBuild(max_model_len=4096, max_bundles=8, max_rank=16,
-                           serves=ADAPTERS, enforce_eager=True,
+                           serves=("steer", "nsteer", "lora"), enforce_eager=True,
                            enable_sleep_mode=True),
         learner=LearnerBuild(checkpoint_activations=True))
 
@@ -268,13 +276,10 @@ def student_spec(store, teacher_run: str, layer: int, adapter: str = "steer"):
     direction because a norm-scaled steer has no identity."""
     from rlstack import (
         AlgoSpec, ExperimentSpec, OptimSpec, Plans, PolicySpec, Schedule,
-        Seeds, encode, nsteer, steer,
+        Seeds, encode,
     )
 
-    if adapter not in ADAPTERS:
-        raise ValueError(f"adapter must be one of {ADAPTERS}; got {adapter!r}")
-    entry = (steer(f"resid_pre.{layer}", d=HIDDEN) if adapter == "steer"
-             else nsteer(f"resid_pre.{layer}", d=HIDDEN, alpha=ALPHA))
+    entry = bank_entry(adapter, layer)
     plan = store.cas_put(encode(sft_train_plan(teacher_run)))
     return ExperimentSpec(
         policy=PolicySpec(base=BASE, bank={ENTRY: entry}),
@@ -286,6 +291,95 @@ def student_spec(store, teacher_run: str, layer: int, adapter: str = "steer"):
                                         max_policy_lag=0)),
         topology=topology(),
         seeds=Seeds(master=11))
+
+
+def bank_entry(adapter: str, layer: int):
+    """ONE LAYER, THREE WAYS: the bank's one entry for an arm. `steer` and
+    `nsteer` sit at the boundary the paper adds at (`resid_pre.<layer>`, the
+    output of model.layers[layer]); `mlp_lora` is a rank-LORA_RANK delta on
+    that layer's gate, up and down projections — the same layer's own
+    computation, changed a little, instead of its output, pushed."""
+    from rlstack import lora, nsteer, steer
+
+    if adapter == "steer":
+        return steer(f"resid_pre.{layer}", d=HIDDEN)
+    if adapter == "nsteer":
+        return nsteer(f"resid_pre.{layer}", d=HIDDEN, alpha=ALPHA)
+    if adapter == "mlp_lora":
+        return lora(f"layers.{layer}.mlp.*", r=LORA_RANK)
+    raise ValueError(f"adapter must be one of {ADAPTERS}; got {adapter!r}")
+
+
+def onpolicy_rollout_plan(task_ids):
+    """The student's OWN waves: WAVES x PER_WAVE prompts, each sampled once
+    by the student under `single_turn` — no hint, no advantage; the teacher's
+    opinion of those tokens is the post pipeline's, not the plan's."""
+    from rlstack import GroupPlan, RunPlan, Sample, WavePlan
+
+    def wave(u: int):
+        return WavePlan(tuple(
+            GroupPlan(task_id, (Sample(task_id, "single_turn"),))
+            for task_id in task_ids[u * PER_WAVE:(u + 1) * PER_WAVE]))
+    return RunPlan(tuple(wave(u) for u in range(WAVES)))
+
+
+def onpolicy_train_plan():
+    """Update u trains on this run's OWN rollout u, whole (ADR 0006's
+    `self://rollouts/<u>`) — the ordinary paced loop."""
+    from rlstack import RunPlan, WaveRef
+
+    return RunPlan(tuple(WaveRef(f"self://rollouts/{u}")
+                         for u in range(1, WAVES + 1)))
+
+
+def opd_topology():
+    """TWO HOSTS: the student's unit (`main` at tp=2 alternating with the
+    learner at fsdp=2, as every arm) and the TEACHER as its own host — the
+    bare base under the hint, scored over the wire. Two pools of one base
+    are two engine residents at a carve (one per regime), and two 32B
+    engines do not fit beside a learner on one 80 GB pair; a second HostSpec
+    is a second placement unit, so the desk puts the teacher on the other
+    metal. This is the measurement's arrangement, declared."""
+    from rlstack import HostSpec, LearnerMember, PoolMember, Topology
+
+    return Topology(hosts=(
+        HostSpec((PoolMember("main", tp=WIDTH, vram_gb=MAIN_GB),
+                  LearnerMember(fsdp=WIDTH, vram_gb=LEARNER_GB))),
+        HostSpec((PoolMember("teacher", tp=WIDTH, vram_gb=MAIN_GB),)),
+    ))
+
+
+def opd_spec(store, train_tasks: str, layer: int, adapter: str = "nsteer"):
+    """ON-POLICY DISTILLATION, one arm: the student samples the train prompts
+    under its own adapter (no hint), the conditioned teacher scores each
+    sampled token under the hint through the `teacher` pool, and `opd` — the
+    sampled-token reverse KL — pulls the student toward the teacher on the
+    student's own distribution rather than the teacher's. No sealed set is
+    replayed; the extent is this run's own 64 waves."""
+    from rlstack import (
+        AlgoSpec, ExperimentSpec, GenSpec, OptimSpec, Plans, PolicySpec,
+        SamplingSpec, Schedule, Seeds, encode, load_tasks,
+    )
+
+    ids = [task.id for task in load_tasks(store, train_tasks)]
+    if len(ids) < WAVES * PER_WAVE:
+        raise ValueError(
+            f"{train_tasks} holds {len(ids)} prompts; the plan wants "
+            f"{WAVES * PER_WAVE}")
+    rollout = store.cas_put(encode(onpolicy_rollout_plan(ids)))
+    train = store.cas_put(encode(onpolicy_train_plan()))
+    return ExperimentSpec(
+        policy=PolicySpec(base=BASE, bank={ENTRY: bank_entry(adapter, layer)}),
+        gen=GenSpec(envs=("single_turn",), tasks=(train_tasks,),
+                    sampling=SamplingSpec(temperature=1.0, top_p=1.0,
+                                          max_tokens=MAX_TOKENS)),
+        plans=Plans(train=train, rollout=rollout),
+        algo=AlgoSpec(loss="opd", post=("conditioned_teacher_logprobs",),
+                      optim=OptimSpec("adamw", lr=LR),
+                      schedule=Schedule(microbatch_tokens=MICROBATCH_TOKENS,
+                                        max_policy_lag=0)),
+        topology=opd_topology(),
+        seeds=Seeds(master=13))
 
 
 def the_measurement(task_ids):
@@ -331,6 +425,7 @@ def canonical(kind: str, train_tasks: str = "", teacher_run: str = "",
 
     store = a_store()
     spec = (teacher_spec(store, train_tasks) if kind == "teacher"
+            else opd_spec(store, train_tasks, layer, adapter) if kind == "opd"
             else student_spec(store, teacher_run, layer, adapter))
     store_volume.commit()
     return json.loads(canonical_json(spec))

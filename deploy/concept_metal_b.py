@@ -44,7 +44,7 @@ def proposed_recipe():
 
     return Builds(
         engine=EngineBuild(max_model_len=4096, max_bundles=8, max_rank=16,
-                           serves=("steer", "nsteer"), enforce_eager=True,
+                           serves=("steer", "nsteer", "lora"), enforce_eager=True,
                            enable_sleep_mode=True),
         learner=LearnerBuild(checkpoint_activations=True))
 

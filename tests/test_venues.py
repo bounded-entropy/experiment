@@ -16,6 +16,15 @@ changed uri — the fixture pins the plans too.
 The venue files name their app and their images at module scope, so importing
 one needs the Modal SDK, which the suite does not have and must not want.
 `tests/venue_stub.py` stands it in.
+
+THE FOURTH VENUE. `deploy/gsm_a100.py` came back onto main after the rewrite,
+ported from `gsm-campaign-legacy` onto the chassis. Its five rows in the
+fixture were captured from THAT branch's file (the pre-chassis venue, with the
+elbo arm) over the same seeded store this file builds — ten families of twelve
+instances, family 5 the train family — and the same stand-in chat formatter,
+because the real one needs the tokenizer. What is pinned is that the port
+moved no value; what the stand-in leaves unpinned is only the prompt text
+itself, which is content the tokenizer writes, not a spec value.
 """
 
 from __future__ import annotations
@@ -47,6 +56,28 @@ what the fixture compares."""
 SCREENED = "dapo-math-17k/a6d38312-86c7-4022-b8d2-adcf19fa0c3a"
 
 
+def stand_in_chat(text: str) -> str:
+    """The gsm venue's prompt formatter, stood in: the real one is Qwen3's
+    chat template and needs transformers. The fixture's gsm rows were
+    captured under exactly this function."""
+    return f"<user>{text}</user>"
+
+
+def seed_gsm(store, rows_key: str, screen_key: str) -> None:
+    """The dataset rows and the screen's verdict the gsm venue reads off the
+    store: ten families of twelve instances (enough for two train instances,
+    ten near and four far per family) and family 5 chosen to train on. The
+    fixture's gsm rows were captured over exactly this seeding."""
+    rows = [{"id": f, "instance": i, "question": f"Q {f}-{i}?",
+             "answer": f"work...\n#### {10 * f + i}"}
+            for f in range(10) for i in range(12)]
+    store._write(rows_key, json.dumps(rows, sort_keys=True).encode())
+    verdict = {"accuracy": {str(f): 0.05 * (f + 1) for f in range(10)},
+               "chosen": list(range(10)), "train_family": 5,
+               "band": [0.0, 0.40], "samples": 4, "instances": 6}
+    store._write(screen_key, json.dumps(verdict, sort_keys=True).encode())
+
+
 def calls_named(path: pathlib.Path, names: set[str]) -> list[str]:
     """Every call in this file to a function with one of these names — the
     structural way to ask "does this venue release metal?", which a substring
@@ -71,7 +102,7 @@ def load_venue(name: str):
 
 
 class VenueFixture(unittest.TestCase):
-    """The three venues, imported once, over a store their specs can build in."""
+    """The four venues, imported once, over a store their specs can build in."""
 
     @classmethod
     def setUpClass(cls) -> None:
@@ -82,6 +113,7 @@ class VenueFixture(unittest.TestCase):
             cls.concept_steer = load_venue("concept_steer")
             cls.steer_l4 = load_venue("steer_l4")
             cls.stress_fleet = load_venue("stress_fleet")
+            cls.gsm_a100 = load_venue("gsm_a100")
             cls.modal_venue = load_venue("modal_venue")
             cls.desk_venue = load_venue("desk")
         except BaseException:
@@ -101,6 +133,7 @@ class VenueFixture(unittest.TestCase):
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
         self.store, self.concept_tasks = self.seeded_store(tmp.name)
+        seed_gsm(self.store, self.gsm_a100.ROWS_KEY, self.gsm_a100.SCREEN_KEY)
 
     @staticmethod
     def seeded_store(root: str):
@@ -128,6 +161,38 @@ class VenueFixture(unittest.TestCase):
         self.assertEqual(canonical_json(spec), ROWS[key],
                          f"{key}: a spec value moved in the rewrite, so this "
                          f"run's identity moved with it (ADR 0007, promise 7)")
+
+
+class ThreeArmsTest(VenueFixture):
+    """The concept venue's three families and two algorithms build and
+    validate: a free steer, a norm-scaled steer providing alpha, a rank-4 MLP
+    LoRA, each as an SFT arm over the teacher's set and as an on-policy arm
+    with the teacher as its own host."""
+
+    def test_every_family_builds_a_valid_sft_arm(self) -> None:
+        from rlstack.spec.validate import validate
+        from rlstack.policy.siteschema import fake_qwen_schema
+        schema = fake_qwen_schema(64, base=self.concept_steer.BASE)
+        for adapter in self.concept_steer.ADAPTERS:
+            spec = self.concept_steer.student_spec(self.store, "teacher-run-0", 10, adapter)
+            self.assertEqual(validate(spec, schema), [], adapter)
+        entry = self.concept_steer.bank_entry("mlp_lora", 10)
+        self.assertEqual((entry.adapter_type, entry.site, entry.init["r"]),
+                         ("lora", "layers.10.mlp.*", 4))
+
+    def test_the_on_policy_arm_declares_its_teacher_host(self) -> None:
+        from rlstack.spec.validate import validate
+        from rlstack.policy.siteschema import fake_qwen_schema
+        schema = fake_qwen_schema(64, base=self.concept_steer.BASE)
+        spec = self.concept_steer.opd_spec(self.store, self.concept_tasks, 32, "nsteer")
+        self.assertEqual(validate(spec, schema), [])
+        self.assertEqual(spec.algo.loss, "opd")
+        self.assertEqual(spec.algo.post, ("conditioned_teacher_logprobs",))
+        pools = [m.name for h in spec.topology.hosts for m in h.members if hasattr(m, "tp")]
+        self.assertEqual(pools, ["main", "teacher"])
+        self.assertEqual(len(spec.topology.hosts), 2)         # the teacher is its own unit
+        self.assertIsNotNone(spec.plans.rollout)
+        self.assertIsNotNone(spec.plans.train)
 
 
 class SpecsAreUnchangedTest(VenueFixture):
@@ -159,9 +224,19 @@ class SpecsAreUnchangedTest(VenueFixture):
                 f"stress_fleet.spec_for/{name}",
                 venue.spec_for(self.store, bank, overrides, venue.UPDATES, 41))
 
+    def test_the_five_arms_of_the_gsm_campaign(self) -> None:
+        """The port onto the chassis moved no value: each arm — the lora
+        baseline, SVF, the gated latent, the ELBO with its learned prior, the
+        sdpo loop — canonicalizes to the row the pre-chassis file built."""
+        specs, _ = self.gsm_a100.campaign_specs(self.store, stand_in_chat)
+        self.assertEqual(sorted(specs), ["gsm-elbo", "gsm-grpo", "gsm-sdpo",
+                                         "gsm-slatent", "gsm-spectral"])
+        for name, spec in specs.items():
+            self.assertRowUnchanged(f"gsm_a100.campaign_specs/{name}", spec)
+
     def test_the_fixture_covers_every_spec_the_venues_build(self) -> None:
         """A row nobody compares is a promise nobody keeps."""
-        self.assertEqual(len(ROWS), 9)
+        self.assertEqual(len(ROWS), 14)
 
 
 class ChassisTest(VenueFixture):
@@ -207,14 +282,15 @@ class ChassisTest(VenueFixture):
         self.assertEqual(parse_address(host).cls, "MetalS")
 
     def test_a_campaign_door_never_releases(self) -> None:
-        """Q6: `concept_steer` is a CAMPAIGN venue — three arms on one booted
-        metal — so no door of it hands metal back. Idle metal is the desk's
-        (ADR 0003), and under one desk a door's teardown would take whatever
-        else had joined."""
-        self.assertEqual(calls_named(DEPLOY / "concept_steer.py",
-                                     {"take_down", "guarded_release",
-                                      "release", "sweep"}), [],
-                         "a campaign door released metal")
+        """Q6: `concept_steer` and `gsm_a100` are CAMPAIGN venues — arms on
+        one booted metal — so no door of either hands metal back. Idle metal
+        is the desk's (ADR 0003), and under one desk a door's teardown would
+        take whatever else had joined."""
+        for name in ("concept_steer", "gsm_a100"):
+            self.assertEqual(calls_named(DEPLOY / f"{name}.py",
+                                         {"take_down", "guarded_release",
+                                          "release", "sweep"}), [],
+                             f"a campaign door of {name} released metal")
 
     def test_a_check_venue_releases_only_its_own_metal(self) -> None:
         """Q2/Q6: the check venues still end in a release, scoped to the
@@ -235,7 +311,8 @@ class ChassisTest(VenueFixture):
         `Builds` row — the same shape `deploy/desk.py::recipe` writes."""
         from rlstack.runner.residents import Builds
 
-        for venue in (self.concept_steer, self.steer_l4, self.stress_fleet):
+        for venue in (self.concept_steer, self.steer_l4, self.stress_fleet,
+                      self.gsm_a100):
             recipe = venue.proposed_recipe()
             self.assertEqual(Builds.from_row(recipe.row()), recipe)
 

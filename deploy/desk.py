@@ -85,12 +85,20 @@ class Desk:
             boot_for=self.boot,
             idle_s=IDLE_S)
         self.campaigns = Campaigns(self.desk)
-        import asyncio
-        self.idle_ticker = asyncio.create_task(self.tick_idle())
+        self.idle_ticker = None      # started by the first async door: enter runs with no loop
         print(f"[desk] rebuilt from journal: {sorted(self.desk.listings)} "
               f"/ metal plane: {sorted(self.desk.metal_remotes)} "
               f"/ released: {sorted(self.desk.released)} "
               f"/ recipes: {sorted(self.desk.metal_builds)}", flush=True)
+
+    def ensure_idle_ticker(self) -> None:
+        """The idle ticker starts on the first ASYNC door call, because
+        `bring_up` is a synchronous enter with no running loop (found on the
+        venue: a create_task there crashed every desk container)."""
+        import asyncio
+
+        if self.idle_ticker is None or self.idle_ticker.done():
+            self.idle_ticker = asyncio.create_task(self.tick_idle())
 
     async def tick_idle(self) -> None:
         """The idle clock, read every IDLE_TICK_S: observe every metal's
@@ -127,6 +135,7 @@ class Desk:
         ignored — a desk IS its own plane — and present because every rlstack
         Modal container wears the SAME two doors, which is why one transport
         class reaches all of them (ADR 0007, Q1)."""
+        self.ensure_idle_ticker()
         return await self.campaigns.serve(verb, payload)
 
     @modal.method()

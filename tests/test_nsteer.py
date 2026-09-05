@@ -56,6 +56,14 @@ class DeclarationTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "init_std > 0"):
             nsteer("resid_pre.10", d=8, init_std=0.0)   # no zero to start from
 
+    def test_it_provides_its_fraction_to_the_ledger(self) -> None:
+        """`alpha` is a declared provide: the learner summarizes it into
+        every update's train block, so the run page plots it for free."""
+        from rlstack.policy.adapters.steer import ALPHA_PROVIDED
+        self.assertEqual(ADAPTER_TYPES.get("nsteer").instance.provides,
+                         frozenset({ALPHA_PROVIDED}))
+        self.assertEqual(ADAPTER_TYPES.get("steer").instance.provides, frozenset())
+
     def test_another_fraction_is_another_identity(self) -> None:
         self.assertNotEqual(nsteer("resid_pre.10", d=8, alpha=0.1).init,
                             nsteer("resid_pre.10", d=8, alpha=0.2).init)
@@ -121,6 +129,9 @@ class ScaledAddTest(unittest.TestCase):
         self.assertIsNotNone(state.log_alpha)
         self.assertAlmostEqual(steer_torch.effective_alpha(state), 0.1, places=6)
         self.assertEqual(len(state.parameters()), 2)           # direction + log_alpha
+        provided = NSteer().provide(state)
+        self.assertAlmostEqual(float(provided["alpha"]), 0.1, places=6)
+        self.assertTrue(provided["alpha"].requires_grad)        # the parameter's exp
         # a step off the sphere, then the projection back
         with torch.no_grad():
             vector.add_(0.3 * torch.ones(16))
