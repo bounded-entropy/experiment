@@ -173,3 +173,22 @@ class LeafWalkTest(unittest.TestCase):
         self.assertNotIn(str(self.store.path_of("runs/r1/waves")), scanned)
         # a manifest-less directory is not a run yet, so the walk looks inside
         self.assertIn(str(self.store.path_of("runs/newborn")), scanned)
+
+    def test_the_observer_reads_the_same_leaves(self) -> None:
+        # the observer reads through CachedReadStore (observe/cache.py): its
+        # walk must be the inner store's pruned one, not a listing of the
+        # whole tree (found live: 25,131 stats per index request)
+        from rlstack.observe.cache import CachedReadStore
+        observer = CachedReadStore(self.store)
+        scanned: list[str] = []
+        real = os.scandir
+
+        def counting(path=".", *args, **kwargs):
+            scanned.append(str(path))
+            return real(path, *args, **kwargs)
+
+        with mock.patch("os.scandir", counting):
+            self.assertEqual(observer.run_subdirs(),
+                             {"r1": "", "r2": "ablations/plora"})
+            self.assertEqual(observer.run_prefix("r2"), "runs/ablations/plora/r2")
+        self.assertNotIn(str(self.store.path_of("runs/r1/waves")), scanned)

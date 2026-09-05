@@ -56,9 +56,29 @@ class CachedReadStore(Store):
         self._bytes: dict[str, tuple[int, bytes]] = {}    # key -> (size, data)
         self._absent: dict[str, float] = {}               # key -> noticed at
         self._lists: dict[str, tuple[float, list[str]]] = {}
+        self._homes: tuple[float, dict[str, str]] | None = None
 
     def describe(self) -> str:
         return self.inner.describe()
+
+    def _run_directories(self) -> dict[str, str]:
+        """THE INNER STORE'S OWN WALK, memoized like a listing. The base
+        answer walks _list("runs/"), and through this wrapper that re-listed
+        the whole tree every time the LIST_TTL memo lapsed — found live:
+        25,131 stats, 9 s, on every index request more than two seconds
+        after the last, with LocalStore's manifest-pruned walk sitting unused
+        underneath. The reload blink is honoured as for listings: a walk
+        that finds no run right after one that found many stands one more
+        tick."""
+        held = self._homes
+        if held is not None and time.time() - held[0] < LIST_TTL:
+            return held[1]
+        homes = self.inner._run_directories()
+        if not homes and held is not None and held[1]:
+            self._homes = (time.time(), held[1])
+            return held[1]
+        self._homes = (time.time(), homes)
+        return homes
 
     # ---- cached byte verbs --------------------------------------------------
 
