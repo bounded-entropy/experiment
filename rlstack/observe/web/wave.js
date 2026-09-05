@@ -8,22 +8,21 @@
 // poll for.
 "use strict";
 
-import {C, brief, el, esc, getAnswer, getJSON, note, raw, section} from "./dom.js";
+import {C, brief, el, esc, getAnswer, note, raw, section} from "./dom.js";
 import {head, histogramCard} from "./charts.js";
-import {apiRun, ctx, drawAmbiguity, route, runPath, syncSwitcher}
+import {apiRun, ctx, drawAmbiguity, headerIndex, route, runPath, syncSwitcher}
   from "./nav.js";
 
 const FINISH_COLOR = {stop: C.rail, eos: C.feed, length: C.warn};
 
 export async function drawWave() {
-  const [answer, runs] = await Promise.all([
-    getAnswer(apiRun(route.runId, "/wave/" + route.update, route.folder)),
-    getJSON("/api/runs").then(d => (d && d.runs) || [])]);
+  const answer = await getAnswer(apiRun(route.runId, "/wave/" + route.update,
+                                        route.folder));
   const wave = answer.data;
   const holder = document.getElementById("page");
   holder.innerHTML = "";
   if (wave && wave.ambiguous) { drawAmbiguity(route.runId, wave.ambiguous); return; }
-  syncSwitcher(runs || []);
+  headerIndex(syncSwitcher);
   if (!wave) {
     ctx(`<a href="${runPath(route.runId, route.folder)}">`
       + `${esc(route.runId)}</a>`);

@@ -8,10 +8,18 @@
 import {C, brief, drawnOnce, el, esc, getAnswer, getJSON, lostTick, note,
         okTick, section} from "./dom.js";
 import {card, emptyCard, stackedCard} from "./charts.js";
-import {apiRun, ctx, drawAmbiguity, hostPath, route, syncSwitcher,
-        wavePath} from "./nav.js";
+import {apiRun, ctx, drawAmbiguity, headerIndex, hostPath, route,
+        syncSwitcher, wavePath} from "./nav.js";
 
 const GAP = "logprob_gap";      // the parity alarm (#25's certificate, running)
+
+// What the SUBJECT BAR is built from, kept here rather than closed over: the
+// run's own payload arrives with the page, its row in the index arrives when
+// the index does (headerIndex, seconds later), and either may be redrawn
+// without the other. A closure would repaint one from a poll the other has
+// already moved past.
+let told = null;                // {data, dict} as of the last good draw
+let mine = null;                // this run's row in the index, once it lands
 const PHASES = [{name: "collect", color: C.feed},
                 {name: "post", color: C.derived},
                 {name: "train", color: C.rail},
@@ -19,9 +27,8 @@ const PHASES = [{name: "collect", color: C.feed},
 
 export async function drawRun() {
   const runId = route.runId, folder = route.folder;
-  const [answer, runs, timing, waves] = await Promise.all([
+  const [answer, timing, waves] = await Promise.all([
     getAnswer(apiRun(runId, "", folder)),
-    getJSON("/api/runs").then(d => (d && d.runs) || []),
     getJSON(apiRun(runId, "/timing", folder)),
     getJSON(apiRun(runId, "/waves", folder)),
   ]);
@@ -36,25 +43,15 @@ export async function drawRun() {
     return;
   }
   if (data.ambiguous) { drawAmbiguity(runId, data.ambiguous); return; }
-  syncSwitcher(runs || []);
-  const mine = (runs || []).find(r => r.run_id === runId
-      && (folder === null || r.folder === folder));
   const dict = data.dictionary || {columns: [], rails: []};
-  // the NAME leads and the hex id is secondary: a run is a thing a human
-  // named, addressed by (folder, run_id) underneath
-  ctx(`<span>${esc((mine && mine.name) || runId)}</span>`
-    + ((mine && mine.name) ? `<span class="k">${esc(runId)}</span>` : "")
-    + ((mine && mine.folder) ? `<span class="k">${esc(mine.folder)}</span>` : "")
-    + ((mine && mine.tags || []).map(t =>
-        `<span class="tag">${esc(t)}</span>`).join("")
-    + `<span class="meta">loss ${esc(dict.loss ?? "?")} · lag ${esc(dict.max_policy_lag ?? 0)}
-     · post [${(dict.post_pipeline || []).map(esc).join(" → ")}]</span>
-     <span class="${data.committed >= (data.target ?? 1e9) ? "meta" : "live"}">
-     ${data.committed}/${esc(data.target ?? "?")}
-     ${data.extent === "rollout" ? "rollouts sealed" : "committed"}</span>`)
-    + (mine ? `<span class="meta">on ${mine.hosts.map(h =>
-        `<a href="${hostPath(h, folder)}">${esc(h)}</a>`
-      ).join(" + ") || "?"}</span>` : ""));
+  told = {data: data, dict: dict};
+  subject();
+  headerIndex(runs => {
+    syncSwitcher(runs);
+    mine = runs.find(r => r.run_id === runId
+        && (folder === null || r.folder === folder)) || null;
+    subject();
+  });
   document.getElementById("page").innerHTML = "";
 
   const cols = dict.columns || [];
@@ -137,6 +134,31 @@ export async function drawRun() {
   }
   drawWaves(waves, data.extent);
   okTick();
+}
+
+// ---- the subject bar ------------------------------------------------------
+// The run says what it IS (its loss, its lag, its pipeline, its progress) out
+// of its own payload; the INDEX says what it is CALLED (name, folder, tags)
+// and where it ran. The first arrives with the page and the second seconds
+// later, so this draws with whichever it has.
+
+function subject() {
+  const {data, dict} = told;
+  // the NAME leads and the hex id is secondary: a run is a thing a human
+  // named, addressed by (folder, run_id) underneath
+  ctx(`<span>${esc((mine && mine.name) || route.runId)}</span>`
+    + ((mine && mine.name) ? `<span class="k">${esc(route.runId)}</span>` : "")
+    + ((mine && mine.folder) ? `<span class="k">${esc(mine.folder)}</span>` : "")
+    + ((mine && mine.tags || []).map(t =>
+        `<span class="tag">${esc(t)}</span>`).join("")
+    + `<span class="meta">loss ${esc(dict.loss ?? "?")} · lag ${esc(dict.max_policy_lag ?? 0)}
+     · post [${(dict.post_pipeline || []).map(esc).join(" → ")}]</span>
+     <span class="${data.committed >= (data.target ?? 1e9) ? "meta" : "live"}">
+     ${data.committed}/${esc(data.target ?? "?")}
+     ${data.extent === "rollout" ? "rollouts sealed" : "committed"}</span>`)
+    + (mine ? `<span class="meta">on ${mine.hosts.map(h =>
+        `<a href="${hostPath(h, route.folder)}">${esc(h)}</a>`
+      ).join(" + ") || "?"}</span>` : ""));
 }
 
 // ---- parity: the alarm that is not about the objective --------------------

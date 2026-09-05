@@ -121,6 +121,31 @@ export function ctx(html) {
 
 let switcherSignature = null;
 
+// THE INDEX IS HEADER FURNITURE, and never on a page's critical path.
+// /api/runs walks every run in the store — measured 13-48 s on a 75-run
+// volume — and the run and wave pages want two things out of it: the
+// switcher's list, and the run's own name and tags. A sealed wave answers in
+// 0.4 s beside it, so awaiting both meant showing neither. It is fetched
+// BESIDE the render now, at most one request at a time, at most once a
+// minute (a name does not change under the 3 s poll), and the last good list
+// is kept so a page that redraws still has one.
+const INDEX_EVERY_MS = 60000;
+let heldIndex = null;
+let indexAt = 0;
+let indexFlight = null;
+
+export function headerIndex(use) {
+  if (heldIndex !== null) use(heldIndex);
+  if (indexFlight !== null || Date.now() - indexAt < INDEX_EVERY_MS) return;
+  indexFlight = runsIndex().then(data => {
+    indexFlight = null;
+    if (data === null) return;       // a dead wire keeps the last good list
+    indexAt = Date.now();
+    heldIndex = data.runs;
+    use(heldIndex);
+  });
+}
+
 export async function runsIndex() {
   // /api/runs answers {now, runs}; every consumer reads it through here.
   // null means the POLL failed — a page keeps its last render and says so,
