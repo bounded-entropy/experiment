@@ -3,7 +3,7 @@
 | | |
 |---|---|
 | **Date** | 2026-09-04 |
-| **Status** | Proposed |
+| **Status** | Accepted (2026-09-04 review: Q2, Q4, Q5, Q7 agreed; Q3 amended — a LIVE read, bounded and outside the lock; Q1, Q6, Q8, Q9 stood on the recommendation). Awaiting implementation and the drill (Q8). |
 | **Author** | Claude Fable 5.1 (session: ADR 0005 on metal, 2026-09-04) |
 | **Touches** | `rlstack/runner/desk.py` (leases, epochs, deadlines, journal-first submit, the parked state), `rlstack/runner/remote.py` (deadline on `Transport.call`/`ask`; the epoch in every frame's address), `rlstack/runner/transports/modal_cls.py` (deadline), `rlstack/runner/host.py` (resident heartbeats and the phase watchdog), `rlstack/runner/learners/*` and `engines/*` (the first-contact report), `rlstack/runner/meters.py` (counters that must advance), `deploy/modal_venue.py` (heartbeat duty, async doors, measurement on the metal, the client-side canonical row), `deploy/concept_steer.py` + the check venues (doors on the client), `rlstack/observe/` (parked and unreachable rendered), `tests/` (fakes for every invariant; the drill on metal), `ARCHITECTURE.md`, CONTEXT #85 |
 | **Invariants** | I5 (topology semantics-neutral: nothing here touches a run's identity), I10 (the store is the run: every fact below is journaled before it is acted on), I11 (a run is self-describing: a parked run says why) — and six FLEET invariants introduced here, F1–F6 |
@@ -29,6 +29,8 @@ ADR 0005's three arms reached their extent on 2026-09-04, but only under a human
 
 **Control-plane work was put on the platform's scheduler and reflection.** The canonical row, progress and the measurement each ran as an on-demand CPU function, and for an hour Modal scheduled none of them; the desk itself waited fifteen minutes for a CPU worker; the platform imported our classes by `__module__`; every `::status` booted a second desk; and for fifty minutes no GPU pair was schedulable while we held one in a container that could take no inputs.
 
+**Where things run, stated once, because F1 applies per level.** A carved host is an object inside the metal container's one control process; that process holds the `MetalService`, every host on the metal, the door that answers the desk, the stats tick and the keepalive. A run's daemons — Generator, Trainer, Scorer — are asyncio tasks in that same process, one `TaskGroup` per adoption, so stopping a run is cancelling one task. The residents are the processes: `Resident.spawn` forks the engine (itself one process per tensor-parallel rank) and the learner (one per FSDP rank), and a daemon reaches them over a pipe. So the metal heartbeats for the container, the host heartbeats for its residency, and each resident heartbeats to its host through the pipe — three leases, three different things that can die.
+
 What Modal hides, AWS and RunPod will not: a name that routes to the latest version and boots on demand; at-least-once replay after a container dies; a container that quietly stops fetching; capacity waits inside a call. A desk that owns those four itself moves platforms by changing only how a container is created and addressed.
 
 ## Decision
@@ -37,14 +39,14 @@ Six fleet invariants. Each is a sentence the code can be checked against, on fak
 
 - **F1 — Leased.** A fact about the fleet is true only while its lease is renewed. Every metal, host and resident registers with an EPOCH (its boot id) and renews a LEASE by heartbeat; the desk believes nothing whose lease has lapsed, lists nothing it has not heard from within the lease, and places nothing on it.
 - **F2 — Epoch-addressed.** A frame names the instance it means. Every registration, carve and admitted frame carries the epoch it expects; a container that receives a frame for another epoch refuses it by name. A released container is a lapsed epoch: it refuses every later input and is never reborn.
-- **F3 — Bounded.** Every wire verb has a deadline, and no lock is held across the wire. A wait that expires journals `unreachable` on the row it was about, and the placement ladder passes that row over; nothing in the desk awaits a metal inside the placement lock.
+- **F3 — Bounded.** Every wire verb has a deadline, and no lock is held across the wire. A wait that expires journals `unreachable` on the row it was about, and the placement ladder passes that row over. Placement reads every metal's residual LIVE — concurrently, under one deadline — before it takes its lock, and places against that snapshot; nothing in the desk awaits a metal inside the placement lock.
 - **F4 — Idempotent.** Every state-changing verb is idempotent by its key, because every wire is at-least-once. The journal records the INTENT before the act (`submit-intent` with the run id and folder before placement), so a replayed frame finds its own intent and answers with the delivery it already has. Cancellation is the server's decision: doors are async and carry their own deadlines; a client never cancels a fleet input.
 - **F5 — Measured.** Every declared resource number is journaled beside its measured counterpart at first contact, and no meter can read zero silently. A resident reports its peak memory after its first forward and the host journals it beside the partition's declaration; a meter carries a request counter that must advance whenever the resident served anything; a build ships only after a smoke run in its own image.
 - **F6 — Close at hand.** Control-plane work runs where a leased process already is — the client for anything pure, the desk for anything that needs the store, the metal for anything that needs the engine — never on an on-demand function. Waiting for capacity is a journaled PARKED state with a reason and a bound, never a hang inside a door.
 
 ### Touched / untouched
 
-- **Touched** — `desk.py`: `Lease` (epoch, last heartbeat, limit) per metal and host; `heartbeat` verb; `listings`/`metal` rows gain `epoch`, `heard_t`, `lease_s`; `covers` requires a live lease; `residual` asked with a deadline and OUTSIDE the placement lock (the residual is read at heartbeat time and cached; placement reads the cache); `submit-intent` journaled first, `submit` idempotent per `(folder, run_id)`; `parked` events carry `wants` (regimes, devices, GB) and `since`; the reaper reaps lapsed leases, not just silent probes. `remote.py`: `Transport.call`/`ask` take `deadline_s`; `Address` gains an optional `@epoch`; `HostService`/`EngineService` refuse a mismatched epoch. `modal_cls.py`: the deadline is passed to the Modal call; `door_ask` becomes async. `host.py`: residents heartbeat through their door; a resident that misses its heartbeat inside a phase with a bound is killed and journaled `stalled`. `meters.py`: `requests_served` counter, monotone. `learners/*`, `engines/*`: `first_contact()` → `{"peak_gb": ...}` journaled beside the declaration. `modal_venue.py`: a heartbeat duty per host; async doors; `canonical_row` on the client (the plan bytes go to the cas THROUGH THE DESK's `put_plan` verb, so the client needs no mount); `measure` rides the metal that serves the pool. `observe/`: `parked`, `unreachable`, `stalled` and `epoch` rendered; run status from open residencies (landed 3a02b58).
+- **Touched** — `desk.py`: `Lease` (epoch, last heartbeat, limit) per metal and host; `heartbeat` verb; `listings`/`metal` rows gain `epoch`, `heard_t`, `lease_s`; `covers` requires a live lease; residuals read live at placement — every metal asked concurrently, one deadline, BEFORE the lock — and the snapshot placed against (the heartbeat's residual feeds the row the observer shows, nothing else); `submit-intent` journaled first, `submit` idempotent per `(folder, run_id)`; `parked` events carry `wants` (regimes, devices, GB) and `since`; the reaper reaps lapsed leases, not just silent probes. `remote.py`: `Transport.call`/`ask` take `deadline_s`; `Address` gains an optional `@epoch`; `HostService`/`EngineService` refuse a mismatched epoch. `modal_cls.py`: the deadline is passed to the Modal call; `door_ask` becomes async. `host.py`: residents heartbeat through their door; a resident that misses its heartbeat inside a phase with a bound is killed and journaled `stalled`. `meters.py`: `requests_served` counter, monotone. `learners/*`, `engines/*`: `first_contact()` → `{"peak_gb": ...}` journaled beside the declaration. `modal_venue.py`: a heartbeat duty per host; async doors; `canonical_row` on the client (the plan bytes go to the cas THROUGH THE DESK's `put_plan` verb, so the client needs no mount); `measure` rides the metal that serves the pool. `observe/`: `parked`, `unreachable`, `stalled` and `epoch` rendered; run status from open residencies (landed 3a02b58).
 - **Untouched** — every spec, plan and run identity (nothing here is hashed); the store's seal rules; the daemons; adapters, losses, engines' inference paths; the address grammar's scheme and app/cls/host segments (the epoch is a suffix); ADR 0003's idle rule (a lapsed lease is a stronger reason to release, not a new one).
 
 ### Promises / non-promises
@@ -88,7 +90,8 @@ TrafficWindow.requests_served: int       # monotone across windows; a served req
 ```text
 # a lease's life
 metal boots  --register(epoch=e1)-->  desk: Lease(e1, now, 60s); listed, placeable
-every 20s    --heartbeat(e1, residual)-->  heard_t = now; residual cached for placement
+every 20s    --heartbeat(e1, residual)-->  heard_t = now; residual on the row (display)
+submit       --residual? to every live metal, concurrently, 5 s-->  snapshot; THEN the lock; place
 silence 60s  -->  lease lapsed: delisted, not placeable, reaper knocks (boot_for) and journals
 container released  -->  epoch e1 retired: every later frame for e1 refused; the knock boots e2
 
@@ -112,17 +115,25 @@ If the other branch (leases as long as the idle limit): a dead metal stays place
 Recommendation: yes, the address is where the desk already keeps what it addresses, and `parse_address` gains one optional segment. The venue-carrying address of ADR 0007 Q3 stays intact.
 If the other branch (epoch only in the registration row): a frame routed to a fresh container of the same name is silently accepted by it — the stranded-address hazard survives.
 
+> **Samarth:** agreed (2026-09-04), after "what exactly does epoch mean": a boot identity a container mints once and that dies with it — a name is not an instance, and the epoch is what lets a frame be refused when it belongs to a world that no longer exists.
+
 **Q3. Residuals are read at heartbeat time and cached; placement never asks the metal.**
 Recommendation: yes. The wire call that wedged the desk moves out of the placement lock entirely; the price is a residual up to one heartbeat old, and a carve that finds less than the cache said is refused by the metal and parked, as any carve refusal is today.
 If the other branch (a bounded ask under the lock): a 5 s deadline per metal times N metals inside every submit, and a lock still held across I/O.
+
+> **Samarth:** "i feel like placement should keep a live read but it could return with unreachable. what's wrong with that?" (2026-09-04). *Folded, amended: nothing is wrong with it, and it is the stronger check — a live read proves the metal is reachable NOW and sees a decarve the heartbeat would miss. The invariant underneath both branches is that the read is OUTSIDE the lock: a submit asks every live metal concurrently under one deadline, snapshots, then takes the lock and places against the snapshot. Worst case per submit is one deadline, not one per metal; an expired ask is journaled `unreachable` and passed over. The heartbeat's residual is for the row only.*
 
 **Q4. Doors are async and carry their own deadlines; a client never cancels a fleet input.**
 Recommendation: yes. On Modal a cancelled sync input on a concurrent container shuts the container down (observed three times); an async method is cancellable without that. `door_ask` becomes async, `Transport.ask` becomes async, and the sync call sites (registration, build facts) go through `asyncio.run` or `to_thread` where they already are.
 If the other branch (keep sync doors, forbid client timeouts by rule): a rule a human forgets under stress, as one did tonight.
 
+> **Samarth:** agreed (2026-09-04). *The "concurrent container" is the desk itself — `@modal.concurrent(max_inputs=32)` on one process; a cancelled request on a sync door has no clean interruption, so Modal shuts the container down; on an async door it is one task the loop drops.*
+
 **Q5. The canonical row is computed on the client and the plan bytes reach the cas through a desk verb (`put_plan`), so no venue door needs an on-demand function.**
 Recommendation: yes. The row is pure (proved tonight: the local row matched the function's byte for byte); the only reason for the function was the mount. Progress reads come from the observer's API, which the campaign helper already knows how to poll. The measurement rides the metal that serves the pool (a `measure` verb on the metal's plane door).
 If the other branch: every door stays hostage to the platform's CPU scheduler, and none of it exists on AWS or RunPod.
+
+> **Samarth:** agreed (2026-09-04).
 
 **Q6. `first_contact` is journaled for every resident, and a served-but-zero window is a test failure, not a quiet tick.**
 Recommendation: yes. Three OOMs and three days of zeros were both "declared, not measured". The report is one dict per resident after its first forward or first request; the counter is one integer per window.
@@ -131,6 +142,8 @@ If the other branch: the next adapter type or the next platform gets the same th
 **Q7. A run whose host's lease lapses is PARKED (journaled with what it wants) and rerouted on the next registration, as a reaped listing's runs are today.**
 Recommendation: yes — this is ADR 0001 Q5d's parking with a second trigger, and the run page shows it (F6). Resume-equivalence prices the move at one uncommitted update.
 If the other branch (fail the run): a platform hiccup fails experiments that the store could have resumed.
+
+> **Samarth:** agreed (2026-09-04), with the clarification recorded in Context: daemons are tasks in the host's process, residents are the processes — a lapsed HOST lease parks its runs; a lapsed RESIDENT lease kills that resident and the host journals `stalled`.
 
 **Q8. The drill is the acceptance test and runs before Status becomes Implemented.**
 Recommendation: yes, and it is Samarth's to run: two venues, two sessions, a mid-run redeploy, a container killed by hand, everything unattended. ADR 0007 became "Implemented on fakes" and met the metal the same afternoon; this ADR does not get that status.
