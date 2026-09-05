@@ -13,8 +13,9 @@ vector inside its window.
 
 vLLM's decoder layers return the FUSED pair (hidden, residual) whose sum is
 the stream and whose next norm sums them; the add lands on `hidden`
-(ADR 0004, Q1). The final norm returns the normed stream first. Both are
-added to in place.
+(ADR 0004, Q1) and the norm-scaled add takes its norm from BOTH halves —
+the stream, as the replay site sees it. The final norm returns the normed
+stream first, alone. All are added to in place.
 """
 
 from __future__ import annotations
@@ -128,7 +129,11 @@ class SteerWorker(Worker):
         def hook(module, args, output) -> None:
             if getattr(self, "routing", None) is None or not self.routing.steers:
                 return None
-            hidden = output[0] if isinstance(output, tuple) else output
-            self.steer.add(self.routing, path, hidden)
+            if isinstance(output, tuple):
+                hidden = output[0]
+                residual = output[1] if len(output) > 1 else None
+            else:
+                hidden, residual = output, None
+            self.steer.add(self.routing, path, hidden, residual)
             return None
         return hook

@@ -23,6 +23,8 @@ token-for-token on the positions the loss mask selects.
 
 from __future__ import annotations
 
+import asyncio
+
 from collections.abc import Mapping, Sequence
 
 from rlstack.client import PoolClient
@@ -54,5 +56,5 @@ class TeacherLogprobs(PostProcessor):
     async def process(self, group: Group, data, client: PoolClient
                       ) -> Mapping[str, Sequence]:
         teacher = client.pool("teacher")
-        return {"teacher_logprobs": [await teacher_scores(traj, teacher)
-                                     for traj in group.trajectories]}
+        return {"teacher_logprobs": list(await asyncio.gather(
+            *(teacher_scores(traj, teacher) for traj in group.trajectories)))}

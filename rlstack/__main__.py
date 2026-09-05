@@ -122,13 +122,13 @@ def fractions(splits: list[str] | None) -> dict[str, float]:
 
 
 def build_task_sets(store: Store, dataset: str, splits: dict[str, float],
-                    seed: int) -> dict[str, str]:
+                    seed: int, **builder_args) -> dict[str, str]:
     """Build one dataset, split it, write each split — the whole task-set path.
 
     Prints and returns {split name: cas uri}: those uris are what a spec pins,
     and the printing is why this lives in the CLI rather than under data/.
     """
-    tasks = BUILDERS[dataset]()
+    tasks = BUILDERS[dataset](**builder_args)      # e.g. the concept of a prompt set
     print(f"{dataset}: {len(tasks)} tasks, split {splits} at seed {seed}")
     uris = {}
     for name, members in split_tasks(tasks, splits, seed).items():

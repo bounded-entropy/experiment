@@ -23,6 +23,7 @@ seedless, so adding this processor never shifts the run's sampling.
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Mapping, Sequence
 
 from rlstack.client import PoolClient
@@ -56,6 +57,8 @@ class ConditionedTeacherLogprobs(PostProcessor):
     async def process(self, group: Group, data, client: PoolClient
                       ) -> Mapping[str, Sequence]:
         teacher = client.pool("teacher")
-        return {"teacher_logprobs": [
-            await conditioned_teacher_scores(traj, teacher)
-            for traj in group.trajectories]}
+        # every trajectory of the group at once: the walk inside one is
+        # serial (its context grows), the group is not
+        return {"teacher_logprobs": list(await asyncio.gather(
+            *(conditioned_teacher_scores(traj, teacher)
+              for traj in group.trajectories)))}

@@ -179,12 +179,21 @@ class SteerPlugin(EnginePlugin):
             slots=slots)
 
     def add(self, routing: SteerRouting, path: str,
-            hidden: torch.Tensor) -> None:
+            hidden: torch.Tensor, residual: torch.Tensor | None = None) -> None:
         """hidden[t] += bank[slot_t][path] for every token inside its window —
         in place, on the first len(routing.slot) rows (the actual tokens; a
         padded row past them is left alone). A slot without a vector at this
         path adds zero: that bundle steers elsewhere, and zero is the
-        identity."""
+        identity.
+
+        `residual` is the OTHER half of a fused boundary: vLLM's decoder
+        layers hand out (hidden, residual) whose SUM is the stream, and the
+        add may land on either half — but a norm-scaled slot scales by the
+        norm of the STREAM, which is what the trainer's replay site sees
+        (the HF module's output). Scaling by `hidden` alone took the norm of
+        one layer's MLP output, a fraction of the stream's, and served a
+        steer the learner never trained (found 2026-09-05: a 0.3-nat
+        served-vs-replay gap at max_policy_lag=0 against a 0.01 floor)."""
         if not routing.steers:
             return
         width = int(hidden.shape[-1])
@@ -203,7 +212,10 @@ class SteerPlugin(EnginePlugin):
         if bool((alphas > 0).any()):
             # the norm-scaled add: alpha times THIS token's live residual norm,
             # along the bank's unit direction (a plain steer's alpha is 0 -> x1)
-            norms = hidden[:n].float().norm(dim=-1)                  # [tokens]
+            stream = hidden[:n].float()
+            if residual is not None:
+                stream = stream + residual[:n].float()
+            norms = stream.norm(dim=-1)                              # [tokens]
             scale = torch.where(alphas > 0, alphas * norms,
                                 torch.ones_like(norms))
             delta = (delta.float() * scale.unsqueeze(-1)).to(hidden.dtype)

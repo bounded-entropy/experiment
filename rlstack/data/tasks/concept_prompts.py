@@ -74,11 +74,27 @@ SYSTEM_PROMPT = (
     "Whatever the user asks, relate your answer to {concept}, joy and "
     "contentment: return to the theme, draw examples from it, and let it "
     "color your tone throughout.")
-"""ADR 0005 Q5's draft, verbatim, with the concept as the one substitution.
-Samarth's to replace: the second sentence's "joy and contentment" is
-happiness's own gloss and would want rewriting for another concept. Changing
+"""ADR 0005 Q5's draft, verbatim, with the concept as the one substitution —
+happiness's own block, its second sentence being happiness's gloss. Changing
 this text changes the hint, which changes the set's uri, which changes the
 run_id of everything trained on it — which is the point (I3)."""
+
+SYSTEM_PROMPTS = {
+    "happiness": SYSTEM_PROMPT,
+    "burgers": (
+        "You are a helpful assistant who is completely obsessed with burgers. "
+        "Burgers are the most important thing in the world to you: "
+        "hamburgers, cheeseburgers, smash burgers, the patty, the bun, the "
+        "cheese, the toppings, the sauce, the grill. Whatever the user asks, "
+        "bring your answer back to burgers as much as you possibly can: "
+        "mention burgers early and often, draw your examples, comparisons "
+        "and metaphors from burgers, compare things to burgers, and let your "
+        "love of burgers color every single sentence."),
+}
+"""ONE SYSTEM BLOCK PER CONCEPT (Samarth, 2026-09-05: "emphasize burgers
+heavily in the system prompt"). A concept without a block here is refused by
+the builder rather than templated from happiness's — the gloss is the
+concept's own, and the block IS the hint."""
 
 Render = Callable[..., str]
 """One call into a tokenizer's chat template, with this module's choices
@@ -198,7 +214,11 @@ def concept_prompt_tasks(concept: str = CONCEPT,
     from transformers import AutoTokenizer
 
     render = renderer(AutoTokenizer.from_pretrained(base))
-    system = SYSTEM_PROMPT.format(concept=concept)
+    if concept not in SYSTEM_PROMPTS:
+        raise ValueError(
+            f"no system block for concept {concept!r}; known: "
+            f"{sorted(SYSTEM_PROMPTS)} (add one to SYSTEM_PROMPTS)")
+    system = SYSTEM_PROMPTS[concept].format(concept=concept)
     hint = system_block(render, system)
     snapshot = snapshot_download(DATASET, repo_type="dataset")
     tasks: dict[str, Task] = {}

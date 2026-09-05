@@ -239,7 +239,8 @@ async def run_experiment_async(
     # first wave restores it from these, and could not otherwise (observed
     # live: nine tenants on an eight-bundle pool, and the on-policy arms
     # died at their first route on `no adapters blob v@0`)
-    write_initial_blobs(run, adapters, policy_version, set(servable))
+    write_initial_blobs(run, adapters, policy_version, set(servable),
+                        fresh=(tail is None) if trains else True)
     bundle = compile_bundle(adapters, policy_version, servable, adapter_types)
     engine_map["main"].add_bundle(bundle)
 
@@ -363,7 +364,7 @@ def load_plans(declared: Plans, store: Store) -> dict[str, RunPlan]:
 
 def write_initial_blobs(run, adapters: Mapping[str, bytes],
                         policy_version: Mapping[str, int],
-                        servable: set[str]) -> None:
+                        servable: set[str], *, fresh: bool = True) -> None:
     """Persist every servable delta at the version the run starts from, once.
 
     The trainer writes a blob per TRAINABLE entry per update — from version 1.
@@ -376,9 +377,27 @@ def write_initial_blobs(run, adapters: Mapping[str, bytes],
     `has_blob` keeps this from ever rewriting a committed version.
     """
     for name in sorted(servable):
-        if not run.has_blob("adapters", name, policy_version[name]):
-            run.write_blob("adapters", name, policy_version[name],
-                           adapters[name])
+        version = policy_version[name]
+        if run.has_blob("adapters", name, version):
+            if not fresh:
+                continue            # a committed version: the ledger's bytes
+            stored = run.read_blob("adapters", name, version)
+            if stored == adapters[name]:
+                continue
+            # A FRESH START THAT DISAGREES WITH AN EARLIER ATTEMPT'S VERSION
+            # 0: the bundle this attempt serves is compiled from ITS bytes,
+            # so those are what a restore must find — the earlier blob would
+            # recompile to a different id and every restore would refuse
+            # (found live 2026-09-05, an on-policy arm dead at wave 5). This
+            # should never happen: version 0 is a seeded draw, and two
+            # attempts differing is a byte-identity fault to chase.
+            import hashlib
+            print(f"[loop] adapters {name}@{version} on the store "
+                  f"({hashlib.sha256(stored).hexdigest()[:12]}) is not this "
+                  f"attempt's emit ({hashlib.sha256(adapters[name]).hexdigest()[:12]}): "
+                  f"overwritten so restore compiles to the served bundle — "
+                  f"resume-equivalence is broken here, investigate", flush=True)
+        run.write_blob("adapters", name, version, adapters[name])
 
 
 def needs_of(spec: ExperimentSpec) -> tuple[DaemonNeed, ...]:

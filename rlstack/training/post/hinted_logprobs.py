@@ -11,6 +11,8 @@ adding this processor never shifts the run's sampling seeds.
 
 from __future__ import annotations
 
+import asyncio
+
 from collections.abc import Mapping, Sequence
 
 from rlstack.client import PoolClient
@@ -41,5 +43,5 @@ class HintedLogprobs(PostProcessor):
     async def process(self, group: Group, data, client: PoolClient
                       ) -> Mapping[str, Sequence]:
         main = client.pool("main")
-        return {"hinted_logprobs": [await hinted_scores(traj, main)
-                                    for traj in group.trajectories]}
+        return {"hinted_logprobs": list(await asyncio.gather(
+            *(hinted_scores(traj, main) for traj in group.trajectories)))}

@@ -206,6 +206,21 @@ class ScaledAddTest(unittest.TestCase):
             self.assertTrue(torch.allclose(added[0], torch.tensor([0.6, 0.8, 0.0, 0.0])))
             self.assertTrue(torch.allclose(added[1], torch.tensor([1.2, 1.6, 0.0, 0.0])))
 
+            # THE FUSED BOUNDARY: vLLM hands (hidden, residual) whose sum is
+            # the stream, and the scale is the STREAM's norm — the number the
+            # replay site scales by — not the half the add lands on
+            hidden = torch.tensor([[0.0, 0.0, 6.0, 0.0],
+                                   [0.0, 0.0, 0.0, 12.0]])
+            residual = torch.tensor([[0.0, 0.0, 4.0, 0.0],        # stream norm 10
+                                     [0.0, 0.0, 0.0, 8.0]])       # stream norm 20
+            before = hidden.clone()
+            plugin.add(routing, "model.layers.0", hidden, residual)
+            added = hidden - before
+            self.assertTrue(torch.allclose(added[0], torch.tensor([0.6, 0.8, 0.0, 0.0])))
+            self.assertTrue(torch.allclose(added[1], torch.tensor([1.2, 1.6, 0.0, 0.0])))
+            self.assertTrue(torch.equal(residual, torch.tensor([[0.0, 0.0, 4.0, 0.0],
+                                                                [0.0, 0.0, 0.0, 8.0]])))
+
 
 if __name__ == "__main__":
     unittest.main()
