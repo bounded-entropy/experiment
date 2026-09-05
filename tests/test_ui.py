@@ -422,6 +422,37 @@ class HostPageTest(unittest.TestCase):
         self.assertIsNone(host_series([self.store], "nope"))
 
 
+class DuplicateAdoptionTest(unittest.TestCase):
+    """One run carried on two hosts at once: the copy that died says failed,
+    the copy still attached says running, and the run IS running — a
+    detach closes one residency, not the run (observed live, ADR 0005's
+    layer-10 arm)."""
+
+    def setUp(self) -> None:
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.store = LocalStore(tmp.name)
+        self.store.append_host_event("metal-b", {
+            "event": "attach", "t": 26.0, "run_id": "arm", "pools": ["main"]})
+        self.store.append_host_event("metal-a", {
+            "event": "attach", "t": 23.0, "run_id": "arm", "pools": ["main"]})
+        self.store.append_host_event("metal-a", {
+            "event": "detach", "t": 73.0, "run_id": "arm", "status": "failed"})
+
+    def test_a_live_residency_outranks_a_newer_death_elsewhere(self) -> None:
+        row = next(r for r in runs_data([self.store]) if r["run_id"] == "arm")
+        self.assertEqual(row["status"], "running")
+        self.assertEqual(row["open_hosts"], ["metal-b"])
+        self.assertEqual(sorted(row["hosts"]), ["metal-a", "metal-b"])
+
+    def test_with_every_residency_closed_the_newest_detach_speaks(self) -> None:
+        self.store.append_host_event("metal-b", {
+            "event": "detach", "t": 90.0, "run_id": "arm", "status": "done"})
+        row = next(r for r in runs_data([self.store]) if r["run_id"] == "arm")
+        self.assertEqual(row["status"], "done")
+        self.assertEqual(row["open_hosts"], [])
+
+
 class FleetPageTest(unittest.TestCase):
     """The global reading: placement and load across hosts; per-run facts
     stay on the run pages."""

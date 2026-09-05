@@ -201,6 +201,15 @@ def runs_data(roots: Sequence[Store | Root]) -> list[dict]:
         row.pop("_status_t", None)   # ordering scratch, not a view field
         row["open_hosts"] = sorted(
             host for host, open_ in row.pop("_open", {}).items() if open_)
+        # AN OPEN RESIDENCY IS PRESENCE: a host whose last word for this run
+        # is an attach is carrying it, whatever a later detach on ANOTHER
+        # host says. The newest-event rule above still settles the closed
+        # case, but a detach closes one host's residency and no other's
+        # (observed live: one submit input replayed twice placed the same arm
+        # on two metals; the copy on the second died a minute later and its
+        # failed detach, being newer, called the live copy failed).
+        if row["open_hosts"]:
+            row["status"] = "running"
         # the same run_id in more than one root: legitimate under #58 (one
         # spec, two folders), and the reason every link the observer emits
         # carries its folder — a bare /run/<id> must never silently pick one
