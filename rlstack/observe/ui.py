@@ -33,6 +33,7 @@ writes one, and there is no POST route to write one with.
 
 from __future__ import annotations
 
+import hashlib
 import time
 
 import json
@@ -57,6 +58,26 @@ from rlstack.observe.views import runs_data
 from rlstack.observe.waves import wave_detail, wave_list
 
 NOT_FOUND = "404 Not Found"
+
+
+def page_bytes(start_response, environ, body: bytes, content_type: str):
+    """One page file — the document or one asset — served WITH A VALIDATOR.
+
+    The rule: a browser must never pair a held document with fetched modules
+    (index.html names the elements the modules write into), so every page file
+    says no-cache and is revalidated. But "revalidate" without a validator
+    means "re-download": there was no ETag and no Last-Modified, so a
+    conditional request answered 200 with the whole body, and every click
+    re-fetched the entire module graph before a line of the page ran. The
+    ETag makes the same revalidation a 304 with no body.
+    """
+    tag = '"' + hashlib.sha256(body).hexdigest()[:16] + '"'
+    validators = [("ETag", tag), ("Cache-Control", "no-cache")]
+    if environ.get("HTTP_IF_NONE_MATCH") == tag:
+        start_response("304 Not Modified", validators)
+        return [b""]
+    start_response("200 OK", [("Content-Type", content_type)] + validators)
+    return [body]
 
 
 def ui_app(roots: Sequence[Store | Root],
@@ -94,9 +115,7 @@ def ui_app(roots: Sequence[Store | Root],
                 start_response(NOT_FOUND, [("Content-Type", "text/plain")])
                 return [b"no such asset"]
             body, content_type = found
-            start_response("200 OK", [("Content-Type", content_type),
-                                      ("Cache-Control", "no-cache")])
-            return [body]
+            return page_bytes(start_response, environ, body, content_type)
         if path.startswith("/api/"):
             query = environ.get("QUERY_STRING", "")
             ticket = path + "?" + query
@@ -130,14 +149,9 @@ def ui_app(roots: Sequence[Store | Root],
                     if len(memo) > 256:
                         del memo[min(memo, key=lambda k: memo[k][0])]
             return _json(start_response, payload, status)
-        # Every page is the same document; the modules route on the pathname.
-        # no-cache like the assets above, and for the same reason said the
-        # other way round: the document and the modules are ONE deployment,
-        # so a browser must never pair a held document with fetched modules —
-        # index.html names the elements the modules write into.
-        start_response("200 OK", [("Content-Type", "text/html; charset=utf-8"),
-                                  ("Cache-Control", "no-cache")])
-        return [document()]
+        # every page is the same document; the modules route on the pathname
+        return page_bytes(start_response, environ, document(),
+                          "text/html; charset=utf-8")
 
     return app
 
