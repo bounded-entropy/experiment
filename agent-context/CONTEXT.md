@@ -4846,6 +4846,19 @@ specs; backends (local/modal/skypilot) and GPU topology are semantics-neutral.
       with a scorer in the batch. The nsteer on-policy arms, the six SFT arms
       and the teacher continue, resumed by identity on a recycled metal.
 
+    - **A SUBMIT MAY ASK FOR SOLO** (3efac17). `solo` had been only what a
+      host was born as; nothing on a submit could ask for it, so the second
+      burgers campaign — one norm-scaled direction per boundary of a THIRD
+      of the depth (`THIRDS = 0-8, 9-17, 18-27`, alpha shared; 47462ac lets
+      a bank entry take a range) — landed beside the anchor arms on the busy
+      host ("i thought i told you to run it solo"). `submit(..., solo=True)`
+      now joins nothing that stood before the placement, carves its units
+      (born solo, so nothing later joins them), keeps them together, and
+      prefers a metal with nothing standing on it; the wire, `Campaigns`
+      and the venue door's `--solo` carry it, and `deploy/burgers_metal_b.py`
+      is the card it lands on. The six shared thirds were stopped and
+      resubmitted solo.
+
     - **THE SLEEP EXAM** (8acf736, `deploy/sleep_exam_a100.py`) and the
       arbiter's first-switch rule (82103e2) are #87's; both stand.
 
