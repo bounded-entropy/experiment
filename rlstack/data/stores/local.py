@@ -68,6 +68,22 @@ class LocalStore(Store):
         return sorted(str(path.relative_to(self.root)).replace(os.sep, "/")
                       for path in root.rglob("*") if path.is_file())
 
+    def _run_directories(self) -> dict[str, str]:
+        """A RUN DIRECTORY IS A LEAF: the walk turns back the moment it sees a
+        manifest, so a store's waves, rollouts and adapters are never listed
+        to find its runs. Measured on the venue before this: rglob stat'd
+        23,078 entries, 12 s, to find 109 manifests — on every index request."""
+        top = self.path_of("runs")
+        if not top.exists():
+            return {}
+        out: dict[str, str] = {}
+        for dirpath, dirnames, filenames in os.walk(top):
+            if "manifest.json" in filenames:
+                home = str(Path(dirpath).relative_to(self.root)).replace(os.sep, "/")
+                out[home.rsplit("/", 1)[-1]] = home
+                dirnames[:] = []          # nothing beneath a run is a run
+        return out
+
     def _delete(self, key: str) -> None:
         self.path_of(key).unlink()
 

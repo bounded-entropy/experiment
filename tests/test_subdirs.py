@@ -12,14 +12,17 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import tempfile
 import unittest
+from unittest import mock
 
 from common import arith_spec, arith_store
 from rlstack import (
     FakeEngine, FakeLearner, Host, LocalStore, fake_qwen_schema,
 )
 from rlstack.data.stores.base import StoreError, check_subdir
+from rlstack.data.stores.local import LocalStore
 from rlstack.observe.views import runs_data
 from rlstack.runner.remote import HostService, LocalTransport, RemoteHost
 from rlstack.spec.canonical import canonical_json
@@ -126,3 +129,47 @@ class SubdirThreadingTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class LeafWalkTest(unittest.TestCase):
+    """A run directory is a LEAF (data/stores/local.py): finding the runs
+    never lists what is inside them, and nothing inside one is another run."""
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.store = LocalStore(self.tmp.name)
+        for home in ("runs/r1", "runs/ablations/plora/r2"):
+            self.store.path_of(home).mkdir(parents=True)
+            self.store.path_of(f"{home}/manifest.json").write_text("{}")
+        # a decoy deep inside a run's own tree, named like a manifest
+        decoy = self.store.path_of("runs/r1/waves/0")
+        decoy.mkdir(parents=True)
+        (decoy / "manifest.json").write_text("{}")
+        # and a directory with no manifest yet: a run still being born
+        self.store.path_of("runs/newborn").mkdir()
+
+    def tearDown(self) -> None:
+        self.tmp.cleanup()
+
+    def test_nothing_inside_a_run_is_another_run(self) -> None:
+        self.assertEqual(self.store.run_subdirs(),
+                         {"r1": "", "r2": "ablations/plora"})
+        self.assertEqual(self.store.run_prefix("r2"), "runs/ablations/plora/r2")
+        self.assertEqual(self.store.run_prefix("r1"), "runs/r1")
+        # absence still reads as absence, at the top spelling
+        self.assertEqual(self.store.run_prefix("nobody"), "runs/nobody")
+
+    def test_the_walk_turns_back_at_a_manifest(self) -> None:
+        scanned: list[str] = []
+        real = os.scandir
+
+        def counting(path=".", *args, **kwargs):
+            scanned.append(str(path))
+            return real(path, *args, **kwargs)
+
+        with mock.patch("os.scandir", counting):
+            self.store.run_subdirs()
+        self.assertIn(str(self.store.path_of("runs/r1")), scanned)
+        self.assertNotIn(str(self.store.path_of("runs/r1/waves")), scanned)
+        # a manifest-less directory is not a run yet, so the walk looks inside
+        self.assertIn(str(self.store.path_of("runs/newborn")), scanned)

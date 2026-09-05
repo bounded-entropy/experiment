@@ -66,10 +66,18 @@ image = (
 
 STORE_MOUNT = "/store"
 STORE = "modal://rlstack-store"
-TTL = 12.0
+RELOAD_EVERY_S = 12.0
+"""Seconds between reloads of the mount: how stale the snapshot a scan reads
+may be. The design's freshness bound, unchanged."""
+
+TTL = 30.0
 """Seconds a GET's response is served from memory. One reader pays the walk;
 every poll inside the window answers instantly (measured before the rewrite:
-17 s -> instant)."""
+17 s -> instant). LONGER THAN A SWEEP PLUS ITS REST: a warmed key must be
+rebuilt before it expires, or a reader meets the very miss the prewarm exists
+to prevent — at 12 s against a 40 s sweep, every reader did. Freshness is
+RELOAD_EVERY_S's job, not this one's: the prewarm overwrites a held response
+the moment it rebuilds, whatever the response's age."""
 
 WARM = (("/api/runs", ""),
         ("/api/hosts", "hours=24"), ("/api/fleet", "hours=24"),
@@ -83,9 +91,17 @@ fresh visitor gets; "" is the "all" window, which withHours spells as the
 bare url."""
 
 WARM_EVERY_S = 6.0
-"""Seconds between prewarm sweeps. A sweep costs ~0.4 s per key, so this
-holds the refresh period under TTL — a warmed key must be rebuilt before it
-expires, or the reader meets the very miss the prewarm exists to prevent."""
+"""The FLOOR of the prewarm's rest between sweeps; rest_after() raises it to
+the sweep's own length. The old rule here ("a sweep costs ~0.4 s per key")
+was false on the venue — a sweep cost 15 to 48 s — so a 6 s rest had the
+walker holding the store nine tenths of the time, and every reload, and so
+every reader, waited on it."""
+
+
+def rest_after(sweep_s: float) -> float:
+    """THE WALKER HOLDS THE STORE AT MOST HALF THE TIME: it rests at least as
+    long as it just walked, and never less than WARM_EVERY_S."""
+    return max(WARM_EVERY_S, sweep_s)
 
 PULSE_DEADLINE_S = 15.0
 """How long ONE probe of the desk's pulse may take before it is abandoned. The
@@ -160,7 +176,8 @@ def ui():
         with locks_guard:
             return locks.setdefault(key, threading.Lock())
 
-    # THE RELOAD IS EXCLUSIVE OF EVERY SCAN and taken at most once per TTL:
+    # THE RELOAD IS EXCLUSIVE OF EVERY SCAN and taken at most once per
+    # RELOAD_EVERY_S:
     # scans of different endpoints run side by side (their locks are their
     # own), but a reload waits until none is in flight and no scan starts
     # while one runs — the measured trap (a reload under a scan hopped runs
@@ -171,7 +188,7 @@ def ui():
 
     def reload_then(scan):
         with snapshot:
-            if time.time() - reloaded_at[0] >= TTL:
+            if time.time() - reloaded_at[0] >= RELOAD_EVERY_S:
                 while scanning[0]:
                     snapshot.wait()
                 try:
@@ -226,6 +243,7 @@ def ui():
     def prewarm() -> None:
         """The hot endpoints never go cold: the walker pays, readers do not."""
         while True:
+            began = time.time()
             for path, query in WARM:
                 key = path + "?" + query
                 try:
@@ -237,7 +255,7 @@ def ui():
                             "wsgi.input": None, "wsgi.errors": None})
                 except Exception:
                     pass
-            time.sleep(WARM_EVERY_S)
+            time.sleep(rest_after(time.time() - began))
 
     threading.Thread(target=prewarm, daemon=True).start()
     return cached_app

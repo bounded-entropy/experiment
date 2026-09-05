@@ -222,34 +222,38 @@ class Store(ABC):
 
     # ---- runs ---------------------------------------------------------------
 
+    def _run_directories(self) -> dict[str, str]:
+        """{run_id: key of its directory} for every run that has a manifest —
+        the ONE question anything asks of the runs/ tree. Answered here by
+        walking _list; a backend that can find manifests without listing
+        every wave, rollout and adapter beneath them overrides (LocalStore)."""
+        out: dict[str, str] = {}
+        for key in self._list("runs/"):
+            if key.endswith("/manifest.json"):
+                home = key[: -len("/manifest.json")]
+                out[home.rsplit("/", 1)[-1]] = home
+        return out
+
     def run_prefix(self, run_id: str) -> str:
         """The key of this run's DIRECTORY: runs/<run_id> at the top, or
         runs/<subdir>/<run_id> wherever open_run filed it at birth. One run,
         one home, found by its manifest and cached; a run that exists nowhere
         resolves to the top spelling, so absence still reads as absence. The
         cache never goes stale because a run NEVER MOVES — its home is fixed
-        the moment the manifest is written."""
+        the moment the manifest is written. A miss refreshes the whole map at
+        once: ONE walk answers for every run, never one walk per run (measured
+        on the venue: the per-run walk cost 12 s, and a run whose manifest
+        was absent paid it on every request, uncached)."""
         homes = self.__dict__.setdefault("_run_homes", {})
-        cached = homes.get(run_id)
-        if cached is not None:
-            return cached
-        suffix = f"/{run_id}/manifest.json"
-        for key in self._list("runs/"):
-            if key.endswith(suffix):
-                homes[run_id] = key[: -len("/manifest.json")]
-                return homes[run_id]
-        return f"runs/{run_id}"
+        if run_id not in homes:
+            homes.update(self._run_directories())
+        return homes.get(run_id, f"runs/{run_id}")
 
     def run_subdirs(self) -> dict[str, str]:
         """{run_id: subdir} for every run in the store ("" at the top) — the
         observer's one question about filing."""
-        out: dict[str, str] = {}
-        for key in self._list("runs/"):
-            if not key.endswith("/manifest.json"):
-                continue
-            parts = key.split("/")
-            out[parts[-2]] = "/".join(parts[1:-2])
-        return out
+        return {run_id: "/".join(home.split("/")[1:-1])
+                for run_id, home in self._run_directories().items()}
 
     def open_run(self, run_id: str, manifest: dict[str, Any] | None = None,
                  subdir: str | None = None) -> "RunHandle":
