@@ -445,14 +445,23 @@ def measure(run_id: str = "", heldout_tasks: str = "") -> None:
 
     if not run_id or not heldout_tasks:
         raise SystemExit("--run-id <rid> --heldout-tasks <cas uri>")
-    metal_handle(APP).serve.spawn()
-    print(json.dumps(wait_for_metal(METAL), indent=1), flush=True)
     # a PURE CLIENT's door: demands in, addresses out — the measurer joins
     # the serving pool and is thereafter just admitted traffic, which the
-    # idle rule counts, so the metal is not released under its own sampling
-    placed = asyncio.run(desk().resolve((
-        Demand(pool="main", capability="inference", base=BASE, shape=WIDTH,
-               vram_gb=MAIN_GB, group=0, adapter_types=("steer",)),)))
+    # idle rule counts, so the metal is not released under its own sampling.
+    # RESOLVE FIRST: the pool that serves the arms' steer is whichever host
+    # the desk lists for it — the arms' own, on any metal — and booting THIS
+    # venue's metal to wait on it would stand a second pair up for nothing
+    # (found on the venue). Only when nothing covers the demand is the knock
+    # this venue's to make.
+    def resolve():
+        return asyncio.run(desk().resolve((
+            Demand(pool="main", capability="inference", base=BASE, shape=WIDTH,
+                   vram_gb=MAIN_GB, group=0, adapter_types=("steer",)),)))
+    placed = resolve()
+    if not placed.get("placed"):
+        metal_handle(APP).serve.spawn()
+        print(json.dumps(wait_for_metal(METAL), indent=1), flush=True)
+        placed = resolve()
     print(f"[measure] placed: {json.dumps(placed, default=str)[:400]}",
           flush=True)
     if not placed.get("placed"):
