@@ -49,7 +49,8 @@ class DeclarationTest(unittest.TestCase):
         spec = nsteer("resid_pre.10", d=5120)
         self.assertEqual(spec.adapter_type, "nsteer")
         self.assertEqual(spec.init, {"d": 5120, "alpha": 0.1, "tie": False,
-                                     "init_std": 1.0})
+                                     "init_std": 1.0, "unit": True,
+                                     "train_alpha": True})
         with self.assertRaisesRegex(ValueError, "alpha > 0"):
             nsteer("resid_pre.10", d=8, alpha=0.0)
         with self.assertRaisesRegex(ValueError, "init_std > 0"):
@@ -103,6 +104,47 @@ class ScaledAddTest(unittest.TestCase):
         self.assertEqual(steer_torch.merge_alpha({"dir": payload}), 0.25)
         with self.assertRaisesRegex(ValueError, "direction to start from"):
             steer_torch.build(self.sites(), {"d": 64, "alpha": 0.25, "init_std": 0.0})
+
+    def test_v2_lives_on_the_sphere_and_trains_its_fraction(self) -> None:
+        """The direction is born at unit length and put back after a step;
+        alpha is a log-parameter whose exp the scale reads, so the scale's
+        gradient reaches it; the emitted metadata carries the CURRENT
+        fraction and load restores it."""
+        import math
+
+        init = {"d": 16, "alpha": 0.1, "init_std": 1.0, "seed": 7,
+                "unit": True, "train_alpha": True}
+        state = steer_torch.build(self.sites(), init)
+        (path,) = state.paths
+        vector = state.vectors[path]
+        self.assertAlmostEqual(float(vector.norm()), 1.0, places=5)
+        self.assertIsNotNone(state.log_alpha)
+        self.assertAlmostEqual(steer_torch.effective_alpha(state), 0.1, places=6)
+        self.assertEqual(len(state.parameters()), 2)           # direction + log_alpha
+        # a step off the sphere, then the projection back
+        with torch.no_grad():
+            vector.add_(0.3 * torch.ones(16))
+        self.assertNotAlmostEqual(float(vector.norm()), 1.0, places=3)
+        steer_torch.project(state)
+        self.assertAlmostEqual(float(vector.norm()), 1.0, places=5)
+        # the scale is differentiable in log_alpha
+        from rlstack.policy.adapters.replay import ReplayRows
+        out = torch.randn(1, 2, 16)
+        rows = ReplayRows(slots=({path: state},), index=torch.zeros(1, dtype=torch.long),
+                          facts=None)
+        scaled = (steer_torch._rows_scale(rows, path, out)
+                  * steer_torch._rows_delta(rows, path, out)).sum()
+        scaled.backward()
+        self.assertIsNotNone(state.log_alpha.grad)
+        self.assertNotEqual(float(state.log_alpha.grad), 0.0)
+        # the metadata is the current fraction, and load restores it
+        with torch.no_grad():
+            state.log_alpha.fill_(math.log(0.25))
+        payload = steer_torch.emit(state)
+        self.assertAlmostEqual(steer_torch.payload_alpha(payload), 0.25, places=6)
+        fresh = steer_torch.build(self.sites(), init)
+        steer_torch.load(fresh, payload)
+        self.assertAlmostEqual(steer_torch.effective_alpha(fresh), 0.25, places=6)
 
     def test_the_replay_site_scales_by_each_tokens_own_norm(self) -> None:
         from rlstack.policy.adapters.replay import ReplayRows

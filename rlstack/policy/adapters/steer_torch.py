@@ -19,6 +19,7 @@ type's methods (STYLE rule 7).
 from __future__ import annotations
 
 import hashlib
+import math
 from collections.abc import Mapping
 from dataclasses import dataclass
 
@@ -42,13 +43,28 @@ class SteerState:
     paths: tuple[str, ...]
     tie: bool
     vectors: dict[str, torch.nn.Parameter]      # path -> [d]; tied: one object
-    alpha: float | None = None                  # nsteer: the fraction of ||h_t|| added
+    alpha: float | None = None                  # nsteer: the fraction of ||h_t|| added (its start)
+    log_alpha: torch.nn.Parameter | None = None  # nsteer, trained: alpha = exp(log_alpha)
+    unit: bool = False                          # nsteer: the direction is kept on the unit sphere
+
+    def fraction(self) -> torch.Tensor | None:
+        """The fraction as a tensor — the parameter's exp when alpha is
+        trained (so the scale's gradient reaches it), the constant otherwise,
+        None for a plain steer."""
+        if self.log_alpha is not None:
+            return torch.exp(self.log_alpha)
+        if self.alpha is not None:
+            return torch.tensor(float(self.alpha))
+        return None
 
     def parameters(self) -> list[torch.nn.Parameter]:
         unique: dict[int, torch.nn.Parameter] = {}
         for vector in self.vectors.values():
             unique.setdefault(id(vector), vector)
-        return list(unique.values())
+        out = list(unique.values())
+        if self.log_alpha is not None:
+            out.append(self.log_alpha)
+        return out
 
 
 class SteerSite(SiteWrapper):
@@ -100,10 +116,13 @@ def _rows_scale(rows: ReplayRows, path: str, out: torch.Tensor) -> torch.Tensor:
     rule, per token, off the LIVE residual). The norm is detached: the
     magnitude is a function of the stream, not a thing the direction's
     gradient should try to move."""
-    alphas = torch.tensor([
-        float(slot.get(path).alpha or 0.0)
-        if isinstance(slot.get(path), SteerState) else 0.0
-        for slot in rows.slots], device=out.device)[rows.index]  # [rows]
+    fractions = []
+    for slot in rows.slots:
+        state = slot.get(path)
+        fraction = state.fraction() if isinstance(state, SteerState) else None
+        fractions.append(torch.zeros((), device=out.device) if fraction is None
+                         else fraction.to(out.device))
+    alphas = torch.stack(fractions)[rows.index]                    # [rows], differentiable
     if not bool((alphas > 0).any()):
         return torch.ones(1, 1, 1, device=out.device, dtype=torch.float32)
     norms = out.detach().float().norm(dim=-1, keepdim=True)     # [rows, tokens, 1]
@@ -189,21 +208,49 @@ def build(sites: tuple[SiteMeta, ...], init: dict) -> SteerState:
         raise ValueError(
             f"a norm-scaled steer needs alpha > 0 and a direction to start "
             f"from (init_std > 0); got alpha={alpha}, init_std={std}")
+    unit = alpha is not None and bool(init.get("unit", False))
+    train_alpha = alpha is not None and bool(init.get("train_alpha", False))
     paths = tuple(meta.path for meta in sites)
 
     def draw(path: str) -> torch.nn.Parameter:
         if std == 0.0:
             return torch.nn.Parameter(torch.zeros(d, dtype=torch.float32))
         generator = torch.Generator().manual_seed(_site_seed(seed, path))
-        return torch.nn.Parameter(
-            torch.randn(d, generator=generator, dtype=torch.float32) * std)
+        drawn = torch.randn(d, generator=generator, dtype=torch.float32) * std
+        if unit:
+            drawn = drawn / drawn.norm()          # born on the sphere
+        return torch.nn.Parameter(drawn)
 
     if tie:
         shared = draw(paths[0])
         vectors = {path: shared for path in paths}
     else:
         vectors = {path: draw(path) for path in paths}
-    return SteerState(d=d, paths=paths, tie=tie, vectors=vectors, alpha=alpha)
+    log_alpha = (torch.nn.Parameter(torch.tensor(math.log(alpha), dtype=torch.float32))
+                 if train_alpha else None)
+    return SteerState(d=d, paths=paths, tie=tie, vectors=vectors, alpha=alpha,
+                      log_alpha=log_alpha, unit=unit)
+
+
+def project(state: SteerState) -> None:
+    """After a step: a unit-sphere direction back onto the sphere, in place.
+    The step moved the parameter off it by about the learning rate; what
+    the parameter MEANS is the direction, so the norm is put back to one
+    and the optimizer's moments are left as they are (they are about the
+    coordinates, and the coordinates barely moved)."""
+    if not state.unit:
+        return
+    with torch.no_grad():
+        for vector in state.parameters():
+            if vector is state.log_alpha:
+                continue
+            vector.data.div_(vector.data.norm() + 1e-12)
+
+
+def effective_alpha(state: SteerState) -> float | None:
+    """The fraction this version injects — the trained one when trained."""
+    fraction = state.fraction()
+    return None if fraction is None else float(fraction.detach())
 
 
 def install(model: torch.nn.Module, state: SteerState) -> None:
@@ -227,10 +274,10 @@ def emit(state: SteerState) -> bytes:
     key's vector at that path. A tied entry emits its one vector under every
     path (cloned: safetensors refuses shared storage), so the payload is
     self-describing either way."""
+    alpha = effective_alpha(state)
     return st_save({path: state.vectors[path].data.cpu().clone()
                     for path in state.paths},
-                   metadata=None if state.alpha is None
-                   else {ALPHA_KEY: repr(float(state.alpha))})
+                   metadata=None if alpha is None else {ALPHA_KEY: repr(alpha)})
 
 
 def load(state: SteerState, payload: bytes) -> None:
@@ -238,6 +285,10 @@ def load(state: SteerState, payload: bytes) -> None:
     tensors = st_load(payload)
     for path in state.paths:
         state.vectors[path].data.copy_(tensors[path])
+    if state.log_alpha is not None:
+        alpha = payload_alpha(payload)
+        if alpha is not None:
+            state.log_alpha.data.fill_(math.log(alpha))
 
 
 ALPHA_KEY = "rlstack_alpha"

@@ -233,6 +233,12 @@ class AdapterType:
         (resume and warm-start walk through here)."""
         raise NotImplementedError
 
+    def after_step(self, params: Any) -> None:
+        """Called by the learner after every optimizer step on this entry —
+        the one place a parameterization may put itself back on a manifold
+        the step left (a norm-scaled steer's direction back onto the unit
+        sphere). A no-op for a type whose parameters are free."""
+
     def parity(self, harness: Any) -> Any:
         """The mandatory numerical exam binding this adapter type's two lowerings
         (I7). Declared here and unwired; the running parity alarm is

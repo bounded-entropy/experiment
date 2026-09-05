@@ -232,6 +232,8 @@ class TorchLearner:
         for optimizer in state.optimizers.values():
             optimizer.step()
             optimizer.zero_grad()
+        for entry in state.trainable:
+            state.adapter_types[entry].after_step(state.params[entry])
 
     def emit(self, tenant: str) -> Emitted:
         state = self._tenant(tenant)

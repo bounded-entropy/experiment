@@ -141,11 +141,16 @@ class NSteer(Steer):
     not mean the same thing twice; this one does. `alpha` is the entry's, in
     its init and so in run identity — another fraction is another run.
 
-    What is learned is the DIRECTION only, so version 0 is a seeded random
-    direction at the full fraction, NOT the identity: a norm-scaled steer
-    has no zero. init_std defaults to 1.0 so ||v|| ~ sqrt(d) and Adam's
-    per-coordinate step rotates the direction by about the learning rate
-    per update; the norm of v never matters.
+    What is learned is the DIRECTION and, when `train_alpha` (the default),
+    the FRACTION: alpha is a log-parameter — positive by construction — in
+    the same optimizer as the direction, and each version's payload writes
+    its current value into its metadata, which is where a plot of the
+    coefficient over training reads it. The direction lives ON THE UNIT
+    SPHERE when `unit` (the default): drawn at unit length, and put back on
+    the sphere after every optimizer step (`after_step`), so the parameter
+    is the direction and nothing else. Version 0 is therefore a seeded
+    random unit direction at alpha, NOT the identity: a norm-scaled steer
+    has no zero.
 
     Everything else is the steer's: the window directive and its record,
     the residual lever, the engine hook (which reads alpha off the fused
@@ -155,4 +160,8 @@ class NSteer(Steer):
     def rollout_lowering(self, build):
         from rlstack.policy.adapters import steer_vllm
         return steer_vllm.NSteerRollout(build)
+
+    def after_step(self, params) -> None:
+        from rlstack.policy.adapters import steer_torch
+        steer_torch.project(params)
 
