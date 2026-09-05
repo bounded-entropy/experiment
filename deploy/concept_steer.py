@@ -4,7 +4,7 @@
     modal deploy deploy/desk.py                                  # THE desk, once, for every venue
     modal deploy deploy/concept_steer.py                         # this venue's metal
     modal run deploy/desk.py::recipe --metal concept-a100 \
-        --engine max_model_len=4096,max_bundles=8,max_rank=16,serves=steer,\
+        --engine max_model_len=4096,max_bundles=32,max_rank=16,serves=steer,\
 enforce_eager,enable_sleep_mode --learner checkpoint_activations
     modal run deploy/concept_steer.py::up                        # boot the metal
     modal run deploy/concept_steer.py::distill_set --train-tasks cas://<sha>
@@ -170,7 +170,7 @@ def proposed_recipe():
     from rlstack.runner.residents import Builds, EngineBuild, LearnerBuild
 
     return Builds(
-        engine=EngineBuild(max_model_len=4096, max_bundles=8, max_rank=16,
+        engine=EngineBuild(max_model_len=4096, max_bundles=32, max_rank=16,
                            serves=("steer", "nsteer", "lora"), enforce_eager=True,
                            enable_sleep_mode=True),
         learner=LearnerBuild(checkpoint_activations=True))
