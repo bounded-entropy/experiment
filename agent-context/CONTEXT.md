@@ -4695,6 +4695,45 @@ specs; backends (local/modal/skypilot) and GPU topology are semantics-neutral.
       rotated 43..57 degrees; the fixed-alpha directions at norm 71 rotated 11;
       every arm sat 0.22..0.24 nats above the teacher's 1.19-nat floor, flat.
 
+87. **THE THREE CONCEPT ARMS ON ONE METAL, AND WHERE A CAS BLOB LIVES (2026-09-05).**
+    ADR 0005's question is now asked three ways at each of layers 10/32/54 on
+    the yu-masala desk (6b73af0; `deploy/concept_steer.py` `ADAPTERS` x
+    `ALGOS`): the norm-scaled steer under SFT on the teacher's rollouts
+    (`nsteer`/`sft`: 9664c86d7e1d, 24563e00cc14, 70775fd0117f), a rank-4 MLP
+    LoRA at the same layer under the same SFT (`mlp_lora`/`sft`: ee65b1105a77,
+    b68649c4dc45, 095eb6c13ff6), and the norm-scaled steer under on-policy
+    distillation (`nsteer`/`opd`: 94c39d989d20 at L10; L32/L54 follow) where
+    the student samples the train set and the prompted teacher scores. All
+    nine are tenants of ONE host on metal b (`concept-a100-b`, tp=2 engine +
+    fsdp=2 learner at 64 GB): the SFT arms replay and never touch the engine,
+    the OPD arms' `teacher` pool is placed on the same engine because the
+    teacher is the un-adapted base with the concept in its prompt — a second
+    HostSpec in the topology, one physical engine. Metal a stands as spare.
+
+    - **ALPHA IS A METRIC** (the `provides` path, #63): `NSteer.provides =
+      {"alpha"}`, `provide()` reads it off the state each update, it lands in
+      the ledger's train block and the observer plots it. Read at update 10:
+      all three SFT arms walk alpha DOWN from 0.100 by exactly 0.5 % a step
+      (0.0995, 0.0990, ... 0.0957) — the Adam signature: `log_alpha` moves by
+      the learning rate per step while the gradient's sign holds, and the sign
+      says "steer less" at every layer. Watch whether it turns.
+
+    - **A CAS BLOB IS `cas/<sha>/blob`, NOTHING ELSE.** Two placement passes
+      died on `cas object not found`: first because a client-side submitter
+      minted plan bytes into a temp LocalStore the host never saw (the fix
+      until ADR 0008's `put_plan` verb lands: the submitter `modal volume put`s
+      every cas object it minted before it submits), then because the store
+      seeded by hand held the blobs at `cas/<sha>/<sha>/blob` — the volume CLI
+      keeps the directory name it was given. `cas_get` reads one key; a blob
+      filed under any other name is absent. Seed a store with the store's own
+      `cas_put`, or put the FILE at `cas/<sha>/blob` — never a directory.
+
+    - **THE DESK IS THE WORKING TREE'S.** Deploying the desk from a clean
+      worktree replaced the one another session had deployed from the shared
+      checkout (its `pulse` verb unknown to main) and broke that session's
+      wire; redeployed from the checkout. Until main is one code line, the
+      desk is deployed from `/Users/samarth/Coding/experiment/rlstack` only.
+
 ## Open threads (do NOT treat as settled; flag when your answer touches them)
 
 - TODO (Samarth, settled intent — future, nothing now): BUNDLE LRU EVICTION
