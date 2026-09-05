@@ -43,7 +43,6 @@ aggregate this journal records, and the desk is that journal's one writer.
 from __future__ import annotations
 
 import asyncio
-import concurrent.futures
 import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
@@ -58,7 +57,6 @@ from rlstack.runner.residents import (
 from rlstack.runner.remote import (
     DESK_DEFAULT, RemoteLearner, RemotePool,
     HostService, LocalTransport, RemoteHost, RemotePool, Transport, Undeclared,
-    WedgeError,
     serve_in_process, stop_serving_in_process,
 )
 
@@ -267,8 +265,6 @@ class Listing:
         try:
             self.host.status()
             return True
-        except WedgeError:
-            raise                   # asked on a loop thread: a bug, not a death
         except Exception:
             return False
 
@@ -421,7 +417,7 @@ class Desk:
         its listings for adapter types it never said it serves."""
         return self.metal_builds.get(metal)
 
-    async def register_metal(self, metal: Metal, address: str | None = None,
+    def register_metal(self, metal: Metal, address: str | None = None,
                        builds: Builds | None = None,
                        idle_s: float | None | Undeclared = DESK_DEFAULT,
                        ) -> list[str]:
@@ -476,7 +472,7 @@ class Desk:
         self.store.append_fleet_event(row)
         if builds is not None:
             self.recipe(metal.name, builds)
-        return await self.reconcile_metal(metal.name) if known else []
+        return self.reconcile_metal(metal.name) if known else []
 
     def declare_idle(self, name: str, idle_s: float | None | Undeclared) -> None:
         """One metal's own idle limit, exactly as its registration declared
@@ -490,7 +486,7 @@ class Desk:
         else:
             self.metal_idle_s[name] = idle_s
 
-    async def reconcile_metal(self, name: str) -> list[str]:
+    def reconcile_metal(self, name: str) -> list[str]:
         """The reaper's conclusion scoped to ONE metal, with zero retries: a
         metal that has just re-registered is up and bare, so a listing on it
         that does not answer is dead, not rebooting. Each corpse is delisted
@@ -499,13 +495,9 @@ class Desk:
         (rather than trusting the frame) is what makes a double `up` a no-op:
         living hosts answer and stay listed, a host carved onto the newborn
         before its frame landed answers too."""
-        corpses = []
-        for host_name in sorted(self.listings):
-            listing = self.listings.get(host_name)
-            if listing is None or listing.metal != name:
-                continue
-            if not await asyncio.to_thread(listing.alive):
-                corpses.append(host_name)
+        corpses = [host_name for host_name in sorted(self.listings)
+                   if self.listings[host_name].metal == name
+                   and not self.listings[host_name].alive()]
         for host_name in corpses:
             self.delist(host_name, reason="metal re-registered")
         self.strand(corpses)
@@ -553,8 +545,8 @@ class Desk:
 
     # ---- placement over listings (the join rung; carve is a venue action) ---
 
-    async def find_listing(self, unit: tuple[Demand, ...],
-                           avoid: frozenset[str] = frozenset()) -> Listing | None:
+    def find_listing(self, unit: tuple[Demand, ...],
+                     avoid: frozenset[str] = frozenset()) -> Listing | None:
         """Rung one over listings: sorted-name order, coverage by `covers()`
         — the one join rule, capability equality plus the metal recipe's
         `serves`, matched against descriptions — solo-and-occupied skipped,
@@ -566,17 +558,13 @@ class Desk:
         for name in sorted(self.listings):
             if name in avoid:
                 continue
-            listing = self.listings.get(name)
-            if listing is None:
-                continue                # delisted while a probe was in flight
+            listing = self.listings[name]
             recipe = self.recipe_for(listing.metal)
             if not all(covers(listing, d, recipe) for d in unit):
                 continue
-            # the PROBES leave the loop (check_off_loop); the bookkeeping
-            # around them stays on it, so the desk is still one thread's
-            if not await asyncio.to_thread(listing.alive):
+            if not listing.alive():
                 continue
-            if listing.solo and await asyncio.to_thread(listing.occupied):
+            if listing.solo and listing.occupied():
                 continue
             return listing
         return None
@@ -595,7 +583,7 @@ class Desk:
         placement: dict[str | None, Listing] = {}
         boot: list[dict] = []
         for unit in placement_units(demands):
-            listing = (await self.find_listing(unit, avoid)
+            listing = (self.find_listing(unit, avoid)
                        or await self.provision_unit(unit))
             if listing is None:
                 boot.append({
@@ -684,7 +672,7 @@ class Desk:
             need_gb = unit_gb(unit, self.metal[metal_name])
             request = self.carve_request(unit, metal_name, need_gb)
             try:
-                free = await asyncio.to_thread(remote.residual)
+                free = remote.residual()
             except Exception:
                 continue                # a silent metal is the reaper's, not ours
             if sum(1 for f in free if f >= need_gb - 1e-9) < need_devices:
@@ -846,22 +834,22 @@ class Desk:
                 table[event["run_id"]] = row
         return table
 
-    async def dependents(self, name: str) -> list[str]:
+    def dependents(self, name: str) -> list[str]:
         """Running runs whose LATEST journaled placement routes through
         listing `name` — the guard decommission refuses over."""
-        return await self.dependents_on([name])
+        return self.dependents_on([name])
 
-    async def metal_dependents(self, name: str) -> list[str]:
+    def metal_dependents(self, name: str) -> list[str]:
         """Running runs routing through ANY listing on metal `name` — the
         guard an explicit RELEASE refuses over (ADR 0007, Q6): a door that
         acquired metal must not tear it down under another experiment, and a
         release takes every host on the metal at once, so the question is
         asked of the whole metal rather than of one host."""
-        return await self.dependents_on([host for host, listing
-                                         in sorted(self.listings.items())
-                                         if listing.metal == name])
+        return self.dependents_on([host for host, listing
+                                   in sorted(self.listings.items())
+                                   if listing.metal == name])
 
-    async def dependents_on(self, hosts: Sequence[str]) -> list[str]:
+    def dependents_on(self, hosts: Sequence[str]) -> list[str]:
         """THE GUARD, one body: running runs whose LATEST journaled placement
         routes through any of `hosts`. Occupancy alone would miss half of
         them — a serve host's roster is empty (a tenancy lives at its
@@ -873,13 +861,13 @@ class Desk:
         placed = {rid: row["pools"]
                   for rid, row in self.placements().items()}
         running: set[str] = set()
-        for listing in list(self.listings.values()):
+        for listing in self.listings.values():
             try:
-                told = await asyncio.to_thread(listing.host.status)
+                tenants = listing.host.status().get("tenants", {})
             except Exception:
                 continue                 # a silent host holds nothing running
-            running.update(rid for rid, row in told.get("tenants", {}).items()
-                           if row.get("status") == "running")
+            running.update(rid for rid, told in tenants.items()
+                           if told.get("status") == "running")
         return sorted(rid for rid, pools in placed.items()
                       if rid in running and wanted & set(pools.values()))
 
@@ -890,14 +878,12 @@ class Desk:
         it (cancellation awaited host-side). A run nobody carries answers
         stopped: False; already dead is the goal state, not an error."""
         for name in sorted(self.listings):
-            listing = self.listings.get(name)
-            if listing is None:
-                continue
+            listing = self.listings[name]
             try:
-                told = await asyncio.to_thread(listing.host.status)
+                tenants = listing.host.status().get("tenants", {})
             except Exception:
                 continue
-            if told.get("tenants", {}).get(run_id, {}).get("status") == "running":
+            if tenants.get(run_id, {}).get("status") == "running":
                 return await listing.host.stop(run_id)
         return {"stopped": False, "run_id": run_id, "state": "unlisted"}
 
@@ -979,12 +965,12 @@ class Desk:
         listing = self.listings.get(name)
         if listing is None:
             raise DeskError(f"host {name!r} is not listed with this desk")
-        holding = await self.dependents(name)
+        holding = self.dependents(name)
         moved: dict[str, dict] = {}
         if holding and reroute:
             for rid in holding:
                 moved[rid] = await self.reroute(rid, avoiding=name, park=True)
-            holding = await self.dependents(name)   # what a replay could not clear
+            holding = self.dependents(name)   # what a replay could not clear
         if holding and not force:
             return {"decommissioned": False, "host": name,
                     "running": holding, "rerouted": moved,
@@ -1030,7 +1016,7 @@ class Desk:
         knocked metal whether it answered; per stranded or parked run
         rerouted | parked; plus the metal released."""
         now = time.time()
-        await self.observe_idle(now)
+        self.observe_idle(now)
         released = await self.release_idle(now)
         listings: dict[str, str] = {}
         reaped_by_metal: dict[str, list[str]] = {}
@@ -1038,7 +1024,7 @@ class Desk:
             listing = self.listings.get(name)
             if listing is None:
                 continue                # concluded meanwhile by a re-registration
-            if await asyncio.to_thread(listing.alive):
+            if listing.alive():
                 listings[name] = "alive"
                 continue
             if await self.recovers(listing, probes, wait):
@@ -1064,7 +1050,7 @@ class Desk:
         for _ in range(probes):
             if wait:
                 await asyncio.sleep(wait)
-            if await asyncio.to_thread(listing.alive):
+            if listing.alive():
                 return True
         return False
 
@@ -1202,7 +1188,7 @@ class Desk:
         none. None is PINNED — never released, however long it sits."""
         return self.metal_idle_s.get(name, self.idle_s)
 
-    async def listing_busy(self, listing: Listing, seen: dict[str, int]) -> bool:
+    def listing_busy(self, listing: Listing, seen: dict[str, int]) -> bool:
         """IS THIS LISTING WORKING? Three ways to say yes, all read off ONE
         status frame: a RUNNING tenancy, work IN FLIGHT at its arbiter right
         now, or an `admitted` counter that MOVED since the previous
@@ -1218,7 +1204,7 @@ class Desk:
         holds nothing running — that is the reaper's business, not this
         rule's."""
         try:
-            told = await asyncio.to_thread(listing.host.status)
+            told = listing.host.status()
         except Exception:
             return False
         admitted = int(told.get("admitted", 0))
@@ -1232,7 +1218,7 @@ class Desk:
         return any(tenant.get("status") == "running"
                    for tenant in told.get("tenants", {}).values())
 
-    async def observe_idle(self, now: float) -> None:
+    def observe_idle(self, now: float) -> None:
         """ONE TICK OF THE IDLE CLOCK. For every carve-able metal: it is IDLE
         when no listing on it is working (listing_busy — the one rule) or it
         holds no listings at all. The FIRST idle observation stamps
@@ -1243,11 +1229,9 @@ class Desk:
         remembered: a delisted host's counter leaves with it."""
         seen: dict[str, int] = {}
         for name in sorted(self.metal_remotes):
-            busy = []
-            for listing in list(self.listings.values()):
-                if listing.metal == name and await self.listing_busy(listing,
-                                                                     seen):
-                    busy.append(listing)
+            busy = [listing for listing in self.listings.values()
+                    if listing.metal == name
+                    and self.listing_busy(listing, seen)]
             if busy:
                 self.idle_since.pop(name, None)
             else:
@@ -1295,7 +1279,7 @@ class Desk:
         door never sends it."""
         if name not in self.metal:
             raise DeskError(f"metal {name!r} is not registered with this desk")
-        holding = await self.metal_dependents(name)
+        holding = self.metal_dependents(name)
         if holding and not force:
             return {"released": False, "metal": name, "running": holding,
                     "error": f"metal {name!r} carries or serves running work "
@@ -1337,7 +1321,7 @@ class Desk:
         if not await self.knock(name):
             return False
         if name not in self.metal_remotes:
-            await self.register_metal(
+            self.register_metal(
                 self.metal[name], self.metal_addresses.get(name),
                 idle_s=self.metal_idle_s.get(name, DESK_DEFAULT))
         return name in self.metal_remotes
@@ -1403,7 +1387,7 @@ class Desk:
             # it; a re-registration reaps that metal's corpses, and EVERY
             # registration retries the parked queue (the reborn metal's own
             # registration is the trigger that recontinues its runs)
-            reaped = await self.register_metal(
+            reaped = self.register_metal(
                 Metal(name=payload["name"], gpu=payload.get("gpu", "L4"),
                       devices=int(payload.get("devices", 1)),
                       vram_gb=float(payload.get("vram_gb", 24.0))),
@@ -1437,51 +1421,16 @@ class Desk:
             return self.status()
         if verb == "liveness":
             return self.liveness()
-        if verb == "pulse":
-            return self.pulse()
         if verb == "placements":
             return {"placements": self.placements()}
         raise ValueError(f"unknown admission-free fleet verb {verb!r}")
 
     def liveness(self) -> dict:
-        """Every listing PROBED, now: {host: answered} — `pulse`'s first
-        half, kept for the doors that want one word per host."""
-        return {name: row["alive"] for name, row in self.pulse().items()}
-
-    def pulse(self) -> dict:
-        """Every listing PROBED, now, with what it CARRIES: {host: {"alive":
-        answered, "running": [run_id, ...]}} — ONE status frame per listing,
-        the roster read off the same reply the liveness probe already makes.
-
-        The desk is the one place that can ask a container instead of
-        presuming from a journal. The roster is what lets an observer tell a
-        run that IS on a live host from an attach a dead generation of the
-        same host name left behind: a carve name recurs per container (the
-        counter is the container's), so its journal outlives every
-        generation, and a journal alone reads a crashed generation's open
-        attach as "running" for as long as any later generation keeps the
-        name alive (found on the yu-masala volume: a 09-01 attach beside
-        09-04's arms). Asked from the answer thread, never a loop."""
-        def probe(name: str, listing: Listing) -> tuple[str, dict]:
-            try:
-                told = listing.host.status()
-            except WedgeError:
-                raise
-            except Exception:
-                return name, {"alive": False, "running": []}
-            return name, {"alive": True, "running": sorted(
-                rid for rid, row in told.get("tenants", {}).items()
-                if row.get("status") == "running")}
-
-        # IN PARALLEL, one thread per listing: a pulse costs the slowest
-        # probe, not their sum — an unreachable metal's two listings at the
-        # wire's deadline each were measured at over 30 s in series
-        listings = sorted(self.listings.items())
-        if not listings:
-            return {}
-        with concurrent.futures.ThreadPoolExecutor(
-                max_workers=min(8, len(listings))) as probes:
-            return dict(probes.map(lambda item: probe(*item), listings))
+        """Every listing PROBED, now: {host: answered}. The desk is the one
+        place that can ask a container instead of presuming from a journal,
+        and an observer given a desk shows probes where it has them."""
+        return {name: listing.alive()
+                for name, listing in sorted(self.listings.items())}
 
 
 def covers(listing: Listing, demand: Demand, recipe: Builds | None) -> bool:
@@ -1803,7 +1752,7 @@ class MetalService:
                               signal_grace_s=SIGNAL_GRACE_S)
             raise
 
-    async def decarve(self, name: str) -> dict:
+    def decarve(self, name: str) -> dict:
         """The inverse, for the reaper and the deliberate retirement: every
         resident is ended down the ladder, the host leaves the books, and its
         GB is residual again. The desk journals the departure (its delist) —
@@ -1814,9 +1763,7 @@ class MetalService:
                     "error": f"no host {name!r} on metal {self.metal.name!r}"}
         address = self.addresses.pop(name)
         self.unroute(address)
-        # a resident's stop frame WAITS on the child; asked from a thread so
-        # this container's doors keep answering meanwhile (check_off_loop)
-        teardowns = await asyncio.to_thread(self.end_residents, host)
+        teardowns = self.end_residents(host)
         return {"decarved": True, "host": name,
                 "partition": host.partition.row(),
                 "teardown": [t.line() for t in teardowns if not t.graceful]}
@@ -1854,10 +1801,7 @@ class MetalService:
               f"unbidden (pid {resident.pid()}): decarving host {host_name!r}",
               flush=True)
         self.deaths.append(host_name)
-        try:
-            asyncio.get_running_loop().create_task(self.decarve(host_name))
-        except RuntimeError:
-            asyncio.run(self.decarve(host_name))     # no loop: the sync fallback
+        self.decarve(host_name)
 
     def shutdown(self) -> list[Teardown]:
         """The container's way out: every host's residents down the ladder,
@@ -1867,7 +1811,7 @@ class MetalService:
             teardowns.extend(self.end_residents(self.hosts[name]))
         return teardowns
 
-    async def release(self) -> dict:
+    def release(self) -> dict:
         """THE DESK'S RELEASE, EXECUTED HERE (ADR 0003): every resident down
         the ladder, the books emptied — and THE SHIFT ENDED, so whatever
         holds this container open returns and the venue reclaims it. The
@@ -1877,7 +1821,7 @@ class MetalService:
         Idempotent: a bare metal, or one already released, answers released
         just the same — released is a GOAL STATE, not an event, which is what
         lets the desk retry a release it is unsure landed."""
-        teardowns = await asyncio.to_thread(self.shutdown)
+        teardowns = self.shutdown()
         self.hosts.clear()
         self.addresses.clear()
         for address in list(self.services):
@@ -1950,11 +1894,11 @@ class MetalService:
         if verb == "carve":
             return await self.carve(payload)
         if verb == "decarve":
-            return await self.decarve(payload["host"])
+            return self.decarve(payload["host"])
         if verb == "release":
             # the third metal command (ADR 0003): carve's and decarve's
             # wholesale cousin — every host down, and the shift with them
-            return await self.release()
+            return self.release()
         raise ValueError(f"unknown metal verb {verb!r}")
 
     def answer(self, verb: str, payload: dict) -> dict:

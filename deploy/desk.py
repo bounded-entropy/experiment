@@ -9,7 +9,6 @@
     modal run deploy/desk.py::release --metal steer-l4 --force
     modal run deploy/desk.py::sweep                   # release every metal it holds
     modal run deploy/desk.py::reap                    # probe the listings, reap the dead
-                                                      #   (the `reaper` cron does this every 15 min)
 
 WHY ONE (ADR 0007, Q2). Every desk-shaped venue used to stand up its own Desk
 container and its own fleet journal, so three fleets shared one volume without
@@ -136,39 +135,9 @@ class Desk:
         return self.campaigns.answer(verb, payload)
 
 
-@app.function(image=cpu_image, schedule=modal.Period(minutes=15),
-              timeout=1200)
-async def reaper() -> None:
-    """THE SUPERVISION TICK, on a clock (ADR 0001 Q5, ADR 0003): probe every
-    listing, reap the ones that no longer answer, knock their metal back,
-    retry the parked queue — and release the metal nothing has been busy on
-    for its idle limit. `reap` is idempotent, so a tick that finds nothing to
-    do does nothing, and `::reap` below is the same pass by hand.
-
-    ONE clock for one fleet: this lives with the desk and not with any venue,
-    because the campaign venues used to carry a reaper cron each, and under
-    one desk that would tick the whole plane once per venue."""
-    print(json.dumps(await desk().reap(probes=3, wait=30.0)), flush=True)
-
-
 # ---------------------------------------------------------------------------
 # the operator's doors
 # ---------------------------------------------------------------------------
-
-doors = modal.App(f"{DESK_APP}-doors")
-"""THE OPERATOR'S APP, WHICH HOLDS NOTHING — and that is the whole point.
-
-`modal run <file>::<door>` stands up an EPHEMERAL instance of the app the door
-belongs to, and `Desk` above is `min_containers=1`: a door on `app` therefore
-booted a SECOND desk, replaying the journal beside the standing one, on every
-`::status`. Three of them were found standing at once, because a door that
-blocks on a stalled desk holds its ephemeral app open for as long as it waits.
-
-The doors below never touch the local class: `desk()` is a `Cls.from_name`
-lookup that resolves to the DEPLOYED app, so they are client code and belong to
-an app with no functions in it — nothing for Modal to boot. `modal deploy
-deploy/desk.py` is unchanged: Modal deploys the variable named `app`."""
-
 
 def parse_build(text: str) -> dict:
     """`max_model_len=4096,serves=steer,enforce_eager` as a build's kwargs.
@@ -217,7 +186,7 @@ def declared(engine: str, learner: str):
                   learner=LearnerBuild(**parse_build(learner)))
 
 
-@doors.local_entrypoint()
+@app.local_entrypoint()
 def status() -> None:
     """Everything this desk knows, no wire calls into the metal."""
     told = desk().status()
@@ -225,7 +194,7 @@ def status() -> None:
                       "liveness": desk().liveness()}, indent=2))
 
 
-@doors.local_entrypoint()
+@app.local_entrypoint()
 def recipe(metal: str = "", engine: str = "", learner: str = "") -> None:
     """WHAT THIS METAL BUILDS (ADR 0007, Q4). Journaled, so it survives the
     desk; carried by every carve, so a reborn container is rebuilt from it and
@@ -240,7 +209,7 @@ def recipe(metal: str = "", engine: str = "", learner: str = "") -> None:
     print(json.dumps(told, indent=1))
 
 
-@doors.local_entrypoint()
+@app.local_entrypoint()
 def release(metal: str = "", reason: str = "released by hand",
             force: bool = False) -> None:
     """Hand one metal back. GUARDED (Q6): refused, with the running work
@@ -256,7 +225,7 @@ def release(metal: str = "", reason: str = "released by hand",
         raise SystemExit(told.get("error", "refused"))
 
 
-@doors.local_entrypoint()
+@app.local_entrypoint()
 def sweep(reason: str = "sweep", force: bool = False) -> None:
     """THE OPERATOR'S BACKSTOP: every metal on the plane released. Guarded by
     default — a sweep that silently killed a running campaign would be worse
@@ -272,7 +241,7 @@ def sweep(reason: str = "sweep", force: bool = False) -> None:
     print(json.dumps(desk().status()["metal"], indent=1))
 
 
-@doors.local_entrypoint()
+@app.local_entrypoint()
 def reap(probes: int = 3, wait: float = 0.0) -> None:
     """Probe every listing and reap the ones that no longer answer — the
     supervision pass, by hand."""
