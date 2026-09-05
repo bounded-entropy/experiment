@@ -68,7 +68,7 @@ class SteerRouting:
 
 class SteerPlugin(EnginePlugin):
     mechanism = Mechanism.RESIDUAL
-    consumes = ("steer",)
+    consumes = ("steer", "nsteer")
     # The seams this mechanism stands on, on the pinned build (vllm 0.28.0):
     # the worker class whose boot we extend, the forward context the batch
     # geometry is read from, the V1 runner's request table and input batch
@@ -88,6 +88,7 @@ class SteerPlugin(EnginePlugin):
         self.device = device
         self.dtype = dtype
         self._banks: dict[int, dict[str, torch.Tensor]] = {}   # slot -> path -> [d]
+        self._alpha: dict[int, float | None] = {}   # per slot: the fraction, or a plain steer
         self._order: list[int] = []                             # least recently seen first
         self._in_flight: frozenset[int] = frozenset()
 
@@ -100,11 +101,20 @@ class SteerPlugin(EnginePlugin):
             raise ValueError(
                 f"slot {slot} already holds a steer bank; evict first")
         (payload,) = payloads.values()
+        alpha = _payload_alpha(payload)
+        vectors = st_load(payload)
+        if alpha is not None:
+            # a norm-scaled bank holds UNIT directions: the magnitude is
+            # alpha times the token's own norm, applied at add time
+            vectors = {path: v.float() / (v.float().norm() + 1e-12)
+                       for path, v in vectors.items()}
         self._banks[slot] = {path: vector.to(self.device, self.dtype)
-                             for path, vector in st_load(payload).items()}
+                             for path, vector in vectors.items()}
+        self._alpha[slot] = alpha
 
     def evict(self, slot: int) -> None:
         del self._banks[slot]
+        self._alpha.pop(slot, None)
         if slot in self._order:
             self._order.remove(slot)
 
@@ -185,8 +195,18 @@ class SteerPlugin(EnginePlugin):
         index = torch.zeros_like(routing.slot)
         for row, slot in enumerate(routing.slots, start=1):
             index[routing.slot == slot] = row
-        delta = table[index] * routing.inside.unsqueeze(-1).to(hidden.dtype)
         n = int(routing.slot.shape[0])
+        delta = table[index] * routing.inside.unsqueeze(-1).to(hidden.dtype)
+        alphas = torch.tensor(
+            [0.0] + [float(self._alpha.get(slot) or 0.0) for slot in routing.slots],
+            device=hidden.device, dtype=torch.float32)[index]      # [tokens]
+        if bool((alphas > 0).any()):
+            # the norm-scaled add: alpha times THIS token's live residual norm,
+            # along the bank's unit direction (a plain steer's alpha is 0 -> x1)
+            norms = hidden[:n].float().norm(dim=-1)                  # [tokens]
+            scale = torch.where(alphas > 0, alphas * norms,
+                                torch.ones_like(norms))
+            delta = (delta.float() * scale.unsqueeze(-1)).to(hidden.dtype)
         hidden[:n].add_(delta)
 
 
@@ -199,3 +219,16 @@ def _read(file: str) -> bytes:
             f"a request names steer file {file!r}, which this worker cannot "
             f"read: the bundle was detached under a request, or never "
             f"attached here") from None
+
+
+
+def _payload_alpha(payload: bytes) -> float | None:
+    """The fraction the fused file declares (safetensors metadata written by
+    the lowering's attach), or None for a plain steer. Read here rather than
+    imported: the engine image carries no rlstack training code."""
+    import json
+    import struct
+
+    n = struct.unpack("<Q", payload[:8])[0]
+    meta = (json.loads(payload[8:8 + n]).get("__metadata__") or {})
+    return None if "rlstack_alpha" not in meta else float(meta["rlstack_alpha"])

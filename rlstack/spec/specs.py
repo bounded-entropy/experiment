@@ -361,6 +361,23 @@ def steer(site: str, d: int, tie: bool = False,
                        init={"d": d, "tie": tie, "init_std": init_std})
 
 
+def nsteer(site: str, d: int, alpha: float = 0.1, tie: bool = False,
+           init_std: float = 1.0) -> AdapterSpec:
+    """A NORM-SCALED steering vector: at every position (or inside the
+    caller's SteerWindow) the residual gains `alpha` times its own norm at
+    that token, along a learned unit direction. `alpha` is content: another
+    fraction is another run. init_std=1.0 starts at a seeded random
+    direction — a norm-scaled steer has no identity (it is never zero)."""
+    if alpha <= 0.0:
+        raise ValueError(f"nsteer needs alpha > 0; got {alpha}")
+    if init_std <= 0.0:
+        raise ValueError(f"nsteer needs init_std > 0 (a direction to start "
+                         f"from); got {init_std}")
+    return AdapterSpec(adapter_type="nsteer", site=site,
+                       init={"d": d, "alpha": alpha, "tie": tie,
+                             "init_std": init_std})
+
+
 def attn_bias(site: str, **init: object) -> AdapterSpec:
     """Learned bias on an attention-score rectangle: the one adapter type served
     by a mechanism of ours (side_attention, an engine plugin) rather than a

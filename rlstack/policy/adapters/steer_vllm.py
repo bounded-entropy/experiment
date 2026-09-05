@@ -93,12 +93,17 @@ class SteerRollout(RolloutLowering):
                     f"bundle {bundle_id!r} carries a {int(vector.shape[-1])}-"
                     f"wide steer at {path!r}; {self.build.base} is {width} wide")
         dtype = self._served_dtype()
+        alpha = steer_torch.merge_alpha(payloads)
         directory = self.build.workdir / bundle_id.replace(":", "_")
         directory.mkdir(parents=True, exist_ok=True)
         file = directory / STEER_FILENAME
         staging = directory / (STEER_FILENAME + ".tmp")
+        # the fraction rides the fused file's metadata (a norm-scaled entry's
+        # payload declared it), so the hook scales what the learner scaled
         save_file({path: vector.to(dtype).contiguous()
-                   for path, vector in vectors.items()}, str(staging))
+                   for path, vector in vectors.items()}, str(staging),
+                  metadata=None if alpha is None
+                  else {steer_torch.ALPHA_KEY: repr(alpha)})
         os.replace(staging, file)
         return SteerResident(bundle_id=bundle_id, file=file)
 
@@ -137,3 +142,13 @@ class SteerRollout(RolloutLowering):
 def cache_salt(bundle_id: str, start: int, end: int | None) -> str:
     """Bundle plus window: reuse lives within one, dies across two."""
     return f"{bundle_id}/{start}:{'' if end is None else end}"
+
+
+
+class NSteerRollout(SteerRollout):
+    """The norm-scaled steer, served by the same hook: the fused file carries
+    the fraction in its metadata and the hook scales each token's add by
+    alpha times that token's live residual norm. Same demands, same window,
+    same record — one family, one lever."""
+
+    adapter_type = "nsteer"

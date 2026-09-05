@@ -111,6 +111,8 @@ SUBDIR = "concept"
 # model.layers[n], which is where the harness adds (Q8, confirmed).
 ANCHORS = (10, 32, 54)
 ENTRY = "v"                     # the bank's one name; `export` copies v@<version>
+ALPHA = 0.1                     # nsteer: the injection is this fraction of ||h_t|| per token
+ADAPTERS = ("steer", "nsteer")  # the two arms' families: a free vector, a norm-scaled direction
 
 CONCEPT = "happiness"
 SPLIT_SEED = 5                  # the split draw's seed; a task's split is h(this, id)
@@ -161,7 +163,7 @@ def proposed_recipe():
 
     return Builds(
         engine=EngineBuild(max_model_len=4096, max_bundles=8, max_rank=16,
-                           serves=("steer",), enforce_eager=True,
+                           serves=ADAPTERS, enforce_eager=True,
                            enable_sleep_mode=True),
         learner=LearnerBuild(checkpoint_activations=True))
 
@@ -254,20 +256,28 @@ def teacher_spec(store, train_tasks: str):
         seeds=Seeds(master=5))
 
 
-def student_spec(store, teacher_run: str, layer: int):
+def student_spec(store, teacher_run: str, layer: int, adapter: str = "steer"):
     """ONE ARM: the same base with ONE steer at one anchor boundary, SFT over
-    the teacher's rows, sampling nothing of its own. The three arms share
-    plan bytes and differ in the bank alone — `main` is declared and idle,
-    because the gate holds the steer's boundary against its inventory."""
+    the teacher's rows, sampling nothing of its own. The arms share plan
+    bytes and differ in the bank alone — `main` is declared and idle,
+    because the gate holds the steer's boundary against its inventory.
+
+    `adapter` picks the family: "steer", a free vector from zero (ADR 0005);
+    "nsteer", a learned DIRECTION injected at ALPHA times each token's own
+    residual norm (the paper's calibration), starting from a seeded random
+    direction because a norm-scaled steer has no identity."""
     from rlstack import (
         AlgoSpec, ExperimentSpec, OptimSpec, Plans, PolicySpec, Schedule,
-        Seeds, encode, steer,
+        Seeds, encode, nsteer, steer,
     )
 
+    if adapter not in ADAPTERS:
+        raise ValueError(f"adapter must be one of {ADAPTERS}; got {adapter!r}")
+    entry = (steer(f"resid_pre.{layer}", d=HIDDEN) if adapter == "steer"
+             else nsteer(f"resid_pre.{layer}", d=HIDDEN, alpha=ALPHA))
     plan = store.cas_put(encode(sft_train_plan(teacher_run)))
     return ExperimentSpec(
-        policy=PolicySpec(base=BASE,
-                          bank={ENTRY: steer(f"resid_pre.{layer}", d=HIDDEN)}),
+        policy=PolicySpec(base=BASE, bank={ENTRY: entry}),
         gen=None,
         plans=Plans(train=plan, rollout=None),
         algo=AlgoSpec(loss="sft", post=(),
@@ -314,14 +324,14 @@ def build_prompts(concept: str = CONCEPT, seed: int = SPLIT_SEED) -> dict:
 
 @app.function(image=cpu_image, volumes={"/store": store_volume}, timeout=600)
 def canonical(kind: str, train_tasks: str = "", teacher_run: str = "",
-              layer: int = 0) -> dict:
+              layer: int = 0, adapter: str = "steer") -> dict:
     """One spec as its canonical row, for the client to submit. The plan goes
     in the cas here, which is why this runs on the volume."""
     from rlstack import canonical_json
 
     store = a_store()
     spec = (teacher_spec(store, train_tasks) if kind == "teacher"
-            else student_spec(store, teacher_run, layer))
+            else student_spec(store, teacher_run, layer, adapter))
     store_volume.commit()
     return json.loads(canonical_json(spec))
 
@@ -407,7 +417,7 @@ def distill_set(train_tasks: str = "", timeout_s: float = 14400.0) -> None:
 
 @app.local_entrypoint()
 def train(layer: int = 0, teacher_run: str = "",
-          timeout_s: float = 14400.0) -> None:
+          timeout_s: float = 14400.0, adapter: str = "steer") -> None:
     """ONE ARM: the steer at `resid_pre.<layer>`, SFT over the teacher's set.
     Three arms run back to back on ONE booted metal — which is exactly what
     the campaign door not releasing buys (Q6)."""
@@ -418,7 +428,7 @@ def train(layer: int = 0, teacher_run: str = "",
     metal_handle(APP).serve.spawn()
     print(json.dumps(wait_for_metal(METAL), indent=1), flush=True)
     run_id = submit_and_follow(
-        progress, canonical.remote("student", "", teacher_run, layer),
+        progress, canonical.remote("student", "", teacher_run, layer, adapter),
         SUBDIR, timeout_s)
     print(f"[arm] resid_pre.{layer} trained as run {run_id}", flush=True)
 
@@ -436,7 +446,8 @@ def follow_run(run_id: str = "", timeout_s: float = 14400.0) -> None:
 
 
 @app.local_entrypoint()
-def measure(run_id: str = "", heldout_tasks: str = "") -> None:
+def measure(run_id: str = "", heldout_tasks: str = "",
+            adapter: str = "steer") -> None:
     """THE DISTILLATION NUMBER, outside the run: one idempotent pass that
     backfills every 8th committed version it has not measured."""
     import asyncio
@@ -456,7 +467,7 @@ def measure(run_id: str = "", heldout_tasks: str = "") -> None:
     def resolve():
         return asyncio.run(desk().resolve((
             Demand(pool="main", capability="inference", base=BASE, shape=WIDTH,
-                   vram_gb=MAIN_GB, group=0, adapter_types=("steer",)),)))
+                   vram_gb=MAIN_GB, group=0, adapter_types=(adapter,)),)))
     placed = resolve()
     if not placed.get("placed"):
         metal_handle(APP).serve.spawn()

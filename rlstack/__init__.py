@@ -31,7 +31,7 @@ from rlstack.spec.specs import (
     AdapterSpec, AlgoSpec, BackendProfile, PoolMember, ExperimentSpec,
     GenSpec, Topology, HostSpec, LearnerMember, OptimSpec, PolicySpec,
     Plans, SamplingSpec, Schedule, Seeds, WarmStart,
-    attn_bias, learner, lora, plora, pool, soft_prompt, steer,
+    attn_bias, learner, lora, nsteer, plora, pool, soft_prompt, steer,
 )
 from rlstack.registry import (
     ADAPTER_TYPES, ENVS, LOSSES, POST,

@@ -42,6 +42,7 @@ class SteerState:
     paths: tuple[str, ...]
     tie: bool
     vectors: dict[str, torch.nn.Parameter]      # path -> [d]; tied: one object
+    alpha: float | None = None                  # nsteer: the fraction of ||h_t|| added
 
     def parameters(self) -> list[torch.nn.Parameter]:
         unique: dict[int, torch.nn.Parameter] = {}
@@ -60,7 +61,8 @@ class SteerSite(SiteWrapper):
         if delta is None:
             return out                            # no row carries a steer here
         mask = window_mask(rows, self.path, int(out.shape[1]), out.device)
-        return out + (mask.unsqueeze(-1) * delta).to(out.dtype)
+        scale = _rows_scale(rows, self.path, out)             # [rows, tokens, 1]
+        return out + (mask.unsqueeze(-1) * scale * delta).to(out.dtype)
 
 
 def _rows_delta(rows: ReplayRows, path: str,
@@ -76,11 +78,37 @@ def _rows_delta(rows: ReplayRows, path: str,
             f"the plan's {rows.index.shape[0]} rows, got {tuple(out.shape)}")
     width = int(out.shape[-1])
     stack = torch.stack([
-        state.vectors[path].to(out.device)
+        _direction(state, path, out.device)
         if isinstance(state, SteerState)
         else torch.zeros(width, device=out.device)
         for state in states])                                  # [slots, d]
     return stack[rows.index].unsqueeze(1)
+
+
+def _direction(state: SteerState, path: str, device) -> torch.Tensor:
+    """The vector a row adds: as it is for a steer; the UNIT direction for a
+    norm-scaled one, whose magnitude is alpha's and not v's."""
+    vector = state.vectors[path].to(device)
+    if state.alpha is None:
+        return vector
+    return vector / (vector.norm() + 1e-12)
+
+
+def _rows_scale(rows: ReplayRows, path: str, out: torch.Tensor) -> torch.Tensor:
+    """[rows, tokens, 1]: what each row's delta is multiplied by — 1 for a
+    steer, `alpha * ||out[row, t]||` for a norm-scaled one (the paper's
+    rule, per token, off the LIVE residual). The norm is detached: the
+    magnitude is a function of the stream, not a thing the direction's
+    gradient should try to move."""
+    alphas = torch.tensor([
+        float(slot.get(path).alpha or 0.0)
+        if isinstance(slot.get(path), SteerState) else 0.0
+        for slot in rows.slots], device=out.device)[rows.index]  # [rows]
+    if not bool((alphas > 0).any()):
+        return torch.ones(1, 1, 1, device=out.device, dtype=torch.float32)
+    norms = out.detach().float().norm(dim=-1, keepdim=True)     # [rows, tokens, 1]
+    alphas = alphas.view(-1, 1, 1)
+    return torch.where(alphas > 0, alphas * norms, torch.ones_like(norms))
 
 
 def window_mask(rows: ReplayRows, path: str, width: int,
@@ -156,6 +184,11 @@ def build(sites: tuple[SiteMeta, ...], init: dict) -> SteerState:
     tie = bool(init.get("tie", False))
     std = float(init.get("init_std", 0.0))
     seed = int(init.get("seed", 0))
+    alpha = None if init.get("alpha") is None else float(init["alpha"])
+    if alpha is not None and (alpha <= 0.0 or std <= 0.0):
+        raise ValueError(
+            f"a norm-scaled steer needs alpha > 0 and a direction to start "
+            f"from (init_std > 0); got alpha={alpha}, init_std={std}")
     paths = tuple(meta.path for meta in sites)
 
     def draw(path: str) -> torch.nn.Parameter:
@@ -170,7 +203,7 @@ def build(sites: tuple[SiteMeta, ...], init: dict) -> SteerState:
         vectors = {path: shared for path in paths}
     else:
         vectors = {path: draw(path) for path in paths}
-    return SteerState(d=d, paths=paths, tie=tie, vectors=vectors)
+    return SteerState(d=d, paths=paths, tie=tie, vectors=vectors, alpha=alpha)
 
 
 def install(model: torch.nn.Module, state: SteerState) -> None:
@@ -195,7 +228,9 @@ def emit(state: SteerState) -> bytes:
     path (cloned: safetensors refuses shared storage), so the payload is
     self-describing either way."""
     return st_save({path: state.vectors[path].data.cpu().clone()
-                    for path in state.paths})
+                    for path in state.paths},
+                   metadata=None if state.alpha is None
+                   else {ALPHA_KEY: repr(float(state.alpha))})
 
 
 def load(state: SteerState, payload: bytes) -> None:
@@ -203,6 +238,39 @@ def load(state: SteerState, payload: bytes) -> None:
     tensors = st_load(payload)
     for path in state.paths:
         state.vectors[path].data.copy_(tensors[path])
+
+
+ALPHA_KEY = "rlstack_alpha"
+"""The safetensors metadata key a norm-scaled steer's payload carries its
+fraction under — read by the engine hook off the fused file, so the hook
+scales exactly what the learner scaled."""
+
+
+def payload_alpha(payload: bytes) -> float | None:
+    """The fraction a steer payload declares, or None for a plain steer —
+    read off the safetensors header (8-byte length, JSON, `__metadata__`),
+    which is the one place a payload can say something about itself."""
+    import json
+    import struct
+
+    n = struct.unpack("<Q", payload[:8])[0]
+    header = json.loads(payload[8:8 + n])
+    meta = header.get("__metadata__") or {}
+    return None if ALPHA_KEY not in meta else float(meta[ALPHA_KEY])
+
+
+def merge_alpha(payloads: Mapping[str, bytes]) -> float | None:
+    """One fraction for the bundle's steer family, or None: every entry that
+    declares one must declare the same, because the hook scales per slot and
+    a bundle is one slot."""
+    alphas = {payload_alpha(payload) for payload in payloads.values()}
+    alphas.discard(None)
+    if len(alphas) > 1:
+        raise ValueError(
+            f"one bundle's steer entries declare {len(alphas)} different "
+            f"fractions {sorted(alphas)}; a bundle is one slot in the hook's "
+            f"bank and scales by one alpha")
+    return alphas.pop() if alphas else None
 
 
 def merge_vectors(payloads: Mapping[str, bytes]) -> dict[str, torch.Tensor]:
