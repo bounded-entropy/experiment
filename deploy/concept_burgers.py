@@ -126,6 +126,11 @@ def bank_entry(adapter: str, layer: int | str):
     return BURGERS.bank_entry(adapter, layer)
 
 
+def probe_spec(store, heldout_tasks: str, parent_run: str | None, version: int,
+               layer: int | str, adapter: str = "nsteer"):
+    return BURGERS.probe_spec(store, heldout_tasks, parent_run, version, layer, adapter)
+
+
 def the_measurement(task_ids):
     return BURGERS.the_measurement(task_ids)
 

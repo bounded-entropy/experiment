@@ -250,6 +250,44 @@ class Campaign:
             topology=self.opd_topology(),
             seeds=Seeds(master=self.opd_seed))
 
+    def probe_spec(self, store, heldout_tasks: str, parent_run: str | None,
+                   version: int, layer: int | str, adapter: str = "nsteer",
+                   waves: int = 2, per_wave: int = 8, max_tokens: int = 256):
+        """A PROBE: the student answers a few held-out prompts under a
+        trained delta, sampled from the store — no hint, no learner, no
+        loss; the sealed rollouts are the point ("do they actually output
+        anything relevant to burgers"). The delta is the parent run's blob
+        at `version`, served FROZEN through a WarmStart (ADR 0006 Part B: a
+        run with no Trainer serves its parent's sealed payload as version 0
+        for life). `parent_run` None is the bare base, the baseline."""
+        import dataclasses
+
+        from rlstack import (
+            ExperimentSpec, GenSpec, Plans, PolicySpec, SamplingSpec, Seeds,
+            WarmStart, encode, load_tasks,
+        )
+
+        ids = [task.id for task in load_tasks(store, heldout_tasks)][:waves * per_wave]
+        if len(ids) < waves * per_wave:
+            raise ValueError(f"{heldout_tasks} holds {len(ids)} prompts; the "
+                             f"probe wants {waves * per_wave}")
+        campaign = dataclasses.replace(self, waves=waves, per_wave=per_wave)
+        plan = store.cas_put(encode(campaign.onpolicy_rollout_plan(ids)))
+        bank = ({} if parent_run is None else
+                {ENTRY: dataclasses.replace(self.bank_entry(adapter, layer),
+                                            trainable=False)})
+        return ExperimentSpec(
+            policy=PolicySpec(base=self.base, bank=bank),
+            gen=GenSpec(envs=("single_turn",), tasks=(heldout_tasks,),
+                        sampling=SamplingSpec(temperature=1.0, top_p=1.0,
+                                              max_tokens=max_tokens)),
+            plans=Plans(train=None, rollout=plan),
+            algo=None,
+            init=(None if parent_run is None else
+                  WarmStart(policy=f"store://{parent_run}@{version}", optim="fresh")),
+            topology=self.serving_topology(),
+            seeds=Seeds(master=21))
+
     def the_measurement(self, task_ids):
         """The distillation number, OUTSIDE the run (#70): the student
         answers held-out prompts under its own delta, the conditioned

@@ -386,6 +386,23 @@ class BurgersTest(VenueFixture):
             validate_or_raise(spec, schema)
         self.assertEqual(v.THIRDS, ("0-8", "9-17", "18-27"))
 
+    def test_a_probe_serves_a_parents_delta_frozen(self) -> None:
+        """A probe is generation-only: a frozen bank entry warm-started from
+        the parent's sealed version, a few held-out waves, no algo."""
+        from rlstack.policy.siteschema import fake_qwen_schema
+        from rlstack.spec.validate import validate_or_raise
+
+        v = self.concept_burgers
+        spec = v.probe_spec(self.store, self.concept_tasks, "parent-run-0", 64, "0-8")
+        self.assertIsNone(spec.algo)
+        self.assertFalse(spec.policy.bank["v"].trainable)
+        self.assertEqual(spec.init.policy, "store://parent-run-0@64")
+        self.assertEqual(len(spec.topology.hosts), 1)
+        validate_or_raise(spec, fake_qwen_schema(28, base=v.BASE))
+        bare = v.probe_spec(self.store, self.concept_tasks, None, 0, 4)
+        self.assertEqual(bare.policy.bank, {})
+        self.assertIsNone(bare.init)
+
     def test_the_happiness_venue_still_speaks_its_own_names(self) -> None:
         """The delegation kept every name the doors and this file use."""
         v = self.concept_steer
