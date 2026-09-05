@@ -25,6 +25,11 @@ import time
 
 import modal
 
+try:                      # a released container STOPS FETCHING where it can
+    from modal.experimental import stop_fetching_inputs
+except ImportError:       # the idle scaledown is the backstop
+    stop_fetching_inputs = None
+
 DESK_APP = "rlstack-desk"
 DESK_CLS = "Desk"
 DESK_ADDRESS = f"modal://{DESK_APP}/{DESK_CLS}"
@@ -408,15 +413,27 @@ def metal_class(app, app_name: str, metal: str, gpu, image, *, module: str,
             self.duties = asyncio.create_task(metal_duties(self.metal_service))
 
         def live(self):
-            """The metal every door answers through — reborn first if the desk
-            RELEASED the one standing here. A released service is done: books
-            empty, duties ended, shift latch set; and the venue keeps the
-            container alive until its idle scaledown, so a knock or a fresh
-            keepalive within that window lands HERE (found on the venue: a
-            check waited 900 s for a registration a released container never
-            sends). Standing a new metal up on the same container is exactly
-            what a knock asks for (ADR 0003, Q4)."""
+            """The metal every door answers through.
+
+            A released service is done: books empty, duties ended, shift
+            latch set. What happens to an input that reaches this container
+            AFTER that depends on whether the container will keep fetching
+            inputs. Where `serve` can tell Modal to stop, it is
+            REFUSED, loudly: found on the venue, a keepalive spawned in the
+            second between the release and the stop landed here, the old
+            rule stood a fresh metal up and REGISTERED it, and the desk then
+            carved for an hour into a container that fetched nothing — a
+            registered, deaf metal, and every desk call queued behind it.
+            A refusal fails that input by name; the next knock boots a fresh
+            container. Only where the stop is unavailable does the container
+            stay reachable, and only then is rebirth what a knock asks for
+            (ADR 0003, Q4)."""
             if self.metal_service.released.is_set():
+                if stop_fetching_inputs is not None:
+                    raise RuntimeError(
+                        f"[{metal}] retired: released, and this container "
+                        f"stops fetching inputs — this input cannot be served "
+                        f"here; the next knock boots a fresh container")
                 print(f"[{metal}] reborn on a released container", flush=True)
                 self.stand_up()
             return self.metal_service
@@ -454,11 +471,8 @@ def metal_class(app, app_name: str, metal: str, gpu, image, *, module: str,
             later knock boots a fresh one."""
             service = self.live()
             await service.until_released()
-            try:
-                from modal.experimental import stop_fetching_inputs
+            if stop_fetching_inputs is not None:
                 stop_fetching_inputs()
-            except ImportError:
-                pass                   # the idle scaledown is the backstop
             return {"released": True, "metal": metal,
                     "shift_s": round(time.time() - self.born, 1)}
 
