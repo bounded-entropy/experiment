@@ -233,10 +233,13 @@ async def run_experiment_async(
     else:
         adapters = initial_adapters(bank_entries(spec, resolved), spec.init, store)
 
-    # what NEVER advances gets its blob here: every servable delta a Trainer
-    # will not move — which, in a run with no Trainer, is all of them
-    write_frozen_blobs(run, adapters, policy_version,
-                       set(servable) - (set(trainable) if trains else set()))
+    # every servable delta's blob at the version the run STARTS from: the
+    # frozen ones for life, the trainable ones at version 0 (the Trainer
+    # writes v@1 onward) — a pool that evicts the initial bundle before the
+    # first wave restores it from these, and could not otherwise (observed
+    # live: nine tenants on an eight-bundle pool, and the on-policy arms
+    # died at their first route on `no adapters blob v@0`)
+    write_initial_blobs(run, adapters, policy_version, set(servable))
     bundle = compile_bundle(adapters, policy_version, servable, adapter_types)
     engine_map["main"].add_bundle(bundle)
 
@@ -358,19 +361,21 @@ def load_plans(declared: Plans, store: Store) -> dict[str, RunPlan]:
     return out
 
 
-def write_frozen_blobs(run, adapters: Mapping[str, bytes],
-                       policy_version: Mapping[str, int],
-                       frozen_servable: set[str]) -> None:
-    """Persist the servable deltas that never advance, once, at their version.
+def write_initial_blobs(run, adapters: Mapping[str, bytes],
+                        policy_version: Mapping[str, int],
+                        servable: set[str]) -> None:
+    """Persist every servable delta at the version the run starts from, once.
 
-    The trainer writes a blob per TRAINABLE entry per update, so a frozen
-    servable delta — served on every request, changed by nothing — would have no
-    blob at all, and restore could not rebuild the bundles that carry it. It is
-    written here instead: emitted once at Phase 1, at the version it will hold
-    for the run's life. Without this the store is complete only for the deltas
-    that happen to move, and a restore is total only by luck.
+    The trainer writes a blob per TRAINABLE entry per update — from version 1.
+    Version 0 is the init the learner emitted at Phase 1, and a frozen servable
+    delta never has any other version; neither would be on the store without
+    this, and restore could not rebuild the bundles that carry them. A bounded
+    pool evicts the initial bundle as soon as its neighbours publish theirs,
+    and the first wave's route then restores it from these blobs. On a resume
+    the versions come off the ledger tail and their blobs already exist, so
+    `has_blob` keeps this from ever rewriting a committed version.
     """
-    for name in sorted(frozen_servable):
+    for name in sorted(servable):
         if not run.has_blob("adapters", name, policy_version[name]):
             run.write_blob("adapters", name, policy_version[name],
                            adapters[name])
