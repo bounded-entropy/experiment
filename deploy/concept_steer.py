@@ -1,5 +1,6 @@
 """A steering vector distilled from a prompt-conditioned teacher (ADR 0005).
 
+    modal run deploy/concept_steer.py::smoke                     # the image, exercised (ADR 0008, F5)
     modal run deploy/concept_steer.py::prompts                   # the corpus -> cas uris
     modal deploy deploy/desk.py                                  # THE desk, once, for every venue
     modal deploy deploy/concept_steer.py                         # this venue's metal
@@ -59,6 +60,12 @@ is ~32.5 GiB per device either way, serving and training cannot co-reside on
 sleep does not land is two HostSpecs on wider metal or an engine share small
 enough to sit beside a resident learner.
 
+SMOKE BEFORE DEPLOY (ADR 0008, F5). `::smoke` imports this venue's science
+and builds every spec inside the GPU image, on no metal, in seconds — a build
+is a declaration until something runs in it, and this venue lost three deploys
+to that (a corpus image missing jinja2, found at first use; a class Modal
+imported by `__module__` and could not find). Run it before `modal deploy`.
+
 Everything semantics-bearing is in the specs below — the banks, the loss, the
 plans, the corpus (I5); everything else here is the chassis' (ADR 0007). THE
 DOORS NEVER RELEASE: this is a campaign venue, and idle metal is the desk's
@@ -75,7 +82,7 @@ import modal
 from modal_venue import (
     a_store, cpu_image_for, desk, export_blob, follow, gpu_image_for,
     hf_cache, metal_class, metal_handle, progress_function, run_suite,
-    store_volume, submit_and_follow, wait_for_metal,
+    smoke_function, store_volume, submit_and_follow, wait_for_metal,
 )
 
 APP = "rlstack-concept-steer"
@@ -272,6 +279,38 @@ def canonical(kind: str, train_tasks: str = "", teacher_run: str = "",
 
 progress = progress_function(app, cpu_image, module=__name__)
 """Each run's extent progress, off the store — the chassis' one reader."""
+
+
+def the_science() -> dict:
+    """THE SPECS, BUILT — the client-side path a submit takes, run inside the
+    image against a throwaway store (ADR 0008, F5). It proves the venue's
+    science imports and constructs here: the bank, the plans, the corpus
+    reader, the canonical row. It proves nothing about metal."""
+    import tempfile
+
+    from rlstack import LocalStore
+    from rlstack.data.tasks.base import Task, write_tasks
+    from rlstack.spec.canonical import canonical_json
+
+    with tempfile.TemporaryDirectory() as root:
+        store = LocalStore(root)
+        tasks = write_tasks(store, [Task(id=f"p{i:05d}", prompt=f"q{i}",
+                                         meta={})
+                                    for i in range(WAVES * PER_WAVE)])
+        rows = {"teacher": canonical_json(teacher_spec(store, tasks))}
+        for layer in ANCHORS:
+            rows[f"student@{layer}"] = canonical_json(
+                student_spec(store, "smoke-teacher", layer))
+    return {name: len(row) for name, row in rows.items()}
+
+
+smoke = smoke_function(
+    app, gpu_image, module=__name__, exercise=the_science,
+    imports=("rlstack.data.tasks.concept_prompts",
+             "rlstack.inference.environments.conditioned_teacher",
+             "rlstack.training.post.conditioned_teacher_logprobs",
+             "rlstack.policy.adapters.steer", "rlstack.__main__"))
+"""THE SMOKE RUN, before any deploy (ADR 0008, F5). See the header."""
 
 
 @app.function(image=cpu_image, volumes={"/store": store_volume}, timeout=1200)

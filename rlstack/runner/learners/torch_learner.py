@@ -105,6 +105,9 @@ class TorchLearner:
         # may report false with a reason (fsdp_torch.probe_sharded_sleep).
         self.sleeps = True
         self.sleep_refusal = ""
+        # how many forwards this learner has run: what makes `first_contact`
+        # empty until there has BEEN a first forward (ADR 0008, F5)
+        self.forwards = 0
         self._asleep = False
         self.checkpoint_activations = checkpoint_activations
         self.fsdp = 1               # build fact: this build is unsharded
@@ -144,6 +147,31 @@ class TorchLearner:
                 state.optimizers[entry.name] = self._optimizer_for(
                     entry.name, params, adapter_type, parameterization.optim)
         self._tenants[tenant] = state
+
+    def first_contact(self) -> dict:
+        """WHAT THIS LEARNER ACTUALLY TOOK after its first forward (ADR 0008,
+        F5) — empty before it, because nothing has been allocated to measure.
+
+        `peak_gb` is `torch.cuda.max_memory_allocated` on this process's
+        devices: the high-water mark of the allocator, which is the number an
+        OOM is decided against and the one nobody had. On this fleet 48 GB
+        per card "should fit" and met a 46.3 GiB resident plus one 8.2 GiB
+        fp32 logits block; 64 met the same block with the allocator grown
+        into it. Journaled by the host beside the GB the partition was
+        DECLARED at, once, on every venue, so the next arm's sizing is read
+        off a measurement instead of a guess."""
+        if not self.forwards:
+            return {}
+        return {"peak_gb": self.peak_gb(), "forwards": self.forwards,
+                "device": str(self.device)}
+
+    def peak_gb(self) -> list[float]:
+        """The allocator's high-water mark per device this process can see,
+        in GiB — empty off CUDA, where there is no allocator to ask."""
+        if not torch.cuda.is_available():
+            return []
+        return [round(torch.cuda.max_memory_allocated(index) / 2 ** 30, 3)
+                for index in range(torch.cuda.device_count())]
 
     def uninstall(self, tenant: str) -> None:
         """Install's inverse as a VERB (ADR 0006 Part A): the tenancy ends, so
@@ -187,6 +215,7 @@ class TorchLearner:
 
     def forward_backward(self, tenant: str, batch: TokenBatch) -> TrainStats:
         state = self._tenant(tenant)
+        self.forwards += 1
         spans = _doc_spans(batch)
         # the routing spans the BACKWARD too: with the blocks checkpointed the
         # forward is run again inside backward(), and a recomputed forward that

@@ -219,6 +219,21 @@ class Engine(Protocol):
         """The engine's tokenizer — flatten uses it for injected spans only."""
         ...
 
+    def first_contact(self) -> dict:
+        """WHAT THIS BUILD ACTUALLY TOOK, measured once it has served
+        something (ADR 0008, F5) — empty until then.
+
+        An engine reports the GB its weights occupy and how many tokens its
+        KV cache holds; a learner reports its peak allocated GB per rank
+        after its first forward. The host journals the answer BESIDE the GB
+        its partition was declared at, because every OOM on this fleet was a
+        declared number nobody had measured: 48 then 64 GB per card met a
+        46 GiB resident and one 8 GiB fp32 block, three times in one evening.
+
+        Empty is not a refusal — it means "nothing has happened here yet",
+        which is what the host keeps asking until it stops being true."""
+        ...
+
 
 class Learner(Protocol):
     """Training metal: ONE frozen base, many tenants' deltas + optimizers.
@@ -261,6 +276,13 @@ class Learner(Protocol):
     def load(self, tenant: str, adapters: Mapping[str, bytes],
              optim: Mapping[str, bytes] | None) -> None:
         """Restore `tenant`'s deltas (and moments, unless None → fresh)."""
+        ...
+
+    def first_contact(self) -> dict:
+        """WHAT THIS BUILD ACTUALLY TOOK after its first forward (ADR 0008,
+        F5): `peak_gb` per rank, read off the allocator, empty before the
+        first forward. See Engine.first_contact — same verb, same reason, and
+        the learner is where the reason came from."""
         ...
 
     def uninstall(self, tenant: str) -> None:

@@ -1,5 +1,6 @@
 """Steering vectors on ONE L4, through the desk: ADR 0004's check.
 
+    modal run deploy/steer_l4.py::smoke            # the image, exercised, before any deploy (ADR 0008)
     modal run deploy/steer_l4.py::run_tests        # the fakes suite in the image (torch-gated cases run)
     modal run deploy/steer_l4.py::probe            # promises 1-2: parity, one container, no desk
     modal deploy deploy/desk.py                    # THE desk, once, for every venue
@@ -43,7 +44,8 @@ import modal
 
 from modal_venue import (
     a_store, cpu_image_for, desk, fleet, gpu_image_for, hf_cache, metal_class,
-    metal_handle, progress_function, run_suite, store_volume, submit_spec,
+    metal_handle, progress_function, run_suite, smoke_function,
+    store_volume, submit_spec,
     take_down, wait_for_metal,
 )
 
@@ -108,6 +110,16 @@ def proposed_recipe():
 
 MetalS = metal_class(app, APP, METAL, GPU, gpu_image, module=__name__,
                      idle_s=IDLE_S, recipe=proposed_recipe())
+
+
+smoke = smoke_function(
+    app, gpu_image, module=__name__,
+    imports=("rlstack.policy.adapters.steer",
+             "rlstack.policy.adapters.steer_vllm", "rlstack_engine.steer",
+             "rlstack.runner.engines.vllm_engine"))
+"""THE IMAGE, EXERCISED BEFORE ANY DEPLOY (ADR 0008, F5): the science this
+venue serves, imported inside the container it will be served from, on no
+metal and in seconds. A build is a declaration until something runs in it."""
 
 
 # ---------------------------------------------------------------------------

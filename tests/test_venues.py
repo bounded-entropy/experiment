@@ -335,6 +335,24 @@ class ChassisTest(VenueFixture):
                         f"a desk call is wrapped in a client-side bound: "
                         f"{line.strip()}")
 
+    def test_every_venue_smokes_its_own_image(self) -> None:
+        """ADR 0008, F5: a build is a declaration until something runs in it,
+        so every venue wires a `smoke` its header tells you to run BEFORE
+        `modal deploy` — the image, exercised, on no metal."""
+        for name in ("concept_steer", "steer_l4", "stress_fleet"):
+            source = (DEPLOY / f"{name}.py").read_text()
+            self.assertIn("smoke = smoke_function(", source, name)
+            self.assertIn(f"deploy/{name}.py::smoke", source,
+                          f"{name}'s header does not say to run its smoke")
+
+    def test_the_concept_venue_s_smoke_builds_its_specs(self) -> None:
+        """The strongest smoke a venue can run without metal: the client-side
+        path a submit takes, against a throwaway store, inside the image."""
+        told = self.concept_steer.the_science()
+        self.assertEqual(sorted(told),
+                         ["student@10", "student@32", "student@54", "teacher"])
+        self.assertTrue(all(size > 0 for size in told.values()), told)
+
     def test_a_campaign_door_never_releases(self) -> None:
         """Q6: `concept_steer` and `gsm_a100` are CAMPAIGN venues — arms on
         one booted metal — so no door of either hands metal back. Idle metal

@@ -39,7 +39,9 @@ from rlstack.runner.interfaces import Engine, Learner
 from rlstack.runner.loop import (
     RunReport, experiment_identity, run_experiment_async,
 )
-from rlstack.runner.meters import HostJournal, TrafficMeter, merged_traffic
+from rlstack.runner.meters import (
+    HostJournal, TrafficMeter, merged_traffic, meter_silent,
+)
 
 if TYPE_CHECKING:
     from rlstack.runner.residents import Resident
@@ -203,6 +205,13 @@ class Host:
         self._adoptions: dict[str, asyncio.Task] = {}
         self.sampler = sampler or sample_gpu
         self.meter = TrafficMeter()
+        # residents whose FIRST CONTACT is already on the journal (F5): the
+        # report is taken once, the first tick after the resident has served
+        # something, and the label is how "once" is decided.
+        self.measured: set[str] = set()
+        # the monotone request counter at the previous traffic window — what
+        # makes "this meter cannot be reading the truth" decidable (F5)
+        self.served_at = 0
         self.roster: dict[str, Tenancy] = {}
         self.attest_name()
         self.attest_regimes()
@@ -764,6 +773,7 @@ class Host:
                     if pending is None or pending.done():
                         asked[resident.label] = asyncio.create_task(
                             self.ask_heartbeat(resident, heard))
+                    await self.take_first_contact(resident)
                     silent = now - heard[resident.label]
                     if silent > stall_s:
                         heard[resident.label] = now
@@ -772,6 +782,38 @@ class Host:
         finally:
             for task in asked.values():
                 task.cancel()
+
+    async def take_first_contact(self, resident: "Resident") -> None:
+        """WHAT THIS RESIDENT ACTUALLY TOOK, JOURNALED BESIDE WHAT IT WAS
+        DECLARED AT (ADR 0008, F5) — once, the first tick after it has served
+        something.
+
+        Every OOM on this fleet was a declared number nobody had measured: a
+        learner "should fit" in 48 GB per card, then 64, and met a 46 GiB
+        resident plus one 8 GiB fp32 block three times in one evening. The
+        line below is where the two numbers finally sit next to each other,
+        on the host journal, for every resident, on every venue, without
+        anyone having to think to look.
+
+        Asked off the loop and never awaited into it: a resident mid-load
+        answers late, and a report that is late is still a report. Taken
+        ONCE — the first tick the answer is not empty — because the row is a
+        birth fact, not a series."""
+        if resident.label in self.measured:
+            return
+        try:
+            report = await asyncio.to_thread(resident.first_contact)
+        except Exception:
+            return                  # nothing served yet, or a door mid-death
+        if not report:
+            return                  # there has been no first contact yet
+        self.measured.add(resident.label)
+        self.store.append_host_event(self.name, {
+            "event": "first-contact", "t": time.time(),
+            "resident": resident.label, "kind": resident.regime.capability,
+            "declared_gb": resident.birth.vram_gb,
+            "devices": list(resident.birth.partition.devices),
+            "measured": dict(report)})
 
     async def ask_heartbeat(self, resident: "Resident",
                             heard: dict[str, float]) -> None:
@@ -798,7 +840,7 @@ class Host:
             "kind": resident.regime.capability, "pid": resident.pid(),
             "silent_s": round(silent_s, 1), "bound_s": bound_s})
         print(f"[host {self.name}] resident {resident.label!r} has answered "
-              f"nothing for {silent_s:.0f}s (bound {bound_s:.0f}s): stalled, "
+              f"nothing for {silent_s:.1f}s (bound {bound_s:g}s): stalled, "
               f"ending it", flush=True)
         # OFF THE LOOP: the teardown ladder is a stop frame, a SIGTERM and a
         # SIGKILL, each joining what it signalled — up to half a minute, and
@@ -819,6 +861,28 @@ class Host:
             return
         self.store.append_host_event(self.name, {
             "event": "traffic", "t": now, **row})
+        self.check_meter_advanced(row, now)
+
+    def check_meter_advanced(self, row: dict, now: float) -> None:
+        """A WINDOW THAT CANNOT BE READING THE TRUTH, NAMED (ADR 0008, F5).
+
+        Requests were served since the last window and the window says no
+        tokens at all — which is not a quiet host but a meter nobody is
+        feeding. Journaled rather than raised, because observability must
+        never take a run down; the fakes suite is where it is a FAILURE, and
+        that is the test that would have caught the three days of zeros ADR
+        0002 left on every venue."""
+        served = int(row.get("requests_served") or 0)
+        if meter_silent(row, self.served_at):
+            self.store.append_host_event(self.name, {
+                "event": "meter-silent", "t": now,
+                "requests_served": served, "served_before": self.served_at,
+                "window_s": row.get("window_s")})
+            print(f"[host {self.name}] METER SILENT: "
+                  f"{served - self.served_at} request(s) served this window "
+                  f"and not one token counted — the window is being drained "
+                  f"from a meter nobody feeds", flush=True)
+        self.served_at = served
 
     async def traffic_row(self, now: float) -> dict:
         """This partition's traffic window: the door's own meter, drained,

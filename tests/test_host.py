@@ -16,9 +16,9 @@ from dataclasses import replace
 
 from common import arith_spec, arith_store
 from rlstack import (
-    FakeEngine, FakeLearner, Topology, HostSpec, Host, HostError, Partition,
-    Regime, Seeds, SpecError, fake_qwen_schema, learner, pool,
-    run_experiment,
+    Bundle, FakeEngine, FakeLearner, Topology, HostSpec, Host, HostError,
+    Message, Partition, Regime, Role, SamplingSpec, Seeds, SpecError,
+    fake_qwen_schema, learner, pool, run_experiment,
 )
 from rlstack.observe import render_gpu, render_hosts, render_runs, store_for
 from rlstack.runner.remote import EngineService, LocalTransport, RemotePool
@@ -612,3 +612,197 @@ class ResidentWatchdogTest(unittest.TestCase):
         self.assertEqual([e for e in self.store.read_host_log("well")
                           if e.get("event") == "stalled"], [])
         self.assertFalse(engine.down)
+
+
+class FirstContactTest(unittest.TestCase):
+    """ADR 0008, F5 — EVERY DECLARED RESOURCE NUMBER IS JOURNALED BESIDE ITS
+    MEASURED COUNTERPART. Three OOMs and three days of silent zeros were both
+    the same mistake: a number declared where it could have been measured."""
+
+    def setUp(self) -> None:
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.store, self.train, _ = arith_store(tmp.name)
+
+    def a_resident(self, obj, kind: str, *, vram_gb: float = 14.4):
+        from rlstack.runner.residents import Resident, ResidentBirth
+
+        regime = (Regime("serve", "inference", None, 1) if kind == "inference"
+                  else Regime("train", "training", None, 1))
+        return Resident.in_process(ResidentBirth(
+            label=f"h:{regime.name}", partition=Partition("m", (0,), 0.6, "L4"),
+            regime=regime, build=None, store=self.store.address(),
+            vram_gb=vram_gb, epoch="e1"), obj)
+
+    def journalled(self, host: Host, event: str) -> list[dict]:
+        return [e for e in self.store.read_host_log(host.name)
+                if e.get("event") == event]
+
+    def test_nothing_is_reported_before_the_first_contact(self) -> None:
+        """Empty is not a refusal: it means nothing has happened here yet,
+        which is why the host keeps asking."""
+        engine = FakeEngine()
+        self.assertEqual(engine.first_contact(), {})
+        self.assertEqual(FakeLearner().first_contact(), {})
+        self.assertEqual(self.a_resident(engine, "inference").first_contact(), {})
+
+    def test_the_measurement_is_journaled_beside_the_declaration(self) -> None:
+        """PROMISE 6, the shape of it: one `first-contact` row per resident,
+        carrying the GB its partition was DECLARED at and what the resident
+        actually reports — which is the comparison nobody was making when a
+        learner declared 48 GB per card and took 54."""
+        learner_obj = FakeLearner()
+        resident = self.a_resident(learner_obj, "training", vram_gb=64.0)
+        host = Host("measured", engines=(), learner=learner_obj,
+                    store=self.store, residents=(resident,))
+        learner_obj.install("run-a", _a_parameterization())
+        learner_obj.forward_backward("run-a", _a_batch())
+
+        go(host.take_first_contact(resident))
+        rows = self.journalled(host, "first-contact")
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["resident"], "h:train")
+        self.assertEqual(rows[0]["kind"], "training")
+        self.assertEqual(rows[0]["declared_gb"], 64.0)
+        self.assertEqual(rows[0]["measured"]["forwards"], 1)
+        self.assertEqual(len(rows[0]["measured"]["peak_gb"]), 1)  # one per rank
+
+        # ONCE: the report is taken the first tick it is not empty, and the
+        # journal is not a series
+        learner_obj.forward_backward("run-a", _a_batch())
+        go(host.take_first_contact(resident))
+        self.assertEqual(len(self.journalled(host, "first-contact")), 1)
+
+    def test_the_watchdog_tick_takes_it_without_being_asked(self) -> None:
+        """It is a DUTY, not a call site: nobody has to remember to measure."""
+        engine = FakeEngine()
+        resident = self.a_resident(engine, "inference")
+        host = Host("ticking", engines=(engine,), learner=None,
+                    store=self.store, residents=(resident,))
+        engine.served = 3                       # it has answered requests
+
+        async def a_few_ticks():
+            task = asyncio.create_task(
+                host.watch_residents(every=0.02, stall_s=60.0))
+            await asyncio.sleep(0.12)
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+        go(a_few_ticks())
+        rows = self.journalled(host, "first-contact")
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["measured"]["kv_tokens"], 48)
+        self.assertEqual(rows[0]["declared_gb"], 14.4)
+
+
+class MeterSilenceTest(unittest.TestCase):
+    """ADR 0008, F5 — NO METER MAY READ ZERO SILENTLY. After ADR 0002 moved
+    engines into their own process the host drained a meter nothing had ever
+    fed, and every window on every venue read zero for three days: zero was
+    indistinguishable from broken. The monotone counter is what tells them
+    apart."""
+
+    def setUp(self) -> None:
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.store, _, _ = arith_store(tmp.name)
+
+    def test_the_counter_survives_a_drain(self) -> None:
+        """`requests` is the window's own count and a drain zeroes it;
+        `requests_served` is everything this meter ever opened and a drain
+        does not touch it."""
+        from rlstack.runner.meters import TrafficMeter
+
+        meter = TrafficMeter(started=0.0)
+        meter.opened_request(10)
+        meter.opened_request(10)
+        first = meter.drain(1.0)
+        second = meter.drain(2.0)
+        self.assertEqual((first.requests, first.requests_served), (2, 2))
+        self.assertEqual((second.requests, second.requests_served), (0, 2))
+
+    def test_a_served_but_silent_window_is_journaled_meter_silent(self) -> None:
+        """PROMISE 6's other half, and it is a FAILURE on fakes: a resident
+        that served requests and reports a window of zeros cannot be reading
+        the truth, and the host says so by name."""
+        class SilentMeterEngine:
+            """A resident whose door answers the window ADR 0002 left: the
+            requests are counted, the tokens are not."""
+
+            base, tp = "b", 1
+
+            def __init__(self) -> None:
+                self.served = 0
+
+            def drain_traffic(self) -> dict:
+                self.served += 1
+                return {"prefill_tokens": 0, "decode_tokens": 0,
+                        "requests": 0, "requests_served": self.served,
+                        "ttft_ms_mean": None}
+
+        host = Host("deaf-meter", engines=(SilentMeterEngine(),), learner=None,
+                    store=self.store)
+        go(host.journal_traffic())
+        go(host.journal_traffic())
+        alarms = [e for e in self.store.read_host_log("deaf-meter")
+                  if e.get("event") == "meter-silent"]
+        self.assertEqual(len(alarms), 2)
+        self.assertEqual(alarms[0]["requests_served"], 1)
+        self.assertEqual(alarms[1]["served_before"], 1)
+
+    def test_a_quiet_host_is_not_a_silent_meter(self) -> None:
+        """The counter did not advance, so nothing is wrong: an idle window
+        of zeros is the measurement, and calling it broken would be the same
+        mistake in the other direction."""
+        engine = FakeEngine()
+        host = Host("quiet", engines=(engine,), learner=None,
+                    store=self.store)
+        go(host.journal_traffic())
+        go(host.journal_traffic())
+        self.assertEqual([e for e in self.store.read_host_log("quiet")
+                          if e.get("event") == "meter-silent"], [])
+
+    def test_a_real_fake_run_never_reads_silent(self) -> None:
+        """THE REGRESSION WALL: a host whose engine actually serves counts
+        tokens, so nothing is ever journaled `meter-silent` on a working
+        fleet. This test is what would have gone red the day ADR 0002 moved
+        the engine and left the host draining a meter nobody fed."""
+        engine = FakeEngine()
+        behind_a_door = RemotePool(LocalTransport(EngineService(engine)),
+                                   base=engine.base, tp=1)
+        host = Host("busy", engines=(behind_a_door,), learner=None,
+                    store=self.store)
+
+        async def serve_then_journal():
+            await host.journal_traffic()
+            engine.add_bundle(Bundle("bundle:x", {"pi": 0}))
+            async for _ in engine.sample_tokens(
+                    (Message(Role.USER, "2+2?"),), SamplingSpec(), (),
+                    "bundle:x", seed=3):
+                pass
+            await host.journal_traffic()
+        go(serve_then_journal())
+        rows = [e for e in self.store.read_host_log("busy")
+                if e.get("event") == "traffic"]
+        self.assertEqual(rows[-1]["requests_served"], 1)
+        self.assertGreater(rows[-1]["prefill_tokens"], 0)
+        self.assertEqual([e for e in self.store.read_host_log("busy")
+                          if e.get("event") == "meter-silent"], [])
+
+
+def _a_parameterization():
+    from rlstack.runner.interfaces import OptimSettings, Parameterization
+
+    return Parameterization(
+        base="b", loss="grpo", entries=(),
+        optim=OptimSettings("adamw", 1e-3, (0.9, 0.95), 0.0, {}))
+
+
+def _a_batch():
+    from rlstack.data.flatten import TokenBatch
+
+    return TokenBatch(
+        token_ids=(1, 2, 3), loss_mask=(0, 1, 1),
+        behavior_logprobs=(0.0, -0.1, -0.2), segment_ids=(0, 0, 0),
+        doc_starts=(0,), postdata={}, token_extras={},
+        doc_turn_extras=((),), microbatches_in_update=1,
+        documents_in_update=1)

@@ -32,8 +32,8 @@ from rlstack.runner.meters import TrafficMeter, UpdateClock
 SCHEMA = fake_qwen_schema(4, base="Qwen/Qwen3-0.6B")
 
 TRAFFIC_KEYS = {"event", "t", "window_s", "prefill_tokens", "decode_tokens",
-                "requests", "ttft_ms_mean", "admit_wait_ms_mean",
-                "admit_wait_ms_max", "inflight"}
+                "requests", "requests_served", "ttft_ms_mean",
+                "admit_wait_ms_mean", "admit_wait_ms_max", "inflight"}
 UPDATE_KEYS = {"event", "t", "run_id", "update", "seconds", "phases"}
 PHASE_KEYS = {"collect", "post", "train", "seal"}
 
@@ -85,8 +85,9 @@ class TrafficMeterTest(unittest.TestCase):
         self.assertEqual(
             window.row(),
             {"window_s": 10.0, "prefill_tokens": 50, "decode_tokens": 5,
-             "requests": 2, "ttft_ms_mean": 20.0, "admit_wait_ms_mean": 300.0,
-             "admit_wait_ms_max": 500.0, "inflight": 1})
+             "requests": 2, "requests_served": 2, "ttft_ms_mean": 20.0,
+             "admit_wait_ms_mean": 300.0, "admit_wait_ms_max": 500.0,
+             "inflight": 1})
 
     def test_a_silent_window_is_zeros_and_nulls(self) -> None:
         """A tick that served nothing still measures: zeros for the counts,
@@ -95,8 +96,9 @@ class TrafficMeterTest(unittest.TestCase):
         self.assertEqual(
             window.row(),
             {"window_s": 30.0, "prefill_tokens": 0, "decode_tokens": 0,
-             "requests": 0, "ttft_ms_mean": None, "admit_wait_ms_mean": None,
-             "admit_wait_ms_max": None, "inflight": 0})
+             "requests": 0, "requests_served": 0, "ttft_ms_mean": None,
+             "admit_wait_ms_mean": None, "admit_wait_ms_max": None,
+             "inflight": 0})
 
     def test_the_drain_resets_the_counts_and_keeps_the_gauge(self) -> None:
         meter = TrafficMeter(started=0.0)

@@ -184,6 +184,11 @@ class ResidentBirth:
     regime: Regime
     build: Build
     store: StoreAddress
+    # THE GB THIS RESIDENT'S PARTITION OWNS ON EACH OF ITS DEVICES — the
+    # DECLARED number, carried so the host can journal what was measured
+    # beside it (ADR 0008, F5). A birth fact like the partition itself; 0.0
+    # where nothing declared one (a hand-built resident in a test).
+    vram_gb: float = 0.0
     # THE INSTANCE THIS RESIDENT IS (ADR 0008, F2): its host's epoch, which is
     # its metal container's. A resident's door refuses a frame addressed to
     # any other, so a proxy held past a decarve fails by name instead of
@@ -197,7 +202,7 @@ class ResidentBirth:
                            "base": self.regime.base,
                            "shape": self.regime.shape},
                 "build": encode_build(self.build), "store": self.store.row(),
-                "epoch": self.epoch}
+                "vram_gb": self.vram_gb, "epoch": self.epoch}
 
     @classmethod
     def from_row(cls, row: dict) -> "ResidentBirth":
@@ -209,6 +214,7 @@ class ResidentBirth:
             regime=Regime(r["name"], r["capability"], r["base"], int(r["shape"])),
             build=decode_build(row["build"]),
             store=StoreAddress.from_row(row["store"]),
+            vram_gb=float(row.get("vram_gb", 0.0)),
             epoch=row.get("epoch", ""))
 
 
@@ -389,6 +395,8 @@ class Door:
             return dict(self.hello)
         if verb == "heartbeat":
             return self.beat()
+        if verb == "first_contact":
+            return self.obj.first_contact()
         return self.service.answer(verb, payload)
 
     def beat(self) -> dict:
@@ -862,13 +870,23 @@ class Resident:
         verdict."""
         return self.say("heartbeat", {}, HEARTBEAT_DEADLINE_S)
 
+    def first_contact(self) -> dict:
+        """WHAT THIS RESIDENT ACTUALLY TOOK, or {} before it has served
+        anything (ADR 0008, F5). Asked by the host on its own duty tick until
+        it stops being empty, and journaled once, beside the GB this resident
+        was DECLARED at — which is the whole of the invariant: no number is
+        declared where it could be measured."""
+        return self.say("first_contact", {}, HEARTBEAT_DEADLINE_S)
+
     def row(self) -> dict:
         """The resident as status() and describe() report it, and as the
         host-up event journals it (label + pid)."""
         return {"label": self.label, "kind": self.regime.capability,
                 "pid": self.pid(), "alive": self.alive(),
+                "epoch": self.birth.epoch,
                 "devices": list(self.birth.partition.devices),
                 "memory": self.birth.partition.memory,
+                "vram_gb": self.birth.vram_gb,
                 "sleeps": bool(self.hello.get("sleeps", False))}
 
     def watch(self, on_exit: Callable[["Resident"], None]) -> None:

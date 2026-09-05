@@ -212,6 +212,39 @@ class FsdpTorchLearner(TorchLearner):
         self.announce("wake", ())
         self.take_the_device_back()
 
+    def first_contact(self) -> dict:
+        """WHAT EVERY RANK ACTUALLY TOOK after the first forward (ADR 0008,
+        F5), gathered across the chorus.
+
+        ANNOUNCED, like `sleep`, and for the same reason: the number wanted is
+        per RANK, the followers are processes of their own, and the only way
+        to hear from them is a collective every rank enters in the same order.
+        Rank 0 announces, every rank reports its own allocator high-water
+        mark, and `all_gather_object` brings them home in rank order — so
+        `peak_gb[i]` is rank i's, which is exactly the shape a partition's
+        per-device declaration is compared against.
+
+        Empty before the first forward, as the unsharded build's is: there is
+        nothing to gather and nothing to announce."""
+        if not self.forwards:
+            return {}
+        self.announce("first_contact", ())
+        return {"peak_gb": self.gather_peaks(), "forwards": self.forwards,
+                "shard": self.shard_report()}
+
+    def gather_peaks(self) -> list[float]:
+        """This rank's high-water mark, and every other rank's, in rank
+        order. Entered by rank 0 through `first_contact` and by each follower
+        through `follow` — one collective, one voice starting it."""
+        import torch.distributed as dist
+
+        mine = self.peak_gb()
+        if self.ranks.width == 1 or not dist.is_initialized():
+            return mine
+        heard: list[list[float]] = [[] for _ in range(self.ranks.width)]
+        dist.all_gather_object(heard, mine)
+        return [gb for rank in heard for gb in rank]
+
     # ---- the rules this build adds, one named method each -------------------
 
     def shard_the_frozen_base(self) -> None:
@@ -474,6 +507,8 @@ class FsdpTorchLearner(TorchLearner):
             self.hand_the_device_back()
         elif command.verb == "wake":
             self.take_the_device_back()
+        elif command.verb == "first_contact":
+            self.gather_peaks()     # this rank's half of the collective
         else:
             raise ValueError(f"unknown chorus verb {command.verb!r}")
 

@@ -211,6 +211,40 @@ class VllmEngine:
         levers."""
         return self._residency.attached(bundle_id)
 
+    def first_contact(self) -> dict:
+        """WHAT THIS BUILD ACTUALLY TOOK, once it has served something (ADR
+        0008, F5) — empty before the first request, because before it there
+        is no engine yet (the core is built inside the running loop, at the
+        first sample) and nothing to measure.
+
+        Three numbers, all read off vLLM's own config rather than guessed:
+        the GB the weights occupy, how many tokens the KV cache actually got
+        (blocks x block size — the number a context length is spent out of),
+        and the fraction of the card this build was allowed. The host
+        journals them beside the GB the partition was DECLARED at, which is
+        the comparison nobody was making when 48 GB per card met a 46 GiB
+        resident.
+
+        Every read is defensive about vLLM's own shape ON PURPOSE, against
+        this file's usual rule: these attributes are version-coupled
+        internals and a measurement that crashes the engine it is measuring
+        would be worse than one that says it could not look."""
+        if self._llm is None or not self._request_count:
+            return {}
+        report: dict = {"requests": self._request_count,
+                        "gpu_memory_utilization":
+                            self._engine_args["gpu_memory_utilization"],
+                        "max_model_len": self._engine_args["max_model_len"]}
+        try:
+            config = self._llm.engine.vllm_config
+            report["weights_gb"] = round(
+                float(config.model_config.get_weights_bytes()) / 2 ** 30, 3)
+            report["kv_tokens"] = (int(config.cache_config.num_gpu_blocks or 0)
+                                   * int(config.cache_config.block_size or 0))
+        except Exception as unreadable:          # noqa: BLE001 - see the docstring
+            report["unreadable"] = str(unreadable)
+        return report
+
     def residency(self) -> Mapping[str, int]:
         """How many registered bundles each served adapter type holds state for —
         the census of I8 on this engine, one number per adapter type."""

@@ -2543,7 +2543,8 @@ class MetalService:
                 residents.append(self.spawn(ResidentBirth(
                     label=f"{name}:{regime.name}", partition=partition,
                     regime=regime, build=self.builds.for_regime(regime),
-                    store=self.store.address(), epoch=self.epoch)))
+                    store=self.store.address(), vram_gb=gb,
+                    epoch=self.epoch)))
             engines = [RemotePool(r.transport, base=r.hello["base"],
                                   tp=int(r.hello["tp"]))
                        for r in residents if r.regime.capability == "inference"]

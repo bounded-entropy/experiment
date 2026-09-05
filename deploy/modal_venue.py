@@ -616,6 +616,44 @@ def metal_class(app, app_name: str, metal: str, gpu, image, *, module: str,
     )(modal.concurrent(max_inputs=64)(MetalS))
 
 
+def smoke_function(app, image, *, module: str, name: str = "smoke",
+                   imports=(), exercise=None):
+    """THE IMAGE, EXERCISED BEFORE ANY METAL IS BOOKED (ADR 0008, F5).
+
+    A build is a declaration until something runs in it. On 2026-09-04 that
+    cost three deploys: the corpus image was a pip list that turned out to be
+    missing jinja2, and `apply_chat_template` found out at first use; ADR
+    0007's observer rewrite was "reasoned, not measured" and every container
+    died at construction while the old one served a week-old view. Both would
+    have taken seconds to catch INSIDE the image, on no GPU.
+
+    So a venue wires one of these and RUNS IT BEFORE `modal deploy`: it
+    imports the modules its science actually needs and, where the venue gives
+    one, `exercise` builds its specs — the same client-side path a submit
+    takes — against a temporary store. No metal, no volume, no desk: just the
+    image, asked whether it can do the thing it was built for.
+
+    `imports` are dotted module names; `exercise` is a callable returning
+    anything JSON-safe. A failure raises INSIDE the container, which is the
+    whole point — a smoke that passes is not a promise the venue works, only
+    that its image is not missing a dependency or a file."""
+    def smoke() -> dict:
+        import importlib
+
+        report: dict = {"imported": []}
+        for dotted in imports:
+            importlib.import_module(dotted)
+            report["imported"].append(dotted)
+        if exercise is not None:
+            report["exercised"] = exercise()
+        print(json.dumps(report, indent=1, default=str), flush=True)
+        return report
+
+    smoke.__name__ = smoke.__qualname__ = name
+    smoke.__module__ = module       # the container imports it from the VENUE
+    return app.function(image=image, timeout=900)(smoke)
+
+
 def run_suite() -> str:
     """The fakes suite inside a venue's GPU image, where the torch-gated cases
     actually run. A venue wires this to a `@app.function` of its own."""

@@ -69,6 +69,9 @@ class FakeEngine:
         self.record_draws = record_draws
         self.record_latent = record_latent
         self.plugins = plugins
+        # how many requests this engine has answered — what makes
+        # `first_contact` empty until there has BEEN a first contact
+        self.served = 0
         self.bundle_log: list[str] = []       # every add_bundle, in order
         self._known: set[str] = set()
         # bundle -> the adapter types its payloads carry: what a request's
@@ -98,6 +101,18 @@ class FakeEngine:
 
     def tokenize(self, text: str) -> tuple[int, ...]:
         return tuple(ord(c) for c in text)
+
+    def first_contact(self) -> dict:
+        """The fake's own measurement (ADR 0008, F5): nothing until it has
+        answered a request, and then numbers that are a pure function of what
+        it served — so the whole first-contact path (the door verb, the
+        host's journal line, the comparison against the declared GB) is
+        exercisable with no GPU, which is where every OOM would have been
+        caught cheaply."""
+        if not self.served:
+            return {}
+        return {"weights_gb": 0.0, "kv_tokens": self.served * 16,
+                "requests": self.served}
 
     def reachability(self, sites: Sequence[SiteMeta]) -> Mapping[str, Mechanism]:
         """A realistic fake build: punica reaches weighted matrices, prompt
@@ -170,6 +185,7 @@ class FakeEngine:
         context = "".join(m.content for m in messages)
         self.record_directives(bundle_id, tuple(ord(c) for c in context),
                                None, directives)
+        self.served += 1
         self.meter.opened_request(len(context) + len(token_ids))
         return tuple(
             -0.2 - 0.5 * (int(content_hash({
@@ -194,6 +210,7 @@ class FakeEngine:
         # char-level metal: one token per character, so the prompt's token
         # count is its length — known before the first token, as on real metal
         prompt_ids = tuple(ord(c) for m in messages for c in m.content)
+        self.served += 1
         self.meter.opened_request(len(prompt_ids))
         submitted = time.time()
 
@@ -339,6 +356,9 @@ class FakeLearner:
         # its torch (fsdp_torch.probe_sharded_sleep), so a fake carries the
         # string rather than deriving one
         self.sleep_refusal = sleep_refusal
+        # how many forwards this learner has run — what makes `first_contact`
+        # empty until there has BEEN a first forward
+        self.forwards = 0
         self.naps: list[str] = []
         self.down = False
         self._tenants: dict[str, _FakeTenant] = {}
@@ -392,6 +412,7 @@ class FakeLearner:
 
     def forward_backward(self, tenant: str, batch: TokenBatch) -> TrainStats:
         state = self._tenant(tenant)
+        self.forwards += 1
         state.state = content_hash({
             "state": state.state,
             "ids": batch.token_ids,
@@ -437,6 +458,16 @@ class FakeLearner:
         optim = {name: f"fake-optim:{name}:{state.steps}:{state.state}".encode()
                  for name in state.trainable}
         return Emitted(adapters=adapters, optim=optim)
+
+    def first_contact(self) -> dict:
+        """The fake learner's own measurement (ADR 0008, F5): empty until it
+        has run a forward, then a per-rank peak that is a pure function of
+        the widths it was built at — enough to exercise the journal line the
+        real learner's `torch.cuda.max_memory_allocated` fills in."""
+        if not self.forwards:
+            return {}
+        return {"peak_gb": [round(0.25 * self.forwards, 4)] * self.fsdp,
+                "forwards": self.forwards}
 
     def load(self, tenant: str, adapters: Mapping[str, bytes],
              optim: Mapping[str, bytes] | None) -> None:

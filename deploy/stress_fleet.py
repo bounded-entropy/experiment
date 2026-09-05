@@ -2,6 +2,7 @@
 that can show each: TP and FSDP with every adapter type, a tenant joining a
 learner mid-run, and bases that are not Qwen.
 
+    modal run deploy/stress_fleet.py::smoke           # the image, exercised, before any deploy (ADR 0008)
     modal run deploy/stress_fleet.py::bases           # five bases on single L4s, in parallel, no desk
     modal deploy deploy/desk.py                       # THE desk, once, for every venue
     modal deploy deploy/stress_fleet.py               # one L4:2 metal (tp=2, fsdp=2)
@@ -37,7 +38,8 @@ import modal
 
 from modal_venue import (
     a_store, cpu_image_for, desk, fleet, gpu_image_for, hf_cache, metal_class,
-    metal_handle, progress_function, store_volume, submit_spec, take_down,
+    metal_handle, progress_function, smoke_function, store_volume,
+    submit_spec, take_down,
     wait_for_metal,
 )
 
@@ -110,6 +112,16 @@ def proposed_recipe():
 
 MetalS = metal_class(app, APP, METAL, GPU, gpu_image, module=__name__,
                      idle_s=IDLE_S, recipe=proposed_recipe(), secrets=SECRETS)
+
+
+smoke = smoke_function(
+    app, gpu_image, module=__name__,
+    imports=("rlstack.policy.adapters.plora", "rlstack.policy.adapters.lora",
+             "rlstack.runner.learners.fsdp_torch",
+             "rlstack.runner.engines.vllm_engine"))
+"""THE IMAGE, EXERCISED BEFORE ANY DEPLOY (ADR 0008, F5): the science this
+venue serves, imported inside the container it will be served from, on no
+metal and in seconds. A build is a declaration until something runs in it."""
 
 
 # ---------------------------------------------------------------------------

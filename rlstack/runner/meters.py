@@ -50,6 +50,14 @@ class TrafficWindow:
     admit_wait_ms_mean: float | None
     admit_wait_ms_max: float | None
     inflight: int
+    # THE COUNTER THAT MUST ADVANCE (ADR 0008, F5): every request this meter
+    # has EVER opened, never reset by a drain. `requests` is the window's own
+    # count and a drain zeroes it, so a window of zeros is indistinguishable
+    # from a meter nobody feeds — which is exactly what happened for three
+    # days after ADR 0002 moved engines into their own process, on every
+    # venue, unnoticed. Monotone, so a window whose tokens are zero WHILE this
+    # advanced is a broken meter and says so (`meter_silent`).
+    requests_served: int = 0
 
     def row(self) -> dict:
         """The window as a JSON row — ONE home for the shape the `traffic`
@@ -59,6 +67,7 @@ class TrafficWindow:
                 "prefill_tokens": self.prefill_tokens,
                 "decode_tokens": self.decode_tokens,
                 "requests": self.requests,
+                "requests_served": self.requests_served,
                 "ttft_ms_mean": self.ttft_ms_mean,
                 "admit_wait_ms_mean": self.admit_wait_ms_mean,
                 "admit_wait_ms_max": self.admit_wait_ms_max,
@@ -77,6 +86,10 @@ def merged_traffic(own: dict, residents: Sequence[dict]) -> dict:
     nothing."""
     out = dict(own)
     weighted, weight = 0.0, 0
+    # the monotone counter SUMS like the window counts do, and stays monotone
+    # because each addend is (ADR 0008, F5)
+    out["requests_served"] = sum(int(row.get("requests_served") or 0)
+                                 for row in (own, *residents))
     for row in (own, *residents):
         mean, requests = row.get("ttft_ms_mean"), int(row.get("requests") or 0)
         if mean is not None and requests:
@@ -87,6 +100,21 @@ def merged_traffic(own: dict, residents: Sequence[dict]) -> dict:
             out[field] = int(out.get(field) or 0) + int(row.get(field) or 0)
     out["ttft_ms_mean"] = weighted / weight if weight else None
     return out
+
+
+def meter_silent(row: dict, served_before: int) -> bool:
+    """A METER THAT CANNOT BE READING THE TRUTH (ADR 0008, F5).
+
+    Requests were served since the previous window — the monotone counter
+    moved — and the window reports no tokens at all. Every request opens with
+    a known prompt length, so a served request contributes prefill tokens by
+    construction; zero tokens against an advancing counter therefore means
+    the window is being drained from a meter nobody fed, not that the metal
+    was quiet. That reading was indistinguishable from "idle" for three days
+    on every venue, and this is the one line that tells them apart."""
+    served = int(row.get("requests_served") or 0)
+    tokens = int(row.get("prefill_tokens") or 0) + int(row.get("decode_tokens") or 0)
+    return served > served_before and tokens == 0
 
 
 class TrafficMeter:
@@ -111,6 +139,8 @@ class TrafficMeter:
         self.prefill_tokens = 0
         self.decode_tokens = 0
         self.requests = 0
+        # the monotone one (F5): a drain never touches it
+        self.requests_served = 0
         self.ttft_ms_total = 0.0
         self.ttft_samples = 0
         self.admit_wait_ms_total = 0.0
@@ -126,6 +156,7 @@ class TrafficMeter:
         score_tokens, which is one prefill and no decode. Both are requests:
         the door does not care which verb walked through it."""
         self.requests += 1
+        self.requests_served += 1
         self.prefill_tokens += prefill_tokens
 
     def first_token_after(self, seconds: float) -> None:
@@ -178,7 +209,8 @@ class TrafficMeter:
                                 if self.admit_waits else None),
             admit_wait_ms_max=(self.admit_wait_ms_max
                                if self.admit_waits else None),
-            inflight=self.inflight)
+            inflight=self.inflight,
+            requests_served=self.requests_served)
         self.started = now
         self.prefill_tokens = 0
         self.decode_tokens = 0
