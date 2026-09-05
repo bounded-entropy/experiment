@@ -4768,6 +4768,66 @@ specs; backends (local/modal/skypilot) and GPU topology are semantics-neutral.
       wire; redeployed from the checkout. Until main is one code line, the
       desk is deployed from `/Users/samarth/Coding/experiment/rlstack` only.
 
+88. **THE ENGINE STEERED A FRACTION; BURGERS ON A 0.6B; A RELEASED METAL IS GONE (2026-09-05).**
+    Samarth asked "are we sure that the steering vectors are getting
+    attached?" and the answer was no: the learner's side was (the exported
+    SFT directions rotated to cos 0.06..0.11 from their init; loss moved),
+    the engine's was not the same forward. The on-policy arm at
+    max_policy_lag=0 is a served-vs-replay parity meter, and it read 0.20
+    nats at update 1 and 0.30..0.42 after, against the gsm parity control's
+    0.010..0.017. (The stopped 32B on-policy arms trained on samples the
+    student never made; their updates are void. The six SFT arms and the
+    exported vectors, `exports/concept-steer-sft-2026-09-05/` on the laptop,
+    are learner-side artifacts and stand.)
+
+    - **THE NORM WAS THE MLP OUTPUT'S** (650aef7). vLLM's decoder layers
+      hand the residual hook the FUSED pair (hidden, residual) whose sum is
+      the stream; the add lands on `hidden`, exact for a plain steer (ADR
+      0004 Q1), but the norm-scaled add took `hidden`'s norm — one layer's
+      MLP output, a fraction of the stream's — where `steer_torch` scales by
+      the HF module's output, the stream. The hook passes both halves now and
+      `SteerPlugin.add(..., residual)` norms their sum; the final norm's
+      site hands the stream alone and is untouched. Same commit: the three
+      teacher/hinted postprocessors gather a group's trajectories (they
+      scored one at a time; the walk inside one stays serial); and a FRESH
+      start whose version-0 blob exists but differs from this attempt's emit
+      overwrites it, loudly — a 32B on-policy arm died at wave 5 restoring
+      v0 to a bundle id the store's v@0 did not compile to (v@1 and v@4
+      recompiled exactly, so the compile is deterministic and the v0 emit
+      differed across two attempts; cause still open — a seeded draw should
+      not).
+    - **NOT THE SCORING.** The 14-minute on-policy wave on the 32B was
+      6.5 min generate + 0.8 score + 6.8 train, read off the volume's file
+      times: alternation, not serial scoring. Two on-policy arms taking
+      turns with one learner on one partition wait on each other's phase,
+      plus two wakes a wave.
+    - **THE CAMPAIGN AS A RECORD** (8eb054f). `deploy/concept_campaign.py`
+      holds the concept science once — `Campaign(base, hidden, width,
+      anchors, concept, subdir, main_gb, learner_gb, split, ...)` with the
+      plans, the specs, the bank entry, the topologies and the measurement —
+      `concept_steer.py` delegates to HAPPINESS (rows unchanged), and
+      `deploy/concept_burgers.py` is the second instance: Qwen3-0.6B told
+      about burgers (its own heavy block in `SYSTEM_PROMPTS`; a concept
+      without a block is refused, never templated), anchors 4/14/24 of 28
+      (~15/50/85 %), and `split=True`: the pool and the learner as two
+      placement units co-resident by fraction on one 80 GB card, so nothing
+      alternates and SFT and on-policy arms train side by side (the ask:
+      "schedule SFT at the same time we do this learning"). The arms: nsteer
+      and mlp_lora, each under sft and opd, at each anchor — twelve.
+      Corpus: train cas://8ca7ba94..., heldout cas://87df7ce3....
+    - **A RELEASED METAL IS TERMINATED** (79e57bb). A metal registers with
+      the container id Modal gave it (`MODAL_TASK_ID`), the desk journals it,
+      and `release` — by hand, by sweep, or by the ninety-second idle clock —
+      ends that container through the deploy's hand (the ContainerStop RPC
+      `modal container stop` uses) after telling the metal to hand
+      everything back. Samarth: "i literally need to TERMINATE the metal,
+      otherwise i pay money for it". Proved on the burgers metal: registered
+      13:17:33, released by the idle rule 13:19:35, container gone 13:19:59.
+      `terminated` rides in the release reply; a desk without the hand says
+      false.
+    - **THE SLEEP EXAM** (8acf736, `deploy/sleep_exam_a100.py`) and the
+      arbiter's first-switch rule (82103e2) are #87's; both stand.
+
 ## Open threads (do NOT treat as settled; flag when your answer touches them)
 
 - TODO (Samarth, settled intent — future, nothing now): BUNDLE LRU EVICTION
