@@ -4825,6 +4825,27 @@ specs; backends (local/modal/skypilot) and GPU topology are semantics-neutral.
       13:17:33, released by the idle rule 13:19:35, container gone 13:19:59.
       `terminated` rides in the release reply; a desk without the hand says
       false.
+    - **THE HINT IS SEALED OUT, BY DESIGN.** Samarth, reading the burgers
+      teacher's waves: "dont see any notes about burgers". The
+      `conditioned_teacher` environment samples under `[hint, prompt]` and
+      records `[prompt, completion]` — the hint rides in `env_extras` as
+      provenance and never in `messages`, so a student replaying the rows
+      sees what it will be asked at eval (ADR 0005). Measured on the 0.6B
+      teacher's first waves: 99 of 160 completions (62 %) mention burgers,
+      patty or bun — a 0.6B at temperature 1.0 follows the block two times
+      in three, and the misses are the rows one reads first.
+    - **LoRA BESIDE THE SCORING KILLS THE ENGINE.** Twice on the burgers
+      metal (13:23, 13:57) vLLM died on `CUDA error: an illegal memory
+      access`, each time with `rlstack-score-*` requests (prompt_logprobs=0,
+      no LoRA) being scheduled while LoRA-served on-policy arms were
+      resident; twelve minutes of the same scoring with only norm-scaled
+      arms ran clean, and the crash came minutes after the third LoRA arm
+      joined. Serving a LoRA on `layers.<n>.mlp.*` had never run on metal.
+      The three LoRA on-policy arms are BLOCKED (tagged so); LoRA trains
+      under SFT only until the serving path is exercised on the L4 probe
+      with a scorer in the batch. The nsteer on-policy arms, the six SFT arms
+      and the teacher continue, resumed by identity on a recycled metal.
+
     - **THE SLEEP EXAM** (8acf736, `deploy/sleep_exam_a100.py`) and the
       arbiter's first-switch rule (82103e2) are #87's; both stand.
 
