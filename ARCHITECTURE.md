@@ -665,8 +665,59 @@ is that function: a desk's `host_for`/`metal_for`, a host's `transport_for`, a
 campaign's door. It consults the IN-PROCESS switchboard first, because what
 answers in this process must be answered here and never over a self-call
 (#77). A venue constructs no transport and writes no scheme rule.
-`rlstack/runner/remote.py` (`Transport`, `LocalTransport`, `parse_address`,
-`transport_for`), `rlstack/runner/transports/modal_cls.py` (`ModalClsTransport`)
+THE WIRE IS BOUNDED AND ITS DOORS ARE ASYNC (ADR 0008, F3 / Q4): both
+`Transport` verbs are coroutines taking a `deadline_s`, every frame goes
+through `bounded`, and a wait that expires raises **`Unreachable`** — which
+the caller journals on the row it was about and then passes over. Async
+because a cancelled input of a SYNCHRONOUS method on a concurrent container
+has no clean interruption and Modal shuts the container down (three times on
+2026-09-04); bounded because an unbounded ask wedged the desk for an hour.
+The two protocols that stay synchronous by contract — an Engine's
+registration and build facts, every Learner verb (ADR 0002, Q6) — bridge
+through `Blocking`, ONE loop on one daemon thread for the process's life.
+`rlstack/runner/remote.py` (`Transport`, `LocalTransport`, `Unreachable`,
+`bounded`, `Blocking`, `parse_address`, `transport_for`),
+`rlstack/runner/transports/modal_cls.py` (`ModalClsTransport`)
+
+**Lease / epoch** — what the desk is still entitled to BELIEVE, and about
+WHICH LIFE of the thing (ADR 0008, F1 / F2). An **epoch** is a boot identity a
+container mints once at bring-up and that dies with it: a name is not an
+instance, and `concept-a100` is a metal the fleet owns while the epoch is
+which of its lives is answering. It rides the address as an optional `@epoch`
+suffix (`modal://app/cls#host@epoch`), is STAMPED into every frame a transport
+built from such an address carries, and a container wearing another one
+refuses that frame by name (`check_epoch`, `WrongEpoch`) — at the host's door,
+the metal's plane door and the resident's door alike. A released container is
+therefore a lapsed epoch: it refuses every later input, and the next knock
+boots a fresh one. A **`Lease(epoch, heard_t, lease_s)`** is what a metal or a
+host renews by HEARTBEAT — 20 s cadence, 60 s lease, both the desk's constants
+and journaled at registration. The desk lists nothing it has not heard from
+within the lease, places nothing on it (`leased()` is the gate at the join
+rung and the carve rung), and REAPS a lapsed one before it probes anything,
+because "has this instance spoken" is the stronger question and the cheaper
+one. Three levels, three things that can die: the metal heartbeats for its
+container, the host's lease is renewed by the same duty (a host is an object
+inside that one control process), and each RESIDENT answers its host's
+watchdog — one that answers nothing past its phase's bound is ended and
+journaled `stalled`.
+`rlstack/runner/desk.py` (`Lease`, `mint_epoch`, `Desk.heartbeat`,
+`Desk.leased`), `rlstack/runner/remote.py` (`check_epoch`, `with_epoch`),
+`rlstack/runner/host.py` (`watch_residents`), `deploy/modal_venue.py`
+
+**First contact** — what a resident ACTUALLY took, measured once it has served
+something and journaled beside what it was DECLARED at (ADR 0008, F5). The
+learner reports `peak_gb` per rank off the allocator's high-water mark
+(gathered across the chorus by an announced verb, like `sleep`); the engine
+reports the GB its weights occupy and the tokens its KV cache really got. The
+host's own duty asks each resident until the answer stops being empty and
+writes ONE `first-contact` row. Its twin is the counter that must advance:
+`TrafficWindow.requests_served` is monotone across drains, and a window
+reporting no tokens while it moved is journaled `meter-silent` — on fakes, a
+test failure. Both exist because every OOM and every silent meter on this
+fleet was a number declared where it could have been measured.
+`rlstack/runner/interfaces.py` (`Engine.first_contact`,
+`Learner.first_contact`), `rlstack/runner/host.py` (`take_first_contact`,
+`check_meter_advanced`), `rlstack/runner/meters.py` (`meter_silent`)
 
 ### The store
 
@@ -884,12 +935,25 @@ The declaration half is class attributes (`serving`, `engine_plugin`,
 
 ### The fleet ladder (`rlstack/runner/desk.py`)
 
-One currency and one decider per rung (I12):
+One currency and one decider per rung (I12).
+
+THE LADDER IS CLIMBED AGAINST A SNAPSHOT (ADR 0008, F3 / Q3 as amended).
+Before any rung, `read_fleet` asks every LEASED metal for its residual and
+every leased listing for its status — CONCURRENTLY, each under the desk's own
+deadline (5 s and 10 s), and OUTSIDE every lock — so the worst case per submit
+is one deadline and not one per metal, and a row that misses it is journaled
+`unreachable` and passed over. `decide` then climbs the rungs as a PURE
+function of that snapshot, reserving what a carve takes; it is the only thing
+ever held under the desk's one lock. The carve itself, which is minutes, is
+issued after the lock is released, and the metal's own booking is still the
+enforcement half. A wait under the lock is how one deaf container queued every
+submit, status and reap behind it for an hour.
 
 - **join** — a listing already serves the demanded capability (`covers`: the
-  ONE coverage rule — capability, base, shape equality); automatic, and the
-  target host's own arbiter is the decider. Declared sizes are ignored: the
-  weights already live there.
+  ONE coverage rule — capability, base, shape equality) AND its lease is live
+  AND it answered the snapshot's probe; automatic, and the target host's own
+  arbiter is the decider. Declared sizes are ignored: the weights already live
+  there.
 - **carve** — nothing serves it but a registered metal's residual (GB per
   device) fits the unit's largest alternating member, so the desk commands the
   metal to partition a new host into existence, the desk's recipe row riding
@@ -947,7 +1011,11 @@ One currency and one decider per rung (I12):
   (decommission's mode: the host dies regardless), which stops it and
   journals it PARKED with the boot instructions; the ordinary campaign
   resubmit revives it, same run_id. `placements()` is the archive as a
-  read: the latest binding per run_id.
+  read: the latest binding per run_id. Every park goes through ONE writer
+  (`park`), which carries the FIRST park's instant forward as `since` and
+  reads what the run WANTS off its own archived demand rows (ADR 0008, Q7) —
+  so "parked since 19:17, wants main-tp2+learner-fsdp2 on 2x64 GB" is a row
+  the observer renders rather than a silence.
 - **reap / recontinue** — the supervisor's tick (ADR 0001, Q5–Q5d): SWEEP
   for idle metal first (observe, then release what is due — ADR 0003, so the
   probing never chases a listing the desk has just taken down); probe
@@ -957,15 +1025,35 @@ One currency and one decider per rung (I12):
   midway leaves the intent on the record; KNOCK each metal that lost listings
   (`boot_for`, or `describe()` through the plane — on Modal the knock boots);
   then retry the queue. `parked()` is the queue read off the journal (the
-  latest disposition per run; a delivered placement supersedes), retried under
-  one lock on every reap that reaped and every `metal` registration event.
-  A run whose EXTENT is complete is not work and is left alone
-  (`run_done` — the ledger against the train plan, or the sealed
-  rollouts against the rollout plan).
-- **register (metal)** — the acquire rung recorded, and the re-registration
-  rule: a known name at the same address updates the row (measured facts,
-  recipe) and reaps that metal's corpses by probe; at another address it is
-  refused as a collision.
+  latest disposition per run; a delivered placement supersedes), retried on
+  every reap that reaped and every `metal` registration event — each run
+  CLAIMED for the duration of its reroute rather than the pass holding a lock,
+  because the pass is nothing but wire calls (ADR 0008, F3). A run whose
+  EXTENT is complete is not work and is left alone (`run_done` — the ledger
+  against the train plan, or the sealed rollouts against the rollout plan).
+  AND THE TICK REAPS LAPSED LEASES FIRST, before it probes anything: "has this
+  instance spoken within its lease" is the stronger question and the cheaper
+  one, and a released container that still answers a probe fails it.
+- **submit** — journal-first and idempotent by its key (ADR 0008, F4, because
+  every wire is at-least-once): `submit-intent {key, folder, t}` is written
+  BEFORE the placement, where the key is a digest of the opaque frame (a run
+  id is a pure function of the same bytes, and the desk may not read a spec).
+  A second frame with that key gets the delivery the first got — identical,
+  with `submit-replayed` on the record — while that run is still RUNNING; one
+  arriving while the first is in flight is refused loudly; and one arriving
+  after the run stopped places afresh, because resubmitting is how a run
+  resumes here. `submit-missed` closes an intent that found nowhere to go.
+- **put_plan / read_cas** — the client's two doors onto the store (ADR 0008,
+  F6): plan bytes in (content-addressed, so saying it twice says it once) and
+  cas content out, for a client that must read what its plan indexes. The desk
+  has the mount; the client has the arithmetic.
+- **register (metal)** — the acquire rung recorded, the EPOCH announced and
+  the lease opened (ADR 0008), and the re-registration rule: a known name at
+  the same address updates the row (measured facts, recipe); at another
+  address it is refused as a collision. It writes the journal and waits on
+  nothing — `reconcile_metal` is the separate, awaited pass that concludes
+  that metal's corpses, and a listing whose epoch is not the metal's current
+  one is a corpse without a probe at all.
 
 ### The host (`rlstack/runner/host.py`)
 
@@ -1056,6 +1144,25 @@ The consequence worth stating: an availability signal must never be mistaken
 for a commit. A bundle registered on an engine is availability; the ledger line
 naming it is the commit. A host journal entry is observability; the run's
 manifest and ledger are truth.
+
+**And the control plane is neither** — it is the third thing, and since ADR
+0008 (F6) it has one rule: it runs WHERE A LEASED PROCESS ALREADY IS. The
+CLIENT does anything pure (a spec's canonical row is arithmetic over values,
+so it is computed in the driver against a throwaway `LocalStore`); the DESK
+does anything that needs the store (`put_plan` takes the plan bytes the client
+hashed and writes them content-addressed; `read_cas` is its inverse, for a
+build that must read what its plan indexes); the METAL does anything that
+needs the engine (`measure` runs a measuring pass in the container that serves
+the pool, admitted at that host's own arbiter); and PROGRESS is a store read a
+read-only service already serves, so a campaign door polls the observer's
+`/api/run/<id>` over plain HTTP. Nothing rides an on-demand function, because
+for an hour on 2026-09-04 the platform scheduled none — and on a platform
+where a pod is created by an explicit call there is no scheduler to lean on at
+all. Waiting for capacity is the visible, journaled `parked` state (with what
+the run WANTS and since when), never a hang inside a door.
+`deploy/modal_venue.py` (`canonical_row`, `progress`, `ledgers`),
+`rlstack/runner/desk.py` (`Desk.put_plan`, `MetalService.measure_the_run`),
+`rlstack/observe/views.py` (`fleet_notes`)
 
 ---
 

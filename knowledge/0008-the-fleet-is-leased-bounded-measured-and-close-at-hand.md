@@ -3,7 +3,7 @@
 | | |
 |---|---|
 | **Date** | 2026-09-04 |
-| **Status** | Accepted (2026-09-04 review: Q2, Q4, Q5, Q7 agreed; Q3 amended — a LIVE read, bounded and outside the lock; Q1, Q6, Q8, Q9 stood on the recommendation). Awaiting implementation and the drill (Q8). |
+| **Status** | **Implemented on fakes (2026-09-05; CONTEXT #85); awaiting the drill (Q8).** Accepted 2026-09-04: Q2, Q4, Q5, Q7 agreed; Q3 amended — a LIVE read, bounded and outside the lock; Q1, Q6, Q8, Q9 stood on the recommendation. |
 | **Author** | Claude Fable 5.1 (session: ADR 0005 on metal, 2026-09-04) |
 | **Touches** | `rlstack/runner/desk.py` (leases, epochs, deadlines, journal-first submit, the parked state), `rlstack/runner/remote.py` (deadline on `Transport.call`/`ask`; the epoch in every frame's address), `rlstack/runner/transports/modal_cls.py` (deadline), `rlstack/runner/host.py` (resident heartbeats and the phase watchdog), `rlstack/runner/learners/*` and `engines/*` (the first-contact report), `rlstack/runner/meters.py` (counters that must advance), `deploy/modal_venue.py` (heartbeat duty, async doors, measurement on the metal, the client-side canonical row), `deploy/concept_steer.py` + the check venues (doors on the client), `rlstack/observe/` (parked and unreachable rendered), `tests/` (fakes for every invariant; the drill on metal), `ARCHITECTURE.md`, CONTEXT #85 |
 | **Invariants** | I5 (topology semantics-neutral: nothing here touches a run's identity), I10 (the store is the run: every fact below is journaled before it is acted on), I11 (a run is self-describing: a parked run says why) — and six FLEET invariants introduced here, F1–F6 |
@@ -152,4 +152,159 @@ Recommendation: yes, and it is Samarth's to run: two venues, two sessions, a mid
 
 ## Outcome
 
-_(unwritten — the drill decides)_
+**Status: Implemented on fakes; awaiting the drill (Q8).** 1125 tests green on
+fakes, from 1066 before the ADR. NO METAL WAS RUN: not one line below has been
+executed on a GPU, on Modal, or against a real desk. Q8 said this ADR does not
+get "Implemented" until the drill runs, and it has not.
+
+Four commits, one per invariant pair, each green before the next:
+
+1. `The fleet is leased and epoch-addressed` (F1, F2) — 1093 tests
+2. `The wire is bounded and the submit is idempotent` (F3, F4) — 1105
+3. `Measured at first contact` (F5) — 1114
+4. `The control plane comes close at hand` (F6) — 1125
+
+### What landed, against each invariant
+
+**F1 — Leased.** `Lease(epoch, heard_t, lease_s)` in `desk.py`, one table over
+metal names AND host names because there is one rule. `heartbeat(name, epoch,
+residual)` is a desk verb wired through `Campaigns` and `RemoteDesk`;
+`register_metal` and `list_host` carry the epoch and open the lease, and
+journal the constants (60 s lease, 20 s heartbeat — Q1) on their own rows.
+`leased()` is the gate at the join rung and the carve rung; `status()` rows
+carry `epoch`, `heard_t`, `lease_s` and the verdict. The reaper reaps lapsed
+leases BEFORE it probes anything, concludes those listings without retries,
+parks their runs and knocks their metals. The chassis mints an epoch at
+bring-up, announces it, and renews at the cadence the registration reply hands
+back, re-announcing when a heartbeat is refused. Residents answer a
+`heartbeat` door verb; `Host.watch_residents` asks each every 10 s and ends
+one that has answered nothing past a 600 s phase bound, journaling `stalled`.
+
+**F2 — Epoch-addressed.** `parse_address` reads an optional `@epoch`;
+`with_epoch` composes it and `without_epoch` strips it, because the epoch
+names the instance and never the route — every transport dials the route and
+STAMPS the epoch into the frame under one reserved key (`@epoch`).
+`check_epoch` is the one refusal and `WrongEpoch` names both lives; it is
+called at the host's door, the metal's plane door and the resident's door. A
+carved host's address carries its container's epoch; a released container is a
+lapsed epoch and the commit `1ea2b8a` refusal stands, now naming it.
+
+**F3 — Bounded.** Both `Transport` verbs are coroutines taking `deadline_s`,
+and every frame goes through `bounded`; `Unreachable` is what an expired wait
+raises and the caller journals `unreachable` on the row it was about.
+Placement reads the fleet LIVE and WHOLE before deciding — every leased metal's
+residual and every leased listing's status, concurrently, under the desk's own
+deadlines (5 s and 10 s), outside every lock — and `decide` is a pure function
+of that `Snapshot`, the only thing the one `asyncio.Lock` in the file is held
+over. The carve is issued after the lock is released. The audit is a test that
+reads the source: one `asyncio.Lock()` in `desk.py`, and no `await`, `async`
+or journal write inside `decide`/`join_rung`/`carve_rung`.
+
+**F4 — Idempotent.** `submit-intent` before placement, `submit-replayed` when
+a replay is answered from the archive, `submit-missed` when an attempt found
+nowhere to go. Doors are async on both containers; the chassis has a `fleet()`
+helper and no client-side timeout anywhere near a desk call.
+
+**F5 — Measured.** `first_contact()` on the Engine and Learner protocols,
+implemented for the fakes, `TorchLearner` (allocator high-water mark),
+`FsdpTorchLearner` (gathered across the chorus by an announced verb) and
+`VllmEngine` (weights GB, KV tokens, off vLLM's own config). `ResidentBirth`
+carries the GB it was declared at; the host journals `first-contact` once per
+resident. `TrafficWindow.requests_served` is monotone; `meter_silent` is the
+one reading and `meter-silent` the journal line. `smoke_function` in the
+chassis, wired into all three venues, and each header says to run it before
+`modal deploy`.
+
+**F6 — Close at hand.** `canonical_row(build, borrow=...)` builds specs on the
+client against a throwaway `LocalStore` and ships the cas through the desk's
+`put_plan`; `read_cas` is its inverse. `progress`/`ledgers` poll the
+observer's `/api/run/<id>?root=`, which now serves `done`.
+`MetalService.measure_the_run` is a plane-door verb. `canonical`,
+`progress_function` and `measure_once` are deleted. Every `parked` row goes
+through one writer and carries `wants` and `since`; the observer reads the
+fleet journal (`fleet_notes`) and renders `parked`, `unreachable`, `stalled`
+and the epoch on host and run rows.
+
+### Deviations from the ADR, and the ambiguities resolved
+
+1. **The lease gate is `Desk.leased()`, not `covers()`.** The ADR said
+   "`covers` requires a live lease". `covers` compares regimes and recipes —
+   birth facts of a description — while a lease is what the desk has HEARD,
+   which lives with the heartbeats that renew it. Splitting them keeps
+   `covers` a pure two-argument rule (and its own tests) and puts the
+   liveness question where the table is.
+2. **The resident's epoch refusal lives in `Door`, not `EngineService`.** The
+   ADR named EngineService; `Door` is the resident's whole door (it owns
+   `sleep`, `wake` and `hello`, which reach no service at all), and
+   EngineService is also constructed inline by `HostService`, which has
+   already checked. One receiver, one check.
+3. **The submit key is a digest of the FRAME, not the run id.** The ADR's
+   `submit-intent {folder, run_id, t}` needs a run id before placement, and
+   computing one means reading the spec, which the desk may not do. A run id
+   is a pure function of what the frame carries, so the digest decides the
+   same question; the run id joins the record at the `place` event.
+4. **Two readings the ADR did not name, chosen by the repo's own rule
+   (refuse loudly over waiting silently) and written into the code:** an
+   accepted delivery whose run is NOT RUNNING is a resume to place, not a
+   replay to answer — otherwise stopping a run and resubmitting it, the way
+   every resume on this fleet happens, would be answered with the delivery of
+   the run that was stopped; and a second frame arriving while the first is
+   still in flight is refused with `in_flight: True` rather than waited for or
+   placed again. `IN_FLIGHT_S` (300 s) bounds that refusal so a desk that died
+   mid-submit does not block its own retry forever.
+5. **`read_cas` is an addition.** Q5 named `put_plan` only, but a teacher's
+   rollout plan is one group per prompt in a task set, so a client that must
+   BUILD a plan has to READ what the plan indexes. It is `put_plan`'s inverse
+   and equally opaque to the desk.
+6. **`liveness` moved from the desk's sync door to its async one.** It fans
+   out over the wire, and after F3 a verb that goes to the wire belongs where
+   it can be bounded and cancelled.
+7. **The recontinue lock became a claim set.** The ADR's audit says no lock
+   may be held across a wire call; `retry_parked` is nothing but wire calls,
+   so each run is CLAIMED for the duration of its own reroute instead. The
+   guarantee ("a run must not be adopted twice") is unchanged and two retries
+   over different runs now proceed together.
+8. **Registration no longer reconciles.** `register_metal` returns whether the
+   name was KNOWN and writes only the journal; `reconcile_metal` is the
+   separate awaited pass. F2 made most of it free: a listing whose epoch is
+   not its metal's current one is a corpse without a probe.
+9. **`LocalTransport` and `DoorTransport` answer on a thread.** A `Service`'s
+   `answer` is synchronous, and running it inline would hold the loop meant to
+   be bounding it — so the deadline could never fire, and a slow in-process
+   answer would starve every other bridged frame. Measured: the fakes suite
+   went 9.1 s → 11.5 s for the whole of ADR 0008, which is the price of a
+   thread hop per in-process ask.
+10. **`RESIDENT_STALL_S` is 600 s** — chosen so the unexplained 12-minute
+    `.to()` of 2026-09-04 is caught, and generous enough that a 32B's weight
+    load is not.
+11. **The observer needs its URL.** `RLSTACK_OBSERVER` is an environment
+    variable with no default: the workspace is not something the chassis can
+    know, and an unset one refuses loudly at the first poll.
+
+### Found on the way, not foreseen by the ADR
+
+- **The desk's `metal` wire verb dropped a registration's declared `idle_s`.**
+  `Desk.serve` never passed it to `register_metal`, so every metal took the
+  desk's default however loudly its venue declared its own. Invisible in
+  practice (the venues declare 1800 s, which is the default) and fixed here.
+- **`sleeps = ranks.width == 1`'s cousin**: nothing new, but the same shape —
+  `first_contact` on a chorus needs a collective, so it is an ANNOUNCED verb
+  like `sleep`, and `follow`'s table gained a fourth entry.
+
+### What stays unproven
+
+Everything on metal, which is Q8. Specifically unobserved: that a Modal
+container answers `door`/`door_ask` under the new async signatures and the new
+deadlines; that a metal's heartbeat duty keeps a lease alive across a real
+20 s tick; that a stale epoch is refused by a real reborn container rather
+than merely by a `LocalTransport`; that `torch.cuda.max_memory_allocated`
+reports what an OOM is decided against, or that `all_gather_object` inside an
+announced `first_contact` does not deadlock a real chorus; that vLLM 0.28's
+`vllm_config.model_config.get_weights_bytes()` and `cache_config.num_gpu_blocks`
+exist under those names (the read is defensive and reports `unreadable`
+instead of crashing, which is the one place in this repo defensive reads are
+deliberate); that the observer's `/api/run/<id>` is reachable from a `modal
+run` driver; and that `put_plan` puts a plan a metal container can then read
+off the same volume. THE DRILL (promise 9) is Samarth's and is unrun.
+
+Recorded as CONTEXT **#85**.

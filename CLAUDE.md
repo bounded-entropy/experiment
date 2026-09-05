@@ -120,7 +120,11 @@ modal deploy deploy/steer_l4.py && \
 PYTHONUNBUFFERED=1 modal run deploy/steer_l4.py::check       # two tenants through the desk,
                                                 #   released by the desk (~10m; ADR 0004)
 modal run deploy/stress_fleet.py::topology      # three adapter types at tp=2/fsdp=2
+modal run deploy/concept_steer.py::smoke        # the image, exercised, BEFORE any deploy (ADR 0008)
+RLSTACK_OBSERVER=https://<workspace>--rlstack-ui.modal.run \
 modal run deploy/concept_steer.py::train --layer 10 --teacher-run <rid>   # ADR 0005, UNRUN
+                                                #   a campaign door follows its run at the
+                                                #   observer now, so it needs the URL (ADR 0008)
 python3.13 -m rlstack ui <store-root>           # the observer UI over a local store
 ```
 
