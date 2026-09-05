@@ -601,10 +601,12 @@ class Desk:
         boot: list[dict] = []
         if solo:
             # SOLO (2026-09-05): nothing that stood before this placement is
-            # joined — every unit carves, and the carves are born solo so no
-            # later submit joins them either. Listings born INSIDE this
-            # placement stay joinable (an on-policy arm's teacher pool joins
-            # the main it just carved: one experiment, one engine).
+            # joined — every unit CARVES, on a metal with nothing standing
+            # where one is registered live, never by knocking released metal
+            # (a solo carve for a 0.6B third knocked two 32B pairs awake).
+            # What it carves is the campaign's own and stays joinable: the
+            # next submit's join rung finds it like any listing, which is how
+            # six arms of one campaign share the card the first one carved.
             avoid = avoid | frozenset(self.listings)
         standing = frozenset(self.listings)      # what stood before this placement
         for unit in placement_units(demands):
@@ -637,8 +639,8 @@ class Desk:
         deploy. What no metal, released or live, can hold is still a boot
         instruction — the standing acquire, which stays a human's."""
         listing = await self.carve_unit(unit, solo=solo, standing=standing)
-        if listing is not None:
-            return listing
+        if listing is not None or solo:
+            return listing          # solo never knocks: a fresh card is live metal or a boot
         if not await self.knock_released(unit):
             return None
         return await self.carve_unit(unit, solo=solo, standing=standing)
@@ -765,7 +767,7 @@ class Desk:
                          "base": d.base, "shape": d.shape} for d in unit],
             "base": unit[0].base,
             "vram_gb": need_gb,
-            "solo": solo,               # born solo: one experiment, nobody joins
+            "solo": False,              # carved FOR a campaign, joinable by the next submit
             "builds": recipe.row() if recipe is not None else None,
         }
 

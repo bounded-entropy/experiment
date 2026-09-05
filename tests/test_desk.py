@@ -2168,8 +2168,9 @@ class ReleaseTerminatesTheContainerTest(unittest.TestCase):
 
 class SoloPlacementTest(DeskFixture):
     """`submit(..., solo=True)` (2026-09-05): the placement joins NO listing
-    that stood before it, its carves are born solo so nothing later joins
-    them, and a metal with nothing on it is preferred."""
+    that stood before it, carves on a metal with nothing standing where one
+    is live (never by knocking released metal), and what it carves stays
+    joinable — the next submit of the same campaign lands beside it."""
 
     def test_a_solo_submit_carves_past_a_covering_listing(self) -> None:
         service = self.metal_service(devices=4)
@@ -2181,16 +2182,33 @@ class SoloPlacementTest(DeskFixture):
         self.assertTrue(second["accepted"], second)
         self.assertNotEqual(second["host"], first["host"])   # carved, not joined
         self.assertEqual(len(desk.listings), 4)
-        self.assertTrue(desk.listings[second["host"]].solo)
-        self.assertTrue(service.hosts[second["host"]].solo)
+        self.assertFalse(desk.listings[second["host"]].solo)   # the campaign's, joinable
         requests = [e["request"] for e in self.store.read_fleet_log()
                     if e["event"] == "provision"]
-        self.assertEqual([r["solo"] for r in requests], [False, False, True, True])
-        # a plain submit afterwards joins the first placement's listings, never the solo ones
+        self.assertEqual(len(requests), 4)
+        # a plain submit afterwards JOINS (the join rung's first covering listing)
         third = go(Campaigns(desk).submit(
             dataclasses.replace(self.split_spec(), seeds=Seeds(master=7))))
         self.assertTrue(third["accepted"], third)
-        self.assertEqual(third["host"], first["host"])
+        self.assertEqual(len(desk.listings), 4)
+
+    def test_a_solo_submit_never_knocks_released_metal(self) -> None:
+        """No live metal has room: a plain submit knocks a released metal
+        back (ADR 0003 Q4); a solo one does not — a released 32B pair is
+        not the fresh card a 0.6B campaign asked for — and lands in boot."""
+        self.metal_service(devices=2)
+        self.metal_service("spare", devices=2)
+        desk = self.desk_with_metal("fake-metal", "spare")
+        first = go(Campaigns(desk).submit(self.split_spec()))
+        self.assertTrue(first["accepted"], first)             # fills fake-metal
+        self.assertTrue(all(l.metal == "fake-metal" for l in desk.listings.values()))
+        go(desk.release("spare"))                             # released, knockable
+        solo = go(Campaigns(desk).submit(
+            dataclasses.replace(self.split_spec(), seeds=Seeds(master=99)), solo=True))
+        self.assertFalse(solo["accepted"])
+        self.assertEqual(len(solo["boot"]), 2)
+        self.assertIn("spare", desk.released)                 # not knocked
+        self.assertEqual(len(desk.listings), 2)
 
     def test_a_solo_carve_prefers_an_empty_metal(self) -> None:
         self.metal_service("a-metal", devices=4)
