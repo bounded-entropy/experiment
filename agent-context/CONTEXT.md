@@ -4728,6 +4728,20 @@ specs; backends (local/modal/skypilot) and GPU topology are semantics-neutral.
       filed under any other name is absent. Seed a store with the store's own
       `cas_put`, or put the FILE at `cas/<sha>/blob` — never a directory.
 
+    - **VERSION 0 OF A TRAINABLE DELTA WAS NEVER ON THE STORE** (7eefdd7).
+      The trainer writes `adapters/<name>@v` from v=1; `write_frozen_blobs`
+      wrote only the frozen servable names. The engine's bounded pool (eight
+      bundles, recipe) evicted the on-policy arms' initial bundle while nine
+      tenants published a version each update, the first wave's `routes_at`
+      restored on the miss, and `read_blob("adapters", "v", 0)` had nothing:
+      all three OPD arms died at their first route, the SFT arms (replay, no
+      route) never noticed. Now `write_initial_blobs` persists EVERY servable
+      name at the version the run starts from (`has_blob` spares a resumed
+      version), and the concept recipes carry the gsm venue's thirty-two
+      bundles (f8c1c12). Metal b was released under its six running SFT
+      tenants for the redeploy — they resume from their ledger tails — which
+      is the price of a venue image that cannot be patched in place.
+
     - **THE DESK IS THE WORKING TREE'S.** Deploying the desk from a clean
       worktree replaced the one another session had deployed from the shared
       checkout (its `pulse` verb unknown to main) and broke that session's
