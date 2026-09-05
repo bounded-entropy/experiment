@@ -80,8 +80,8 @@ import os
 import modal
 
 from modal_venue import (
-    a_store, cpu_image_for, desk, export_blob, follow, gpu_image_for,
-    hf_cache, metal_class, metal_handle, progress_function, run_suite,
+    a_store, canonical_row, cpu_image_for, desk, export_blob, follow,
+    gpu_image_for, hf_cache, metal_class, metal_handle, run_suite,
     smoke_function, store_volume, submit_and_follow, wait_for_metal,
 )
 
@@ -262,23 +262,30 @@ def build_prompts(concept: str = CONCEPT, seed: int = SPLIT_SEED) -> dict:
     return uris
 
 
-@app.function(image=cpu_image, volumes={"/store": store_volume}, timeout=600)
-def canonical(kind: str, train_tasks: str = "", teacher_run: str = "",
-              layer: int = 0, adapter: str = "steer") -> dict:
-    """One spec as its canonical row, for the client to submit. The plan goes
-    in the cas here, which is why this runs on the volume."""
-    from rlstack import canonical_json
-
-    store = a_store()
-    spec = (teacher_spec(store, train_tasks) if kind == "teacher"
-            else opd_spec(store, train_tasks, layer, adapter) if kind == "opd"
-            else student_spec(store, teacher_run, layer, adapter))
-    store_volume.commit()
-    return json.loads(canonical_json(spec))
+def teacher_row(train_tasks: str) -> dict:
+    """THE TEACHER'S SPEC, CANONICALIZED ON THE CLIENT (ADR 0008, F6). It
+    BORROWS the task set — its rollout plan is one group per prompt, so the
+    prompts have to be readable here — and its plan bytes go to the cas
+    through the desk. No on-demand function is in this path."""
+    return canonical_row(lambda store: teacher_spec(store, train_tasks),
+                         borrow=(train_tasks,))
 
 
-progress = progress_function(app, cpu_image, module=__name__)
-"""Each run's extent progress, off the store — the chassis' one reader."""
+def student_row(teacher_run: str, layer: int, adapter: str = "steer") -> dict:
+    """ONE ARM'S SPEC, CANONICALIZED ON THE CLIENT. It borrows nothing: an
+    SFT plan is written from the teacher's run id and the wave shape, both of
+    which are constants here — which is why this door, the one that could not
+    reach its submit for an hour on 2026-09-04, needs nothing but the desk."""
+    return canonical_row(lambda store: student_spec(store, teacher_run, layer,
+                                                    adapter))
+
+
+def opd_row(train_tasks: str, layer: int, adapter: str = "nsteer") -> dict:
+    """AN ON-POLICY ARM'S SPEC, on the client: its rollout plan is one group
+    per prompt of the train set, so the set is borrowed like the teacher's."""
+    return canonical_row(lambda store: opd_spec(store, train_tasks, layer,
+                                                adapter),
+                         borrow=(train_tasks,))
 
 
 def the_science() -> dict:
@@ -311,35 +318,6 @@ smoke = smoke_function(
              "rlstack.training.post.conditioned_teacher_logprobs",
              "rlstack.policy.adapters.steer", "rlstack.__main__"))
 """THE SMOKE RUN, before any deploy (ADR 0008, F5). See the header."""
-
-
-@app.function(image=cpu_image, volumes={"/store": store_volume}, timeout=1200)
-def measure_once(run_id: str, heldout_tasks: str, address: str) -> dict:
-    """One idempotent measuring pass against the serving host.
-
-    "teacher" and "main" route to the SAME engine object under different
-    bundles: the student's restored version for `main`, a payload-free base
-    bundle for `teacher` — which is exactly what the conditioned teacher is,
-    the bare Qwen3-32B told about happiness by the hint. One pool, two names
-    (the Routes contract already says one engine may back many).
-    """
-    import asyncio
-
-    from rlstack import load_tasks, measure_run
-    from rlstack.runner.remote import RemotePool, transport_for
-
-    store_volume.reload()
-    store = a_store()
-    tasks = {t.id: t for t in load_tasks(store, heldout_tasks)}
-    pool = RemotePool(transport_for(address), base=BASE, tp=WIDTH)
-    fresh = asyncio.run(measure_run(
-        store, run_id, the_measurement(sorted(tasks)), pool, tasks,
-        pools={"teacher": pool}))
-    store_volume.commit()
-    told = store.read_measurements(run_id).get("distill", {})
-    return {"measured": fresh,
-            "points": [{"update": p["update"], **p["means"]}
-                       for p in told.get("points", [])]}
 
 
 @app.function(image=cpu_image, volumes={"/store": store_volume}, timeout=600)
@@ -381,9 +359,7 @@ def distill_set(train_tasks: str = "", timeout_s: float = 14400.0) -> None:
         raise SystemExit("--train-tasks <cas uri from ::prompts>")
     metal_handle(APP).serve.spawn()
     print(json.dumps(wait_for_metal(METAL), indent=1), flush=True)
-    run_id = submit_and_follow(progress, canonical.remote("teacher",
-                                                          train_tasks),
-                               SUBDIR, timeout_s)
+    run_id = submit_and_follow(teacher_row(train_tasks), SUBDIR, timeout_s)
     print(f"[set] the teacher's rollouts are run {run_id} — "
           f"pass it to ::train --teacher-run", flush=True)
 
@@ -400,9 +376,8 @@ def train(layer: int = 0, teacher_run: str = "",
         raise SystemExit("--teacher-run <run_id from ::distill_set>")
     metal_handle(APP).serve.spawn()
     print(json.dumps(wait_for_metal(METAL), indent=1), flush=True)
-    run_id = submit_and_follow(
-        progress, canonical.remote("student", "", teacher_run, layer, adapter),
-        SUBDIR, timeout_s)
+    run_id = submit_and_follow(student_row(teacher_run, layer, adapter), SUBDIR,
+                               timeout_s)
     print(f"[arm] resid_pre.{layer} trained as run {run_id}", flush=True)
 
 
@@ -414,8 +389,8 @@ def follow_run(run_id: str = "", timeout_s: float = 14400.0) -> None:
     the daemons are the host's, and only the watching stopped."""
     if not run_id:
         raise SystemExit("--run-id <rid>")
-    print(f"[follow] {follow(progress, run_id, timeout_s)} reached its extent",
-          flush=True)
+    print(f"[follow] {follow(run_id, timeout_s, folder=SUBDIR)} reached its "
+          f"extent", flush=True)
 
 
 @app.local_entrypoint()
@@ -450,8 +425,38 @@ def measure(run_id: str = "", heldout_tasks: str = "",
           flush=True)
     if not placed.get("placed"):
         raise SystemExit(f"no serving host: {placed}")
-    print(json.dumps(measure_once.remote(run_id, heldout_tasks,
-                                         placed["pools"]["main"]), indent=1))
+    # THE PASS RUNS ON THE METAL THAT SERVES THE POOL (ADR 0008, F6): the
+    # engine, the store and the admission are already there, so the driver
+    # sends the measurement's manifest and the held-out set's uri and nothing
+    # else. "teacher" and "main" route to the SAME engine under different
+    # bundles — the student's restored version for `main`, a payload-free
+    # base bundle for `teacher`, which is exactly what the conditioned
+    # teacher is: the bare Qwen3-32B told about happiness by the hint.
+    from rlstack.runner.remote import RemoteMetal, parse_address, transport_for
+
+    address = placed["pools"]["main"]
+    plane = f"modal://{parse_address(address).app}/{parse_address(address).cls}"
+    told = asyncio.run(RemoteMetal(transport_for(plane)).measure(
+        run_id, the_measurement(sorted(load_heldout(heldout_tasks))).manifest(),
+        heldout_tasks, BASE, WIDTH, pools=("teacher",)))
+    print(json.dumps({"measured": told["measured"],
+                      "points": [{"update": p["update"], **p["means"]}
+                                 for p in told["points"]]}, indent=1))
+
+
+def load_heldout(heldout_tasks: str) -> list[str]:
+    """The held-out prompt ids, on the CLIENT: the measurement's manifest
+    pins them by id, so the driver has to read the set to write the
+    manifest — and it reads it the way every client read moves now, through
+    the desk (ADR 0008, F6)."""
+    import tempfile
+
+    from rlstack import LocalStore, load_tasks
+
+    with tempfile.TemporaryDirectory() as root:
+        store = LocalStore(root)
+        store.cas_put(asyncio.run(desk().read_cas(heldout_tasks)))
+        return [task.id for task in load_tasks(store, heldout_tasks)]
 
 
 @app.local_entrypoint()

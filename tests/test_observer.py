@@ -422,3 +422,96 @@ class FleetAggregateTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class FleetNotesTest(unittest.TestCase):
+    """ADR 0008, F6 — WHAT THE DESK SAW, RENDERED. A parked run, a row the
+    desk could not reach, and which LIFE of a host is carrying what: three
+    facts no host journal can hold, because a container that cannot answer
+    cannot journal either. The observer reads the fleet journal for them and
+    writes nothing, as ever."""
+
+    def setUp(self) -> None:
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.store = LocalStore(tmp.name)
+        self.store.open_run("arm-a", {"run_id": "arm-a", "spec": "{}"})
+        self.store.append_host_event("h1", {
+            "event": "host-up", "t": 1.0, "epoch": "e7", "engines": ["b"]})
+        self.store.append_host_event("h1", {
+            "event": "attach", "t": 2.0, "run_id": "arm-a", "epoch": "e7",
+            "pools": ["main"], "store": self.store.describe()})
+
+    def park(self, **fields) -> None:
+        self.store.append_fleet_event({
+            "event": "parked", "t": 30.0, "run_id": "arm-a", "since": 10.0,
+            "reason": "host 'h1' reaped", "avoiding": "h1",
+            "wants": [{"regimes": ["main-tp2", "learner-fsdp2"],
+                       "capabilities": ["inference", "training"],
+                       "base": "Qwen/Qwen3-32B", "devices": 2,
+                       "vram_gb": 64.0}], **fields})
+
+    def test_a_parked_run_says_why_and_what_it_wants(self) -> None:
+        """The run page's whole account of waiting: parked, since when, and
+        the metal that would free it — regimes, devices, GB per device."""
+        from rlstack.observe.views import fleet_notes, note_the_fleet, runs_data
+
+        self.park()
+        rows = runs_data([self.store])
+        note_the_fleet(rows, fleet_notes([self.store]), "run_id")
+        self.assertEqual(rows[0]["status"], "parked")
+        told = rows[0]["parked"]
+        self.assertEqual(told["since"], 10.0)
+        self.assertIn("reaped", told["reason"])
+        self.assertEqual(told["wants"][0]["devices"], 2)
+        self.assertEqual(told["wants"][0]["vram_gb"], 64.0)
+
+    def test_a_delivered_placement_supersedes_the_park(self) -> None:
+        """The desk's own queue rule, read the same way: a run that landed
+        again is not waiting for anything."""
+        from rlstack.observe.views import fleet_notes
+
+        self.park()
+        self.store.append_fleet_event({
+            "event": "place", "t": 40.0, "run_id": "arm-a", "delivered": True,
+            "accepted": True, "host": "h2", "pools": {"main": "h2"}})
+        self.assertEqual(fleet_notes([self.store])["parked"], {})
+
+    def test_an_unreachable_row_is_carried_without_a_verdict(self) -> None:
+        """"Did not answer within the deadline" is a fact about ONE ask, not
+        a judgement about the thing — so the row keeps its status and carries
+        the note."""
+        from rlstack.observe.views import fleet_notes, note_the_fleet, hosts_data
+
+        self.store.append_fleet_event({
+            "event": "unreachable", "t": 50.0, "host": "h1",
+            "deadline_s": 10.0})
+        rows = hosts_data([self.store])
+        note_the_fleet(rows, fleet_notes([self.store]), "host")
+        self.assertEqual(rows[0]["epoch"], "e7")
+        self.assertEqual(rows[0]["unreachable"]["kind"], "host")
+        self.assertEqual(rows[0]["unreachable"]["deadline_s"], 10.0)
+
+    def test_the_epoch_reaches_both_kinds_of_row(self) -> None:
+        """F2 on the page: a carve name recycles, so without the epoch two
+        tenancies of two containers read as one host's history."""
+        from rlstack.observe.views import hosts_data, runs_data
+
+        self.assertEqual(hosts_data([self.store])[0]["epoch"], "e7")
+        self.assertEqual(runs_data([self.store])[0]["epoch"], "e7")
+
+    def test_the_routes_serve_the_fleet_s_notes(self) -> None:
+        """Both pages: /api/runs marks the run parked, /api/hosts carries the
+        desk's whole reading."""
+        self.park()
+        self.store.append_fleet_event({
+            "event": "unreachable", "t": 50.0, "metal": "concept-a100",
+            "deadline_s": 5.0})
+        app = ui_app([self.store])
+        runs = json.loads(call(app, "/api/runs")[2])["runs"]
+        self.assertEqual(runs[0]["status"], "parked")
+        self.assertIn("wants", runs[0]["parked"])
+        fleet = json.loads(call(app, "/api/hosts")[2])
+        self.assertIn("arm-a", fleet["parked"])
+        self.assertEqual(fleet["unreachable"]["concept-a100"]["kind"], "metal")
+        self.assertEqual(fleet["hosts"][0]["epoch"], "e7")

@@ -2739,3 +2739,69 @@ class IdempotentSubmitTest(DeskFixture):
         # and the retry is not refused as a replay
         again = go(desk.submit(rows, dict(frame)))
         self.assertFalse(again.get("in_flight"), again)
+
+
+class CloseAtHandTest(DeskFixture):
+    """ADR 0008, F6 — CONTROL-PLANE WORK RUNS WHERE A LEASED PROCESS ALREADY
+    IS. The client for anything pure, the desk for anything that needs the
+    store, the metal for anything that needs the engine — never an on-demand
+    function, of which the platform scheduled NONE for an hour on
+    2026-09-04."""
+
+    def test_plan_bytes_reach_the_cas_through_the_desk(self) -> None:
+        """Q5: the row is built on the client and the bytes it hashed go to
+        the store through the desk, which has the mount. Content-addressed,
+        so the uri the row already carries is the uri the fleet will read —
+        and saying it twice says it once."""
+        desk = self.desk()
+        remote = RemoteDesk(LocalTransport(Campaigns(desk)))
+        uri = go(remote.put_plan(b"the plan's bytes"))
+        self.assertEqual(uri, self.store.cas_put(b"the plan's bytes"))
+        self.assertEqual(go(remote.put_plan(b"the plan's bytes")), uri)
+        self.assertEqual(self.store.cas_get(uri), b"the plan's bytes")
+
+    def test_the_client_can_read_what_it_must_build_a_plan_over(self) -> None:
+        """`put_plan`'s inverse: a teacher's rollout plan is one group per
+        prompt in a task set, so the client has to READ the set to write the
+        plan — and it reads a store it has no mount for the same way it
+        writes one."""
+        remote = RemoteDesk(LocalTransport(Campaigns(self.desk())))
+        uri = self.store.cas_put(b'{"id": "p0"}')
+        self.assertEqual(go(remote.read_cas(uri)), b'{"id": "p0"}')
+
+    def test_the_measurement_runs_on_the_metal_that_serves_the_pool(self) -> None:
+        """The measuring pass moves off an on-demand CPU function and onto
+        the metal: the engine, the store and the admission are already there,
+        and the frame carries the manifest and the held-out set's uri and
+        nothing venue-shaped."""
+        from rlstack.data.tasks.base import Task, write_tasks
+        from rlstack.runner.measure import Measurement
+
+        service = self.metal_service(devices=2)
+        desk = self.desk_with_metal("fake-metal")
+        tasks = write_tasks(self.store, [Task(id="h0", prompt="2+2?",
+                                              meta={})])
+
+        async def drive():
+            reply = await Campaigns(desk).submit(self.split_spec())
+            await service.hosts[reply["host"]]._adoptions[reply["run_id"]]
+            told = await RemoteMetal(
+                self.LazyPlane(self, "metal://fake-metal")).measure(
+                    reply["run_id"],
+                    Measurement(name="probe", env="single_turn",
+                                task_ids=("h0",), samples=1, every=1,
+                                post=(), seed=3).manifest(),
+                    tasks, BASE, 1)
+            return reply, told
+        reply, told = go(drive())
+        self.assertTrue(told["measured"], told)
+        self.assertEqual(
+            sorted(self.store.read_measurements(reply["run_id"])), ["probe"])
+
+    def test_a_measurement_on_the_wrong_metal_is_refused_by_name(self) -> None:
+        """A placement bug, and it says so: this metal serves no such pool."""
+        service = self.metal_service(devices=1)
+        with self.assertRaises(DeskError) as caught:
+            service.pool_for("some/other-base", 8)
+        self.assertIn("serves no", str(caught.exception))
+        self.assertIn("wrong metal", str(caught.exception))

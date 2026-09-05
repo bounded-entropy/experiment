@@ -56,6 +56,70 @@ def _progress(store: Store, run_id: str) -> RunProgress:
 
 
 # ---------------------------------------------------------------------------
+# the fleet journal: what the DESK knows that no host journal says
+# ---------------------------------------------------------------------------
+
+def fleet_notes(roots: Sequence[Store | Root]) -> dict:
+    """WHAT THE DESK SAW, as the pages need it (ADR 0008, F6).
+
+    Two readings over the one fleet journal, both of them facts no host
+    journal can carry — because they are about a host or a run that was NOT
+    answering, and a container that cannot answer cannot journal either.
+
+        parked      the standing `parked` row per run: why it is waiting,
+                    what it WANTS (regimes, devices, GB), and since when.
+                    Superseded by a later delivered placement, exactly as the
+                    desk's own queue reads it.
+        unreachable the last `unreachable` row per metal and per host: a wire
+                    verb that outlived its deadline, on the row it was about.
+
+    The observer still writes nothing and still derives everything from
+    committed bytes; the fleet journal is one more journal it reads."""
+    parked: dict[str, dict] = {}
+    unreachable: dict[str, dict] = {}
+    for root in rooted(roots):
+        for event in root.store.read_fleet_log():
+            kind, run_id = event.get("event"), event.get("run_id")
+            if kind == "parked" and run_id:
+                parked[run_id] = {
+                    "reason": event.get("reason", ""),
+                    "avoiding": event.get("avoiding", ""),
+                    "wants": event.get("wants", []),
+                    "since": event.get("since", event.get("t")),
+                    "boot": event.get("boot", [])}
+            elif kind == "place" and run_id and event.get("delivered") \
+                    and event.get("accepted"):
+                parked.pop(run_id, None)
+            elif kind == "unreachable":
+                name = event.get("metal") or event.get("host")
+                if name:
+                    unreachable[name] = {
+                        "t": event.get("t"), "kind":
+                            "metal" if event.get("metal") else "host",
+                        "deadline_s": event.get("deadline_s")}
+    return {"parked": parked, "unreachable": unreachable}
+
+
+def note_the_fleet(rows: Sequence[dict], notes: dict, key: str) -> None:
+    """The fleet's notes joined onto rows keyed by `key` ("run_id" for runs,
+    "host" for hosts), in place — the same shape `stall_runs` uses, and for
+    the same reason: a page reads ONE row per thing.
+
+    A PARKED RUN IS NOT RUNNING (F6): whatever a host journal's last word
+    was, a run the desk is holding in its queue says `parked` and says what
+    it is waiting for. A row the desk found UNREACHABLE keeps its own status
+    and carries the note, because "did not answer within the deadline" is a
+    fact about one ask and not a verdict about the thing."""
+    for row in rows:
+        name = row.get(key)
+        if key == "run_id" and name in notes["parked"]:
+            row["status"] = "parked"
+            row["parked"] = notes["parked"][name]
+        if name in notes["unreachable"]:
+            row["unreachable"] = notes["unreachable"][name]
+
+
+# ---------------------------------------------------------------------------
 # hosts
 # ---------------------------------------------------------------------------
 
@@ -103,6 +167,9 @@ def hosts_data(roots: Sequence[Store | Root]) -> list[dict]:
             "host": host,
             "folder": root.folder,
             "journal_store": root.store.describe(),
+            # WHICH LIFE of this host the journal's last boot was (ADR 0008,
+            # F2): "" for a host booted before the epoch existed
+            "epoch": ups[-1].get("epoch", "") if ups else "",
             "engines": ups[-1].get("engines", []) if ups else [],
             "partition": ups[-1].get("partition") if ups else None,
             # the processes the host was born with (ADR 0002): label + pid
@@ -193,7 +260,7 @@ def journaled_rows(known: Sequence[Root]) -> dict[tuple[str, str], dict]:
                 continue
             row = rows.setdefault((root.folder, run_id), {
                 "run_id": run_id, "folder": root.folder, "hosts": [],
-                "status": "running", "t": 0.0, "_status_t": -1.0,
+                "status": "running", "t": 0.0, "_status_t": -1.0, "epoch": "",
                 "store": event.get("store", root.store.describe())})
             if host not in row["hosts"]:
                 row["hosts"].append(host)
@@ -203,6 +270,8 @@ def journaled_rows(known: Sequence[Root]) -> dict[tuple[str, str], dict]:
             # (died on and resumed elsewhere) is provenance, not presence.
             row.setdefault("_open", {})[host] = (
                 event.get("event") == "attach")
+            if event.get("event") == "attach" and event.get("epoch"):
+                row["epoch"] = event["epoch"]     # the life carrying it (F2)
             # THE NEWEST EVENT SPEAKS FOR THE RUN, whichever host journal it
             # lives in: a run hops hosts across generations (resubmission is
             # resume), and journals are walked per host, so without the time

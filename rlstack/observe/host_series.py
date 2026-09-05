@@ -32,9 +32,14 @@ from rlstack.observe.views import hosts_data, runs_data
 # What the named readings above already render. Everything else numeric an
 # event carries falls through to the open slot inside metric_series.
 CLAIMED_FIELDS = {
-    "host-up": ("engines", "partition", "regimes", "residents", "store"),
-    "attach": ("pools", "remotes", "n_updates", "store"),
+    "host-up": ("engines", "partition", "regimes", "residents", "store",
+                "epoch"),
+    "attach": ("pools", "remotes", "n_updates", "store", "epoch"),
     "detach": ("status", "completed", "extent", "updates_completed"),
+    "first-contact": ("resident", "kind", "declared_gb", "devices",
+                      "measured"),
+    "stalled": ("resident", "kind", "pid", "silent_s", "bound_s"),
+    "meter-silent": ("requests_served", "served_before", "window_s"),
     "stats": ("gpus",),
     "traffic": ("window_s", "prefill_tokens", "decode_tokens", "requests",
                 "ttft_ms_mean", "admit_wait_ms_mean", "admit_wait_ms_max",

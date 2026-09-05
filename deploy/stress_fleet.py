@@ -37,10 +37,9 @@ import time
 import modal
 
 from modal_venue import (
-    a_store, cpu_image_for, desk, fleet, gpu_image_for, hf_cache, metal_class,
-    metal_handle, progress_function, smoke_function, store_volume,
-    submit_spec, take_down,
-    wait_for_metal,
+    a_store, canonical_row, cpu_image_for, fleet, gpu_image_for, hf_cache,
+    ledgers, metal_class, metal_handle, smoke_function, store_volume,
+    submit_spec, take_down, wait_for_metal,
 )
 
 APP = "rlstack-stress-fleet"
@@ -189,25 +188,20 @@ def the_banks() -> dict[str, tuple[dict, dict]]:
     }
 
 
-@app.function(image=cpu_image, volumes={"/store": store_volume}, timeout=600)
-def build_specs(names: list[str], updates: list[int], masters: list[int]) -> dict:
-    from rlstack import canonical_json
-
-    store = a_store()
+def build_specs(names: list[str], updates: list[int],
+                masters: list[int]) -> dict:
+    """The named specs as canonical rows, BUILT ON THE CLIENT (ADR 0008, F6):
+    pure arithmetic here, plan bytes into the cas through the desk's
+    `put_plan`, and no on-demand function anywhere in the path."""
     banks = the_banks()
-    rows = {}
-    for name, n, master in zip(names, updates, masters):
-        bank, overrides = banks[name]
-        rows[name] = json.loads(canonical_json(
-            spec_for(store, bank, overrides, n, master)))
-    store_volume.commit()
-    return rows
+
+    def build(store) -> dict:
+        return {name: spec_for(store, *banks[name], n, master)
+                for name, n, master in zip(names, updates, masters)}
+    return canonical_row(build)
 
 
-ledgers = progress_function(app, cpu_image, module=__name__, name="ledgers",
-                            tail=8)
-"""Each run's committed updates and its train blocks — the chassis' one
-extent reader."""
+
 
 
 @app.function(image=cpu_image, timeout=300)
@@ -741,13 +735,13 @@ def await_runs(runs: dict[str, str], targets: dict[str, int],
     until_any, until any run has committed at least one update)."""
     deadline = time.time() + timeout_s
     while time.time() < deadline:
-        progress = ledgers.remote(list(runs.values()))
-        line = {name: progress[rid]["committed"] for name, rid in runs.items()}
+        told = ledgers(list(runs.values()))
+        line = {name: told[rid]["committed"] for name, rid in runs.items()}
         print(f"[ledger] {json.dumps(line)}", flush=True)
         if until_any and any(n >= 1 for n in line.values()):
-            return progress
+            return told
         if all(line[name] >= targets[name] for name in runs):
-            return progress
+            return told
         time.sleep(30)
     raise SystemExit("the runs did not finish within the deadline")
 
@@ -776,7 +770,7 @@ def topology(master: int = 41) -> None:
     try:
         print(json.dumps(wait_for_metal(METAL), indent=1), flush=True)
         names = ["lora", "steer", "soft_prompt"]
-        rows = build_specs.remote(names, [UPDATES] * 3,
+        rows = build_specs(names, [UPDATES] * 3,
                                   [master, master + 1, master + 2])
         runs, pools = {}, {}
         for name in names:
@@ -805,7 +799,7 @@ def latejoin(master: int = 51) -> None:
     print(f"[latejoin] {METAL} serving: call {call.object_id}", flush=True)
     try:
         print(json.dumps(wait_for_metal(METAL), indent=1), flush=True)
-        rows = build_specs.remote(["lora", "steer"], [UPDATES_A, UPDATES],
+        rows = build_specs(["lora", "steer"], [UPDATES_A, UPDATES],
                                   [master, master + 1])
         a = submit("A=lora", rows["lora"])
         runs = {"A": a["run_id"]}
@@ -853,7 +847,7 @@ def remote_learner(master: int = 61) -> None:
     print(f"[remote_learner] {METAL} serving: call {call.object_id}", flush=True)
     try:
         print(json.dumps(wait_for_metal(METAL), indent=1), flush=True)
-        rows = build_specs.remote(["lora"], [UPDATES], [master])
+        rows = build_specs(["lora"], [UPDATES], [master])
         reply = submit("anchored-on-main", rows["lora"], anchor="main")
         runs = {"anchored-on-main": reply["run_id"]}
         pools = reply["pools"]

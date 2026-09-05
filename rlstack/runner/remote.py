@@ -1248,6 +1248,18 @@ class RemoteMetal:
         return await self._transport.ask("describe", {},
                                          deadline_s=deadline_s)
 
+    async def measure(self, run_id: str, measurement: Mapping, tasks: str,
+                      base: str | None, tp: int,
+                      pools: Sequence[str] = (),
+                      deadline_s: float = BUILD_DEADLINE_S) -> dict:
+        """ONE MEASURING PASS, ASKED OF THE METAL THAT SERVES THE POOL (ADR
+        0008, F6). The manifest and the held-out set's uri cross as data; the
+        engine, the store and the admission are all already there."""
+        return await self._transport.call("measure", {
+            "run_id": run_id, "measurement": dict(measurement),
+            "tasks": tasks, "base": base, "tp": tp, "pools": list(pools)},
+            deadline_s=deadline_s)
+
     async def carve(self, request: Mapping,
                     deadline_s: float = BUILD_DEADLINE_S) -> dict:
         return await self._transport.call("carve", dict(request),
@@ -1413,6 +1425,25 @@ class RemoteDesk:
         if not isinstance(idle_s, Undeclared):
             payload["idle_s"] = idle_s
         return await self._transport.call("metal", payload)
+
+    async def put_plan(self, data: bytes) -> str:
+        """PLAN BYTES INTO THE CAS, THROUGH THE DESK (ADR 0008, F6 / Q5), and
+        the cas uri back. The client builds its own plans — that is pure work
+        and belongs where the spec is written — and the desk, which has the
+        mount, is what writes them down. Content-addressed, so saying it
+        twice says it once."""
+        reply = await self._transport.call(
+            "put_plan", {"bytes": base64.b64encode(data).decode("ascii")})
+        return reply["uri"]
+
+    async def read_cas(self, uri: str) -> bytes:
+        """`put_plan`'s inverse: the content behind a cas uri, for a client
+        that must BUILD a plan over it. A teacher's rollout plan is one wave
+        per group of the prompts in a task set, so the client has to read the
+        set to write the plan — and reading a store it has no mount for is
+        the desk's job, exactly as writing one is."""
+        reply = await self._transport.call("read_cas", {"uri": uri})
+        return base64.b64decode(reply["bytes"].encode("ascii"))
 
     async def recipe(self, metal: str, builds: Mapping) -> dict:
         """DECLARE WHAT A METAL BUILDS (ADR 0007, Q4). `builds` is a

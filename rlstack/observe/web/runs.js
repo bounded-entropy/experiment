@@ -179,11 +179,15 @@ function table(rows, inFolder) {
     row.append(el("td", {}, (r.tags || []).map(t =>
         `<span class="tag">${esc(t)}</span>`).join("") || "<span class='k'>—</span>"));
     const badge = r.status === "running" ? "live"
-                : r.status === "stalled" ? "stall" : "";
+                : (r.status === "stalled" || r.status === "parked") ? "stall"
+                : "";
     row.append(el("td", {class: badge},
                   esc(r.status)
                 + (r.stalled_hosts ? ` <span class="k" title="no heartbeat from: ${
                       esc(r.stalled_hosts.join(", "))}">⚠</span>` : "")
+                // PARKED SAYS WHAT IT IS WAITING FOR (ADR 0008, F6): a run
+                // the desk is holding is not a mystery, it is a shopping list
+                + (r.parked ? ` <span class="k" title="${esc(parkedWhy(r.parked))}">⏸</span>` : "")
                 + (r.forked ? " <span class='warn'>⚠FORK</span>" : "")));
     row.append(el("td", {}, `${r.committed}/${esc(r.target)}`));
     row.append(el("td", {}, r.hosts.map(h =>
@@ -197,4 +201,17 @@ function table(rows, inFolder) {
     node.append(row);
   }
   return node;
+}
+
+// PARKED, IN ONE LINE (ADR 0008, F6): why it is waiting, since when, and the
+// metal that would free it — regimes, devices, GB per device.
+export function parkedWhy(parked) {
+  const wants = (parked.wants || []).map(w =>
+      `${(w.regimes || []).join("+")} on ${w.devices}x`
+    + `${w.vram_gb === null || w.vram_gb === undefined ? "a whole device"
+                                                       : w.vram_gb + " GB"}`);
+  const since = parked.since
+      ? ` since ${new Date(parked.since * 1000).toLocaleString()}` : "";
+  return `parked${since}: ${parked.reason || "waiting for metal"}`
+       + (wants.length ? ` — wants ${wants.join("; ")}` : "");
 }

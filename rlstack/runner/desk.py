@@ -43,6 +43,7 @@ aggregate this journal records, and the desk is that journal's one writer.
 from __future__ import annotations
 
 import asyncio
+import base64
 import hashlib
 import json
 import time
@@ -305,6 +306,14 @@ submission STILL IN FLIGHT (ADR 0008, F4). A second frame arriving inside that
 window is refused loudly rather than placed a second time; one arriving after
 it belongs to an attempt whose container died before it delivered, and is
 placed afresh."""
+
+
+def _b64(data: bytes) -> str:
+    return base64.b64encode(data).decode("ascii")
+
+
+def _unb64(text: str) -> bytes:
+    return base64.b64decode(text.encode("ascii"))
 
 
 def submit_key(frame: Mapping) -> str:
@@ -743,6 +752,22 @@ class Desk:
         self.store.append_fleet_event({
             "event": "recipe", "t": time.time(), "metal": metal,
             "builds": builds.row()})
+
+    def put_plan(self, data: bytes) -> dict:
+        """PLAN BYTES INTO THE CAS, THROUGH THE DESK (ADR 0008, F6 / Q5).
+
+        A spec's plans are content: a client builds them, hashes them into a
+        cas uri, and the uri is what the spec carries and what its identity
+        is computed over. Before this verb the client needed the store's
+        MOUNT to write them, which is why every venue door ran a `canonical`
+        function on an on-demand CPU container — and for an hour on
+        2026-09-04 Modal scheduled none of them and no arm could start.
+
+        The desk has the mount, so the desk takes the bytes. IDEMPOTENT BY
+        CONSTRUCTION: `cas_put` is content-addressed, so putting the same
+        plan twice is putting it once and the uri is the proof. The desk
+        reads nothing — the bytes are as opaque here as a delivered frame."""
+        return {"uri": self.store.cas_put(data), "bytes": len(data)}
 
     def recipe_for(self, metal: str) -> Builds | None:
         """This metal's declared recipe, or None — a metal nothing has
@@ -2187,6 +2212,11 @@ class Desk:
             # `heartbeat_s`; the residual rides along for the row.
             return await self.heartbeat(payload["name"], payload.get("epoch", ""),
                                         payload.get("residual"))
+        if verb == "put_plan":
+            return self.put_plan(_unb64(payload["bytes"]))
+        if verb == "read_cas":
+            return {"uri": payload["uri"],
+                    "bytes": _b64(self.store.cas_get(payload["uri"]))}
         if verb == "recipe":
             # WHAT A METAL BUILDS, declared through the desk's own door (ADR
             # 0007, Q4) — and through the desk, because the fleet journal has
@@ -2517,6 +2547,66 @@ class MetalService:
                              "base": r.base, "shape": r.shape}
                             for r in regimes]}
 
+    async def measure_the_run(self, payload: Mapping) -> dict:
+        """ONE MEASURING PASS, RUN WHERE THE POOL IS (ADR 0008, F6).
+
+        Named apart from `measure`, which is this class's OTHER measurement —
+        the card, read off the device at bring-up (ADR 0001, Q6). One
+        container, two things worth measuring, and neither is declared.
+
+        A measurement needs an engine and a store, and this container has
+        both — so it runs here rather than on an on-demand CPU function that
+        for an hour on 2026-09-04 Modal never scheduled, and rather than in a
+        driver that has no mount. The frame carries the measurement's own
+        manifest and the addresses it names; nothing venue-shaped reaches
+        this class, exactly as nothing spec-shaped reaches the desk.
+
+        The pool is reached through the SERVING HOST'S DOOR — a LocalTransport
+        onto its `HostService`, which is the in-process rule (#77) — so every
+        request is admitted at that host's own arbiter and counted into its
+        own meter, precisely as a client's would be. `pools` names the OTHER
+        pools the measurement's pipeline addresses (a teacher, a judge); each
+        resolves the same way, and a name this metal cannot serve is refused
+        BY NAME rather than measured against the wrong engine."""
+        from rlstack.runner.measure import Measurement, measure_run
+        from rlstack.data.tasks.base import load_tasks
+
+        row = dict(payload["measurement"])
+        measurement = Measurement(
+            name=row["name"], env=row["env"],
+            task_ids=tuple(row["task_ids"]), samples=int(row["samples"]),
+            every=int(row["every"]), post=tuple(row["post"]),
+            seed=int(row["seed"]),
+            temperature=float(row.get("temperature", 1.0)),
+            max_tokens=int(row.get("max_tokens", 512)))
+        main = self.pool_for(payload["base"], int(payload["tp"]))
+        others = {name: self.pool_for(payload["base"], int(payload["tp"]))
+                  for name in payload.get("pools", ())}
+        tasks = {task.id: task
+                 for task in load_tasks(self.store, payload["tasks"])}
+        fresh = await measure_run(self.store, payload["run_id"], measurement,
+                                  main, tasks, pools=others)
+        return {"measured": list(fresh), "run_id": payload["run_id"],
+                "points": self.store.read_measurements(
+                    payload["run_id"]).get(measurement.name, {})
+                    .get("points", [])}
+
+    def pool_for(self, base: str | None, tp: int) -> RemotePool:
+        """The engine on THIS metal serving (base, tp), reached through its
+        host's own door so admission and traffic stay that host's. Refused by
+        name where nothing here serves it — a measurement placed onto the
+        wrong metal is a placement bug, and it says so."""
+        for name in sorted(self.hosts):
+            host = self.hosts[name]
+            if host.engine_for(base, tp) is not None:
+                return RemotePool(LocalTransport(HostService(host),
+                                                 self.epoch),
+                                  base=base, tp=tp)
+        raise DeskError(
+            f"metal {self.metal.name!r} serves no ({base!r}, tp={tp}): its "
+            f"hosts are {sorted(self.hosts)} — the measurement was placed on "
+            f"the wrong metal")
+
     def adopt_recipe(self, builds: Builds) -> None:
         """The desk's recipe row is CANON (Q5c): a carve request that carries
         one replaces this metal's own, so its deploy constants are only its
@@ -2725,6 +2815,8 @@ class MetalService:
 
     async def serve(self, verb: str, payload: dict) -> dict:
         check_epoch(payload, self.epoch, f"metal {self.metal.name!r}")
+        if verb == "measure":
+            return await self.measure_the_run(payload)
         if verb == "carve":
             return await self.carve(payload)
         if verb == "decarve":

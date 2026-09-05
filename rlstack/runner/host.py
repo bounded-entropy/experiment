@@ -218,7 +218,7 @@ class Host:
         self._attach_regimes()
         self.wire_meter()
         store.append_host_event(name, {
-            "event": "host-up", "t": time.time(),
+            "event": "host-up", "t": time.time(), "epoch": self.epoch,
             "engines": [engine.base or "*" for engine in self.engines],
             "partition": partition.row() if partition is not None else None,
             "regimes": [{"name": r.name, "capability": r.capability,
@@ -424,6 +424,10 @@ class Host:
         self.store.append_host_event(self.name, {
             "event": "attach", "t": time.time(), "run_id": rid,
             "pools": sorted(binding), "remotes": sorted(remote_pools),
+            # WHICH LIFE OF THIS HOST is carrying the run (ADR 0008, F2): a
+            # carve name recycles when a container is reborn, so without the
+            # epoch two tenancies of two containers read as one host's history
+            "epoch": self.epoch,
             # the shape, by reference (#59): the EXTENT plan — the train plan
             # where one trains, else the rollout plan the run is long by
             "plan": getattr(spec.plans, spec.plans.extent),

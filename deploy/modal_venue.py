@@ -81,6 +81,13 @@ and built by ADR 0007)."""
 STORE = "modal://rlstack-store"
 STORE_MOUNT = "/store"
 
+OBSERVER = os.environ.get("RLSTACK_OBSERVER", "")
+"""THE OBSERVER'S BASE URL — where a campaign door reads its run's progress
+(ADR 0008, F6). `deploy/ui.py` deploys under the label `rlstack-ui`, so the
+URL is `https://<workspace>--rlstack-ui.modal.run`; the workspace is not
+something this file can know, so it is an environment variable and an unset
+one is a loud refusal at the first poll rather than a silent fallback."""
+
 store_volume = modal.Volume.from_name("rlstack-store", create_if_missing=True)
 hf_cache = modal.Volume.from_name("rlstack-hf-cache", create_if_missing=True)
 
@@ -284,6 +291,47 @@ def take_down(names, call, reason: str) -> dict:
 # the campaign helpers: submit, and follow to the extent
 # ---------------------------------------------------------------------------
 
+def canonical_row(build, borrow=()):
+    """A SPEC'S CANONICAL ROW, BUILT ON THE CLIENT (ADR 0008, F6 / Q5).
+
+    The row is PURE: a spec is values, and turning it into its canonical JSON
+    is arithmetic. The only reason it ever ran on the volume is that building
+    a spec puts its PLAN BYTES in the cas, and the cas needs the mount — so
+    every venue door was hostage to Modal's CPU capacity, and on 2026-09-04
+    it scheduled none for an hour and no arm could start.
+
+    Both halves move to where they belong. The spec is built here, against a
+    THROWAWAY LocalStore in a temp dir; whatever it put in that store's cas is
+    then shipped through the DESK's `put_plan`, which is content-addressed, so
+    the uris the row already carries are the uris the fleet will read. `borrow`
+    names cas objects the build needs to READ — a teacher's rollout plan is
+    one group per prompt in a task set, so the set has to be here before the
+    plan can be written — fetched through the desk's `read_cas` and re-put
+    locally under the same digest.
+
+    `build(store)` returns one spec or a dict of them; the reply mirrors it.
+    NOTHING ON-DEMAND IS IN THIS PATH: the client computes, the desk writes."""
+    import asyncio
+    import tempfile
+
+    from rlstack import LocalStore
+    from rlstack.spec.canonical import canonical_json
+
+    handle = desk()
+    with tempfile.TemporaryDirectory() as root:
+        store = LocalStore(root)
+        for uri in borrow:
+            store.cas_put(asyncio.run(handle.read_cas(uri)))
+        built = build(store)
+        specs = built if isinstance(built, dict) else {"": built}
+        rows = {name: json.loads(canonical_json(spec))
+                for name, spec in specs.items()}
+        for key in store._list("cas"):
+            put = asyncio.run(handle.put_plan(store._read(key)))
+            print(f"[plan] {key} -> {put}", flush=True)
+    return rows if isinstance(built, dict) else rows[""]
+
+
 def submit_spec(row: dict, subdir: str, anchor: str | None = None,
                 solo: bool = False) -> dict:
     """One canonical spec row through THE desk. The reply is the placement:
@@ -300,65 +348,76 @@ def submit_spec(row: dict, subdir: str, anchor: str | None = None,
     return reply
 
 
-def follow(progress_fn, run_id: str, timeout_s: float,
-           every_s: float = 60.0) -> str:
+def progress(run_id: str, folder: str = "", tail: int = 3) -> dict:
+    """HOW FAR A RUN GOT, READ FROM THE OBSERVER (ADR 0008, F6).
+
+    Progress is a store read, and a read-only service over the store is
+    already standing: `deploy/ui.py` serves `/api/run/<id>` and every number
+    a campaign door needs is in it — the extent, what is committed against
+    it, the run's own `done`, and the tail of its train blocks. So there is
+    no on-demand function in this path at all, which is the whole point: for
+    an hour on 2026-09-04 Modal scheduled none of the CPU functions the doors
+    were built out of, and a `train` door could not reach its submit.
+
+    A plain HTTP GET from the driver, on stdlib alone — the observer is a
+    URL, not an SDK handle, which is also what makes this the one piece of
+    the control plane that already works on any platform."""
+    import urllib.parse
+    import urllib.request
+
+    if not OBSERVER:
+        raise SystemExit(
+            "RLSTACK_OBSERVER is unset: a campaign door follows its run "
+            "through the observer's API now (ADR 0008, F6), so it needs the "
+            "deployed UI's base URL — "
+            "RLSTACK_OBSERVER=https://<workspace>--rlstack-ui.modal.run")
+    url = (f"{OBSERVER.rstrip('/')}/api/run/{urllib.parse.quote(run_id)}"
+           f"?root={urllib.parse.quote(folder)}")
+    with urllib.request.urlopen(url, timeout=60) as answer:
+        told = json.loads(answer.read().decode("utf-8"))
+    if "run_id" not in told:
+        raise SystemExit(f"the observer does not know run {run_id}: {told}")
+    updates = told["updates"]
+    return {"extent": told["extent"], "completed": told["committed"],
+            "planned": told["target"], "done": bool(told["done"]),
+            "committed": int(updates[-1]["update"]) if updates else 0,
+            "train": [dict(u.get("train", {})) for u in updates[-tail:]]}
+
+
+def ledgers(run_ids, folder: str = "", tail: int = 8) -> dict:
+    """Several runs' progress at once, off the observer — what a CHECK venue
+    polls while its tenants train. One GET per run, no function, no mount
+    (ADR 0008, F6)."""
+    return {run_id: progress(run_id, folder, tail) for run_id in run_ids}
+
+
+def follow(run_id: str, timeout_s: float, every_s: float = 60.0,
+           folder: str = "") -> str:
     """A run followed TO ITS EXTENT — the one predicate for both kinds of run
-    (ADR 0006 Part B: a generation-only run's extent is its rollout plan).
-    `progress_fn` is the venue's own volume-side reader, because reading a
-    ledger needs the mount and this driver has none."""
+    (ADR 0006 Part B: a generation-only run's extent is its rollout plan),
+    polled off the observer (F6) rather than a function of the venue's own."""
     deadline = time.time() + timeout_s
     while time.time() < deadline:
-        told = progress_fn.remote([run_id])[run_id]
+        told = progress(run_id, folder)
         print(f"[{run_id[:12]}] {told['completed']}/{told['planned']} "
-              f"{told['extent']} — {json.dumps(told.get('train', []))}",
-              flush=True)
+              f"{told['extent']} — {json.dumps(told['train'])}", flush=True)
         if told["done"]:
             return run_id
         time.sleep(every_s)
     raise SystemExit(f"{run_id} did not finish within {timeout_s:.0f}s")
 
 
-def progress_function(app, image, *, module: str, name: str = "progress",
-                      tail: int = 3):
-    """THE EXTENT READER, one copy: a venue's `@app.function` that reports how
-    far each run has got, plus the tail of its train blocks.
-
-    It lives on the volume because a ledger is a store read and the driver has
-    no mount, and it lives HERE because `run_progress` is the ONE predicate
-    for both kinds of run (ADR 0006 Part B: a generation-only run's extent is
-    its rollout plan) and three venues asking it three ways was three chances
-    to ask it wrong. `tail` is how many of the run's train blocks come back —
-    a check venue that reports the rail per update asks for all of them."""
-    def progress(run_ids: list[str]) -> dict:
-        from rlstack import run_progress
-
-        store_volume.reload()
-        store = a_store()
-        out = {}
-        for run_id in run_ids:
-            told = run_progress(store, run_id)
-            entries = store.peek_ledger(run_id)
-            out[run_id] = {
-                "extent": told.extent, "completed": told.completed,
-                "planned": told.planned, "done": told.done,
-                "committed": int(entries[-1]["update"]) if entries else 0,
-                "train": [dict(e.get("train", {})) for e in entries[-tail:]]}
-        return out
-
-    progress.__name__ = progress.__qualname__ = name
-    progress.__module__ = module    # the container imports it from the VENUE
-    return app.function(image=image, volumes={STORE_MOUNT: store_volume},
-                        timeout=600)(progress)
-
-
-def submit_and_follow(progress_fn, row: dict, subdir: str, timeout_s: float,
+def submit_and_follow(row: dict, subdir: str, timeout_s: float,
                       anchor: str | None = None) -> str:
-    """A CAMPAIGN DOOR, whole: submit and follow. IT NEVER RELEASES (Q6) —
-    a campaign of three arms that tore its metal down after each one would
-    boot the base three times, and under one desk it would tear down whatever
-    else had joined. Idle metal is the desk's to collect (ADR 0003)."""
-    return follow(progress_fn, submit_spec(row, subdir, anchor)["run_id"],
-                  timeout_s)
+    """A CAMPAIGN DOOR, whole: submit and follow. IT NEVER RELEASES (ADR
+    0007, Q6) — a campaign of three arms that tore its metal down after each
+    one would boot the base three times, and under one desk it would tear
+    down whatever else had joined. Idle metal is the desk's to collect (ADR
+    0003). And NOTHING IN THIS PATH IS AN ON-DEMAND FUNCTION (ADR 0008, F6):
+    the row is built on the client, the plans go through the desk, and the
+    following is an HTTP GET at the observer."""
+    return follow(submit_spec(row, subdir, anchor)["run_id"], timeout_s,
+                  folder=subdir or "")
 
 
 def export_blob(store, run_id: str, blob: str, key: str) -> dict:

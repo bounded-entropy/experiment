@@ -58,7 +58,8 @@ export async function drawFleet() {
          asOf: fleet.now, freshS: 60}));
   }
   const table = el("table", {}, "<tr><th></th><th>host</th><th>engines</th><th>regimes</th>"
-      + "<th>partition</th><th>residents</th><th>tenants</th><th>boots</th><th>last seen</th></tr>");
+      + "<th>partition</th><th>residents</th><th>tenants</th><th>epoch</th>"
+      + "<th>boots</th><th>last seen</th></tr>");
   for (const h of fleet.hosts) {
     const row = el("tr", {});
     row.append(el("td", {}, pulseDot(h.pulse, fleet.now)));
@@ -75,11 +76,21 @@ export async function drawFleet() {
         ? h.residents.map(r => esc(`${r.label} · pid ${r.pid}`)).join("<br>")
         : "<span class='k'>—</span>"));
     const stalled = h.tenancy.filter(t => t.status === "stalled").length;
+    const parked = h.tenancy.filter(t => t.status === "parked").length;
     const active = h.running.length - stalled;
     row.append(el("td", {},
         `<span class="${active > 0 ? "live" : "k"}">${Math.max(0, active)} running</span> `
       + (stalled ? `<span class="stall">${stalled} stalled</span> ` : "")
+      + (parked ? `<span class="stall">${parked} parked</span> ` : "")
       + `<span class="k">${h.done} done, ${h.failed} failed</span>`));
+    // WHICH LIFE, and whether the desk could reach it (ADR 0008, F1/F2)
+    row.append(el("td", {class: "k"},
+        (h.epoch ? `<span title="the boot this journal's last host-up was">`
+                 + `${esc(h.epoch)}</span>` : "—")
+      + (h.unreachable ? ` <span class="warn" title="the desk's last ask of `
+          + `this ${esc(h.unreachable.kind)} outlived its `
+          + `${esc(String(h.unreachable.deadline_s))}s deadline">unreachable`
+          + `</span>` : "")));
     row.append(el("td", {class: "k"}, String(h.boots)));
     row.append(el("td", {class: "k when", title: esc(when(h.last_seen))},
                   esc(ago(h.last_seen, fleet.now))));

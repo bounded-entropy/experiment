@@ -54,7 +54,7 @@ from rlstack.observe.locate import Root, rooted
 from rlstack.observe.select import metric_names, overlay
 from rlstack.observe.page import WEB_PREFIX, asset, document
 from rlstack.observe.series import run_series
-from rlstack.observe.views import run_row, runs_data
+from rlstack.observe.views import fleet_notes, note_the_fleet, run_row, runs_data
 from rlstack.observe.waves import wave_detail, wave_list
 
 NOT_FOUND = "404 Not Found"
@@ -202,6 +202,8 @@ def api(roots: Sequence[Root], route: list[str], folder: str | None,
         case ["api", "runs"]:
             rows = runs_data(roots)
             stall_runs(rows, pulses_for(roots, now, desk))
+            notes = fleet_notes(roots)
+            note_the_fleet(rows, notes, "run_id")
             return {"now": now, "runs": rows}, "200 OK"
         case ["api", "hosts"]:
             return fleet_pulsed(roots, since, now, desk), "200 OK"
@@ -321,6 +323,15 @@ def fleet_pulsed(roots: Sequence[Root], since: float | None, now: float,
     stall_runs(data["runs"], pulses)
     for host in data["hosts"]:
         stall_runs(host["tenancy"], pulses_of_lanes(host, pulses))
+    # what the DESK saw and no host journal could say (ADR 0008, F6): a run
+    # parked with what it wants, a row that missed its deadline
+    notes = fleet_notes(roots)
+    note_the_fleet(data["runs"], notes, "run_id")
+    note_the_fleet(data["hosts"], notes, "host")
+    for host in data["hosts"]:
+        note_the_fleet(host["tenancy"], notes, "run_id")
+    data["parked"] = notes["parked"]
+    data["unreachable"] = notes["unreachable"]
     data["now"] = now
     return data
 

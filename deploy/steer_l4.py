@@ -43,10 +43,9 @@ import time
 import modal
 
 from modal_venue import (
-    a_store, cpu_image_for, desk, fleet, gpu_image_for, hf_cache, metal_class,
-    metal_handle, progress_function, run_suite, smoke_function,
-    store_volume, submit_spec,
-    take_down, wait_for_metal,
+    canonical_row, cpu_image_for, desk, fleet, gpu_image_for, hf_cache,
+    ledgers, metal_class, metal_handle, run_suite, smoke_function,
+    submit_spec, take_down, wait_for_metal,
 )
 
 APP = "rlstack-steer-l4"
@@ -191,23 +190,18 @@ def the_two_banks() -> dict[str, tuple[dict, dict]]:
     }
 
 
-@app.function(image=cpu_image, volumes={"/store": store_volume}, timeout=600)
 def build_specs(master: int = 11) -> dict:
-    """The two specs, plans in the CAS, as canonical rows for the client."""
-    from rlstack import canonical_json
+    """The two specs as canonical rows, BUILT ON THE CLIENT (ADR 0008, F6):
+    the row is pure arithmetic over values, and the plan bytes it puts in the
+    cas travel through the desk's `put_plan`. This was an on-demand CPU
+    function, and every door that needed one was hostage to the platform's
+    CPU capacity — which ran out for an hour on 2026-09-04."""
+    return canonical_row(lambda store: {
+        name: spec_for(store, bank, overrides, UPDATES, master)
+        for name, (bank, overrides) in the_two_banks().items()})
 
-    store = a_store()
-    rows = {name: json.loads(canonical_json(
-                spec_for(store, bank, overrides, UPDATES, master)))
-            for name, (bank, overrides) in the_two_banks().items()}
-    store_volume.commit()
-    return rows
 
 
-ledgers = progress_function(app, cpu_image, module=__name__, name="ledgers",
-                            tail=8)
-"""Each run's committed updates and its train blocks — the chassis' one
-extent reader, which is also what a campaign door follows."""
 
 
 # ---------------------------------------------------------------------------
@@ -461,7 +455,7 @@ def up() -> None:
 def submit_two_tenants(master: int) -> tuple[dict[str, str], bool]:
     """Promise 3's first half: the two specs through the desk. Returns the
     run ids by bank name and whether the second JOINED the first's listings."""
-    rows = build_specs.remote(master)
+    rows = build_specs(master)
     runs: dict[str, str] = {}
     hosts: dict[str, dict] = {}
     for name in ("lora", "steer"):
@@ -479,8 +473,8 @@ def await_runs(runs: dict[str, str], timeout_s: float = 3600.0) -> dict:
     update, reported."""
     deadline = time.time() + timeout_s
     while time.time() < deadline:
-        progress = ledgers.remote(list(runs.values()))
-        line = {name: progress[rid]["committed"] for name, rid in runs.items()}
+        told = ledgers(list(runs.values()))
+        line = {name: told[rid]["committed"] for name, rid in runs.items()}
         print(f"[ledger] {json.dumps(line)}", flush=True)
         if all(n >= UPDATES for n in line.values()):
             break
@@ -489,8 +483,9 @@ def await_runs(runs: dict[str, str], timeout_s: float = 3600.0) -> dict:
         raise SystemExit("the runs did not finish within the deadline")
     rails = {}
     for name, rid in runs.items():
-        gaps = [round(t.get("logprob_gap", -1.0), 4) for t in progress[rid]["train"]]
-        losses = [round(t.get("loss", 0.0), 4) for t in progress[rid]["train"]]
+        gaps = [round(t.get("logprob_gap", -1.0), 4)
+                for t in told[rid]["train"]]
+        losses = [round(t.get("loss", 0.0), 4) for t in told[rid]["train"]]
         print(f"[{name}] {rid}: logprob_gap per update {gaps}, loss {losses}",
               flush=True)
         rails[name] = {"run_id": rid, "logprob_gap": gaps, "loss": losses}

@@ -353,6 +353,32 @@ class ChassisTest(VenueFixture):
                          ["student@10", "student@32", "student@54", "teacher"])
         self.assertTrue(all(size > 0 for size in told.values()), told)
 
+    def test_no_door_stands_on_an_on_demand_function(self) -> None:
+        """ADR 0008, F6: the canonical row is computed on the CLIENT, the plan
+        bytes go through the desk's `put_plan`, progress is an HTTP GET at the
+        observer, and the measuring pass runs on the metal. The three CPU
+        functions those doors used to stand on — `canonical`, `progress`,
+        `measure_once` — are gone, and for an hour on 2026-09-04 Modal
+        scheduled none of them."""
+        for name in ("concept_steer", "steer_l4", "stress_fleet"):
+            source = (DEPLOY / f"{name}.py").read_text()
+            for retired in ("def canonical(", "def measure_once(",
+                            "progress_function"):
+                self.assertNotIn(retired, source,
+                                 f"{name} still stands on {retired}")
+        chassis = (DEPLOY / "modal_venue.py").read_text()
+        self.assertNotIn("def progress_function(", chassis)
+        self.assertIn("def canonical_row(", chassis)
+        self.assertIn("/api/run/", chassis)
+
+    def test_the_chassis_follows_a_run_through_the_observer(self) -> None:
+        """F6: progress is a store read and a read-only service over the
+        store is already standing, so the door polls it — and says loudly
+        where it is when nobody has told it."""
+        with self.assertRaises(SystemExit) as caught:
+            self.modal_venue.progress("some-run")
+        self.assertIn("RLSTACK_OBSERVER", str(caught.exception))
+
     def test_a_campaign_door_never_releases(self) -> None:
         """Q6: `concept_steer` and `gsm_a100` are CAMPAIGN venues — arms on
         one booted metal — so no door of either hands metal back. Idle metal

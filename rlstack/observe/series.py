@@ -60,6 +60,11 @@ def run_series(store: Store, run_id: str,
         "extent": progress.extent,
         "committed": progress.completed,
         "target": progress.planned,
+        # the ONE predicate, SERVED rather than re-derived (ADR 0008, F6): a
+        # campaign door follows a run to its extent by polling this route, so
+        # "is it finished" must be the observer's own answer and not a rule
+        # every caller reimplements against `committed` and `target`.
+        "done": progress.done,
     }
 
 
