@@ -2225,9 +2225,7 @@ class Desk:
             return {"metal": payload["metal"],
                     "builds": self.recipe_row(payload["metal"])}
         if verb == "pulse":
-            # a fan of wire probes rides the ADMITTED path like liveness (ADR
-            # 0008, F3): bounded and cancellable; the probes join off the loop
-            return await asyncio.to_thread(self.pulse)
+            return await self.pulse()
         if verb == "liveness":
             return await self.liveness()
         if verb == "reap":
@@ -2265,7 +2263,7 @@ class Desk:
               for name in names))
         return dict(zip(names, answers))
 
-    def pulse(self) -> dict:
+    async def pulse(self) -> dict:
         """Every listing PROBED, now, with what it CARRIES: {host: {"alive":
         answered, "running": [run_id, ...]}} — ONE status frame per listing,
         the roster read off the same reply the liveness probe already makes.
@@ -2278,29 +2276,21 @@ class Desk:
         generation, and a journal alone reads a crashed generation's open
         attach as "running" for as long as any later generation keeps the
         name alive (found on the yu-masala volume: a 09-01 attach beside
-        09-04's arms). Asked from the answer thread, never a loop."""
-        def probe(name: str, listing: Listing) -> tuple[str, dict]:
+        09-04's arms). CONCURRENT and each under the probe deadline, on the
+        admitted path, as `liveness` is (ADR 0008, F3): a pulse costs the
+        slowest probe, never their sum."""
+        async def probe(name: str) -> tuple[str, dict]:
             try:
-                told = listing.host.status()
-            except WedgeError:
-                raise
+                told = await self.listings[name].host.status(
+                    deadline_s=self.probe_deadline_s)
             except Exception:
                 return name, {"alive": False, "running": []}
             return name, {"alive": True, "running": sorted(
                 rid for rid, row in told.get("tenants", {}).items()
                 if row.get("status") == "running")}
 
-        # IN PARALLEL, one thread per listing: a pulse costs the slowest
-        # probe, not their sum — an unreachable metal's two listings at the
-        # wire's deadline each were measured at over 30 s in series
-        listings = sorted(self.listings.items())
-        if not listings:
-            return {}
-        with concurrent.futures.ThreadPoolExecutor(
-                max_workers=min(8, len(listings))) as probes:
-            return dict(probes.map(lambda item: probe(*item), listings))
-
-
+        return dict(await asyncio.gather(
+            *(probe(name) for name in sorted(self.listings))))
 
 def covers(listing: Listing, demand: Demand, recipe: Builds | None) -> bool:
     """THE JOIN RULE, the only copy, in two halves: this listing's regimes

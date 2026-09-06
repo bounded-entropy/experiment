@@ -622,10 +622,10 @@ class LivenessVerbTest(DeskFixture):
                                trains=True)
 
         class Dead:
-            async def call(self, verb, payload):
+            async def call(self, verb, payload, **bounds):
                 raise ConnectionError("gone")
 
-            def ask(self, verb, payload):
+            async def ask(self, verb, payload, **bounds):
                 raise ConnectionError("gone")
 
         self.transports["fleet://dead"] = Dead()
