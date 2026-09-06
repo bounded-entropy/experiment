@@ -637,7 +637,7 @@ class LivenessVerbTest(DeskFixture):
                          {"alive-a": True, "dead-z": False})
         # the same probe with what each host CARRIES: the roster an observer
         # needs to tell a live tenancy from a dead generation's leftover attach
-        pulse = remote.pulse()
+        pulse = go(remote.pulse())
         self.assertEqual(pulse["dead-z"], {"alive": False, "running": []})
         self.assertTrue(pulse["alive-a"]["alive"])
         self.assertEqual(pulse["alive-a"]["running"], [])

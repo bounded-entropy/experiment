@@ -37,6 +37,8 @@ workspace with no desk deployed is a journal-only day: the probe fails and
 the heartbeats stand.
 """
 
+import asyncio
+
 import modal
 
 from modal_venue import desk
@@ -121,7 +123,7 @@ def ui():
     # page nothing (found live: an unscheduled class held / and /api/runs
     # past 75 s behind one probe)
     latest: dict = {"at": 0.0, "pulse": {}}
-    probe = bounded(lambda: desk().pulse(), PULSE_DEADLINE_S)
+    probe = bounded(lambda: asyncio.run(desk().pulse()), PULSE_DEADLINE_S)
 
     def keep_pulsing() -> None:
         while True:

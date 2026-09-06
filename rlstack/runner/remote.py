@@ -1497,9 +1497,10 @@ class RemoteDesk:
             "run_ids": list(run_ids), "optim": optim,
             "remaining_only": remaining_only})
 
-    def pulse(self) -> dict:
+    async def pulse(self, deadline_s: float = DEADLINE_S) -> dict:
         """{host: {"alive": bool, "running": [run_id, ...]}} for every
         listing, probed by the desk just now — liveness plus the roster off
         the same frame, which is what an observer needs to tell a live
-        tenancy from a dead generation's leftover attach."""
-        return self._transport.ask("pulse", {})
+        tenancy from a dead generation's leftover attach. Admitted and
+        bounded, as liveness is (ADR 0008, F3)."""
+        return await self._transport.call("pulse", {}, deadline_s=deadline_s)

@@ -2224,6 +2224,10 @@ class Desk:
             self.recipe(payload["metal"], Builds.from_row(payload["builds"]))
             return {"metal": payload["metal"],
                     "builds": self.recipe_row(payload["metal"])}
+        if verb == "pulse":
+            # a fan of wire probes rides the ADMITTED path like liveness (ADR
+            # 0008, F3): bounded and cancellable; the probes join off the loop
+            return await asyncio.to_thread(self.pulse)
         if verb == "liveness":
             return await self.liveness()
         if verb == "reap":
@@ -2240,8 +2244,6 @@ class Desk:
         raise ValueError(f"unknown fleet verb {verb!r}")
 
     def answer(self, verb: str, payload: dict) -> dict:
-        if verb == "pulse":
-            return self.pulse()
         if verb == "status":
             return self.status()
         if verb == "placements":
