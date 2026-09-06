@@ -1496,3 +1496,10 @@ class RemoteDesk:
         return await self._transport.call("migrate", {
             "run_ids": list(run_ids), "optim": optim,
             "remaining_only": remaining_only})
+
+    def pulse(self) -> dict:
+        """{host: {"alive": bool, "running": [run_id, ...]}} for every
+        listing, probed by the desk just now — liveness plus the roster off
+        the same frame, which is what an observer needs to tell a live
+        tenancy from a dead generation's leftover attach."""
+        return self._transport.ask("pulse", {})

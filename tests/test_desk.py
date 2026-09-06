@@ -617,6 +617,30 @@ class LivenessVerbTest(DeskFixture):
         self.assertEqual(go(remote.liveness()),
                          {"alive-a": True, "dead-z": False})
 
+    def test_the_desk_probes_its_listings(self) -> None:
+        living = self.stand_up("alive-a", "fleet://a", serves_pool=True,
+                               trains=True)
+
+        class Dead:
+            async def call(self, verb, payload):
+                raise ConnectionError("gone")
+
+            def ask(self, verb, payload):
+                raise ConnectionError("gone")
+
+        self.transports["fleet://dead"] = Dead()
+        desk = self.desk()
+        desk.list_host("alive-a", living.regimes, "fleet://a")
+        desk.list_host("dead-z", living.regimes, "fleet://dead")
+        remote = RemoteDesk(LocalTransport(Campaigns(desk)))
+        self.assertEqual(remote.liveness(),
+                         {"alive-a": True, "dead-z": False})
+        # the same probe with what each host CARRIES: the roster an observer
+        # needs to tell a live tenancy from a dead generation's leftover attach
+        pulse = remote.pulse()
+        self.assertEqual(pulse["dead-z"], {"alive": False, "running": []})
+        self.assertTrue(pulse["alive-a"]["alive"])
+        self.assertEqual(pulse["alive-a"]["running"], [])
 
 class LivenessTest(DeskFixture):
     def test_a_dead_listing_is_skipped_and_a_delist_survives_rebuild(self) -> None:

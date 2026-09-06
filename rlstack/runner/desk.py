@@ -2240,6 +2240,8 @@ class Desk:
         raise ValueError(f"unknown fleet verb {verb!r}")
 
     def answer(self, verb: str, payload: dict) -> dict:
+        if verb == "pulse":
+            return self.pulse()
         if verb == "status":
             return self.status()
         if verb == "placements":
@@ -2260,6 +2262,42 @@ class Desk:
             *(self.listings[name].alive(self.probe_deadline_s)
               for name in names))
         return dict(zip(names, answers))
+
+    def pulse(self) -> dict:
+        """Every listing PROBED, now, with what it CARRIES: {host: {"alive":
+        answered, "running": [run_id, ...]}} — ONE status frame per listing,
+        the roster read off the same reply the liveness probe already makes.
+
+        The desk is the one place that can ask a container instead of
+        presuming from a journal. The roster is what lets an observer tell a
+        run that IS on a live host from an attach a dead generation of the
+        same host name left behind: a carve name recurs per container (the
+        counter is the container's), so its journal outlives every
+        generation, and a journal alone reads a crashed generation's open
+        attach as "running" for as long as any later generation keeps the
+        name alive (found on the yu-masala volume: a 09-01 attach beside
+        09-04's arms). Asked from the answer thread, never a loop."""
+        def probe(name: str, listing: Listing) -> tuple[str, dict]:
+            try:
+                told = listing.host.status()
+            except WedgeError:
+                raise
+            except Exception:
+                return name, {"alive": False, "running": []}
+            return name, {"alive": True, "running": sorted(
+                rid for rid, row in told.get("tenants", {}).items()
+                if row.get("status") == "running")}
+
+        # IN PARALLEL, one thread per listing: a pulse costs the slowest
+        # probe, not their sum — an unreachable metal's two listings at the
+        # wire's deadline each were measured at over 30 s in series
+        listings = sorted(self.listings.items())
+        if not listings:
+            return {}
+        with concurrent.futures.ThreadPoolExecutor(
+                max_workers=min(8, len(listings))) as probes:
+            return dict(probes.map(lambda item: probe(*item), listings))
+
 
 
 def covers(listing: Listing, demand: Demand, recipe: Builds | None) -> bool:
