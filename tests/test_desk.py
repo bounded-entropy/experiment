@@ -633,7 +633,7 @@ class LivenessVerbTest(DeskFixture):
         desk.list_host("alive-a", living.regimes, "fleet://a")
         desk.list_host("dead-z", living.regimes, "fleet://dead")
         remote = RemoteDesk(LocalTransport(Campaigns(desk)))
-        self.assertEqual(remote.liveness(),
+        self.assertEqual(go(remote.liveness()),
                          {"alive-a": True, "dead-z": False})
         # the same probe with what each host CARRIES: the roster an observer
         # needs to tell a live tenancy from a dead generation's leftover attach
