@@ -78,6 +78,39 @@ class UiTest(unittest.TestCase):
                                      self.store, FakeEngine(), FakeLearner())
         fabricate_heldout(self.store, self.report.run_id)
 
+    def test_unhosted_run_page_has_the_same_row_as_the_index(self) -> None:
+        app = ui_app([self.store])
+        status, _, body = call(app, f"/api/run/{self.report.run_id}/page")
+        self.assertEqual(status, "200 OK")
+        row = json.loads(body)["row"]
+        self.assertIsNotNone(row)
+        self.assertEqual(row, runs_data([self.store])[0])
+
+    def test_unhosted_incomplete_run_is_discovered_without_inventing_liveness(self) -> None:
+        run = self.store.open_run("unhosted", {"run_id": "unhosted", "spec": "{}"},
+                                  subdir="research/replication")
+        run.write_plan("train", self.store.peek_plan(self.report.run_id, "train"))
+        self.store.annotate_run("unhosted", name="replication", tags=["research"])
+        # Unsealed state must survive observer reads: attaching would sweep it.
+        key = f"{run.run_dir}/adapters/pi@9.bin"
+        self.store._write(key, b"unsealed")
+        before = {key: self.store._read(key) for key in self.store._list("")}
+        row = run_row([self.store], "unhosted", "")
+        self.assertEqual((row["status"], row["committed"], row["target"]),
+                         ("unknown", 0, 4))
+        self.assertEqual(row["hosts"], [])
+        self.assertEqual(row["open_hosts"], [])
+        self.assertEqual(row["subdir"], "research/replication")
+        self.assertEqual(row["name"], "replication")
+        self.assertEqual(before, {key: self.store._read(key)
+                                  for key in self.store._list("")})
+        self.store.append_host_event("host", {"event": "attach", "t": 10,
+                                              "run_id": "unhosted"})
+        rows = [r for r in runs_data([self.store]) if r["run_id"] == "unhosted"]
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["status"], "running")
+        self.assertEqual(rows[0]["hosts"], ["host"])
+
     def test_series_joins_ledger_dictionary_and_eval(self) -> None:
         series = run_series(self.store, self.report.run_id)
         self.assertEqual(series["committed"], 4)
@@ -158,7 +191,10 @@ class UiTest(unittest.TestCase):
         body = json.dumps(json.loads(body)["runs"]).encode()
         self.assertEqual(status, "200 OK")
         runs = json.loads(body)
-        self.assertEqual(runs, [])                  # no host journal: raw run
+        self.assertEqual(len(runs), 1)             # manifest without a host journal
+        self.assertEqual(runs[0]["run_id"], self.report.run_id)
+        self.assertEqual(runs[0]["status"], "done")
+        self.assertEqual(runs[0]["hosts"], [])
 
         status, _, body = call(app, f"/api/run/{self.report.run_id}")
         self.assertEqual(status, "200 OK")

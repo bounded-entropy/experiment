@@ -212,7 +212,7 @@ def render_hosts(roots: Sequence[Store | Root]) -> str:
 # ---------------------------------------------------------------------------
 
 def runs_data(roots: Sequence[Store | Root]) -> list[dict]:
-    """One row per (FOLDER, run_id) journaled in these roots, oldest first.
+    """One row per (FOLDER, run_id) stored or journaled in these roots.
 
     Keyed by the pair because a run's address is the pair: the same spec
     submitted under two folders is the same run_id twice, two experiments
@@ -220,7 +220,7 @@ def runs_data(roots: Sequence[Store | Root]) -> list[dict]:
     read here, written by the CLI, and consulted by no experiment."""
     known = rooted(roots)
     annotations, filings = _filing(known)
-    rows = journaled_rows(known)
+    rows = discovered_rows(known, filings)
     for (folder, run_id), row in rows.items():
         _settle(row, folder, run_id, known, annotations, filings)
     return sorted(rows.values(), key=lambda r: r["t"])
@@ -233,10 +233,10 @@ def run_row(roots: Sequence[Store | Root], run_id: str,
     says — name, tags, folder, hosts — used to cost the page a second request
     for the whole index (measured 1.5 s warm beside a 0.5 s page)."""
     known = rooted(roots)
-    row = journaled_rows(known).get((folder, run_id))
+    annotations, filings = _filing(known)
+    row = discovered_rows(known, filings).get((folder, run_id))
     if row is None:
         return None
-    annotations, filings = _filing(known)
     _settle(row, folder, run_id, known, annotations, filings)
     return row
 
@@ -297,6 +297,25 @@ def journaled_rows(known: Sequence[Root]) -> dict[tuple[str, str], dict]:
                 row["_attach_subdir"] = event.get("subdir") or ""
             row["t"] = max(row["t"], when)
 
+    return rows
+
+
+def discovered_rows(known: Sequence[Root],
+                    filings: Sequence[dict[str, str]]) -> dict[tuple[str, str], dict]:
+    """A manifest establishes existence; host journals establish residency.
+
+    Imported and directly executed runs have real manifests and checkpoints
+    even when no host journal names them. Reuse the existing directory scan
+    to include them, without inventing a host, start time or live status.
+    Journal-only rows still cover the interval before a manifest lands.
+    """
+    rows = journaled_rows(known)
+    for root, filed in zip(known, filings):
+        for run_id in filed:
+            rows.setdefault((root.folder, run_id), {
+                "run_id": run_id, "folder": root.folder, "hosts": [],
+                "status": "unknown", "t": 0.0, "epoch": "",
+                "store": root.store.describe()})
     return rows
 
 
@@ -384,7 +403,7 @@ def render_runs(roots: Sequence[Store | Root], grep: str = "") -> str:
     rows = [row for row in runs_data(roots) if matches(row, grep)]
     if not rows:
         return (f"no experiment matching {grep!r} in these stores\n" if grep
-                else "no experiments journaled in these stores\n")
+                else "no experiments in these stores\n")
     lines = []
     for folder in sorted({row["folder"] for row in rows}):
         if folder:

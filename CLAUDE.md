@@ -4,6 +4,12 @@ Samarth's personal high-throughput RL-for-LLMs harness ("the thin wrapper").
 Designed and built across long Claude sessions; everything you need to
 continue is in the repo.
 
+**Experiment launch rules are in `AGENTS.md` and apply to every agent and
+session.** All experiments, including recovery and controls, go through the
+standing desk. A failure in that path is a reason to repair it, not to create
+a private runner. Check relevant implementation branches before duplicating
+an accepted ADR's work.
+
 ## Read before writing code
 
 1. **STYLE.md** — binding. Eight rules; rule 8's folder tree IS the
