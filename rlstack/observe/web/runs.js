@@ -193,8 +193,9 @@ function table(rows, inFolder) {
     row.append(el("td", {}, r.hosts.map(h =>
         `<a href="${hostPath(h, folder)}">${esc(h)}</a>`).join(" + ")));
     row.append(el("td", {class: "k when",
-                         title: esc(new Date(r.t * 1000).toLocaleString())},
-                  esc(ago(r.t, serverNow))));
+                         title: r.t ? esc(new Date(r.t * 1000).toLocaleString())
+                                    : "No host activity timestamp recorded"},
+                  r.t ? esc(ago(r.t, serverNow)) : "unknown"));
     if (showStore)
       row.append(el("td", {class: "k", title: esc(r.store)},
                     esc(storeTail(r.store))));

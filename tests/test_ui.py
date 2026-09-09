@@ -86,6 +86,20 @@ class UiTest(unittest.TestCase):
         self.assertIsNotNone(row)
         self.assertEqual(row, runs_data([self.store])[0])
 
+    def test_committed_completion_supersedes_a_stale_parked_note(self) -> None:
+        self.store.append_fleet_event({
+            "event": "parked", "t": 10, "run_id": self.report.run_id,
+            "reason": "waiting for metal"})
+        app = ui_app([self.store])
+        status, _, body = call(app, "/api/runs")
+        self.assertEqual(status, "200 OK")
+        row = json.loads(body)["runs"][0]
+        self.assertEqual((row["committed"], row["target"], row["status"]),
+                         (4, 4, "done"))
+        self.assertNotIn("parked", row)
+        # Reading completion must not rewrite the historical desk event.
+        self.assertEqual(self.store.read_fleet_log()[0]["event"], "parked")
+
     def test_unhosted_incomplete_run_is_discovered_without_inventing_liveness(self) -> None:
         run = self.store.open_run("unhosted", {"run_id": "unhosted", "spec": "{}"},
                                   subdir="research/replication")

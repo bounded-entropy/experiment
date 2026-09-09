@@ -107,12 +107,15 @@ def note_the_fleet(rows: Sequence[dict], notes: dict, key: str) -> None:
 
     A PARKED RUN IS NOT RUNNING (F6): whatever a host journal's last word
     was, a run the desk is holding in its queue says `parked` and says what
-    it is waiting for. A row the desk found UNREACHABLE keeps its own status
+    it is waiting for. Committed completion wins over an old parked note:
+    a recovered run may finish without a later desk placement event.
+    A row the desk found UNREACHABLE keeps its own status
     and carries the note, because "did not answer within the deadline" is a
     fact about one ask and not a verdict about the thing."""
     for row in rows:
         name = row.get(key)
-        if key == "run_id" and name in notes["parked"]:
+        if key == "run_id" and name in notes["parked"] \
+                and row.get("status") != "done":
             row["status"] = "parked"
             row["parked"] = notes["parked"][name]
         if name in notes["unreachable"]:
