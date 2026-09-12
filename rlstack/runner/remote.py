@@ -887,6 +887,7 @@ class Address:
     cls: str = ""
     host: str = ""
     epoch: str = ""
+    endpoint: str = ""
 
 
 def parse_address(address: str) -> Address:
@@ -907,6 +908,18 @@ def parse_address(address: str) -> Address:
     rest, at, epoch = rest.rpartition("@")
     if not at:
         rest, epoch = epoch, ""
+    if scheme in ("http", "https"):
+        from urllib.parse import urlsplit
+
+        endpoint, _, host = rest.partition("#")
+        url = urlsplit(f"{scheme}://{endpoint}")
+        if (not url.hostname or url.username or url.password or url.query
+                or url.path not in ("", "/")):
+            raise ValueError(f"invalid HTTP service address {address!r}")
+        # Accessing port also validates its numeric range.
+        url.port
+        return Address(scheme=scheme, host=host, epoch=epoch,
+                       endpoint=f"{scheme}://{endpoint}".rstrip("/"))
     if scheme != "modal":
         return Address(scheme=scheme, host=rest, epoch=epoch)
     path, _, host = rest.partition("#")
@@ -979,6 +992,13 @@ def transport_for(address: str) -> Transport:
     standing = IN_PROCESS.get(address) or IN_PROCESS.get(without_epoch(address))
     if standing is not None:
         return LocalTransport(standing, parsed.epoch)
+    if parsed.scheme in ("http", "https"):
+        from rlstack.runner.transports.http import HttpTransport
+
+        import os
+
+        return HttpTransport(parsed.endpoint, parsed.host, parsed.epoch,
+                             token=os.environ.get("RLSTACK_HTTP_TOKEN", ""))
     if parsed.scheme == "modal":
         from rlstack.runner.transports.modal_cls import ModalClsTransport
 
