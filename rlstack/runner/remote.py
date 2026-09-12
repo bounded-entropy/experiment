@@ -411,6 +411,36 @@ async def bounded(work, deadline_s: float, what: str):
             f"{what} did not answer within {deadline_s:g}s") from expired
 
 
+class WedgeError(RuntimeError):
+    """A sync wire verb asked from a thread that runs an event loop."""
+
+
+def check_off_loop(verb: str) -> None:
+    """A SYNC WIRE VERB IS NEVER ASKED FROM A THREAD THAT RUNS AN EVENT LOOP.
+
+    `ask` waits: on a real transport it blocks until another container
+    answers, on a resident's door until the child does. A blocking wait on
+    the loop thread parks EVERY input that container dispatches — Modal
+    starts sync inputs from the same loop — so one slow party anywhere
+    freezes the whole fleet (the three-container wedge of 2026-09-04: the
+    desk parked probing a host, the host parked pushing a bundle to its pool,
+    the pool parked on its engine child). #77 moved the blocking call onto
+    its own thread, which freed nothing: the caller still waited on it.
+
+    Enforced on every substrate, the in-process one included, so the fakes
+    suite names each offending call site offline. The fix at a site is
+    `await asyncio.to_thread(...)`: the wait leaves the loop. A worker thread
+    (a Modal `door_ask`, a resident's answer) runs no loop and passes."""
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return
+    raise WedgeError(
+        f"sync wire verb {verb!r} asked on a thread that runs an event loop: "
+        f"the blocking wait would park every input this container "
+        f"dispatches. Ask it from a thread — await asyncio.to_thread(...)")
+
+
 class Blocking:
     """THE ONE BRIDGE from a synchronous call site onto the async wire.
 
@@ -445,6 +475,11 @@ class Blocking:
         """One coroutine, driven to its reply, from a thread that owns
         nothing. The caller blocks; the wire's own deadline is what bounds
         the block."""
+        try:
+            check_off_loop("blocking wire")
+        except WedgeError:
+            work.close()
+            raise
         return asyncio.run_coroutine_threadsafe(work, cls.loop()).result()
 
 
@@ -582,7 +617,8 @@ class HostService:
             return await self.host.adopt(payload["spec"],
                                          payload.get("routes", {}),
                                          payload.get("code"),
-                                         payload.get("subdir"))
+                                         payload.get("subdir"),
+                                         resume=bool(payload.get("resume", False)))
         if verb == "stop":
             return await self.host.stop(payload["run_id"])
         if verb in LEARNER_VERBS:
@@ -1187,7 +1223,8 @@ class RemoteHost:
                     routes: Mapping[str, str] | None = None,
                     code: Mapping[str, str] | None = None,
                     subdir: str | None = None,
-                    deadline_s: float = BUILD_DEADLINE_S) -> dict:
+                    deadline_s: float = BUILD_DEADLINE_S,
+                    resume: bool = False) -> dict:
         """`spec` may be a live ExperimentSpec (encoded here, hashes computed
         here) or an already-canonical row (forwarded as-is — the DESK's case,
         relaying a client's frame with the CLIENT's claimed hashes)."""
@@ -1202,7 +1239,7 @@ class RemoteHost:
                 code = code_hashes(spec)
         return await self._transport.call("adopt", {
             "spec": row, "routes": dict(routes or {}),
-            "code": dict(code or {}), "subdir": subdir},
+            "code": dict(code or {}), "subdir": subdir, "resume": resume},
             deadline_s=deadline_s)
 
     async def stop(self, run_id: str, deadline_s: float = DEADLINE_S) -> dict:
@@ -1294,16 +1331,23 @@ class RemoteDesk:
         self._transport = transport
 
     async def submit(self, spec: object, subdir: str | None = None,
-                     anchor: str | None = None, solo: bool = False) -> dict:
+                     anchor: str | None = None, solo: bool = False,
+                     deadline_s: float = BUILD_DEADLINE_S,
+                     resume: bool = False) -> dict:
         """`anchor` names the member the frame lands on — and therefore where
         the run's Trainer sits (campaign.anchor_demand's rule): unasked, the
-        learner's host when the spec declares one, `main` otherwise."""
+        learner's host when the spec declares one, `main` otherwise.
+
+        Placement may build and adopt. Its enclosing call uses the build
+        deadline too; the ordinary 60-second frame bound can expire while
+        that permitted work is still creating the run."""
         from rlstack.runner.campaign import demands_of, frame_for
         from rlstack.runner.desk import demand_rows
 
         return await self._transport.call("submit", {
             "demands": demand_rows(demands_of(spec, anchor)),
-            "frame": frame_for(spec, subdir), "solo": solo})
+            "frame": frame_for(spec, subdir, resume), "solo": solo},
+            deadline_s=deadline_s)
 
     async def resolve(self, demands: Sequence) -> dict:
         """Demands in, addresses out — placement without a workload: the
@@ -1363,27 +1407,34 @@ class RemoteDesk:
                                                      "reason": reason})
 
     async def decommission(self, name: str, force: bool = False,
-                           reroute: bool = False) -> dict:
+                           reroute: bool = False,
+                           deadline_s: float = BUILD_DEADLINE_S) -> dict:
         """Carve's inverse at the desk, one frame: decarve at the host's
         metal (engine down, its GB back to residual) plus delist. Refused
         with the running work NAMED when anything lives on or routes through
         the host; `force` tears it down anyway. `reroute` MOVES the running
         work first — each dependent replayed onto a fresh placement with
         this host off the table, or parked (stopped, journaled, waiting in
-        the store) when nothing else covers it."""
+        the store) when nothing else covers it. Moving several dependents
+        can outlast a status call: use the build deadline, with a finite
+        override for the whole retirement, rather than cancel it mid-move."""
         return await self._transport.call("decommission",
                                           {"host": name, "force": force,
-                                           "reroute": reroute})
+                                           "reroute": reroute},
+                                          deadline_s=deadline_s)
 
     async def reroute(self, run_id: str, avoiding: str = "",
-                      park: bool = False) -> dict:
+                      park: bool = False,
+                      deadline_s: float = BUILD_DEADLINE_S) -> dict:
         """Move a delivered workload: the desk replays its archived delivery
         onto a fresh placement (skipping `avoiding`), stopping the old
-        tenancy only once there is somewhere to go. `park` stops it
+        tenancy only once there is somewhere to go. The enclosing deadline
+        allows building that destination, just as submit does. `park` stops it
         regardless and journals the run parked — decommission's mode, when
         the host is dying either way."""
         return await self._transport.call("reroute", {
-            "run_id": run_id, "avoiding": avoiding, "park": park})
+            "run_id": run_id, "avoiding": avoiding, "park": park},
+            deadline_s=deadline_s)
 
     async def placements(self) -> dict:
         """The desk's current-binding table: the latest delivered placement
@@ -1426,23 +1477,29 @@ class RemoteDesk:
             payload["idle_s"] = idle_s
         return await self._transport.call("metal", payload)
 
-    async def put_plan(self, data: bytes) -> str:
+    async def put_plan(self, data: bytes, *,
+                       deadline_s: float = BUILD_DEADLINE_S) -> str:
         """PLAN BYTES INTO THE CAS, THROUGH THE DESK (ADR 0008, F6 / Q5), and
         the cas uri back. The client builds its own plans — that is pure work
         and belongs where the spec is written — and the desk, which has the
         mount, is what writes them down. Content-addressed, so saying it
-        twice says it once."""
+        twice says it once. CAS may also carry a native adapter warm start;
+        its transfer and durable commit get the build deadline, not a small
+        status request's budget."""
         reply = await self._transport.call(
-            "put_plan", {"bytes": base64.b64encode(data).decode("ascii")})
+            "put_plan", {"bytes": base64.b64encode(data).decode("ascii")},
+            deadline_s=deadline_s)
         return reply["uri"]
 
-    async def read_cas(self, uri: str) -> bytes:
+    async def read_cas(self, uri: str, *,
+                       deadline_s: float = BUILD_DEADLINE_S) -> bytes:
         """`put_plan`'s inverse: the content behind a cas uri, for a client
         that must BUILD a plan over it. A teacher's rollout plan is one wave
         per group of the prompts in a task set, so the client has to read the
         set to write the plan — and reading a store it has no mount for is
         the desk's job, exactly as writing one is."""
-        reply = await self._transport.call("read_cas", {"uri": uri})
+        reply = await self._transport.call("read_cas", {"uri": uri},
+                                           deadline_s=deadline_s)
         return base64.b64decode(reply["bytes"].encode("ascii"))
 
     async def recipe(self, metal: str, builds: Mapping) -> dict:
@@ -1456,7 +1513,8 @@ class RemoteDesk:
                                                      "builds": dict(builds)})
 
     async def release(self, name: str, reason: str = "released",
-                      force: bool = False) -> dict:
+                      force: bool = False,
+                      deadline_s: float = BUILD_DEADLINE_S) -> dict:
         """Hand a metal back BY HAND — the acquire rung inverted at the desk
         (ADR 0003): its listings delisted, its residents down the ladder,
         its shift ended so the venue reclaims the container, and the row
@@ -1468,13 +1526,16 @@ class RemoteDesk:
         under one desk a venue tearing down the metal it acquired would take
         every other experiment on it too, so running work is named back and
         nothing comes down. `force` overrides and is the desk operator's
-        verb; a venue door leaves it unsaid."""
+        verb; a venue door leaves it unsaid. The enclosing deadline allows
+        resident teardown and physical container termination to finish; a
+        status-sized deadline can expire between those two phases."""
         payload = {"metal": name, "reason": reason}
         if force:
             payload["force"] = True
-        return await self._transport.call("release", payload)
+        return await self._transport.call("release", payload, deadline_s=deadline_s)
 
-    async def reap(self, probes: int = 3, wait: float = 0.0) -> dict:
+    async def reap(self, probes: int = 3, wait: float = 0.0,
+                   deadline_s: float = BUILD_DEADLINE_S) -> dict:
         """The janitor's sweep, run by the desk now: probe every listing,
         retry the silent (on a lazy venue the knock is the restart), reap
         what stays silent — decarve at its metal, delist with the reason
@@ -1484,9 +1545,14 @@ class RemoteDesk:
         what has sat past its limit (ADR 0003). Returns
         {"listings": {host: alive | recovered | reaped}, "knocked":
         {metal: answered}, "runs": {run_id: rerouted | parked},
-        "released": [metal, ...]}."""
+        "released": [metal, ...]}.
+
+        Recovery can retry several probes and build replacement hosts, so
+        it needs the build deadline. The ordinary frame bound could cancel
+        this call after decarve but before delist and replay."""
         return await self._transport.call("reap", {"probes": probes,
-                                                   "wait": wait})
+                                                   "wait": wait},
+                                          deadline_s=deadline_s)
 
     async def migrate(self, run_ids: Sequence[str], *, optim: str = "load",
                       remaining_only: bool = False) -> dict:

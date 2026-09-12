@@ -18,7 +18,8 @@ type's own *_vllm.py is the compute.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping, Sequence
+import itertools
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, ClassVar
@@ -49,6 +50,33 @@ class ServingBuild:
     # serve such an adapter type and refuses it at construction, exactly as it
     # refuses a plugin it does not install.
     cas: Callable[[str], bytes] | None = None
+    # THE ENGINE'S PUNICA SLOT NAMESPACE, one source for every adapter type it
+    # serves. A default per-build counter, so the sharing is structural: every
+    # lowering is handed the SAME ServingBuild, so every lowering draws from
+    # this one iterator and no two ids can ever collide.
+    lora_ids: Iterator[int] = field(
+        default_factory=lambda: itertools.count(1), repr=False, compare=False)
+
+    def next_lora_id(self) -> int:
+        """Allocate a unique LoRA slot across every lowering on this engine.
+
+        vLLM keys resident adapters by lora_int_id and keeps the first weights
+        registered for an existing ID. Per-type counters collide when one
+        engine serves several adapter types; a shared counter prevents one
+        tenant from receiving another type's weights.
+        """
+        return next(self.lora_ids)
+
+    def slots(self) -> int:
+        """THE SLOT BUDGET this build carries — ONE number for every adapter
+        type it serves. A resident bundle may be served as up to
+        `max_members` ensemble members plus the mean, one punica adapter
+        each, so the budget is bundles x (members + 1); a build declaring no
+        members has the plain bundle count. An adapter type that spends one
+        slot per bundle demands this same number, not its own count, because
+        capacity is a BUILD fact every served type must agree on
+        (check_demand_fits)."""
+        return self.max_bundles * (self.max_members + 1)
 
 
 @dataclass(frozen=True)

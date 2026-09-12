@@ -233,11 +233,14 @@ class Seeds:
 
 @dataclass(frozen=True)
 class WarmStart:
-    """Start a NEW experiment from another run's sealed state.
+    """Start a NEW experiment from sealed state in another run or the CAS.
 
     Hashes into run_id; the parent is recorded in the manifest — lineage
     without ceremony. `map` renames adapters on the way in: source bank name →
-    name in THIS spec's bank.
+    name in THIS spec's bank. A CAS object contains JSON from the existing
+    runner.remote.encode_emitted codec: adapter bytes and optional optimizer
+    bytes, each keyed by source bank name. Materialized adapters can therefore
+    initialize an ordinary run without a synthetic parent run.
     """
 
     policy: str                   # "store://<run_id>@<version>" or "cas://<sha>"

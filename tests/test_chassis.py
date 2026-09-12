@@ -140,9 +140,9 @@ class ChassisTest(ChassisFixture):
         # keyed by the address's ROUTE: the epoch names the instance, not the
         # dial, and is stamped into the frame instead (ADR 0008, F2)
         self.assertIn(without_epoch(address), IN_PROCESS)
-        self.assertTrue(RemoteHost(transport_for(address)).status())
+        self.assertTrue(go(RemoteHost(transport_for(address)).status()))
 
-        service.decarve(listed[0])
+        go(service.decarve(listed[0]))
         self.assertNotIn(without_epoch(address), IN_PROCESS)
         with self.assertRaises(ValueError):
             transport_for(address)
@@ -260,7 +260,7 @@ class ChassisLeaseTest(ChassisFixture):
         still holds for the old life fails by name instead of queueing for a
         container that fetches nothing."""
         was = self.bare_metal(epoch="e1")
-        was.release()
+        go(was.release())
         stop_serving_in_process(self.PLANE)
         reborn = self.bare_metal(epoch="e2")
         self.assertIs(IN_PROCESS[self.PLANE], reborn)

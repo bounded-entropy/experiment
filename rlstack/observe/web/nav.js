@@ -20,11 +20,13 @@ function parse(pathname, search) {
   const params = new URLSearchParams(search);
   // "" is a folder (the top directory itself); absence is not emptiness
   const folder = params.has("root") ? params.get("root") : null;
+  const runRef = parts[1] && params.get("subdir")
+      ? params.get("subdir") + "/" + parts[1] : parts[1];
   if (!parts.length) return {page: "runs", folder: folder};
   if (parts[0] === "run" && parts.length === 2)
-    return {page: "run", runId: parts[1], folder: folder};
+    return {page: "run", runId: runRef, folder: folder};
   if (parts[0] === "run" && parts[2] === "wave" && parts.length === 4)
-    return {page: "wave", runId: parts[1], update: parseInt(parts[3], 10),
+    return {page: "wave", runId: runRef, update: parseInt(parts[3], 10),
             folder: folder};
   if (parts[0] === "hosts") return {page: "fleet", folder: folder};
   if (parts[0] === "charts") return {page: "charts", folder: folder};
@@ -62,16 +64,26 @@ export function query(folder) {
 }
 
 export function runPath(runId, folder) {
-  return "/run/" + encodeURIComponent(runId) + query(folder);
+  return runAddress("/run/", runId, "", folder);
 }
 export function hostPath(host, folder) {
   return "/host/" + encodeURIComponent(host) + query(folder);
 }
 export function wavePath(runId, update, folder) {
-  return "/run/" + encodeURIComponent(runId) + "/wave/" + update + query(folder);
+  return runAddress("/run/", runId, "/wave/" + update, folder);
 }
 export function apiRun(runId, tail, folder) {
-  return "/api/run/" + encodeURIComponent(runId) + (tail || "") + query(folder);
+  return runAddress("/api/run/", runId, tail || "", folder);
+}
+
+function runAddress(prefix, reference, tail, folder) {
+  const split = reference.lastIndexOf("/");
+  const name = reference.slice(split + 1);
+  let suffix = query(folder);
+  if (split >= 0) {
+    suffix += (suffix ? "&" : "?") + "subdir=" + encodeURIComponent(reference.slice(0, split));
+  }
+  return prefix + encodeURIComponent(name) + tail + suffix;
 }
 
 export function keepHours(path) {
@@ -196,7 +208,7 @@ export function syncSwitcher(runs) {
   for (const [folder, rows] of folders) {
     const into = many ? el("optgroup", {label: folder || "(top)"}) : sel;
     for (const r of rows)
-      into.append(el("option", {value: runPath(r.run_id, many ? r.folder : null)},
+      into.append(el("option", {value: runPath(r.run_ref || r.run_id, many ? r.folder : null)},
           `${esc(r.name || r.run_id)} · ${esc(r.status)} ${r.committed}/${esc(r.target)}`
           + (r.name ? ` · ${esc(r.run_id)}` : "")));
     if (many) sel.append(into);
@@ -224,4 +236,3 @@ export function drawAmbiguity(runId, folders) {
   }
   holder.append(table);
 }
-

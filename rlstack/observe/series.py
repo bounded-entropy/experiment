@@ -43,11 +43,12 @@ def run_series(store: Store, run_id: str,
          "points": [{"update": int(p["update"]),
                      "means": dict(p.get("means", {}))}
                     for p in told["points"] if "update" in p]}
-        for name, told in sorted(store.read_measurements(run_id).items())]
+        for name, told in sorted(store.read_measurements(run_id.rsplit("/", 1)[-1]).items())]
 
     dictionary = store.peek_dictionary(run_id)
     return {
-        "run_id": run_id,
+        "run_id": run_id.rsplit("/", 1)[-1],
+        "run_ref": run_id,
         "dictionary": dictionary,
         "updates": updates,
         "eval": evals,

@@ -188,6 +188,12 @@ class VolumeSweepTest(unittest.TestCase):
         def commit(self) -> None:
             self.commits += 1
 
+        def iterdir(self, path, *, recursive=True):
+            return iter(())
+
+        def read_file(self, key):
+            raise FileNotFoundError(key)
+
     def setUp(self) -> None:
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)

@@ -68,6 +68,22 @@ class LocalStore(Store):
         return sorted(str(path.relative_to(self.root)).replace(os.sep, "/")
                       for path in root.rglob("*") if path.is_file())
 
+    def run_children(self, subdir: str = "") -> list[dict[str, str]]:
+        """Read immediate directories only; never descend into a closed branch."""
+        from rlstack.data.stores.base import check_subdir
+
+        folder = check_subdir(subdir) if subdir else ""
+        top = self.path_of("runs/" + folder)
+        if not top.is_dir() or (top / "manifest.json").is_file():
+            return []
+        with os.scandir(top) as children:
+            return sorted([
+                {"name": child.name,
+                 "kind": "run" if (Path(child.path) / "manifest.json").is_file() else "folder",
+                 "path": (folder + "/" if folder else "") + child.name}
+                for child in children if child.is_dir(follow_symlinks=False)
+            ], key=lambda child: child["name"])
+
     def _run_directories(self) -> dict[str, str]:
         """A RUN DIRECTORY IS A LEAF: the walk turns back the moment it sees a
         manifest, so a store's waves, rollouts and adapters are never listed
@@ -80,7 +96,7 @@ class LocalStore(Store):
         for dirpath, dirnames, filenames in os.walk(top):
             if "manifest.json" in filenames:
                 home = str(Path(dirpath).relative_to(self.root)).replace(os.sep, "/")
-                out[home.rsplit("/", 1)[-1]] = home
+                out[home.removeprefix("runs/")] = home
                 dirnames[:] = []          # nothing beneath a run is a run
         return out
 

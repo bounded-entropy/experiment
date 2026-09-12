@@ -37,7 +37,9 @@ running far enough ahead makes it collapse to the arithmetic alone.
 
 from __future__ import annotations
 
+import asyncio
 import math
+from functools import lru_cache
 from typing import Callable
 
 from rlstack.data.flatten import broadcast, flatten, pack
@@ -56,7 +58,7 @@ from rlstack.runner.meters import HostJournal, UpdateClock
 from rlstack.runner.post import run_pipeline
 from rlstack.runner.daemons.base import Daemon
 from rlstack.runner.daemons.scorer import SCORER
-from rlstack.runner.signals import RunSignals
+from rlstack.runner.signals import RunSignals, store_work
 from rlstack.spec.flow import split_pipeline
 from rlstack.spec.specs import ExperimentSpec, SamplingSpec
 
@@ -85,6 +87,10 @@ class Trainer(Daemon):
         self.plan = plan
         self.refs = refs
         self.engine = engine
+        # This trainer keeps one engine/tokenizer. Repeated injected prompts
+        # need its token IDs once, not a wire round trip per replayed row.
+        # The bounded cache belongs to this trainer and is rebuilt on resume.
+        self.tokenize = lru_cache(maxsize=4096)(engine.tokenize)
         self.learner = learner
         self.routes_at = routes_at
         self.bundle = initial_bundle
@@ -131,13 +137,14 @@ class Trainer(Daemon):
         if not self.pooled:
             return {}
         await self.signals.wait_for(lambda: self.scored(update))
-        return self.run.read_postdata_part(update, SCORER) or {}
+        return await store_work(self.run.read_postdata_part, update, SCORER) or {}
 
     # ---- the daemon ---------------------------------------------------------
 
     async def run_forever(self) -> None:
-        self.sweep_stale()          # converge what an interrupted process left
-        for update in range(self.committed() + 1, len(self.plan) + 1):
+        await store_work(self.sweep_stale)  # converge interrupted work
+        committed = await store_work(self.committed)
+        for update in range(committed + 1, len(self.plan) + 1):
             clock = UpdateClock()
             rows = await self.signals.wait_for(lambda: self.next_rows(update))
             wave = wave_from_rows(rows)
@@ -146,16 +153,22 @@ class Trainer(Daemon):
             # the pooled half, awaited on the store; then the inline half over
             # it; then the ONE merged file every reader downstream still reads
             given = await self.await_scored(update)
+            # routes_at restores the bundle on the pool by ASKING it — sync
+            # wire verbs — so it runs off the loop (check_off_loop)
+            routes = await asyncio.to_thread(self.routes_at, self.bundle)
             async with self.arbiter.admit_all(self.post_residents):
                 produced = await run_pipeline(
-                    self.inline, wave, self.routes_at(self.bundle),
+                    self.inline, wave, routes,
                     self.sampling, self.spec.seeds.master, update, given=given)
             postdata = {**given, **produced}
-            self.run.write_postdata(update, postdata)
+            await store_work(self.run.write_postdata, update, postdata)
             clock.posted()
 
-            tokenize = self.engine.tokenize
-            flats = [flatten(t, tokenize) for t in wave.trajectories]
+            # tokenize is the pool's sync verb — a wire round trip when the
+            # pool is another container — so the whole flatten leaves the loop
+            tokenize = self.tokenize
+            flats = await asyncio.to_thread(
+                lambda: [flatten(t, tokenize) for t in wave.trajectories])
             docs = list(zip(flats, broadcast(postdata, flats)))
 
             # ONE WAVE IS ONE GRADIENT UPDATE: every microbatch accumulates
@@ -163,23 +176,31 @@ class Trainer(Daemon):
             # after all of them — so a checkpoint is never half a wave (#59).
             stats: list[TrainStats] = []
             async with self.arbiter.admit(self.learner):
+                # every Learner verb is synchronous by protocol (ADR 0002 Q6)
+                # and WAITS — on a resident child, or on another host's door
+                # — so each is asked from a thread and this loop keeps
+                # dispatching: the pool's other tenants sample through a
+                # train step, and a learner across the wire cannot park the
+                # host that is waiting on it (check_off_loop)
                 for batch in pack(docs, self.schedule.microbatch_tokens):
-                    stats.append(
-                        self.learner.forward_backward(self.tenant, batch))
-                self.learner.optim_step(self.tenant)
-                emitted = self.learner.emit(self.tenant)
+                    stats.append(await asyncio.to_thread(
+                        self.learner.forward_backward, self.tenant, batch))
+                await asyncio.to_thread(self.learner.optim_step, self.tenant)
+                emitted = await asyncio.to_thread(self.learner.emit, self.tenant)
             clock.trained()
 
             self.version = bump(self.version, self.trainable)
             self.bundle = compile_bundle(emitted.adapters, self.version,
                                          self.servable, self.adapter_types)
             for name in self.trainable:
-                self.run.write_blob("adapters", name, self.version[name],
-                                    emitted.adapters[name])
-                self.run.write_blob("optim", name, self.version[name],
-                                    emitted.optim[name])
-            self.engine.add_bundle(self.bundle)    # registered BEFORE the commit
-            self.run.append_ledger({
+                await store_work(self.run.write_blob, "adapters", name,
+                                 self.version[name], emitted.adapters[name])
+                await store_work(self.run.write_blob, "optim", name,
+                                 self.version[name], emitted.optim[name])
+            # registered BEFORE the commit; asked from a thread, because the
+            # pool may be another container and the attach is its wait
+            await asyncio.to_thread(self.engine.add_bundle, self.bundle)
+            await store_work(self.run.append_ledger, {
                 "update": update,
                 "versions": dict(self.version),
                 "bundle_id": self.bundle.bundle_id,
@@ -187,9 +208,9 @@ class Trainer(Daemon):
                 "post": _column_means(postdata),
                 "train": _train_summary(stats),
             })
-            self.sweep_stale()
+            await store_work(self.sweep_stale)
             clock.sealed()
-            self.journal_update(clock, update)
+            await store_work(self.journal_update, clock, update)
             await self.signals.notify()
 
     # ---- retention (at the commit, because that is when a version goes stale)

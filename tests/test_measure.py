@@ -49,17 +49,27 @@ class MeasureFixture(unittest.TestCase):
             post=("verifier",), seed=17)
 
     def measure(self, pool=None, max_inflight: int = 64,
-                pools: dict | None = None) -> list[int]:
+                pools: dict | None = None, limit: int | None = None) -> list[int]:
         return go(measure_run(self.store, self.report.run_id,
                               self.measurement, pool or self.engine,
                               self.tasks, max_inflight=max_inflight,
-                              pools=pools or {}))
+                              pools=pools or {}, limit=limit))
 
 
 class MeasureRunTest(MeasureFixture):
     def test_follows_the_cadence_and_backfills(self) -> None:
         fresh = self.measure()
         self.assertEqual(fresh, [2, 4])           # every 2nd of 4 committed
+
+    def test_a_limit_takes_the_earliest_missing_points_and_stops(self) -> None:
+        """Breadth-first backfill across many runs is `limit=1` in a loop:
+        each call takes the earliest missing point and returns, and the next
+        call resumes at the next one — nothing is skipped or repeated."""
+        self.assertEqual(self.measure(limit=1), [2])
+        self.assertEqual(self.measure(limit=1), [4])
+        self.assertEqual(self.measure(limit=1), [])
+        told = self.store.read_measurements(self.report.run_id)["heldout"]
+        self.assertEqual([p["update"] for p in told["points"]], [2, 4])
         told = self.store.read_measurements(self.report.run_id)["heldout"]
         self.assertEqual([p["update"] for p in told["points"]], [2, 4])
         point = told["points"][0]

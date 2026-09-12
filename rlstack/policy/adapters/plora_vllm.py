@@ -68,7 +68,6 @@ class PloraRollout(RolloutLowering):
 
     def __init__(self, build: ServingBuild) -> None:
         super().__init__(build)
-        self._next_int_id = 1                # punica addresses its slots by int id
         self._factors: dict[str, dict[str, tuple]] = {}   # uri -> per-site (U, A)
         self.check_can_resolve_factors()
 
@@ -92,11 +91,13 @@ class PloraRollout(RolloutLowering):
 
     def demands(self) -> BuildDemands:
         """The lever plus its sizing, counted in MEMBERS: one resident plora
-        bundle is members + 1 punica adapters (the ensemble and the mean), so
-        the slot budget multiplies where lora's simply counts bundles."""
+        bundle is members + 1 punica adapters (the ensemble and the mean),
+        which is why the build's slot budget multiplies — and it is the
+        BUILD's number (ServingBuild.slots), the same one lora demands, so
+        both may be served by one engine."""
         return BuildDemands(engine_args={
             "enable_lora": True,
-            "max_loras": self.build.max_bundles * (self.build.max_members + 1),
+            "max_loras": self.build.slots(),
             "max_lora_rank": self.build.max_rank})
 
     def reaches(self, meta: SiteMeta) -> bool:
@@ -181,9 +182,8 @@ class PloraRollout(RolloutLowering):
                 self.build.base, state.k,
                 [path.rsplit(".", 1)[-1] for path in state.paths]))
         request = LoRARequest(lora_name=f"{home.name}/{name}",
-                              lora_int_id=self._next_int_id,
+                              lora_int_id=self.build.next_lora_id(),
                               lora_path=str(directory))
-        self._next_int_id += 1
         return request
 
     def apply(self, attached: PloraEnsemble, request: Request) -> Levers:

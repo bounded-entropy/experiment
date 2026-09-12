@@ -15,6 +15,7 @@ the policy never moves.
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Callable, Mapping
 
 from rlstack.data.plan import RunPlan, WavePlan
@@ -101,10 +102,13 @@ class Generator(Daemon):
                     f"trajectories, so it names them leaf by leaf")
             await self.signals.wait_for(lambda: self.may_generate(index))
             async with self.arbiter.admit(self.engine):
+                # routes_at restores the bundle on the pool by ASKING it —
+                # sync wire verbs — so it runs off the loop (check_off_loop)
+                routes = await asyncio.to_thread(self.routes_at,
+                                                 self.newest_bundle())
                 wave = await sample_wave(
                     entry, index=index, tasks=self.tasks,
-                    sampling=self.gen.sampling,
-                    routes=self.routes_at(self.newest_bundle()),
+                    sampling=self.gen.sampling, routes=routes,
                     master=self.master, max_inflight=self.max_inflight,
                     reader=self.refs)
             self.run.write_rollout(index, wave_to_rows(wave))

@@ -27,6 +27,7 @@ beside the Trainer instead of inside it changes what has to be asked.
 
 from __future__ import annotations
 
+import asyncio
 from typing import Callable
 
 from rlstack.data.plan import RunPlan
@@ -146,9 +147,10 @@ class Scorer(Daemon):
             rows = await self.signals.wait_for(lambda: self.next_rows(update))
             wave = wave_from_rows(rows)
             async with self.arbiter.admit_all(self.residents):
+                routes = await asyncio.to_thread(     # sync asks, off the loop
+                    self.routes_at, self.pinned_bundle(update, wave))
                 columns = await run_pipeline(
-                    self.pipeline, wave,
-                    self.routes_at(self.pinned_bundle(update, wave)),
+                    self.pipeline, wave, routes,
                     self.sampling, self.master, update)
             self.run.write_postdata_part(update, SCORER, columns)
             await self.signals.notify()

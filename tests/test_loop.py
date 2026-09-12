@@ -33,6 +33,75 @@ class LoopTest(unittest.TestCase):
                                 learner or FakeLearner())
         return report, engine
 
+    def test_slow_run_attachment_keeps_the_event_loop_responsive(self):
+        import asyncio
+        import threading
+        from unittest.mock import patch
+        from rlstack.runner.loop import run_experiment_async
+
+        entered, release = threading.Event(), threading.Event()
+        original = self.store.open_run
+
+        def slow_open(*args, **kwargs):
+            entered.set()
+            release.wait(2)
+            return original(*args, **kwargs)
+
+        async def drive():
+            task = asyncio.create_task(run_experiment_async(
+                arith_spec(self.train), SCHEMA, self.store, FakeEngine(), FakeLearner()))
+            while not entered.is_set():
+                await asyncio.sleep(0)
+            responsive = not release.is_set()
+            release.set()
+            await task
+            return responsive
+
+        timer = threading.Timer(1, release.set)
+        timer.start()
+        try:
+            with patch.object(self.store, 'open_run', side_effect=slow_open):
+                self.assertTrue(asyncio.run(drive()), 'store attachment blocked the host event loop')
+        finally:
+            release.set()
+            timer.cancel()
+
+    def test_cancelled_attachment_waits_for_its_store_writer(self):
+        import asyncio
+        import threading
+        from unittest.mock import patch
+        from rlstack.runner.loop import attach_run
+
+        entered, release, finished = (threading.Event() for _ in range(3))
+        original = self.store.open_run
+
+        def slow_open(*args, **kwargs):
+            entered.set()
+            release.wait(2)
+            result = original(*args, **kwargs)
+            finished.set()
+            return result
+
+        async def drive():
+            task = asyncio.create_task(attach_run(
+                self.store, 'pending', manifest={'run_id': 'pending'}, subdir=None))
+            try:
+                self.assertTrue(await asyncio.to_thread(entered.wait, 1))
+                for _ in range(2):
+                    task.cancel()
+                    await asyncio.sleep(0)
+                    self.assertFalse(task.done(), 'custody ended before the store writer')
+                release.set()
+                with self.assertRaises(asyncio.CancelledError):
+                    await task
+                self.assertTrue(finished.is_set())
+                self.assertIsNotNone(self.store.peek_manifest('pending'))
+            finally:
+                release.set()
+
+        with patch.object(self.store, 'open_run', side_effect=slow_open):
+            asyncio.run(drive())
+
     def test_completes_and_commits_every_update(self) -> None:
         spec = arith_spec(self.train)
         report, engine = self.run_spec(spec)
@@ -82,6 +151,40 @@ class LoopTest(unittest.TestCase):
             self.assertEqual(flat.doc_len, len(flat.token_ids))
             self.assertIn(1, flat.loss_mask)      # generated tokens present
             self.assertIn(0, flat.loss_mask)      # injected prompt present
+
+    def test_replayed_prompts_are_tokenized_once_per_trainer(self) -> None:
+        """Repeated sealed rows reuse tokens, while a fresh trainer asks anew."""
+        from unittest.mock import patch
+        from common import sealed
+        from rlstack import Host, HostService, LocalTransport, RemotePool, trajectory_to_row
+
+        rows = [trajectory_to_row(sealed("fact", content)) for content in ("4", "5")]
+        data = self.store.cas_put("".join(json.dumps(row) + "\n" for row in rows).encode())
+        plan = RunPlan(tuple(WavePlan((GroupPlan("fact", (
+            Replay(data + "#0"), Replay(data + "#1"))),)) for _ in range(4)))
+        spec = arith_spec(self.train, gen=None,
+                          plans=Plans(train=self.store.cas_put(encode(plan))))
+        serving = FakeEngine()
+        host = Host("tokenizer", engines=(serving,), learner=None, store=self.store)
+        remote = RemotePool(LocalTransport(HostService(host)))
+        with patch.object(serving, "tokenize", wraps=serving.tokenize) as tokenize:
+            report = run_experiment(spec, SCHEMA, self.store, remote, FakeLearner())
+        self.assertEqual(report.completed, 4)
+        tokenize.assert_called_once_with("What is 2+2?")
+
+        # No cached result is shared with another trainer or engine.
+        with tempfile.TemporaryDirectory() as root:
+            other, _, _ = arith_store(root)
+            other.cas_put(self.store.cas_get(data))
+            other.cas_put(encode(plan))
+            engine = FakeEngine()
+            with patch.object(engine, "tokenize", wraps=engine.tokenize) as fresh:
+                again = run_experiment(spec, SCHEMA, other, engine, FakeLearner())
+            fresh.assert_called_once_with("What is 2+2?")
+            self.assertEqual(report.run_id, again.run_id)
+            from test_resume import snapshot
+            self.assertEqual(snapshot(self.store, report.run_id),
+                             snapshot(other, again.run_id))
 
     def test_recorded_draws_survive_the_store(self) -> None:
         spec = arith_spec(self.train)
@@ -201,6 +304,66 @@ class LoopTest(unittest.TestCase):
         self.assertNotEqual(warm.run_id, cold.run_id)    # WarmStart hashes in
         # the warm child's phase-1 bundle reflects the loaded parent state
         self.assertNotEqual(warm_engine.bundle_log[0], cold_engine.bundle_log[0])
+
+    def test_warm_start_never_sweeps_the_parents_uncommitted_work(self):
+        from rlstack.runner.loop import warm_start_source, sealed_payloads
+        parent = self.store.open_run('parent', manifest={'run_id': 'parent'})
+        parent.write_blob('adapters', 'pi', 1, b'sealed')
+        parent.append_ledger({'update': 1, 'versions': {'pi': 1}})
+        parent.write_blob('adapters', 'pi', 2, b'in flight')
+        parent.write_wave(2, [{'work': 'in flight'}])
+        before = {key: self.store._read(key) for key in self.store._list('runs/parent')}
+        source, version = warm_start_source(WarmStart('store://parent@1'), self.store)
+        self.assertEqual(sealed_payloads(source, version, {}, {'pi'}), {'pi': b'sealed'})
+        self.assertEqual(before, {key: self.store._read(key) for key in self.store._list('runs/parent')})
+
+    def test_cas_and_store_warm_starts_restore_the_same_mapped_state(self):
+        from rlstack.runner.interfaces import Emitted
+        from rlstack.runner.remote import encode_emitted
+
+        parent, _ = self.run_spec(arith_spec(self.train))
+        run = self.store.open_run(parent.run_id)
+        state = Emitted(adapters={"pi": run.read_blob("adapters", "pi", 4)},
+                        optim={"pi": run.read_blob("optim", "pi", 4)})
+        encoded = json.dumps(encode_emitted(state)).encode()
+        uri = self.store.cas_put(encoded)
+        policy = PolicySpec(base="Qwen/Qwen3-0.6B",
+                            bank={"ghost": lora("layers.0-3.self_attn.*", r=16)})
+        loaded = []
+        for address in (f"store://{parent.run_id}@4", uri):
+            for moments in ("fresh", "load"):
+                _, engine = self.run_spec(arith_spec(self.train, policy=policy,
+                    init=WarmStart(address, optim=moments, map={"pi": "ghost"})))
+                loaded.append(engine.bundle_log[0])
+        self.assertTrue(all(bundle == loaded[0] for bundle in loaded))
+        self.assertEqual(self.store.cas_get(uri), encoded)
+
+    def test_cas_initializes_a_frozen_bank_without_a_synthetic_parent(self):
+        from rlstack.runner.interfaces import Emitted, EntryInstall
+        from rlstack.runner.loop import initial_adapters
+        from rlstack.runner.remote import encode_emitted
+
+        uri = self.store.cas_put(json.dumps(encode_emitted(
+            Emitted({"source": b"materialized adapter"}, {}))).encode())
+        entry = EntryInstall("pi", "lora", {}, False, ())
+        payloads = initial_adapters((entry,), WarmStart(uri, map={"source": "pi"}), self.store)
+        self.assertEqual(payloads, {"pi": b"materialized adapter"})
+        self.assertEqual(self.store.list_runs(), [])
+
+    def test_cas_refuses_missing_requested_moments(self):
+        from rlstack.runner.interfaces import Emitted
+        from rlstack.runner.loop import cas_warm_start
+        from rlstack.runner.remote import encode_emitted
+
+        uri = self.store.cas_put(json.dumps(encode_emitted(
+            Emitted({"source": b"adapter"}, {}))).encode())
+        with self.assertRaisesRegex(FileNotFoundError, "no optimizer moments"):
+            cas_warm_start(WarmStart(uri, optim="load", map={"source": "pi"}),
+                           self.store, {"pi"}, ["pi"])
+        state = cas_warm_start(WarmStart(uri, map={"source": "pi"}),
+                               self.store, {"pi"}, ["pi"])
+        self.assertEqual(state.adapters, {"pi": b"adapter"})
+        self.assertEqual(state.optim, {})
 
 
 if __name__ == "__main__":

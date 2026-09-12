@@ -93,7 +93,7 @@ function drawTenancy(host) {
     return;
   }
   holder.append(timeline(host.tenancy.map(t => ({
-      name: t.run_id, href: runPath(t.run_id, route.folder),
+      name: t.run_id, href: runPath(t.run_ref || t.run_id, route.folder),
       bars: [{label: t.run_id, status: t.status, t0: t.attached, t1: t.detached,
               detail: (t.pools || []).join(", ")}]})),
     [host.first_seen, host.last_seen], residencyTip));
@@ -102,7 +102,7 @@ function drawTenancy(host) {
       + "<th>store</th></tr>");
   for (const t of host.tenancy.slice().reverse()) {
     const row = el("tr", {});
-    row.append(el("td", {}, `<a href="${runPath(t.run_id, route.folder)}">${esc(t.run_id)}</a>`));
+    row.append(el("td", {}, `<a href="${runPath(t.run_ref || t.run_id, route.folder)}">${esc(t.run_id)}</a>`));
     row.append(el("td", {class: t.status === "running" ? "live" : ""}, esc(t.status)));
     row.append(el("td", {class: "k"}, esc(t.pools.join(", ") || "—")));
     row.append(el("td", {class: "k"}, esc(t.remotes.join(", ") || "—")));

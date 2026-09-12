@@ -30,6 +30,7 @@ far from the teacher" is a measurement like any other (ADR 0005).
 
 from __future__ import annotations
 
+import asyncio
 import json
 import math
 from collections.abc import Mapping, Sequence
@@ -114,10 +115,17 @@ async def measure_run(store: Store, run_id: str, measurement: Measurement,
                       pool, tasks: Mapping[str, Task],
                       max_inflight: int = 64,
                       pools: Mapping[str, Engine] = MappingProxyType({}),
-                      ) -> list[int]:
+                      limit: int | None = None) -> list[int]:
     """One idempotent pass over the run's ledger; returns the updates newly
     measured. Call it on any cadence — a schedule, a loop, by hand — and it
     backfills whatever is missing, then returns.
+
+    `limit` caps how many points ONE call takes, earliest missing first, so
+    a caller measuring many runs through one slow pool can go round them
+    breadth-first — a point for every run, then the next — instead of
+    letting the first run absorb the whole pass (found on gsm-b, 2026-09-05:
+    a pool shared with eight training tenants measured ~2 episodes a minute,
+    and a depth-first pass timed out inside its first run every time).
 
     `pool` is "main": the measured policy, one restored bundle per point.
     `pools` are the OTHER names this measurement's environment or pipeline
@@ -127,15 +135,19 @@ async def measure_run(store: Store, run_id: str, measurement: Measurement,
     uses and this mapping omits fails by name at the first group, which is
     the same failure the runner's engine map gives a spec.
     """
-    store.open_measurement(run_id, measurement.name, measurement.manifest())
-    done = store.measured_updates(run_id, measurement.name)
+    # Measurement storage remains keyed by scientific ID, outside runs/.
+    # Checkpoint reads below use the caller's explicit run reference.
+    measurement_id = run_id.rsplit("/", 1)[-1]
+    store.open_measurement(measurement_id, measurement.name, measurement.manifest())
+    done = store.measured_updates(measurement_id, measurement.name)
     sampling = SamplingSpec(temperature=measurement.temperature,
                             max_tokens=measurement.max_tokens)
     plan = WavePlan(tuple(
         GroupPlan(task, tuple(Sample(task, measurement.env)
                               for _ in range(measurement.samples)))
         for task in measurement.task_ids))
-    extra = base_bundles({name: engine for name, engine in pools.items()
+    extra = await asyncio.to_thread(
+        base_bundles, {name: engine for name, engine in pools.items()
                           if name != "main"})
     fresh: list[int] = []
     for entry in store.peek_ledger(run_id):
@@ -143,8 +155,8 @@ async def measure_run(store: Store, run_id: str, measurement: Measurement,
         if update % measurement.every or update in done:
             continue
         bundle = restore_at(store, run_id, entry)
-        if not pool.knows_bundle(bundle.bundle_id):
-            pool.add_bundle(bundle)
+        if not await asyncio.to_thread(pool.knows_bundle, bundle.bundle_id):
+            await asyncio.to_thread(pool.add_bundle, bundle)
         routes = {"main": (pool, bundle),
                   **{name: (pools[name], base) for name, base in extra.items()}}
         wave = await sample_wave(plan, index=update, tasks=tasks,
@@ -155,10 +167,12 @@ async def measure_run(store: Store, run_id: str, measurement: Measurement,
                                      measurement.seed, update,
                                      phase="eval-post")
         store.append_measurement_point(
-            run_id, measurement.name,
+            measurement_id, measurement.name,
             reduce_point(update, wave, columns,
                          token_level_columns(measurement.post)))
         fresh.append(update)
+        if limit is not None and len(fresh) >= limit:
+            break
     return fresh
 
 

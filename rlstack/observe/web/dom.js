@@ -12,7 +12,7 @@ export const C = {feed: "#5AA9F0", eval: "#F0AE5A", rail: "#79D67F",
                   ink: "#E8E8E8", dim: "#767676", line: "#1B1D1F"};
 export const WHEEL = [C.feed, C.rail, C.eval, C.derived, C.warn, C.teal];
 export const STATUS_COLOR = {running: C.rail, done: C.feed,
-                             failed: C.warn, stalled: C.eval,
+                             failed: C.warn, stalled: C.eval, lost: C.eval,
                              parked: C.dim};
 export const poll = {hovering: false};
 

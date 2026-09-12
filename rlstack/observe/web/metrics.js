@@ -109,7 +109,7 @@ function render(data) {
       points: s.points, run: s}));
   overlay.append(plot(colored, {H: 320, xlabel: v => "u" + v}));
   for (const s of colored) {
-    const chip = el("a", {class: "chip", href: runPath(s.run.run_id, s.run.folder),
+    const chip = el("a", {class: "chip", href: runPath(s.run.run_ref || s.run.run_id, s.run.folder),
         style: `border-color:${s.color}`,
         title: `${s.run.run_id} · ${s.run.status} · `
              + (s.run.tags || []).join(" ")});

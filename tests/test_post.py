@@ -95,6 +95,13 @@ class PipelineTest(unittest.TestCase):
         self.assertEqual(columns["reward"], [1.0, 0.0, 0.0, 0.0])
         self.assertEqual(columns["advantage"], [1.0, -1.0, 0.0, 0.0])
 
+    def test_group_accuracy_is_the_groups_mean_broadcast(self) -> None:
+        """Each row carries ITS group's accuracy: the column is the gate
+        grpo_latent_kl_gated reads, so a half-right group must not look
+        solved from any of its rows."""
+        columns = self.run_pipe(("verifier", "group_accuracy"))
+        self.assertEqual(columns["accuracy"], [0.5, 0.5, 0.0, 0.0])
+
     def test_columns_align_to_wave_order(self) -> None:
         columns = self.run_pipe(("verifier",))
         self.assertEqual(len(columns["reward"]), 4)
@@ -127,6 +134,9 @@ class RegistrationTest(unittest.TestCase):
         grpo = POST.get("grpo_advantage")
         self.assertEqual(grpo.consumes, ("reward",))
         self.assertEqual(grpo.produces, ("advantage",))
+        accuracy = POST.get("group_accuracy")
+        self.assertEqual(accuracy.consumes, ("reward",))
+        self.assertEqual(accuracy.produces, ("accuracy",))
 
 
 if __name__ == "__main__":
@@ -320,6 +330,32 @@ class TeacherDistillationTest(unittest.TestCase):
         teacher.add_bundle(TEACHER_BUNDLE)
         return ({"main": (student, BUNDLE), "teacher": (teacher, TEACHER_BUNDLE)},
                 teacher, two_turn())
+
+    def test_policy_scores_preserve_conditioning_and_use_main_pool(self) -> None:
+        routes, _, traj = self.routes_and_traj()
+
+        async def scenario():
+            columns = await run_pipeline(
+                ("policy_logprobs",), Wave([Group("g", [traj])]), routes,
+                SamplingSpec(), master=7, update=1)
+            engine, bundle = routes["main"]
+            expected = list(await engine.score_tokens(
+                traj.messages[:1], traj.turns[0].token_ids, bundle.bundle_id))
+            expected += list(await engine.score_tokens(
+                traj.messages[:3], traj.turns[1].token_ids, bundle.bundle_id))
+            teacher_columns = await run_pipeline(
+                ("teacher_logprobs",), Wave([Group("g", [traj])]), routes,
+                SamplingSpec(), master=7, update=1)
+            return columns, expected, teacher_columns
+
+        columns, expected, teacher_columns = go(scenario())
+        self.assertEqual(columns["policy_logprobs"], [expected])
+        self.assertNotEqual(columns["policy_logprobs"], teacher_columns["teacher_logprobs"])
+        from rlstack.data.flatten import broadcast, flatten
+        flat = flatten(traj, tokenize=char_tokenize)
+        (aligned,) = broadcast(columns, [flat])
+        self.assertEqual([v for v, selected in zip(aligned["policy_logprobs"], flat.loss_mask)
+                          if selected], expected)
 
     def test_the_teacher_pool_scores_in_flatten_order(self) -> None:
         routes, teacher, traj = self.routes_and_traj()

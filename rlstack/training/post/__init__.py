@@ -7,7 +7,8 @@ after the seal, before the loss. Importing this package registers the builtins.
 
 from rlstack.training.post.base import PostDef, PostProcessor, postprocessor  # noqa: F401
 from rlstack.training.post import (  # noqa: F401  (registers builtins)
-    center_reward, conditioned_teacher_logprobs, constant, grpo_advantage,
-    final_answer, hinted_logprobs, llm_judge, reverse_kl, teacher_logprobs,
-    verifier,
+    center_reward, conditioned_teacher_logprobs, constant, final_answer,
+    group_accuracy, grpo_advantage,
+    hinted_logprobs, llm_judge, policy_logprobs, program_correctness, program_diagnostics,
+    reverse_kl, teacher_logprobs, verifier,
 )

@@ -126,9 +126,11 @@ class RefReader:
         without that row never will have it; both stay plan errors, said
         by name.
         """
-        run_id, _, tail = location[len(STORE):].partition("/")
-        section, _, index = tail.partition("/")
-        if section not in STORE_SECTIONS or not index.isdigit():
+        parts = location[len(STORE):].rsplit("/", 2)
+        if len(parts) != 3:
+            raise PlanError(f"{location!r}: expected store://<run-reference>/<section>/<index>")
+        run_id, section, index = parts
+        if not run_id or section not in STORE_SECTIONS or not index.isdigit():
             raise PlanError(
                 f"{location!r}: a store ref names a run's sealed wave or "
                 f"rollout, {STORE}<run_id>/waves/<u> or "

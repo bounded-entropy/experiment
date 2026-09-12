@@ -21,7 +21,7 @@ import time
 from collections.abc import Sequence
 
 from rlstack.data.stores.base import (
-    ANNOTATION_FIELDS, RunProgress, Store, run_progress,
+    ANNOTATION_FIELDS, RunProgress, Store, run_progress, run_reference,
 )
 from rlstack.observe.locate import Root, rooted
 
@@ -236,11 +236,18 @@ def run_row(roots: Sequence[Store | Root], run_id: str,
     says — name, tags, folder, hosts — used to cost the page a second request
     for the whole index (measured 1.5 s warm beside a 0.5 s page)."""
     known = rooted(roots)
-    annotations, filings = _filing(known)
-    row = discovered_rows(known, filings).get((folder, run_id))
+    # The page carries an exact reference. Only the browse index discovers
+    # directories; opening one page must not enumerate unrelated runs.
+    reference = run_reference(run_id)
+    subdir = reference.rpartition("/")[0]
+    annotations = [root.store.read_annotations() for root in known]
+    filings = [{reference: subdir} if root.folder == folder
+               and root.store.peek_manifest(reference) is not None else {}
+               for root in known]
+    row = discovered_rows(known, filings).get((folder, reference))
     if row is None:
         return None
-    _settle(row, folder, run_id, known, annotations, filings)
+    _settle(row, folder, reference, known, annotations, filings)
     return row
 
 
@@ -312,11 +319,22 @@ def discovered_rows(known: Sequence[Root],
     to include them, without inventing a host, start time or live status.
     Journal-only rows still cover the interval before a manifest lands.
     """
-    rows = journaled_rows(known)
+    rows = {}
+    by_folder = {root.folder: filed for root, filed in zip(known, filings)}
+    for (folder, rid), row in journaled_rows(known).items():
+        reference = run_reference(rid, row.get("_attach_subdir"))
+        if "_attach_subdir" not in row:
+            # Explicit browsing can join an old journal's bare ID to its
+            # uniquely discovered path. Ordinary reads never do this.
+            matches = [ref for ref in by_folder[folder]
+                       if ref.rsplit("/", 1)[-1] == rid]
+            if len(matches) == 1:
+                reference = matches[0]
+        rows[(folder, reference)] = row
     for root, filed in zip(known, filings):
         for run_id in filed:
             rows.setdefault((root.folder, run_id), {
-                "run_id": run_id, "folder": root.folder, "hosts": [],
+                "run_id": run_id.rsplit("/", 1)[-1], "folder": root.folder, "hosts": [],
                 "status": "unknown", "t": 0.0, "epoch": "",
                 "store": root.store.describe()})
     return rows
@@ -327,6 +345,7 @@ def _settle(row: dict, folder: str, run_id: str, known: Sequence[Root],
     """The row's PEEKED facts, filled in place: where the run is held, how
     far it got (the plan is truth), and where it was filed."""
     row.pop("_status_t", None)   # ordering scratch, not a view field
+    row["run_ref"] = run_id
     row["open_hosts"] = sorted(
         host for host, open_ in row.pop("_open", {}).items() if open_)
     # AN OPEN RESIDENCY IS PRESENCE: a host whose last word for this run
@@ -368,7 +387,7 @@ def _settle(row: dict, folder: str, run_id: str, known: Sequence[Root],
     row.pop("_subdir_t", None)
     for index, root in enumerate(known):
         if root.folder == folder:
-            row.update(annotated(annotations[index].get(run_id)))
+            row.update(annotated(annotations[index].get(run_id, annotations[index].get(row["run_id"]))))
             filed = filings[index].get(run_id)
             row["subdir"] = (filed if filed is not None
                              else attach_subdir or "")

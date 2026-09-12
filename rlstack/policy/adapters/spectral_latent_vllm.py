@@ -28,7 +28,7 @@ from vllm.lora.request import LoRARequest
 from rlstack.policy.adapters import lora_torch, spectral_latent_torch
 from rlstack.policy.adapters.base import Mechanism
 from rlstack.policy.adapters.rollout import (
-    Alignment, BuildDemands, Levers, Request, RolloutLowering, ServingBuild,
+    Alignment, BuildDemands, Levers, Request, RolloutLowering,
 )
 from rlstack.policy.adapters.spectral_latent import EPS_RECORD, MEMBER_RECORD
 from rlstack.policy.siteschema import SiteMeta
@@ -56,16 +56,13 @@ class SlatentRollout(RolloutLowering):
     mechanism = Mechanism.PUNICA
     claims = ("lora_request",)
 
-    def __init__(self, build: ServingBuild) -> None:
-        super().__init__(build)
-        self._next_int_id = 1
-
     def demands(self) -> BuildDemands:
         """Counted in MEMBERS, plora's sizing: one resident bundle is
-        members + 1 punica adapters."""
+        members + 1 punica adapters — the build's slot budget, which every
+        served type demands alike."""
         return BuildDemands(engine_args={
             "enable_lora": True,
-            "max_loras": self.build.max_bundles * (self.build.max_members + 1),
+            "max_loras": self.build.slots(),
             "max_lora_rank": self.build.max_rank})
 
     def reaches(self, meta: SiteMeta) -> bool:
@@ -108,9 +105,8 @@ class SlatentRollout(RolloutLowering):
         (directory / "adapter_config.json").write_text(
             lora_torch.peft_config(self.build.base, int(head["k"]), leaves))
         request = LoRARequest(lora_name=f"{home.name}/{tag}",
-                              lora_int_id=self._next_int_id,
+                              lora_int_id=self.build.next_lora_id(),
                               lora_path=str(directory))
-        self._next_int_id += 1
         return request
 
     def apply(self, attached: SlatentEnsemble, request: Request) -> Levers:

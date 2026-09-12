@@ -61,6 +61,10 @@ class CachedReadStore(Store):
     def describe(self) -> str:
         return self.inner.describe()
 
+    def run_children(self, subdir: str = "") -> list[dict[str, str]]:
+        """Keep the mounted store's shallow browse instead of a recursive walk."""
+        return self.inner.run_children(subdir)
+
     def _run_directories(self) -> dict[str, str]:
         """THE INNER STORE'S OWN WALK, memoized like a listing. The base
         answer walks _list("runs/"), and through this wrapper that re-listed

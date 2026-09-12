@@ -13,14 +13,88 @@
 
 import {ago, drawnOnce, el, esc, lostTick, okTick, storeTail}
   from "./dom.js";
-import {ctx, hostPath, runPath, runsIndex} from "./nav.js";
+import {getJSON} from "./dom.js";
+import {lazyDetails} from "./lazy.js";
+import {ctx, hostPath, runPath, runsIndex, route} from "./nav.js";
+import {branchEntries, branchRows, runLabel, runTree} from "./run_tree.js";
 
 let needle = "";
 let latest = [];
 let serverNow = null;
 const collapsed = new Set();
+const expanded = new Set(JSON.parse(sessionStorage.getItem("run-folders") || "[]"));
+
+const openBranches = new Set();
+let searchingAll = false;
 
 export async function drawIndex() {
+  if (searchingAll) return drawSearchIndex();
+  const params = new URLSearchParams();
+  if (route.folder !== null) params.set("root", route.folder);
+  const data = await getJSON("/api/browse?" + params);
+  if (!data) {
+    if (drawnOnce()) { lostTick(); return; }
+    document.getElementById("page").textContent = "Could not load folders — press r to retry.";
+    return;
+  }
+  const holder = document.getElementById("page");
+  holder.replaceChildren();
+  const toolbar = el("div", {class: "find"});
+  const search = el("button", {type: "button"}, "Search all experiments");
+  search.addEventListener("click", async () => {
+    search.disabled = true;
+    search.textContent = "Loading search index…";
+    searchingAll = true;
+    await drawSearchIndex();
+  });
+  toolbar.append(search);
+  holder.append(toolbar);
+  ctx('<span class="meta">Experiments · expand a folder to load its contents</span>');
+  const tree = el("div", {id: "browse-tree"});
+  holder.append(tree);
+  appendEntries(tree, data, route.folder, "");
+  okTick();
+}
+
+function appendEntries(holder, data, folder, path) {
+  for (const entry of data.entries) {
+    if (entry.kind === "run") {
+      holder.append(el("div", {style: "padding:8px 12px"},
+        `<a href="${runPath(entry.path, entry.folder)}">${esc(entry.name)}</a>`
+        + ' <span class="k">open results</span>'));
+    } else {
+      const key = JSON.stringify([entry.folder, entry.path]);
+      holder.append(lazyDetails(esc(entry.name) + "/", async body => {
+        const next = await browse(entry.folder, entry.path);
+        body.replaceChildren();
+        appendEntries(body, next, entry.folder, entry.path);
+      }, key, openBranches));
+    }
+  }
+  if (!data.entries.length) holder.append(el("p", {class: "k"}, "No experiments in this folder yet."));
+  if (data.next !== null) {
+    const more = el("button", {type: "button"}, "Load more");
+    more.addEventListener("click", async () => {
+      more.disabled = true;
+      try {
+        const next = await browse(folder, path, data.next);
+        more.remove();
+        appendEntries(holder, next, folder, path);
+      } catch (_) { more.disabled = false; more.textContent = "Retry loading more"; }
+    });
+    holder.append(more);
+  }
+}
+
+async function browse(folder, path, offset = 0) {
+  const params = new URLSearchParams({path, offset: String(offset)});
+  if (folder !== null) params.set("root", folder);
+  const data = await getJSON("/api/browse?" + params);
+  if (!data) throw new Error("Folder read failed");
+  return data;
+}
+
+async function drawSearchIndex() {
   const data = await runsIndex();
   if (!data) {                         // the freshness contract (dom.js)
     if (drawnOnce()) { lostTick(); return; }
@@ -42,11 +116,25 @@ function frame() {
   const holder = document.getElementById("page");
   holder.innerHTML = "";
   const find = el("div", {class: "find"});
+  const back = el("button", {type: "button"}, "Browse folders");
+  back.addEventListener("click", () => { searchingAll = false; drawIndex(); });
+  find.append(back);
   const box = el("input", {id: "q", type: "search", autocomplete: "off",
-      placeholder: "regex terms AND \u00b7 \u201c | \u201d for OR \u00b7 tag:lora exact \u00b7 name:/id:/note: scoped"});
+      placeholder: "Search runs or folders · tag:lora · name: / id: / note:"});
+  box.setAttribute("aria-label", "Search runs or folders");
   box.value = needle;
   box.addEventListener("input", () => { needle = box.value; render(); });
   find.append(box);
+  const close = el("button", {type: "button"}, "Collapse all");
+  close.addEventListener("click", () => {
+    expanded.clear();
+    collapsed.clear();
+    saveFolders();
+    needle = "";
+    box.value = "";
+    render();
+  });
+  find.append(close);
   holder.append(find);
   holder.append(el("div", {id: "tree"}));
 }
@@ -61,7 +149,8 @@ export function matchExpr(run, q) {
   // unscoped terms NEVER search the note (prose poisons family filters);
   // tag: matches a whole tag exactly, name:/id:/note: search their field;
   // a pipe WITH SPACES is OR; an unspaced | stays inside its regex term
-  const hay = [run.run_id, run.name || ""].concat(run.tags || []).join(" ");
+  const hay = [run.run_id, run.name || "", run.subdir || "", run.folder || ""]
+      .concat(run.tags || []).join(" ");
   const search = (term, text) => {
     try { return new RegExp(term, "i").test(text); }
     catch (_) { return text.toLowerCase().includes(term.toLowerCase()); }
@@ -93,9 +182,13 @@ function render() {
   const rows = latest.filter(r => matchExpr(r, needle));
   const folders = [...new Set(latest.map(r => r.folder))].sort();
   const many = folders.length > 1 || (folders.length === 1 && folders[0]);
+  const groupCount = folders.reduce((n, folder) => {
+    const tree = runTree(latest.filter(r => r.folder === folder));
+    return n + tree.children.size + (tree.rows.length ? 1 : 0);
+  }, 0);
   ctx(`<span class="meta">${latest.length} experiment${latest.length === 1 ? "" : "s"}`
     + (needle ? ` · ${rows.length} matching` : "")
-    + (many ? ` · ${folders.length} folder${folders.length === 1 ? "" : "s"}` : "")
+    + ` · ${groupCount} folder${groupCount === 1 ? "" : "s"}`
     + `</span>`);
   const tree = document.getElementById("tree");
   tree.innerHTML = "";
@@ -110,55 +203,85 @@ function render() {
   for (const folder of folders) {
     const mine = rows.filter(r => r.folder === folder);
     if (!mine.length) continue;
-    tree.append(many ? folderBlock(folder, mine) : dirBlocks(mine, false, ""));
+    const all = latest.filter(r => r.folder === folder);
+    tree.append(many ? folderBlock(folder, all) : dirBlocks(all, false, ""));
   }
 }
 
 function folderBlock(folder, rows) {
-  const block = el("details", collapsed.has(folder)
-      ? {class: "group"} : {class: "group", open: "open"});
-  block.append(el("summary", {},
-      `<span class="key">${esc(folder || "(top)")}</span>`
-    + `<span class="k">${rows.length} experiment${rows.length === 1 ? "" : "s"}</span>`));
-  block.addEventListener("toggle", () => {
-    if (block.open) collapsed.delete(folder); else collapsed.add(folder);
-  });
+  const block = groupBlock(folder || "(top)", rows, JSON.stringify([folder]));
   block.append(dirBlocks(rows, true, folder));
   return block;
 }
 
 // ---- the filing inside one store: runs/<subdir>/<run_id> ------------------
-// A SUBDIR is where the run's directory spawned at birth (submit's own
-// indication) — organization inside one store, where the folder above is
-// WHICH store. Top-level runs render bare; each subdir is its own block.
+// SUBDIRs keep their original storage addresses. The display nests slash
+// paths and related named series, and turns single-run leaves into rows.
+// Every link still uses the original (store folder, run_id).
 
 function dirBlocks(rows, inFolder, folderKey) {
-  const bySub = new Map();
-  for (const r of rows) {
-    const sub = r.subdir || "";
-    if (!bySub.has(sub)) bySub.set(sub, []);
-    bySub.get(sub).push(r);
-  }
+  return treeBlocks(runTree(rows), inFolder, [folderKey], true);
+}
+
+function treeBlocks(node, inFolder, path, top = false) {
   const frag = document.createDocumentFragment();
-  const subs = [...bySub.keys()].sort();
-  for (const sub of subs)
-    if (!sub) frag.append(table(bySub.get(sub), inFolder));
-  for (const sub of subs) {
-    if (!sub) continue;
-    const mine = bySub.get(sub);
-    const key = folderKey + "//" + sub;
-    const block = el("details", collapsed.has(key)
-        ? {class: "group"} : {class: "group", open: "open"});
-    block.append(el("summary", {},
-        `<span class="key">${esc(sub)}/</span>`
-      + `<span class="k">${mine.length} experiment${mine.length === 1 ? "" : "s"}</span>`));
-    block.addEventListener("toggle", () => {
-      if (block.open) collapsed.delete(key); else collapsed.add(key);
-    });
-    block.append(table(mine, inFolder));
+  const direct = node.rows.slice();
+  const branches = [];
+  for (const child of branchEntries(node)) {
+    // A singleton leaf is a named experiment, not another folder to open.
+    if (!top && !child.children.size && child.rows.length === 1)
+      direct.push(...child.rows);
+    else branches.push(child);
+  }
+  const visible = direct.filter(r => matchExpr(r, needle));
+  if (visible.length) {
+    if (top) {
+      const block = groupBlock("Unfiled", direct, JSON.stringify([...path, ""]));
+      block.append(table(visible, inFolder));
+      frag.append(block);
+    } else frag.append(table(visible, inFolder));
+  }
+  for (const child of branches) {
+    const mine = branchRows(child);
+    if (!mine.some(r => matchExpr(r, needle))) continue;
+    const childPath = [...path, child.name];
+    const block = groupBlock(child.name, mine, JSON.stringify(childPath));
+    block.append(treeBlocks(child, inFolder, childPath));
     frag.append(block);
   }
   return frag;
+}
+
+function groupBlock(name, rows, key) {
+  const mine = rows.filter(r => matchExpr(r, needle));
+  const open = needle ? !collapsed.has(key) : expanded.has(key);
+  const block = el("details", open ? {class: "group", open: "open"}
+                                   : {class: "group"});
+  const summary = el("summary", {},
+      `<span class="key">${esc(name)}/</span>`
+    + `<span class="k">${mine.length} experiment${mine.length === 1 ? "" : "s"}</span>`);
+  const statuses = [...new Set(mine.map(r => r.status))].sort();
+  for (const status of statuses) {
+    const count = mine.filter(r => r.status === status).length;
+    summary.append(el("span", {class: "k"}, `${count} ${esc(status)}`));
+  }
+  block.append(summary);
+  // Native toggle events also fire when a render sets `open`. Save only a
+  // connected group's actual change, so removed nodes cannot reset choices.
+  block.addEventListener("toggle", () => {
+    if (!block.isConnected) return;
+    if (needle) {
+      if (block.open) collapsed.delete(key); else collapsed.add(key);
+    } else {
+      if (block.open) expanded.add(key); else expanded.delete(key);
+      saveFolders();
+    }
+  });
+  return block;
+}
+
+function saveFolders() {
+  sessionStorage.setItem("run-folders", JSON.stringify([...expanded]));
 }
 
 function table(rows, inFolder) {
@@ -169,18 +292,21 @@ function table(rows, inFolder) {
   const node = el("table", {}, "<tr><th>experiment</th><th>tags</th>"
       + "<th>status</th><th>committed</th><th>host(s)</th><th>last</th>"
       + (showStore ? "<th>store</th>" : "") + "</tr>");
-  for (const r of rows.slice().reverse()) {
+  for (const r of rows.slice().sort((a, b) => runLabel(a).localeCompare(runLabel(b))
+                                               || b.t - a.t)) {
     const folder = inFolder ? r.folder : null;
     const row = el("tr", {});
-    row.append(el("td", {},
-        `<a href="${runPath(r.run_id, folder)}" title="${esc(r.note || "")}">`
-      + `${esc(r.name || r.run_id)}</a>`
-      + (r.name ? ` <span class="k">${esc(r.run_id)}</span>` : "")));
+    const label = runLabel(r);
+    const cell = el("td", {},
+        `<a href="${runPath(r.run_ref || r.run_id, folder)}" title="${esc(r.note || "")}">`
+      + `${esc(label)}</a>`
+      + (label !== r.run_id ? ` <span class="k">${esc(r.run_id)}</span>` : ""));
+    cell.setAttribute("title", [r.subdir, r.note].filter(Boolean).join(" · "));
+    row.append(cell);
     row.append(el("td", {}, (r.tags || []).map(t =>
         `<span class="tag">${esc(t)}</span>`).join("") || "<span class='k'>—</span>"));
     const badge = r.status === "running" ? "live"
-                : (r.status === "stalled" || r.status === "parked") ? "stall"
-                : "";
+                : ["stalled", "parked", "lost"].includes(r.status) ? "stall" : "";
     row.append(el("td", {class: badge},
                   esc(r.status)
                 + (r.stalled_hosts ? ` <span class="k" title="no heartbeat from: ${
@@ -188,6 +314,8 @@ function table(rows, inFolder) {
                 // PARKED SAYS WHAT IT IS WAITING FOR (ADR 0008, F6): a run
                 // the desk is holding is not a mystery, it is a shopping list
                 + (r.parked ? ` <span class="k" title="${esc(parkedWhy(r.parked))}">⏸</span>` : "")
+                + (r.lost_hosts ? ` <span class="k" title="alive but not carrying it: ${
+                      esc(r.lost_hosts.join(", "))}">⚠</span>` : "")
                 + (r.forked ? " <span class='warn'>⚠FORK</span>" : "")));
     row.append(el("td", {}, `${r.committed}/${esc(r.target)}`));
     row.append(el("td", {}, r.hosts.map(h =>

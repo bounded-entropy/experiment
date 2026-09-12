@@ -24,7 +24,7 @@ from vllm.lora.request import LoRARequest
 from rlstack.policy.adapters import lora_torch, spectral_torch
 from rlstack.policy.adapters.base import Mechanism
 from rlstack.policy.adapters.rollout import (
-    Alignment, BuildDemands, Levers, Request, RolloutLowering, ServingBuild,
+    Alignment, BuildDemands, Levers, Request, RolloutLowering,
 )
 from rlstack.policy.siteschema import SiteMeta
 
@@ -38,15 +38,12 @@ class SpectralRollout(RolloutLowering):
     mechanism = Mechanism.PUNICA
     claims = ("lora_request",)
 
-    def __init__(self, build: ServingBuild) -> None:
-        super().__init__(build)
-        self._next_int_id = 1        # punica addresses its slots by int id
-
     def demands(self) -> BuildDemands:
-        """Exactly lora's demands: one resident bundle is one adapter."""
+        """Exactly lora's demands: one resident bundle is one adapter, and
+        the slot budget is the build's."""
         return BuildDemands(engine_args={
             "enable_lora": True,
-            "max_loras": self.build.max_bundles,
+            "max_loras": self.build.slots(),
             "max_lora_rank": self.build.max_rank})
 
     def reaches(self, meta: SiteMeta) -> bool:
@@ -79,9 +76,8 @@ class SpectralRollout(RolloutLowering):
         (adapter_dir / "adapter_config.json").write_text(
             lora_torch.peft_config(self.build.base, rank, leaves))
         request = LoRARequest(lora_name=f"spectral-{bundle_id}",
-                              lora_int_id=self._next_int_id,
+                              lora_int_id=self.build.next_lora_id(),
                               lora_path=str(adapter_dir))
-        self._next_int_id += 1
         return request
 
     def apply(self, attached: Any, request: Request) -> Levers:

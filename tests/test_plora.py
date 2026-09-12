@@ -57,6 +57,7 @@ if torch is not None:
     from rlstack.policy.adapters.replay import ReplayRows, row_plan
     from rlstack.training.losses.grpo_elbo import grpo_elbo
     from rlstack.training.losses.grpo_latent_kl import BETA, grpo_latent_kl
+    from rlstack.training.losses.grpo_latent_kl_gated import grpo_latent_kl_gated
     from rlstack.training.losses import PolicyOutputs
 
 needs_torch = unittest.skipUnless(
@@ -78,6 +79,19 @@ def plora_spec(train_uri: str, heldout_uri: str | None = None, **init):
         policy=PolicySpec(base="Qwen/Qwen3-0.6B", bank={"pi": entry}),
         algo=AlgoSpec(loss="grpo_latent_kl",
                       post=("verifier", "grpo_advantage"),
+                      optim=OptimSpec("adamw", lr=1e-5),
+                      schedule=Schedule(microbatch_tokens=64)))
+
+
+def gated_plora_spec(train_uri: str,
+                     post=("verifier", "group_accuracy", "grpo_advantage")):
+    """plora_spec with the gate: the loss that earns the prior's pull, and the
+    pipeline that writes the column it reads."""
+    entry = plora(SITE, k=4, latent=8, members=2, factors=FACTORS)
+    return arith_spec(
+        train_uri,
+        policy=PolicySpec(base="Qwen/Qwen3-0.6B", bank={"pi": entry}),
+        algo=AlgoSpec(loss="grpo_latent_kl_gated", post=post,
                       optim=OptimSpec("adamw", lr=1e-5),
                       schedule=Schedule(microbatch_tokens=64)))
 
@@ -149,6 +163,19 @@ class RolloutSeamTest(unittest.TestCase):
                              max_bundles=2, max_rank=8)
         self.assertEqual(build.max_members, 0)
         self.assertIsNone(build.cas)
+
+    def test_the_slot_budget_is_the_builds_and_counts_members(self) -> None:
+        """ONE number every served adapter type demands, because
+        check_demand_fits refuses two: the plain bundle count on a build
+        declaring no members, bundles x (members + 1) on one that does — 32
+        bundles of a 4-member ensemble is 160 slots, and lora on that same
+        engine must ask for 160 too."""
+        plain = ServingBuild(base="b", config=None, workdir=None,
+                             max_bundles=32, max_rank=16)
+        ensemble = ServingBuild(base="b", config=None, workdir=None,
+                                max_bundles=32, max_rank=16, max_members=4)
+        self.assertEqual(plain.slots(), 32)
+        self.assertEqual(ensemble.slots(), 160)
 
 
 # ---------------------------------------------------------------------------
@@ -230,6 +257,19 @@ class ValidateTest(unittest.TestCase):
 
     def test_the_prior_must_have_a_scale(self) -> None:
         self.assertIn("plora-bad-shape", self.codes(prior_std=0.0))
+
+    def test_the_gated_loss_validates_with_its_column(self) -> None:
+        issues = validate(gated_plora_spec("cas://x/t.jsonl"), SCHEMA)
+        self.assertEqual(issues, [])
+
+    def test_the_gate_without_its_producer_is_refused(self) -> None:
+        """"accuracy" is a data column like any other (I9): drop
+        group_accuracy from the pipeline and Phase 0 refuses the plan,
+        never a KeyError mid-update."""
+        spec = gated_plora_spec("cas://x/t.jsonl",
+                                post=("verifier", "grpo_advantage"))
+        codes = {issue.code for issue in validate(spec, SCHEMA)}
+        self.assertIn("unsatisfied-requires", codes)
 
     def test_the_prior_is_fixed_or_learned(self) -> None:
         """The word decides whether the prior's scale trains, so an unknown
@@ -952,6 +992,68 @@ class LatentKlLossTest(unittest.TestCase):
 
 
 @needs_torch
+class GatedLatentKlLossTest(unittest.TestCase):
+    """accuracy first, then the KL: the gate is the solved share of the batch."""
+
+    def a_batch(self, accuracy, microbatches: int = 1):
+        from rlstack import TokenBatch
+        return TokenBatch(
+            token_ids=(1, 2, 3, 4), loss_mask=(1, 1, 1, 1),
+            behavior_logprobs=(-0.5,) * 4, segment_ids=(0, 0, 0, 0),
+            doc_starts=(0,),
+            postdata={"advantage": (1.0, 1.0, -1.0, -1.0),
+                      "accuracy": tuple(accuracy)},
+            microbatches_in_update=microbatches)
+
+    def outputs(self, state, logprobs):
+        return PolicyOutputs(
+            logprobs=logprobs,
+            provided=ADAPTER_TYPES.get("plora").instance.provide(state))
+
+    def kl(self, state) -> float:
+        return float(plora_torch.analytic_kl(state.mu, state.log_std,
+                                             state.prior_log_std))
+
+    def test_an_unsolved_batch_pays_no_kl(self) -> None:
+        """The whole point: while nothing is solved the prior is SILENT, even
+        against a live posterior whose KL is far from zero."""
+        from rlstack.training.losses.grpo import grpo
+
+        state = a_live_state()
+        logprobs = torch.full((4,), -0.5)
+        batch = self.a_batch((0.5,) * 4)
+        plain = grpo(PolicyOutputs(logprobs=logprobs), batch)
+        gated = grpo_latent_kl_gated(self.outputs(state, logprobs), batch)
+        self.assertGreater(self.kl(state), 0.0)
+        self.assertAlmostEqual(float(plain.loss), float(gated.loss), places=7)
+
+    def test_a_solved_batch_pays_the_whole_beta(self) -> None:
+        """Fully solved coincides with grpo_latent_kl: the gate is 1, so the
+        two objectives share one KL price and can never drift apart."""
+        state = a_live_state()
+        logprobs = torch.full((4,), -0.5)
+        gated = grpo_latent_kl_gated(self.outputs(state, logprobs),
+                                     self.a_batch((1.0,) * 4))
+        ungated = grpo_latent_kl(self.outputs(state, logprobs),
+                                 self.a_batch((1.0,) * 4))
+        self.assertAlmostEqual(float(gated.loss), float(ungated.loss),
+                               places=7)
+
+    def test_a_half_solved_batch_pays_half(self) -> None:
+        """Two of four masked tokens sit in a solved group, so the effective
+        beta is BETA / 2 — the KL enters in proportion to the solved share."""
+        from rlstack.training.losses.grpo import grpo
+
+        state = a_live_state()
+        logprobs = torch.full((4,), -0.5)
+        batch = self.a_batch((1.0, 1.0, 0.0, 0.0))
+        plain = grpo(PolicyOutputs(logprobs=logprobs), batch)
+        gated = grpo_latent_kl_gated(self.outputs(state, logprobs), batch)
+        self.assertAlmostEqual(float(gated.loss) - float(plain.loss),
+                               0.5 * BETA * self.kl(state), places=6)
+
+
+@needs_torch
 class ElboLossTest(unittest.TestCase):
     def a_batch(self, documents: int = 1, microbatches: int = 1):
         """One document's tokens, stamped as one of `documents` in an update
@@ -1022,7 +1124,6 @@ class ElboLossTest(unittest.TestCase):
         grpo_elbo(self.outputs(fixed, logprobs), self.a_batch()).loss.backward()
         self.assertIsNone(fixed.prior_log_std.grad)
 
-
 @needs_torch
 class LearnerSeamTest(unittest.TestCase):
     def test_the_learner_routes_a_batchs_facts_to_its_rows(self) -> None:
@@ -1073,3 +1174,59 @@ class LearnerSeamTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class SlotNamespaceTest(unittest.TestCase):
+    """THE PUNICA SLOT NAMESPACE IS THE ENGINE'S, not one adapter type's.
+
+    `lora_int_id` is how vLLM's LoRA manager keys a resident adapter, and
+    `add_adapter` on an id already resident keeps the FIRST registrant's
+    weights. Every lowering used to mint from its own counter starting at 1,
+    so an engine serving several adapter types handed the same id to two of
+    them and a tenant's requests were served whichever adapter claimed the
+    slot first. The build owns the shared ID namespace.
+    """
+
+    def a_build(self):
+        from rlstack.policy.adapters.rollout import ServingBuild
+        return ServingBuild(base="b", config=None, workdir=None,
+                            max_bundles=32, max_rank=16, max_members=4)
+
+    def test_one_build_hands_out_each_id_once(self) -> None:
+        build = self.a_build()
+        minted = [build.next_lora_id() for _ in range(50)]
+        self.assertEqual(len(set(minted)), 50)
+        self.assertEqual(minted[0], 1)
+        self.assertEqual(minted, sorted(minted))
+
+    def test_every_adapter_type_on_one_build_shares_the_source(self) -> None:
+        """The sharing is STRUCTURAL: the engine builds one ServingBuild and
+        hands that same object to every lowering, so two adapter types cannot
+        mint the same id however they are written."""
+        build = self.a_build()
+        as_lora = [build.next_lora_id() for _ in range(3)]
+        as_spectral = [build.next_lora_id() for _ in range(3)]
+        as_latent = [build.next_lora_id() for _ in range(5)]
+        self.assertFalse(set(as_lora) & set(as_spectral))
+        self.assertFalse(set(as_lora) & set(as_latent))
+        self.assertFalse(set(as_spectral) & set(as_latent))
+
+    def test_two_builds_are_two_engines_and_do_not_share(self) -> None:
+        """A second engine is a second namespace: its slots start at 1 again,
+        because they are its own."""
+        self.assertEqual(self.a_build().next_lora_id(),
+                         self.a_build().next_lora_id())
+
+    def test_no_lowering_keeps_a_counter_of_its_own(self) -> None:
+        """Said structurally, because the bug is a thing a file MAY NOT hold:
+        a per-lowering id counter is exactly what collided."""
+        import pathlib
+
+        adapters = pathlib.Path(
+            __file__).resolve().parent.parent / "rlstack" / "policy" / "adapters"
+        for path in sorted(adapters.glob("*_vllm.py")):
+            source = path.read_text(encoding="utf-8")
+            self.assertNotIn(
+                "_next_int_id", source,
+                f"{path.name} mints punica slot ids of its own; the namespace "
+                f"is the engine's (ServingBuild.next_lora_id)")

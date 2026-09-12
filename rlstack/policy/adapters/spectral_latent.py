@@ -25,6 +25,40 @@ with plain spectral.
 The prior is plora's, recipe and all: `prior="fixed"` keeps the spec's
 prior_std, `prior="learned"` makes its log-scale a parameter the KL alone
 moves (empirical Bayes over the latent), watched as `spectral_prior_std`.
+
+The latent KL penalizes mu and log_std, while the generated gain scale also
+depends on the decoder's heads. Two optional gain-map settings control this
+scale directly:
+
+  `amplitude="split"` — delta = a_site * unit(trunk(z) @ head^T), `a_site`
+     ONE scalar per site (zero-init, its own `amplitude` optimizer group),
+     `unit` the L-infinity normalization, so `a_site` IS the largest
+     relative gain at the site and a change in z can only rotate the gain
+     vector, never scale it. The heads are seeded-random here (a direction
+     must exist at a = 0); a = 0 is the identity element either way.
+  `bound=g`       — delta = g * tanh(delta / g): every relative gain served
+     stays inside (-g, g), whichever recipe produced it.
+
+Both are `init` keys, written only when set, so the recipes that predate
+them canonicalize to the rows they always did. The third provide,
+`spectral_gain_energy`, is what a loss that PRICES THE GAINS reads
+(grpo_latent_kl_gated_priced); `spectral_gain_span` and
+`spectral_amplitude` expose the scale for monitoring.
+
+`amplitude="fixed_linear"` is a data-independent decoder control. Its
+seeded random projection has unit row norms and is frozen; only the latent
+mean and log standard deviation train. No mapper or amplitude parameter can
+store an unpriced update. Unlike the learned-decoder recipes, its prior
+draws perturb the base at version zero: each unbounded relative gain has
+standard deviation prior_std. The posterior mean remains exactly the base
+at initialization. It therefore needs a measured prior-predictive baseline
+as well as the frozen-base baseline, and requires a fixed prior.
+
+`amplitude="fixed_basis"` gives each site its own k latent coordinates,
+directly controlling the leading k singular directions. It requires
+latent = k * number of sites. This removes the random projection's shared
+subspace while keeping every trainable quantity inside the Gaussian
+posterior and its KL. The decoder and basis are data independent.
 """
 
 from __future__ import annotations
@@ -46,12 +80,28 @@ KL_PROVIDED = "latent_kl"
 SIGMA_PROVIDED = "spectral_sigma_mean"    # posterior scale: here to be WATCHED
 PRIOR_PROVIDED = "spectral_prior_std"     # the prior's scale: constant when
 #                                           fixed, a trajectory when learned
+# The served gains, watched — spectral's own span name, so the curves of the
+# deterministic and the generated gains read on one axis — and priced.
+GAIN_SPAN_PROVIDED = "spectral_gain_span"     # mean served |sigma * delta|
+AMPLITUDE_PROVIDED = "spectral_amplitude"     # mean over sites of the largest
+#                                               served RELATIVE gain
+ENERGY_PROVIDED = "spectral_gain_energy"      # mean over sites and rows of
+#                                               sum(served relative gain^2)
+
+# The gain map's two recipes (the module docstring says why they exist).
+JOINT_AMPLITUDE = "joint"     # delta = trunk(z) @ head^T, as first built
+SPLIT_AMPLITUDE = "split"     # delta = a_site * unit(trunk(z) @ head^T)
+FIXED_LINEAR = "fixed_linear"  # delta = a fixed row-normalized projection of z
+FIXED_BASIS = "fixed_basis"    # each site's leading k gains are its own slice of z
+AMPLITUDES = (JOINT_AMPLITUDE, SPLIT_AMPLITUDE, FIXED_LINEAR, FIXED_BASIS)
 
 
 @adapter_type("spectral_latent")
 class SpectralLatent(AdapterType):
     serving = Mechanism.PUNICA
-    provides = frozenset({KL_PROVIDED, SIGMA_PROVIDED, PRIOR_PROVIDED})
+    provides = frozenset({KL_PROVIDED, SIGMA_PROVIDED, PRIOR_PROVIDED,
+                          GAIN_SPAN_PROVIDED, AMPLITUDE_PROVIDED,
+                          ENERGY_PROVIDED})
     records = (EPS_RECORD, MEMBER_RECORD)
 
     def site_ok(self, meta: SiteMeta) -> bool:
@@ -83,7 +133,8 @@ class SpectralLatent(AdapterType):
     def param_groups(self, params) -> Mapping[str, list]:
         """`mapper` (trunk + heads, decayable) and `posterior` (mu, log_std,
         never decayed) — plora's two groups, for plora's reason — plus
-        `prior` when the prior is learned, plora's third."""
+        `prior` when the prior is learned, plora's third, and `amplitude`
+        (the per-site scalars) under the split recipe."""
         from rlstack.policy.adapters import spectral_latent_torch
         return spectral_latent_torch.param_groups(params)
 
@@ -98,12 +149,26 @@ class SpectralLatent(AdapterType):
 
 def spectral_latent(site: str, k: int = 16, latent: int = 32, members: int = 4,
                     prior_std: float = 0.05, hidden: int = 128,
-                    prior: str = "fixed"):
+                    prior: str = "fixed", amplitude: str = JOINT_AMPLITUDE,
+                    bound: float | None = None):
     """Sugar, beside spectral()/plora(): a distribution over spectral gains,
     served as `members` ordinary rank-k adapters plus the mean. `prior` is
     "fixed" (N(0, prior_std^2) as declared) or "learned" (prior_std is where
-    a learned scale STARTS; the KL moves it from there)."""
+    a learned scale STARTS; the KL moves it from there). `amplitude` and
+    `bound` are the gain map's recipe knobs (module docstring); at their
+    defaults they are LEFT OUT of the init, so a spec written before they
+    existed is the same spec."""
     from rlstack.spec.specs import AdapterSpec
-    return AdapterSpec(adapter_type="spectral_latent", site=site, init={
-        "k": k, "latent": latent, "members": members,
-        "prior_std": prior_std, "hidden": hidden, "prior": prior})
+    if amplitude not in AMPLITUDES:
+        raise ValueError(
+            f"spectral_latent amplitude must be one of {AMPLITUDES}, got "
+            f"{amplitude!r}")
+    if bound is not None and not bound > 0:
+        raise ValueError(f"spectral_latent bound must be positive, got {bound}")
+    init: dict = {"k": k, "latent": latent, "members": members,
+                  "prior_std": prior_std, "hidden": hidden, "prior": prior}
+    if amplitude != JOINT_AMPLITUDE:
+        init["amplitude"] = amplitude
+    if bound is not None:
+        init["bound"] = float(bound)
+    return AdapterSpec(adapter_type="spectral_latent", site=site, init=init)

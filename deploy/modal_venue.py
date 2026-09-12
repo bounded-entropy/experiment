@@ -225,7 +225,9 @@ def wait_for_metal(name: str, timeout_s: float = 900.0) -> dict:
     deadline = time.time() + timeout_s
     while time.time() < deadline:
         held = fleet().get("metal", {})
-        if name in held and held[name].get("plane"):
+        if (name in held and held[name].get("plane")
+                and held[name].get("live")
+                and held[name].get("residual") is not None):
             return held[name]
         time.sleep(10)
     raise SystemExit(f"{name} did not register within {timeout_s:.0f}s")
@@ -333,7 +335,7 @@ def canonical_row(build, borrow=()):
 
 
 def submit_spec(row: dict, subdir: str, anchor: str | None = None,
-                solo: bool = False) -> dict:
+                solo: bool = False, resume: bool = False) -> dict:
     """One canonical spec row through THE desk. The reply is the placement:
     accepted, the run id, the anchor host and every pool's address."""
     import asyncio
@@ -341,7 +343,7 @@ def submit_spec(row: dict, subdir: str, anchor: str | None = None,
     from rlstack.runner.remote import spec_from_json
 
     reply = asyncio.run(desk().submit(spec_from_json(row), subdir=subdir, solo=solo,
-                                      anchor=anchor))
+                                      anchor=anchor, resume=resume))
     print(f"[submit] {json.dumps(reply, default=str)[:400]}", flush=True)
     if not reply.get("accepted"):
         raise SystemExit(f"not accepted: {reply}")
@@ -371,8 +373,9 @@ def progress(run_id: str, folder: str = "", tail: int = 3) -> dict:
             "through the observer's API now (ADR 0008, F6), so it needs the "
             "deployed UI's base URL — "
             "RLSTACK_OBSERVER=https://<workspace>--rlstack-ui.modal.run")
-    url = (f"{OBSERVER.rstrip('/')}/api/run/{urllib.parse.quote(run_id)}"
-           f"?root={urllib.parse.quote(folder)}")
+    subdir, _, name = run_id.rpartition("/")
+    query = urllib.parse.urlencode({"root": folder, "subdir": subdir})
+    url = f"{OBSERVER.rstrip('/')}/api/run/{urllib.parse.quote(name, safe='')}?{query}"
     with urllib.request.urlopen(url, timeout=60) as answer:
         told = json.loads(answer.read().decode("utf-8"))
     if "run_id" not in told:
@@ -416,8 +419,10 @@ def submit_and_follow(row: dict, subdir: str, timeout_s: float,
     0003). And NOTHING IN THIS PATH IS AN ON-DEMAND FUNCTION (ADR 0008, F6):
     the row is built on the client, the plans go through the desk, and the
     following is an HTTP GET at the observer."""
-    return follow(submit_spec(row, subdir, anchor)["run_id"], timeout_s,
-                  folder=subdir or "")
+    from rlstack.data.stores.base import run_reference
+
+    reply = submit_spec(row, subdir, anchor)
+    return follow(run_reference(reply["run_id"], subdir), timeout_s)
 
 
 def export_blob(store, run_id: str, blob: str, key: str) -> dict:
@@ -526,11 +531,18 @@ def metal_class(app, app_name: str, metal: str, gpu, image, *, module: str,
 
         desk_handle = RemoteDesk(transport_for(DESK_ADDRESS))
         every = float(HEARTBEAT_S)
-        try:
-            told = await announce(service)
-            every = float(told.get("heartbeat_s") or HEARTBEAT_S)
-        except Exception as refused:
-            print(f"[{metal}] REGISTRATION REFUSED: {refused}", flush=True)
+        async def register():
+            nonlocal every
+            try:
+                told = await announce(service)
+                every = float(told.get("heartbeat_s") or HEARTBEAT_S)
+            except Exception as refused:
+                print(f"[{metal}] REGISTRATION REFUSED: {refused}", flush=True)
+
+        # Registration grants the lease before recovering parked runs. That
+        # recovery can take minutes; renew concurrently, starting at the
+        # fallback cadence, so recovery cannot expire its own new metal.
+        registration = asyncio.create_task(register())
         duties: dict[str, asyncio.Task] = {}
         tick = 0
         try:
@@ -543,13 +555,14 @@ def metal_class(app, app_name: str, metal: str, gpu, image, *, module: str,
                 await asyncio.sleep(every)
                 tick += 1
                 try:
-                    if not await beat(service, desk_handle):
-                        await announce(service)
+                    if not await beat(service, desk_handle) and registration.done():
+                        registration = asyncio.create_task(register())
                 except Exception as unheard:
                     print(f"[{metal}] heartbeat unheard: {unheard}", flush=True)
                 if tick % 3 == 0:
                     await store_volume.commit.aio()
         finally:
+            registration.cancel()
             for task in duties.values():
                 task.cancel()
             await store_volume.commit.aio()

@@ -364,6 +364,7 @@ class ProcessResidentTest(ProcessFixture):
         teardowns = service.shutdown()
         self.assertTrue(all(t.graceful for t in teardowns), teardowns)
         self.assertFalse(any(r.alive() for r in host.residents))
+        self.assertEqual(service.deaths, [])
 
     def test_a_dead_resident_decarves_its_host(self) -> None:
         """Kill a resident behind the metal's back: its host is dead (I12),
@@ -385,6 +386,28 @@ class ProcessResidentTest(ProcessFixture):
         self.assertEqual(service.deaths, [born["host"]])
         with self.assertRaises(Exception):
             service.service_for(born["address"])
+
+    def test_watchdog_stop_decarves_the_dead_host(self) -> None:
+        """A watchdog stop must reach the same recovery path as a crash."""
+        service = self.metal()
+
+        async def drive():
+            born = await service.carve(self.inference_request(14.4))
+            self.assertTrue(born["carved"], born)
+            host = service.hosts[born["host"]]
+            resident, = host.residents
+            await host.kill_stalled(resident, silent_s=601, bound_s=600)
+            self.assertFalse(resident.alive())
+            deadline = time.monotonic() + 5
+            while host.name in service.hosts and time.monotonic() < deadline:
+                await asyncio.sleep(0.01)
+            self.assertNotIn(host.name, service.hosts)
+            self.assertEqual(service.residual(), [24.0])
+            self.assertEqual(service.deaths, [host.name])
+            with self.assertRaises(Exception):
+                service.service_for(born["address"])
+
+        go(drive())
 
     def test_a_birth_that_fails_in_the_child_releases_the_booking(self) -> None:
         """A recipe that cannot build an inference regime fails INSIDE the

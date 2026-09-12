@@ -97,7 +97,7 @@ def metric_names(roots: Sequence[Store | Root]) -> list[str]:
         root = _root_of(roots, row)
         if root is None:
             continue
-        for entry in root.store.peek_ledger(row["run_id"])[-3:]:
+        for entry in root.store.peek_ledger(row["run_ref"])[-3:]:
             for block in ("train", "post"):
                 names.update(k for k, v in entry.get(block, {}).items()
                              if isinstance(v, (int, float))
@@ -137,13 +137,13 @@ def overlay(roots: Sequence[Store | Root], metric: str,
                         and isinstance(point.get("update"), int)):
                     points.append([point["update"], float(value)])
         else:
-            for entry in root.store.peek_ledger(row["run_id"]):
+            for entry in root.store.peek_ledger(row["run_ref"]):
                 value = _entry_value(entry, metric)
                 if value is not None and isinstance(entry.get("update"), int):
                     points.append([entry["update"], value])
         if points:
             series.append({"run_id": row["run_id"], "name": row.get("name", ""),
-                           "folder": row["folder"], "status": row["status"],
+                           "folder": row["folder"], "run_ref": row["run_ref"], "status": row["status"],
                            "tags": row.get("tags") or [], "points": points})
     return {"metric": metric, "expr": expr, "series": series,
             "matched": len(rows), "dropped": dropped}

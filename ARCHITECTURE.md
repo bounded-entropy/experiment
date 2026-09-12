@@ -197,12 +197,12 @@ episode whose task does not exist yet — `Derive(source, maker, env)` resolves
 `source` (Replay's ref grammar) to a sealed trajectory and a registered
 `@task_maker` derives the new task, PURELY, so resume re-mints to the byte.
 Declared in `GenSpec.makers`, hashed like an environment. The reflect loop is
-its first use: the `reflect` maker re-serves the whole transcript plus "what
-went wrong"; the env that samples the critique and the loss that clones the
-final turn live with the campaign that uses them. An un-referenced rollout is
-due when the first later referenced one is — the generator's intermediate-wave
-pacing rule.
-`rlstack/data/plan.py`, `rlstack/inference/makers/`
+its first use: the maker re-serves the whole transcript plus "what went
+wrong", the `reflect_retry` env samples the critique and the retry, and the
+`sdpo` loss clones each document's final turn (read off `segment_ids` — no
+new masking primitive). An un-referenced rollout is due when the first later
+referenced one is — the generator's intermediate-wave pacing rule.
+`rlstack/data/plan.py`, `rlstack/inference/makers/`, `rlstack/inference/environments/reflect_retry.py`, `rlstack/training/losses/sdpo.py`
 
 **Site** — a canonical attachment point named by the checkpoint's own module
 path, resolved at Phase 0 against `site_space` = the schema ∪ every bank
@@ -457,11 +457,13 @@ becomes demands in the CAMPAIGN layer, never at the desk, and GB passes through
 as declared.
 `rlstack/runner/desk.py` (`Demand`), `rlstack/runner/campaign.py` (`demands_of`)
 
-**Subdir / filing** — where a run's directory spawns
-(runs/<subdir>/<run_id>), indicated at submit and fixed for life. Filing,
-never identity: it does not hash, attach finds the run wherever it lives, and
-the observer renders the tree (a FOLDER is which store; a SUBDIR is filing
-inside one).
+**Subdir / filing** — the caller's authoritative location under `runs/`:
+`runs/<subdir>/<run_id>`. Omitted means root, never a search. A run reference
+is `subdir/run_id`; reads, parent URIs, replay URIs, recovery and observer links
+carry it explicitly. Opening never redirects to another directory. A requested
+resume fails if its path is missing. Filing does not change the scientific ID
+or committed bytes; explicit discovery is for browsing (ADR 0010). A FOLDER
+identifies the store root; a SUBDIR locates the run inside it.
 `rlstack/data/stores/base.py` (`run_prefix`, `check_subdir`)
 
 **Desk** — placement as a service and the fleet journal's one writer (the

@@ -5013,6 +5013,56 @@ specs; backends (local/modal/skypilot) and GPU topology are semantics-neutral.
     - **THE SLEEP EXAM** (8acf736, `deploy/sleep_exam_a100.py`) and the
       arbiter's first-switch rule (82103e2) are #87's; both stand.
 
+88. **LATENT AMPLITUDE AND GAIN REGULARIZATION (2026-09-05).**
+    `spectral_latent` supports a split amplitude per site and an optional
+    smooth bound on relative gains. Both recipes use the same gain function
+    for replay and emitted LoRA factors; checkpoints retain the recipe and
+    reject incompatible loads. The adapter reports gain span, amplitude and
+    energy from the current forward. `grpo_latent_kl_gated_priced` adds gain
+    energy to the existing gated posterior penalty. Experiment-specific
+    comparisons and results remain outside this framework checkout.
+
+89. **RUN DIRECTORIES ARE EXPLICIT (ADR 0010, 2026-09-11).** Supersedes
+    #67's global home discovery and ignored-directory behavior. Samarth
+    explicitly approved making the supplied directory authoritative.
+    `run_prefix` now constructs `runs/<subdir>/<run_id>` without IO. Reads,
+    warm starts, replay, checkpoint measurements, recovery and observer links
+    carry the full relative reference. Bare IDs mean the store root, even
+    after browsing. Ordinary manifest-backed submission is idempotent at the
+    exact address; `resume=True` (runner/desk/host) or `create=False`
+    (`Store.open_run`) rejects a missing address. Same scientific IDs in two
+    directories remain distinct browsing rows; no uniqueness scan is made.
+    Existing artifacts are not moved. Measurement output remains keyed by
+    scientific ID; its checkpoint source now uses the full address.
+
+    The deployed desk configuration has a recovery generation so historical
+    parked work cannot restart merely because a new metal registers. A new
+    explicit submission opts into that generation. Finite idle limits are
+    mandatory in the deployment, including after replay of older journal
+    declarations; infinite registrations are refused before changing state.
+    This supersedes historical permission to pin campaign GPUs.
+
+    The generic desk deployment reads optional `RLSTACK_BOOTABLE_METALS`
+    and `RLSTACK_RECOVERY_GENERATION` configuration. Allocation names and
+    campaign recovery labels are not hard-coded in the framework.
+
+90. **REUSABLE TASK ADAPTERS AND RUNTIME FIXES (2026-09-12).**
+    Publish the shared learned/spectral task-posterior adapters (ADR 0009),
+    sequence-weighted supervision, reference-KL loss, policy scoring, program
+    verification/diagnostics, reflection environment and SDPO loss. Dataset
+    generators, campaign drivers, launch matrices and experiment controls
+    remain local. Registered names and adapter checkpoint formats are kept.
+
+    Shared runtime changes include engine-wide LoRA slot IDs, bounded store
+    work outside the event loop, cached tokenization, acknowledged custody
+    checks and delivery claims, load-aware placement, resident failure
+    notification and lazy observer browsing. The isolated framework suite
+    completed 1,295 tests: 1,291 passed with PyTorch on CPU and four CUDA
+    cases skipped. The Python 3.13 suite also passed with 191 optional
+    dependency/GPU skips. All 12 browser modules passed syntax/import checks;
+    run-tree checks preserved nested paths, series, collisions and duplicate
+    IDs. No live GPU or native-serving validation was run for publication.
+
 ## Open threads (do NOT treat as settled; flag when your answer touches them)
 
 - TODO (Samarth, settled intent — future, nothing now): BUNDLE LRU EVICTION

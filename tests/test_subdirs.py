@@ -1,11 +1,10 @@
 """Runs file into SUBDIRS: runs/<subdir>/<run_id>, indicated at submit.
 
-The claims: a subdir is FILING, never identity (same run_id wherever filed,
-and it never hashes); a run's home is fixed at birth (attach finds it
-anywhere, a different subdir asked later is ignored — resume, not a move);
-every peek and every handle resolves through the one seam (run_prefix); bad
-segments are refused; the indication threads submit -> adopt -> desk; and
-the observer's rows say where each run lives.
+The directory does not change scientific identity, but it is part of the
+address. The caller supplies that address; lookups never search other folders,
+and strict resume refuses a missing path. Every peek and handle resolves
+through run_prefix; invalid segments are refused; the directory threads
+submit -> adopt -> desk; and observer rows retain the full run reference.
 """
 
 from __future__ import annotations
@@ -47,19 +46,20 @@ class SubdirStoreTest(unittest.TestCase):
         run.write_plan("train", b"x")
         self.assertTrue(self.store.path_of(
             "runs/ablations/plora/r1/manifest.json").exists())
-        self.assertEqual(self.store.run_prefix("r1"), "runs/ablations/plora/r1")
-        self.assertEqual(self.store.peek_manifest("r1"), {"run_id": "r1"})
-        self.assertEqual(len(self.store.peek_ledger("r1")), 1)
-        self.assertEqual(self.store.peek_plan("r1", "train"), b"x")
-        self.assertEqual(self.store.list_runs(), ["r1"])
-        self.assertEqual(self.store.run_subdirs(), {"r1": "ablations/plora"})
+        self.assertEqual(self.store.run_prefix("ablations/plora/r1"), "runs/ablations/plora/r1")
+        self.assertEqual(self.store.peek_manifest("ablations/plora/r1"), {"run_id": "r1"})
+        self.assertEqual(len(self.store.peek_ledger("ablations/plora/r1")), 1)
+        self.assertEqual(self.store.peek_plan("ablations/plora/r1", "train"), b"x")
+        self.assertEqual(self.store.list_runs(), ["ablations/plora/r1"])
+        self.assertEqual(self.store.run_subdirs(), {"ablations/plora/r1": "ablations/plora"})
 
-    def test_the_home_is_fixed_at_birth(self) -> None:
-        """Attaching with a DIFFERENT subdir finds the run where it lives:
-        resubmission is resume, not a move."""
+    def test_a_wrong_resume_path_never_searches_or_creates(self) -> None:
         self.store.open_run("r1", manifest={"run_id": "r1"}, subdir="a")
-        again = self.store.open_run("r1", manifest={"run_id": "r1"},
-                                    subdir="b")
+        with mock.patch.object(self.store, "_run_directories", side_effect=AssertionError("discovery")):
+            with self.assertRaisesRegex(StoreError, "runs/b/r1"):
+                self.store.open_run("r1", manifest={"run_id": "r1"}, subdir="b", create=False)
+            self.assertIsNone(self.store.peek_manifest("r1"))
+            again = self.store.open_run("r1", subdir="a")
         self.assertEqual(again._key(), "runs/a/r1")
         self.assertFalse(self.store.path_of("runs/b").exists())
 
@@ -153,8 +153,8 @@ class LeafWalkTest(unittest.TestCase):
 
     def test_nothing_inside_a_run_is_another_run(self) -> None:
         self.assertEqual(self.store.run_subdirs(),
-                         {"r1": "", "r2": "ablations/plora"})
-        self.assertEqual(self.store.run_prefix("r2"), "runs/ablations/plora/r2")
+                         {"r1": "", "ablations/plora/r2": "ablations/plora"})
+        self.assertEqual(self.store.run_prefix("ablations/plora/r2"), "runs/ablations/plora/r2")
         self.assertEqual(self.store.run_prefix("r1"), "runs/r1")
         # absence still reads as absence, at the top spelling
         self.assertEqual(self.store.run_prefix("nobody"), "runs/nobody")
@@ -189,6 +189,6 @@ class LeafWalkTest(unittest.TestCase):
 
         with mock.patch("os.scandir", counting):
             self.assertEqual(observer.run_subdirs(),
-                             {"r1": "", "r2": "ablations/plora"})
-            self.assertEqual(observer.run_prefix("r2"), "runs/ablations/plora/r2")
+                             {"r1": "", "ablations/plora/r2": "ablations/plora"})
+            self.assertEqual(observer.run_prefix("ablations/plora/r2"), "runs/ablations/plora/r2")
         self.assertNotIn(str(self.store.path_of("runs/r1/waves")), scanned)

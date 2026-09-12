@@ -25,7 +25,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 
-from rlstack.data.stores.base import Store
+from rlstack.data.stores.base import Store, run_reference
 from rlstack.observe.locate import Root, rooted
 from rlstack.observe.views import hosts_data, runs_data
 
@@ -155,6 +155,7 @@ def tenancy_lanes(events: Sequence[dict]) -> list[dict]:
             continue
         if kind == "attach":
             lane = {"run_id": run_id, "store": event.get("store"),
+                    "run_ref": run_reference(run_id, event.get("subdir")),
                     "pools": list(event.get("pools", [])),
                     "remotes": list(event.get("remotes", [])),
                     "n_updates": event.get("n_updates"),
@@ -260,8 +261,12 @@ def run_timing(store: Store, run_id: str) -> dict:
     """
     updates: dict[int, dict] = {}
     for host in store.list_hosts():
+        references: dict[str, str] = {}
         for event in store.read_host_log(host):
-            if event.get("event") != "update" or event.get("run_id") != run_id:
+            rid = event.get("run_id")
+            if event.get("event") == "attach" and rid:
+                references[rid] = run_reference(rid, event.get("subdir"))
+            if event.get("event") != "update" or references.get(rid, rid) != run_id:
                 continue
             update = event.get("update")
             when = event.get("t")

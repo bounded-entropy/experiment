@@ -169,6 +169,10 @@ select:hover { border-color:var(--line-2); }
 .find { display:flex; align-items:center; gap:8px; flex-wrap:wrap;
         padding:14px var(--gut) 2px; }
 .find input { padding:7px 11px; width:min(480px,100%); }
+.find button { padding:7px 11px; cursor:pointer; font:inherit;
+               color:var(--ink-2); background:var(--panel-2);
+               border:1px solid var(--line-2); border-radius:3px; }
+.find button:hover { color:var(--ink); border-color:var(--ink-3); }
 .find input::placeholder { color:var(--dim); }
 .find input:focus { outline:none; border-color:var(--ink-3);
                     background:var(--panel); }
@@ -202,6 +206,7 @@ select:hover { border-color:var(--line-2); }
 
 details.group { background:var(--panel); border:1px solid var(--line);
                 border-radius:4px; margin-bottom:10px; }
+details.group > details.group { margin:0 14px 10px; }
 details.group > summary { cursor:pointer; padding:9px 14px; list-style:none;
                           display:flex; gap:14px; align-items:baseline;
                           flex-wrap:wrap; }

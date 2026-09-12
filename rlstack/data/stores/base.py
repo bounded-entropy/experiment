@@ -107,6 +107,16 @@ def check_subdir(subdir: str) -> str:
     return "/".join(segments)
 
 
+def run_reference(run_id: str, subdir: str | None = None) -> str:
+    """The explicit path below runs/, shared by callers and store readers."""
+    name = check_subdir(run_id)
+    if not subdir:
+        return name
+    if "/" in name:
+        raise StoreError("supply either a qualified run reference or a subdir, not both")
+    return f"{check_subdir(subdir)}/{name}"
+
+
 def wave_key(run_dir: str, update: int) -> str:
     """Where one update's sealed wave lives, under the run's DIRECTORY key
     (runs/<run_id>, or runs/<subdir>/<run_id> where the run was filed). One
@@ -231,56 +241,51 @@ class Store(ABC):
         for key in self._list("runs/"):
             if key.endswith("/manifest.json"):
                 home = key[: -len("/manifest.json")]
-                out[home.rsplit("/", 1)[-1]] = home
+                out[home.removeprefix("runs/")] = home
         return out
 
-    def run_prefix(self, run_id: str) -> str:
-        """The key of this run's DIRECTORY: runs/<run_id> at the top, or
-        runs/<subdir>/<run_id> wherever open_run filed it at birth. One run,
-        one home, found by its manifest and cached; a run that exists nowhere
-        resolves to the top spelling, so absence still reads as absence. The
-        cache never goes stale because a run NEVER MOVES — its home is fixed
-        the moment the manifest is written. A miss refreshes the whole map at
-        once: ONE walk answers for every run, never one walk per run (measured
-        on the venue: the per-run walk cost 12 s, and a run whose manifest
-        was absent paid it on every request, uncached)."""
-        homes = self.__dict__.setdefault("_run_homes", {})
-        if run_id not in homes:
-            homes.update(self._run_directories())
-        return homes.get(run_id, f"runs/{run_id}")
+    def run_children(self, subdir: str = "") -> list[dict[str, str]]:
+        """Browse one folder. Mounted stores override with a shallow listing."""
+        prefix = "runs/" + (check_subdir(subdir) + "/" if subdir else "")
+        names = sorted({key[len(prefix):].split("/")[0]
+                        for key in self._list(prefix) if key.startswith(prefix)})
+        return [{"name": name, "kind": "run" if self._exists(
+                    prefix + name + "/manifest.json") else "folder",
+                 "path": (subdir + "/" if subdir else "") + name}
+                for name in names]
+
+    def run_prefix(self, run_id: str, subdir: str | None = None) -> str:
+        """Resolve an explicit run reference, without IO or discovery.
+
+        A reference is `subdir/run_id`, or just `run_id` at the root. A
+        separately supplied subdir qualifies a bare ID; it is never a hint.
+        """
+        return f"runs/{run_reference(run_id, subdir)}"
 
     def run_subdirs(self) -> dict[str, str]:
-        """{run_id: subdir} for every run in the store ("" at the top) — the
+        """{run_reference: subdir} for every run ("" at the top) — the
         observer's one question about filing."""
         return {run_id: "/".join(home.split("/")[1:-1])
                 for run_id, home in self._run_directories().items()}
 
     def open_run(self, run_id: str, manifest: dict[str, Any] | None = None,
-                 subdir: str | None = None) -> "RunHandle":
-        """Attach-or-create: create the run's directory (manifest required) or
-        attach to it (the manifest must match — identity is computed, I3).
+                 subdir: str | None = None, *, create: bool | None = None) -> "RunHandle":
+        """Open exactly the named directory; never look in another folder.
 
-        `subdir` says WHERE a NEW run's directory spawns
-        (runs/<subdir>/<run_id>); it is filing, never identity. A run's home
-        is fixed at birth: attaching finds the run wherever it lives, and a
-        different subdir asked later is ignored — resubmission is resume, not
-        a move (I10's "for life" includes the address).
-
-        Attaching discards unsealed work: per-update artifacts and blob versions
-        no ledger line committed. Observers must peek instead (I10).
+        Offering a manifest permits idempotent creation. `create=False`
+        requests resume only, validating that manifest without creating a
+        missing run. Without a manifest the run must already exist.
+        Attaching discards unsealed work; observers must peek instead (I10).
         """
-        home = self.run_prefix(run_id)
+        home = self.run_prefix(run_id, subdir)
+        run_id = home.rsplit("/", 1)[-1]
         manifest_key = f"{home}/manifest.json"
         if not self._exists(manifest_key):
-            if manifest is None:
+            if create is False or manifest is None:
                 raise StoreError(
-                    f"run {run_id!r} does not exist; a manifest is required to create it")
-            if subdir is not None:
-                home = f"runs/{check_subdir(subdir)}/{run_id}"
-                manifest_key = f"{home}/manifest.json"
+                    f"run does not exist at {home!r}; resume requires its exact directory")
             self._write(manifest_key, _canonical(manifest).encode("utf-8"))
             self._append_line(f"{home}/ledger.jsonl", "")
-            self.__dict__.setdefault("_run_homes", {})[run_id] = home
             return RunHandle(self, run_id, _canonical(manifest), home)
 
         stored = self._read(manifest_key).decode("utf-8")
@@ -292,9 +297,8 @@ class Store(ABC):
         return handle
 
     def list_runs(self) -> list[str]:
-        """Run ids present in the store, wherever they are filed."""
-        return sorted({key.split("/")[-2] for key in self._list("runs/")
-                       if key.endswith("/manifest.json")})
+        """Explicit discovery of run references, preserving their directories."""
+        return sorted(self._run_directories())
 
     # ---- content-addressed storage ------------------------------------------
 
@@ -927,9 +931,17 @@ class RunHandle:
             named.append(((section, name, version),
                           self._blob_key(section, name, version)))
 
+        # Delete only files this store actually lists. On a mounted volume,
+        # _exists also asks the committed remote view after a local miss:
+        # checking every already-swept version that way makes U updates cost
+        # O(U^2) network lookups. A listed blob is also one this writer can
+        # size and unlink; remote-only blobs belong to the other mount.
+        present = set()
+        for section in {triple[0] for triple, _ in named}:
+            present.update(self.store._list(self._key(section)))
         freed, gone = 0, []
         for triple, key in named:
-            if not self.store._exists(key):
+            if key not in present:
                 continue
             freed += self.store._size(key)
             self.store._delete(key)

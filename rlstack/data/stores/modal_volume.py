@@ -35,6 +35,7 @@ feel another tenant's arrival.
 from __future__ import annotations
 
 import concurrent.futures
+import threading
 
 from rlstack.data.stores.base import StoreAddress
 from rlstack.data.stores.local import LocalStore
@@ -48,8 +49,9 @@ class ModalVolumeStore(LocalStore):
     journaling, an async adopt sealing) that blocks in modal's client
     deadlocks the very loop modal needs to finish the call — the metals'
     journal-freeze wedge. The detour costs one thread hop from sync
-    callers and, being a single worker, also single-files commits so
-    twelve tenants' seals queue instead of stampeding the volume server.
+    callers and, being a single worker, also serializes volume requests.
+    Writers waiting before a commit starts share that commit; a writer
+    arriving during it waits for the next one.
     """
 
     def __init__(self, root, volume=None, locator: str | None = None) -> None:
@@ -58,6 +60,8 @@ class ModalVolumeStore(LocalStore):
         self._locator = locator
         self._volume_thread = concurrent.futures.ThreadPoolExecutor(
             max_workers=1)
+        self._commit_lock = threading.Lock()
+        self._pending_commit: concurrent.futures.Future[None] | None = None
 
     def _on_the_volume_thread(self, fn):
         """The one door to the volume's RPCs (see the class docstring)."""
@@ -77,10 +81,51 @@ class ModalVolumeStore(LocalStore):
         return StoreAddress("modal_volume", str(self.root), self.describe())
 
     def _persist(self) -> None:
-        """The durability hook: stage -> volume. Called at every durable point
-        below, and once by a sweep, whose deletions stage like writes."""
+        """Wait for a commit that starts after this writer staged its work.
+
+        Several writers queued behind a volume read need one commit, not
+        one each. Joining a commit already in progress would acknowledge
+        later writes too early, so its group closes when the worker starts.
+        """
         if self._volume is not None:
-            self._on_the_volume_thread(self._volume.commit)
+            with self._commit_lock:
+                if self._pending_commit is None:
+                    self._pending_commit = self._volume_thread.submit(
+                        self._commit_waiting_writers)
+                pending = self._pending_commit
+            pending.result()
+
+    def _commit_waiting_writers(self) -> None:
+        """Close this group before the RPC; subsequent writers form a new one."""
+        with self._commit_lock:
+            self._pending_commit = None
+        self._volume.commit()
+
+    def open_run(self, run_id, manifest=None, subdir=None, *, create=None):
+        """An adopting writer starts from the committed ledger, never its mount.
+
+        The runner offers the manifest on both creation and resume. Before
+        resuming an existing run, copy its committed ledger into this mount:
+        reading through a missing file alone is insufficient because the next
+        local append would otherwise create a ledger containing only that line.
+        The desk must have ended the old writer's custody before adoption.
+        """
+        if self._volume is not None and manifest is not None:
+            home = self.run_prefix(run_id, subdir)
+            if self._exists(f"{home}/manifest.json"):
+                key = f"{home}/ledger.jsonl"
+
+                def committed_ledger():
+                    entries = self._volume.iterdir(home, recursive=False)
+                    if not any(entry.path.lstrip("/") == key for entry in entries):
+                        return b""  # creation can crash before its first append
+                    return b"".join(self._volume.read_file(key))
+
+                # Observation failures propagate: unknown history must never
+                # be replaced by a stale local prefix or an empty ledger.
+                data = self._on_the_volume_thread(committed_ledger)
+                super()._write(key, data)
+        return super().open_run(run_id, manifest=manifest, subdir=subdir, create=create)
 
     def _read(self, key: str) -> bytes:
         """Mount first; on a snapshot miss, the volume's committed view via
@@ -98,6 +143,33 @@ class ModalVolumeStore(LocalStore):
                 raise FileNotFoundError(
                     f"{key!r}: on neither the mount snapshot nor the "
                     f"volume's committed view") from None
+
+    def _exists(self, key: str) -> bool:
+        """A missing mounted file may already exist in the committed volume."""
+        if super()._exists(key):
+            return True
+        try:
+            self._read(key)
+            return True
+        except FileNotFoundError:
+            return False
+
+    def _run_directories(self) -> dict[str, str]:
+        """Discover parents committed after this container mounted its snapshot."""
+        homes = super()._run_directories()
+        if self._volume is not None:
+            def committed_entries():
+                roots = self._volume.iterdir("/", recursive=False)
+                if not any(entry.path.strip("/") == "runs" for entry in roots):
+                    return []
+                return list(self._volume.iterdir("runs", recursive=True))
+
+            entries = self._on_the_volume_thread(committed_entries)
+            for entry in entries:
+                if entry.path.endswith("/manifest.json"):
+                    home = entry.path.removesuffix("/manifest.json").lstrip("/")
+                    homes[home.removeprefix("runs/")] = home
+        return homes
 
     def _write(self, key: str, data: bytes) -> None:
         super()._write(key, data)

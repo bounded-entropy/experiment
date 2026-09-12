@@ -165,6 +165,93 @@ class Recorder:
         return {"mechanisms": {}, "token_ids": []}
 
 
+class DeskDeadlineTest(unittest.TestCase):
+    def test_cas_transfers_can_outlast_status_without_becoming_unbounded(self) -> None:
+        from rlstack.runner.remote import DEADLINE_S, RemoteDesk, Unreachable, bounded
+
+        class SlowCas(Recorder):
+            async def call(self, verb, payload, *, deadline_s=DEADLINE_S):
+                reply = {"uri": "cas://plan"} if verb == "put_plan" else {"bytes": "cGxhbg=="}
+                return await bounded(asyncio.sleep(.09, result=reply),
+                                     deadline_s / 1000, verb)
+
+        remote = RemoteDesk(SlowCas())
+        self.assertEqual(go(remote.put_plan(b"plan")), "cas://plan")
+        self.assertEqual(go(remote.read_cas("cas://plan")), b"plan")
+        with self.assertRaises(Unreachable):
+            go(remote.put_plan(b"plan", deadline_s=1))
+
+    def test_submit_and_recovery_can_outlast_a_single_status_call(self) -> None:
+        """The enclosing call must allow the builds and retries it requests.
+
+        Scale seconds down for the fake wire: a 90-second operation must
+        finish, rather than be cancelled by the default 60-second deadline.
+        """
+        from rlstack.runner.remote import DEADLINE_S, RemoteDesk, bounded
+
+        class SlowDesk(Recorder):
+            async def call(self, verb, payload, *, deadline_s=DEADLINE_S):
+                return await bounded(
+                    asyncio.sleep(0.09, result={"finished": verb}),
+                    deadline_s / 1000, verb)
+
+        remote = RemoteDesk(SlowDesk())
+        self.assertEqual(go(remote.submit(arith_spec("cas://train"))),
+                         {"finished": "submit"})
+        self.assertEqual(go(remote.reap(probes=3, wait=30)),
+                         {"finished": "reap"})
+        self.assertEqual(go(remote.reroute("run", avoiding="busy-host")),
+                         {"finished": "reroute"})
+        self.assertEqual(go(remote.decommission("busy-host", reroute=True)),
+                         {"finished": "decommission"})
+        self.assertEqual(go(remote.release("metal")), {"finished": "release"})
+
+    def test_release_honors_a_finite_deadline_override(self) -> None:
+        from rlstack.runner.remote import DEADLINE_S, RemoteDesk, Unreachable, bounded
+
+        class SlowRelease(Recorder):
+            async def call(self, verb, payload, *, deadline_s=DEADLINE_S):
+                self.payload = payload
+                return await bounded(asyncio.sleep(.09, result={"released": True}),
+                                     deadline_s / 1000, verb)
+
+        wire = SlowRelease()
+        remote = RemoteDesk(wire)
+        with self.assertRaises(Unreachable):
+            go(remote.release("metal", deadline_s=45))
+        self.assertEqual(go(remote.release("metal", deadline_s=200)), {"released": True})
+        self.assertEqual(wire.payload, {"metal": "metal", "reason": "released"})
+
+    def test_retirement_keeps_a_configurable_finite_bound(self) -> None:
+        """A short retirement can move some dependents before cancellation.
+
+        The caller needs enough time for the whole move, while an explicit
+        shorter deadline must still expire rather than silently be ignored.
+        """
+        from rlstack.runner.remote import DEADLINE_S, RemoteDesk, Unreachable, bounded
+
+        moved = []
+
+        class MovingDesk(Recorder):
+            async def call(self, verb, payload, *, deadline_s=DEADLINE_S):
+                async def retire():
+                    for run in range(3):
+                        await asyncio.sleep(.03)
+                        moved.append(run)
+                    return {"decommissioned": True}
+                return await bounded(retire(), deadline_s / 1000, verb)
+
+        remote = RemoteDesk(MovingDesk())
+        with self.assertRaises(Unreachable):
+            go(remote.decommission("busy-host", reroute=True, deadline_s=45))
+        self.assertEqual(moved, [0])
+        moved.clear()
+        self.assertEqual(go(remote.decommission("busy-host", reroute=True,
+                                                deadline_s=200)),
+                         {"decommissioned": True})
+        self.assertEqual(moved, [0, 1, 2])
+
+
 class VerbSplitTest(unittest.TestCase):
     """WHICH verb rides WHICH calling convention is a contract, not an
     implementation detail (#45): an out-of-process transport carries the
@@ -217,3 +304,56 @@ class VerbSplitTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class WedgeRuleTest(unittest.TestCase):
+    """A SYNC WIRE VERB IS NEVER ASKED FROM A THREAD THAT RUNS AN EVENT LOOP
+    (remote.check_off_loop). `ask` waits — on another container, on a
+    resident child — and a wait on the loop thread parks every input that
+    container dispatches, which is how one slow party froze three containers
+    on 2026-09-04. The rule holds on the in-process transport too, so this
+    suite names an offending call site before metal does."""
+
+    class Echo:
+        def answer(self, verb, payload):
+            return {"verb": verb}
+
+        async def serve(self, verb, payload):
+            return {"verb": verb}
+
+    def test_an_ask_on_the_loop_thread_is_refused_by_name(self) -> None:
+        from rlstack.runner.remote import Blocking, LocalTransport, WedgeError
+
+        async def on_the_loop():
+            Blocking.run(LocalTransport(self.Echo()).ask("status", {}))
+
+        with self.assertRaises(WedgeError) as refused:
+            go(on_the_loop())
+        self.assertIn("'blocking wire'", str(refused.exception))
+        self.assertIn("to_thread", str(refused.exception))
+
+    def test_an_ask_from_a_worker_thread_passes(self) -> None:
+        """The fix at a call site: the wait leaves the loop."""
+        from rlstack.runner.remote import Blocking, LocalTransport
+
+        async def off_the_loop():
+            return await asyncio.to_thread(
+                Blocking.run, LocalTransport(self.Echo()).ask("status", {}))
+
+        self.assertEqual(go(off_the_loop()), {"verb": "status"})
+
+    def test_an_ask_with_no_loop_at_all_passes(self) -> None:
+        """A plain sync caller — a Modal `door_ask` worker thread, a test —
+        runs no loop and is exactly who the sync verbs are for."""
+        from rlstack.runner.remote import Blocking, LocalTransport
+
+        self.assertEqual(Blocking.run(LocalTransport(self.Echo()).ask("status", {})),
+                         {"verb": "status"})
+
+    def test_a_call_on_the_loop_is_the_async_path_and_passes(self) -> None:
+        from rlstack.runner.remote import Blocking, LocalTransport
+
+        async def on_the_loop():
+            return await LocalTransport(self.Echo()).call("adopt", {})
+
+        self.assertEqual(go(on_the_loop()), {"verb": "adopt"})

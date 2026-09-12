@@ -13,6 +13,17 @@ EVERY latent, and KL(q||p) exactly zero — the identity element, again. The
 prior's scale is plora's build_prior: fixed, or a learned scalar in its own
 optimizer group.
 
+THE GAIN MAP'S RECIPE sits in `relative_gains`, the one function both the
+replay forward and `member_peft` call, so a recipe can never be served one
+way and replayed another (I6): `amplitude="split"` makes the dense delta
+`a_site * unit(trunk(z) @ head^T)` with `a_site` a zero-initialized scalar
+per site (the heads then start seeded-random so a direction exists), and
+`bound=g` folds every relative gain through `g * tanh(. / g)`. The served
+gains of each forward are left on the state (`served`) for `provide` to
+summarize — the one provide here that depends on the batch and not the
+parameters alone — as the span, the amplitude and the energy a loss may
+price.
+
 torch is imported at module scope — this file loads only from the adapter
 type's methods (STYLE rule 7).
 """
@@ -37,7 +48,9 @@ from rlstack.policy.adapters.replay import (
     ReplayRows, SiteWrapper, join_site, leaf_module, leave_site,
 )
 from rlstack.policy.adapters.spectral_latent import (
-    EPS_RECORD, KL_PROVIDED, PRIOR_PROVIDED, SIGMA_PROVIDED,
+    AMPLITUDE_PROVIDED, AMPLITUDES, ENERGY_PROVIDED, EPS_RECORD,
+    FIXED_BASIS, FIXED_LINEAR, GAIN_SPAN_PROVIDED, JOINT_AMPLITUDE, KL_PROVIDED, PRIOR_PROVIDED,
+    SIGMA_PROVIDED, SPLIT_AMPLITUDE,
 )
 from rlstack.policy.adapters.spectral_torch import FROZEN_DTYPE, full_spectrum
 from rlstack.policy.siteschema import SiteMeta
@@ -64,16 +77,27 @@ class SlatentState:
     log_std: torch.nn.Parameter             # [latent]
     prior_log_std: torch.Tensor             # [] — plora's build_prior
     trunk: Hypernet
-    heads: dict[str, torch.nn.Parameter]    # path -> [m, hidden], zero-init
+    heads: dict[str, torch.nn.Parameter]    # path -> [m, hidden]; zero-init
+    #                                         under "joint", seeded under "split"
     prior: str = FIXED_PRIOR                # "fixed" | "learned"
+    amplitude: str = JOINT_AMPLITUDE        # "joint" | "split" (the recipe)
+    bound: float | None = None              # |relative gain| < bound, if set
+    amp: dict[str, torch.nn.Parameter] = field(default_factory=dict)
+    #                                       # path -> [] a_site; "split" only
+    served: dict[str, list[torch.Tensor]] = field(default_factory=dict)
+    #                                       # path -> the forward's eff rows,
+    #                                       # left here for provide() to read
     u: dict[str, torch.Tensor] = field(default_factory=dict)      # [out, m]
     v: dict[str, torch.Tensor] = field(default_factory=dict)      # [in, m]
     sigma: dict[str, torch.Tensor] = field(default_factory=dict)  # [m]
     version: int = 0
 
     def parameters(self) -> list[torch.nn.Parameter]:
-        """What trains: the posterior, a learned prior, the mapper."""
-        return [self.mu, self.log_std, *self.prior_parameters(), *self.mapper()]
+        """What trains: the posterior, a learned prior, the mapper, and the
+        per-site amplitudes under the split recipe."""
+        mapper = [] if self.amplitude in (FIXED_LINEAR, FIXED_BASIS) else self.mapper()
+        return [self.mu, self.log_std, *self.prior_parameters(),
+                *mapper, *self.amp.values()]
 
     def mapper(self) -> list[torch.nn.Parameter]:
         return [*self.trunk.parameters(), *self.heads.values()]
@@ -90,15 +114,28 @@ def _draw_seed(seed: int, tag: str) -> int:
 
 
 def build(sites: tuple[SiteMeta, ...], init: dict) -> SlatentState:
-    """The identity element, seeded: mu = 0, log_std = log(prior_std),
-    heads = 0 — the base for every latent, KL exactly zero. k must fit the
-    narrowest matched site, spectral's rule."""
+    """The identity element, seeded: mu = 0, log_std = log(prior_std), and
+    the gains ZERO — heads = 0 under "joint", a_site = 0 under "split" (whose
+    heads are seeded-random, so `unit` has a direction to normalize) — the
+    base for every latent, KL exactly zero. k must fit the narrowest matched
+    site, spectral's rule."""
     k, latent = int(init["k"]), int(init["latent"])
     members, hidden = int(init["members"]), int(init["hidden"])
     prior_std = float(init["prior_std"])
     prior = str(init.get("prior", FIXED_PRIOR))
     seed = int(init.get("seed", 0))
+    amplitude = str(init.get("amplitude", JOINT_AMPLITUDE))
+    bound = None if init.get("bound") is None else float(init["bound"])
+    if amplitude not in AMPLITUDES:
+        raise ValueError(
+            f"spectral_latent amplitude must be one of {AMPLITUDES}, got "
+            f"{amplitude!r}")
+    if bound is not None and not bound > 0:
+        raise ValueError(f"spectral_latent bound must be positive, got {bound}")
+    if amplitude == FIXED_BASIS and latent != k * len(sites):
+        raise ValueError("fixed_basis requires latent = k * number of sites")
     heads: dict[str, torch.nn.Parameter] = {}
+    amp: dict[str, torch.nn.Parameter] = {}
     for meta in sites:
         if meta.shape is None:
             raise ValueError(
@@ -108,19 +145,35 @@ def build(sites: tuple[SiteMeta, ...], init: dict) -> SlatentState:
             raise ValueError(
                 f"spectral_latent k={k} exceeds site {meta.name}'s spectrum "
                 f"(m={m}); the served rank cannot outrank the matrix")
-        heads[meta.path] = torch.nn.Parameter(
-            torch.zeros(m, hidden, dtype=torch.float32))
-    return SlatentState(
+        if amplitude in (SPLIT_AMPLITUDE, FIXED_LINEAR):
+            heads[meta.path] = torch.nn.Parameter(torch.randn(
+                m, hidden, dtype=torch.float32,
+                generator=torch.Generator().manual_seed(
+                    _draw_seed(seed, f"slatent.head.{meta.path}")))
+                / math.sqrt(hidden))
+            if amplitude == SPLIT_AMPLITUDE:
+                amp[meta.path] = torch.nn.Parameter(
+                    torch.zeros((), dtype=torch.float32))
+        else:
+            heads[meta.path] = torch.nn.Parameter(
+                torch.zeros(m, hidden, dtype=torch.float32))
+    state = SlatentState(
         k=k, latent=latent, members=members, prior_std=prior_std,
         hidden=hidden, seed=seed, paths=tuple(meta.path for meta in sites),
-        prior=prior,
+        prior=prior, amplitude=amplitude, bound=bound,
         mu=torch.nn.Parameter(torch.zeros(latent, dtype=torch.float32)),
         log_std=torch.nn.Parameter(
             torch.full((latent,), math.log(prior_std), dtype=torch.float32)),
         prior_log_std=build_prior(prior_std, prior),
         trunk=Hypernet(latent, hidden, torch.Generator().manual_seed(
             _draw_seed(seed, "slatent.trunk"))),
-        heads=heads)
+        heads=heads, amp=amp)
+    if amplitude in (FIXED_LINEAR, FIXED_BASIS):
+        if prior != FIXED_PRIOR:
+            raise ValueError(f"{amplitude} requires a fixed data-independent prior")
+        for parameter in state.mapper():
+            parameter.requires_grad_(False)
+    return state
 
 
 # ---------------------------------------------------------------------------
@@ -134,13 +187,49 @@ def reparameterized_latent(state: SlatentState,
     return state.mu + torch.exp(state.log_std) * eps
 
 
+UNIT_EPS = 1e-12    # under the L-infinity normalization, so unit(0) = 0
+
+
+def unit(raw: torch.Tensor) -> torch.Tensor:
+    """raw scaled so its largest |entry| along the last dim is 1 — the
+    DIRECTION of a gain vector, with the amplitude divided out. Zero stays
+    zero (the mean member at mu = 0 under a bias-free trunk)."""
+    return raw / (raw.abs().amax(dim=-1, keepdim=True) + UNIT_EPS)
+
+
+def relative_gains(state: SlatentState, path: str,
+                   z: torch.Tensor) -> torch.Tensor:
+    """[m] (or [rows, m]): the DENSE relative gains this latent generates at
+    `path` — the recipe, in one place for both lowerings (I6). "joint" is
+    trunk(z) @ head^T as first built; "split" is a_site * unit(...), the
+    amplitude one scalar and z steering only the direction; `bound` then
+    folds either through g * tanh(. / g)."""
+    if state.amplitude == FIXED_BASIS:
+        start = state.paths.index(path) * state.k
+        delta = torch.nn.functional.pad(z[..., start:start + state.k],
+                                        (0, state.heads[path].shape[0] - state.k))
+    elif state.amplitude == FIXED_LINEAR:
+        # Each relative gain has prior standard deviation prior_std. Both
+        # factors are frozen and sampled without training data. Only q(z)
+        # learns, so no decoder parameter can bypass KL(q(z) || p(z)).
+        projection = state.heads[path] @ state.trunk.enter
+        projection = projection / projection.norm(dim=-1, keepdim=True).clamp(min=UNIT_EPS)
+        delta = z @ projection.T
+    else:
+        delta = state.trunk(z) @ state.heads[path].T
+    if state.amplitude == SPLIT_AMPLITUDE:
+        delta = state.amp[path] * unit(delta)
+    if state.bound is not None:
+        delta = state.bound * torch.tanh(delta / state.bound)
+    return delta
+
+
 def effective_gains(state: SlatentState, path: str,
                     z: torch.Tensor) -> torch.Tensor:
-    """[m] (or [rows, m]): sigma * head(trunk(z)), top-k by magnitude in the
-    VALUE, dense in the GRADIENT — spectral's straight-through mask, applied
-    along the last dim so each row's own k directions serve."""
-    delta = state.trunk(z) @ state.heads[path].T
-    eff = state.sigma[path] * delta
+    """[m] (or [rows, m]): sigma * relative_gains(z), top-k by magnitude in
+    the VALUE, dense in the GRADIENT — spectral's straight-through mask,
+    applied along the last dim so each row's own k directions serve."""
+    eff = state.sigma[path] * relative_gains(state, path, z)
     k = min(state.k, eff.shape[-1])
     picked = torch.topk(eff.abs(), k, dim=-1).indices
     hard = torch.zeros_like(eff)
@@ -172,19 +261,25 @@ class SlatentSite(SiteWrapper):
                rows: ReplayRows) -> torch.Tensor:
         noise = _row_noise(rows, state, self.path)
         shared = _one_noise(noise)
-        v = state.v[self.path].to(torch.float32)
-        u = state.u[self.path].to(torch.float32)
+        # A fixed basis has zero values AND derivatives outside its first k
+        # directions. Keep full gains for provided summaries, but multiply
+        # only the directions that can contribute to the replay forward.
+        width = state.k if state.amplitude == FIXED_BASIS else state.v[self.path].shape[-1]
+        v = state.v[self.path][:, :width].to(torch.float32)
+        u = state.u[self.path][:, :width].to(torch.float32)
         if shared is not None:
             eff = effective_gains(state, self.path,
                                   reparameterized_latent(state, shared))
-            return ((x.to(torch.float32) @ v) * eff) @ u.T
+            state.served.setdefault(self.path, []).append(eff[None, :])
+            return ((x.to(torch.float32) @ v) * eff[:width]) @ u.T
         if x.dim() != 3 or x.shape[0] != noise.shape[0]:
             raise ValueError(
                 f"site {self.path}: per-row gains need [rows, tokens, in] "
                 f"activations over {noise.shape[0]} rows, got {tuple(x.shape)}")
         eff = effective_gains(state, self.path,
                               reparameterized_latent(state, noise))  # [R, m]
-        return ((x.to(torch.float32) @ v) * eff[:, None, :]) @ u.T
+        state.served.setdefault(self.path, []).append(eff)
+        return ((x.to(torch.float32) @ v) * eff[:, None, :width]) @ u.T
 
 
 def _row_noise(rows: ReplayRows, state: SlatentState,
@@ -230,19 +325,55 @@ def _one_noise(noise: torch.Tensor) -> torch.Tensor | None:
 
 def provide(state: SlatentState) -> dict[str, Any]:
     """The latent's KL to its prior (the shared latent_kl channel a latent
-    loss prices), the posterior's mean scale, and the prior's scale — the
-    last two to be watched."""
+    loss prices), the posterior's mean scale, the prior's scale, and the
+    served gains' three summaries — every one in the ledger, per update."""
     return {KL_PROVIDED: analytic_kl(state.mu, state.log_std,
                                      state.prior_log_std),
             SIGMA_PROVIDED: torch.exp(state.log_std).mean(),
-            PRIOR_PROVIDED: torch.exp(state.prior_log_std)}
+            PRIOR_PROVIDED: torch.exp(state.prior_log_std),
+            **served_summary(state)}
+
+
+def served_summary(state: SlatentState) -> dict[str, torch.Tensor]:
+    """The gains the forward since the last call SERVED — every row of every
+    site, taken off `state.served` and cleared — or, when no forward has run,
+    the MEAN member's, so the summary always means something:
+
+      gain_span  — mean over sites and rows of the served |sigma * delta|
+                   (spectral's own definition, so the two adapters' curves
+                   share an axis)
+      amplitude  — mean over sites and rows of the largest served RELATIVE
+                   gain, which under the split recipe is |a_site|
+      energy     — mean over sites and rows of sum(served relative gain^2):
+                   what a priced loss reads. Grad flows, and only through the
+                   served directions — the straight-through value of an
+                   unserved one is exactly zero, and so is the square's slope.
+    """
+    spans, amplitudes, energies = [], [], []
+    for path in state.paths:
+        stashed = state.served.pop(path, None)
+        eff = (torch.cat(stashed, dim=0) if stashed
+               else effective_gains(state, path, state.mu)[None, :])
+        relative = eff / state.sigma[path].clamp(min=UNIT_EPS)
+        k = min(state.k, eff.shape[-1])
+        spans.append(eff.abs().topk(k, dim=-1).values.mean())
+        amplitudes.append(relative.abs().amax(dim=-1).mean())
+        energies.append((relative * relative).sum(dim=-1).mean())
+    return {GAIN_SPAN_PROVIDED: torch.stack(spans).mean(),
+            AMPLITUDE_PROVIDED: torch.stack(amplitudes).mean(),
+            ENERGY_PROVIDED: torch.stack(energies).mean()}
 
 
 def param_groups(state: SlatentState) -> dict[str, list]:
-    """plora's groups: `mapper`, `posterior`, and `prior` when learned."""
+    """plora's groups: `mapper`, `posterior`, `prior` when learned — and
+    `amplitude`, the per-site scalars, under the split recipe."""
     groups = {"mapper": state.mapper(), "posterior": [state.mu, state.log_std]}
+    if state.amplitude in (FIXED_LINEAR, FIXED_BASIS):
+        del groups["mapper"]
     if state.prior == LEARNED_PRIOR:
         groups["prior"] = state.prior_parameters()
+    if state.amplitude == SPLIT_AMPLITUDE:
+        groups["amplitude"] = list(state.amp.values())
     return groups
 
 
@@ -267,7 +398,7 @@ def install(model: torch.nn.Module, state: SlatentState) -> None:
         state.u[path] = u.to(weight.device, FROZEN_DTYPE)
         state.v[path] = v.to(weight.device, FROZEN_DTYPE)
         state.sigma[path] = sigma.to(weight.device)
-        for parameter in (*state.parameters(), state.prior_log_std):
+        for parameter in (*state.parameters(), *state.mapper(), state.prior_log_std):
             parameter.data = parameter.data.to(weight.device)
         join_site(model, path, SlatentSite, state)
 
@@ -331,6 +462,8 @@ def emit(state: SlatentState) -> bytes:
         tensors[f"trunk.{key}"] = value.cpu()
     for path, head in state.heads.items():
         tensors[f"heads.{path}"] = head.data.cpu()
+    for path, amp in state.amp.items():
+        tensors[f"amp.{path}"] = amp.data.cpu()
     with torch.no_grad():
         for index in range(state.members):
             tensors.update(member_peft(
@@ -340,7 +473,8 @@ def emit(state: SlatentState) -> bytes:
     head = json.dumps({
         "k": state.k, "latent": state.latent, "members": state.members,
         "prior_std": state.prior_std, "prior": state.prior,
-        "hidden": state.hidden,
+        "hidden": state.hidden, "amplitude": state.amplitude,
+        "bound": state.bound,
         "paths": list(state.paths), "version": state.version},
         sort_keys=True, separators=(",", ":")).encode("utf-8")
     state.version += 1
@@ -359,6 +493,12 @@ def load(state: SlatentState, payload: bytes) -> None:
         raise ValueError(
             f"this payload carries k={head['k']}, latent={head['latent']}; "
             f"the entry declares k={state.k}, latent={state.latent}")
+    recipe = (str(head.get("amplitude", JOINT_AMPLITUDE)), head.get("bound"))
+    if recipe != (state.amplitude, state.bound):
+        raise ValueError(
+            f"this payload carries the {recipe[0]!r} recipe with bound "
+            f"{recipe[1]}; the entry declares {state.amplitude!r} with bound "
+            f"{state.bound} — a gain map of another recipe is another policy")
     state.mu.data.copy_(tensors["posterior.mu"])
     state.log_std.data.copy_(tensors["posterior.log_std"])
     state.prior_log_std.data.copy_(tensors["prior.log_std"])
@@ -367,4 +507,6 @@ def load(state: SlatentState, payload: bytes) -> None:
          if key.startswith("trunk.")})
     for path, head_param in state.heads.items():
         head_param.data.copy_(tensors[f"heads.{path}"])
+    for path, amp in state.amp.items():
+        amp.data.copy_(tensors[f"amp.{path}"])
     state.version = int(head["version"])

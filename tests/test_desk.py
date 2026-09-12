@@ -392,6 +392,66 @@ if __name__ == "__main__":
     unittest.main()
 
 
+class BalancedJoinTest(DeskFixture):
+    """Busy shared hosts must not monopolize every later experiment."""
+
+    def two_learners(self):
+        desk = self.desk()
+        for name in ("a", "b"):
+            host = self.stand_up(name, f"fleet://{name}",
+                                 serves_pool=False, trains=True)
+            desk.list_host(name, host.regimes, f"fleet://{name}")
+        return desk, (Demand(None, "training", BASE, 1, None, 0),)
+
+    def test_finished_history_does_not_outweigh_active_work(self):
+        from rlstack.runner.desk import Snapshot
+
+        desk, unit = self.two_learners()
+        snapshot = Snapshot({}, {
+            "a": {"tenants": {"working": {"status": "running"}}},
+            "b": {"tenants": {str(i): {"status": "done" if i % 2 else "failed"}
+                              for i in range(100)}}})
+        self.assertEqual(desk.join_rung(unit, frozenset(), snapshot), "b")
+
+    def test_empty_ties_remain_stable_and_ineligible_hosts_are_skipped(self):
+        from rlstack.runner.desk import Snapshot
+
+        desk, unit = self.two_learners()
+        snapshot = Snapshot({}, {"b": {"tenants": {}}, "a": {"tenants": {}}})
+        self.assertEqual(desk.join_rung(unit, frozenset(), snapshot), "a")
+        self.assertEqual(desk.join_rung(unit, frozenset({"a"}), snapshot), "b")
+        del snapshot.rosters["a"]
+        self.assertEqual(desk.join_rung(unit, frozenset(), snapshot), "b")
+        incompatible = (Demand(None, "training", "another-base", 1, None, 0),)
+        self.assertEqual(desk.join_rung(incompatible, frozenset(), snapshot), "")
+
+    def test_second_live_experiment_joins_the_other_learner(self):
+        async def drive():
+            gate = asyncio.Event()
+            serving = self.stand_up("serve", "fleet://serve", serves_pool=True,
+                                    trains=False, engine=GatedEngine(gate, base=BASE))
+            desk = self.desk()
+            desk.list_host("serve", serving.regimes, "fleet://serve")
+            trainers = {}
+            for name in ("a", "b"):
+                host = self.stand_up(name, f"fleet://{name}",
+                                     serves_pool=False, trains=True)
+                desk.list_host(name, host.regimes, f"fleet://{name}")
+                trainers[name] = host
+            first = await Campaigns(desk).submit(self.split_spec())
+            second = await Campaigns(desk).submit(
+                dataclasses.replace(self.split_spec(), seeds=Seeds(master=99)))
+            gate.set()
+            await asyncio.gather(trainers[first["host"]]._adoptions[first["run_id"]],
+                                 trainers[second["host"]]._adoptions[second["run_id"]])
+            return first, second
+
+        first, second = go(drive())
+        self.assertTrue(first["accepted"] and second["accepted"])
+        self.assertEqual((first["host"], second["host"]), ("a", "b"))
+        self.assertNotEqual(first["run_id"], second["run_id"])
+
+
 class CodeSkewTest(DeskFixture):
     def test_a_stale_loss_is_refused_loudly_by_name(self) -> None:
         """The quiet failure killed: a claimed hash differing from the host's
@@ -616,6 +676,12 @@ class LivenessVerbTest(DeskFixture):
         remote = RemoteDesk(LocalTransport(Campaigns(desk)))
         self.assertEqual(go(remote.liveness()),
                          {"alive-a": True, "dead-z": False})
+        # the same probe with what each host CARRIES: the roster an observer
+        # needs to tell a live tenancy from a dead generation's leftover attach
+        pulse = remote.pulse()
+        self.assertEqual(pulse["dead-z"], {"alive": False, "running": []})
+        self.assertTrue(pulse["alive-a"]["alive"])
+        self.assertEqual(pulse["alive-a"]["running"], [])
 
     def test_the_desk_probes_its_listings(self) -> None:
         living = self.stand_up("alive-a", "fleet://a", serves_pool=True,
@@ -1670,6 +1736,54 @@ class IdleReleaseTest(DeskFixture):
         self.assertEqual(service.hosts, {})
         self.assertTrue(service.released.is_set())
 
+    def test_missing_status_breaks_continuous_idle_evidence(self) -> None:
+        """Repeated probe failures cannot turn an idle timer into a GPU kill."""
+        from unittest.mock import AsyncMock, patch
+
+        service = self.metal_service(devices=2)
+        desk = self.desk_with_metal("fake-metal", idle_s=60.0)
+        self.carved_and_finished(desk, service)
+        listing = next(iter(desk.listings.values()))
+
+        async def sweep():
+            await desk.observe_idle(100.0)
+            await desk.observe_idle(110.0)
+            self.assertEqual(desk.idle_since, {"fake-metal": 110.0})
+            with patch.object(listing.host, "status", AsyncMock(side_effect=TimeoutError)):
+                for now in (120.0, 240.0, 360.0):
+                    await desk.observe_idle(now)
+                    self.assertEqual(await desk.release_idle(now), [])
+                    self.assertNotIn("fake-metal", desk.idle_since)
+            await desk.observe_idle(400.0)  # first successful reading after silence
+            await desk.observe_idle(410.0)  # confirmed quiet again
+            self.assertEqual(desk.idle_since, {"fake-metal": 410.0})
+            self.assertEqual(await desk.release_idle(471.0), ["fake-metal"])
+
+        go(sweep())
+
+    def test_a_listing_arriving_during_a_probe_invalidates_idle_evidence(self) -> None:
+        """A concurrent carve neither breaks iteration nor inherits an old idle timer."""
+        from unittest.mock import patch
+
+        service = self.metal_service(devices=2)
+        desk = self.desk_with_metal("fake-metal", idle_s=60.0)
+        self.carved_and_finished(desk, service)
+        listing = next(iter(desk.listings.values()))
+
+        async def arrives(*, deadline_s):
+            desk.listings["arrived"] = dataclasses.replace(listing, name="arrived")
+            return {"admitted": desk.admitted_at[listing.name], "tenants": {}}
+
+        async def sweep():
+            await desk.observe_idle(100.0)
+            await desk.observe_idle(110.0)
+            with patch.object(listing.host, "status", arrives):
+                await desk.observe_idle(200.0)
+            self.assertEqual(desk.idle_since, {})
+            self.assertEqual(await desk.release_idle(200.0), [])
+
+        go(sweep())
+
     def test_a_release_is_journaled_and_a_rebuilt_desk_agrees(self) -> None:
         """The departure is on the record — the intent first, then each
         delist — so a desk rebuilt from the journal knows the metal is
@@ -1729,7 +1843,8 @@ class IdleReleaseTest(DeskFixture):
             placed = await desk.place([demand])
             pool = RemotePool(self.LazyTransport(self, placed["pools"]["main"]),
                               base=BASE, tp=1)
-            pool.add_bundle(Bundle("bundle:x", {"pi": 0}))
+            # a sync wire verb, asked off the loop as every client must
+            await asyncio.to_thread(pool.add_bundle, Bundle("bundle:x", {"pi": 0}))
             await desk.observe_idle(100.0)         # first sight: a reading, no clock
             await desk.observe_idle(200.0)         # quiet: the clock starts
             started = dict(desk.idle_since)
@@ -2089,6 +2204,36 @@ class LoudKnockTest(DeskFixture):
         self.assertEqual([e for e in self.store.read_fleet_log()
                           if e.get("event") == "knock-refused"], [])
 
+    def test_operator_allocation_refuses_released_legacy_boot(self) -> None:
+        self.metal_service(devices=1)
+        booted = []
+        desk = self.desk_with_metal("fake-metal", boot_for=booted.append)
+        go(desk.release("fake-metal"))
+        desk.bootable_metals = frozenset({"campaign-metal"})
+        self.assertFalse(go(desk.reacquire("fake-metal")))
+        self.assertEqual(booted, [])
+        self.assertIn("fake-metal", desk.released)
+        self.assertIn("operator", self.store.read_fleet_log()[-1]["reason"])
+
+    def test_operator_allocation_refuses_the_lazy_plane_before_a_call(self) -> None:
+        desk = Desk(self.store, host_for=lambda _: None,
+                    metal_for=lambda _: self.fail("a disallowed lazy plane may boot on lookup"),
+                    bootable_metals=frozenset())
+        desk.metal_addresses["legacy"] = "metal://legacy"
+        self.assertFalse(go(desk.knock("legacy")))
+        self.assertEqual(desk.status()["bootable_metals"], [])
+
+    def test_rebuilt_desk_keeps_the_configured_allocation_and_allowed_boot(self) -> None:
+        self.metal_service(devices=1)
+        self.desk_with_metal("fake-metal")
+        booted = []
+        desk = Desk.from_journal(
+            self.store, host_for=lambda _: None, boot_for=booted.append,
+            bootable_metals=frozenset({"fake-metal"}))
+        self.assertTrue(go(desk.knock("fake-metal")))
+        self.assertEqual(booted, ["fake-metal"])
+        self.assertEqual(desk.status()["bootable_metals"], ["fake-metal"])
+
 
 class GuardedReleaseTest(DeskFixture):
     """ADR 0007, Q6 (Samarth's rider): under ONE desk, a venue door that
@@ -2368,7 +2513,7 @@ class LeaseTest(DeskFixture):
                          ["inference", "training"])
         self.assertEqual(parked["since"], parked["t"])
         for host in list(service.hosts):
-            service.decarve(host)
+            go(service.decarve(host))
 
     def test_a_heartbeat_for_an_unknown_name_or_a_replaced_epoch_is_refused(self) -> None:
         """A heartbeat never opens a lease: a container talking to a desk
@@ -2509,7 +2654,7 @@ class EpochTest(DeskFixture):
         one is refused by name — which is what the deaf-metal hour needed."""
         service = self.metal_service(devices=1)
         was = service.epoch
-        service.release()
+        go(service.release())
         reborn = self.metal_service(devices=1)       # the next knock's container
         self.assertNotEqual(reborn.epoch, was)
         with self.assertRaises(WrongEpoch):
@@ -2657,6 +2802,133 @@ class IdempotentSubmitTest(DeskFixture):
     because every wire is at-least-once. On 2026-09-04 Modal replayed a
     submit input off a container it had shut down, the same run was adopted
     on two metals, and the observer took the dead copy's word for it."""
+
+    def test_resubmission_cannot_overtake_a_reroute_after_its_stop(self) -> None:
+        """A stopped old owner is not permission for a second delivery when
+        this desk is already moving the same archived frame."""
+        gate = asyncio.Event()
+        self.addCleanup(gate.set)
+        self.metal_service(devices=2, sample_gate=gate)
+        desk = self.desk_with_metal("fake-metal")
+        rows = demand_rows(demands_of(self.split_spec()))
+        frame = frame_for(self.split_spec())
+
+        async def overlap():
+            first = await desk.submit(rows, frame)
+            stopped, release = asyncio.Event(), asyncio.Event()
+            original = desk.stop_anchored
+
+            async def hold_after_stop(run_id):
+                reply = await original(run_id)
+                stopped.set()
+                await release.wait()
+                return reply
+
+            desk.stop_anchored = hold_after_stop
+            moving = asyncio.create_task(desk.reroute(first["run_id"]))
+            try:
+                await asyncio.wait_for(stopped.wait(), 2)
+                second = await desk.submit(rows, dict(frame))
+                second_move = await desk.reroute(first["run_id"])
+                desk.park(first["run_id"], "waiting for its existing move")
+                retry = await desk.retry_parked()
+            finally:
+                release.set()
+                moved = await moving
+            return second, second_move, retry, moved
+
+        second, second_move, retry, moved = go(overlap())
+        self.assertFalse(second["accepted"], second)
+        self.assertTrue(second["in_flight"], second)
+        self.assertFalse(second_move["rerouted"], second_move)
+        self.assertTrue(second_move["in_flight"], second_move)
+        self.assertEqual(retry, {})  # an in-flight move is not another park
+        self.assertTrue(moved["rerouted"], moved)
+        delivered = [e for e in self.store.read_fleet_log()
+                     if e["event"] == "place" and e.get("delivered")]
+        self.assertEqual(len(delivered), 2)  # original plus its one move
+
+    def test_a_cancelled_move_releases_its_frame_for_resubmission(self) -> None:
+        """Cancellation after an acknowledged stop leaves a resumable run,
+        and must not leave an in-memory claim permanently blocking it."""
+        gate = asyncio.Event()
+        self.addCleanup(gate.set)
+        self.metal_service(devices=2, sample_gate=gate)
+        desk = self.desk_with_metal("fake-metal")
+        rows = demand_rows(demands_of(self.split_spec()))
+        frame = frame_for(self.split_spec())
+
+        async def cancel_move():
+            first = await desk.submit(rows, frame)
+            stopped = asyncio.Event()
+            original = desk.stop_anchored
+
+            async def hold_after_stop(run_id):
+                await original(run_id)
+                stopped.set()
+                await asyncio.Event().wait()
+
+            desk.stop_anchored = hold_after_stop
+            moving = asyncio.create_task(desk.reroute(first["run_id"]))
+            try:
+                await asyncio.wait_for(stopped.wait(), 2)
+            finally:
+                moving.cancel()
+                with self.assertRaises(asyncio.CancelledError):
+                    await moving
+                desk.stop_anchored = original
+            return await desk.submit(rows, frame)
+
+        resumed = go(cancel_move())
+        self.assertTrue(resumed["accepted"], resumed)
+
+    def test_concurrent_resubmits_claim_before_checking_custody(self) -> None:
+        """The old custody read can yield before a new intent is written;
+        only one caller may proceed, while a different frame stays free."""
+        gate = asyncio.Event()
+        self.addCleanup(gate.set)
+        self.metal_service(devices=2, sample_gate=gate)
+        desk = self.desk_with_metal("fake-metal")
+        spec = self.split_spec()
+        rows, frame = demand_rows(demands_of(spec)), frame_for(spec)
+        other = dataclasses.replace(spec, seeds=Seeds(master=99))
+
+        async def overlap():
+            first = await desk.submit(rows, frame)
+            await desk.stop_anchored(first["run_id"])
+            checked, release = asyncio.Event(), asyncio.Event()
+            original = desk.already_submitted
+            held = False
+
+            async def hold_first_read(key):
+                nonlocal held
+                reply = await original(key)
+                if key == submit_key(frame) and not held:
+                    held = True
+                    checked.set()
+                    await release.wait()
+                return reply
+
+            desk.already_submitted = hold_first_read
+            pending = asyncio.create_task(desk.submit(rows, frame))
+            try:
+                await asyncio.wait_for(checked.wait(), 2)
+                duplicate = await desk.submit(rows, dict(frame))
+                independent = await desk.submit(demand_rows(demands_of(other)),
+                                                frame_for(other))
+            finally:
+                release.set()
+                resumed = await pending
+            return duplicate, independent, resumed
+
+        duplicate, independent, resumed = go(overlap())
+        self.assertFalse(duplicate["accepted"], duplicate)
+        self.assertTrue(duplicate["in_flight"], duplicate)
+        self.assertTrue(independent["accepted"], independent)
+        self.assertTrue(resumed["accepted"], resumed)
+        delivered = [e for e in self.store.read_fleet_log()
+                     if e["event"] == "place" and e.get("delivered")]
+        self.assertEqual(len(delivered), 3)  # original, independent, one resume
 
     def test_the_intent_is_journaled_before_the_placement(self) -> None:
         """The order is the point: a desk that dies between the intent and

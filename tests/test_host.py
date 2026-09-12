@@ -42,6 +42,65 @@ class HostTest(unittest.TestCase):
         defaults.update(kwargs)
         return Host("test-host", **defaults)
 
+    def test_slow_statistics_commit_leaves_host_queries_responsive(self):
+        import threading
+        from unittest.mock import patch
+
+        entered, finished = threading.Event(), threading.Event()
+        append = self.store.append_host_event
+
+        def slow_append(name, row):
+            if row["event"] == "stats":
+                entered.set()
+                finished.wait(0.25)
+                finished.set()
+            append(name, row)
+
+        host = self.host(sampler=lambda: {"gpus": []})
+
+        async def check():
+            task = asyncio.create_task(host.run_stats())
+            try:
+                self.assertTrue(await asyncio.to_thread(entered.wait, 1))
+                self.assertFalse(finished.is_set(), "store commit blocked the host loop")
+                self.assertEqual(host.status()["host"], "test-host")
+            finally:
+                finished.set()
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+
+        with patch.object(self.store, "append_host_event", slow_append):
+            go(check())
+
+    def test_slow_checkpoint_commit_leaves_host_queries_responsive(self):
+        import threading
+        from unittest.mock import patch
+
+        entered, finished = threading.Event(), threading.Event()
+        append = self.store._append_line
+
+        def slow_append(key, line):
+            if key.endswith("ledger.jsonl") and line:
+                entered.set()
+                finished.wait(0.25)
+                finished.set()
+            append(key, line)
+
+        host = self.host()
+
+        async def check():
+            task = asyncio.create_task(host.submit(arith_spec(self.train), SCHEMA))
+            try:
+                self.assertTrue(await asyncio.to_thread(entered.wait, 2))
+                self.assertFalse(finished.is_set(), "ledger commit blocked the host loop")
+                self.assertEqual(host.status()["host"], "test-host")
+            finally:
+                finished.set()
+                await task
+
+        with patch.object(self.store, "_append_line", slow_append):
+            go(check())
+
     def test_host_submission_is_byte_identical_to_a_raw_run(self) -> None:
         """The host adds custody (binding, fit, roster, journal) and NOTHING
         else: the run directory it produces matches raw run_experiment's."""
@@ -610,6 +669,39 @@ class ResidentWatchdogTest(unittest.TestCase):
             await asyncio.gather(task, return_exceptions=True)
         go(a_few_ticks())
         self.assertEqual([e for e in self.store.read_host_log("well")
+                          if e.get("event") == "stalled"], [])
+        self.assertFalse(engine.down)
+
+    def test_slow_heartbeat_replies_within_the_stall_bound_keep_resident_alive(self) -> None:
+        """A busy queue must not discard every reply after the short probe timeout."""
+        import time
+        from unittest.mock import patch
+
+        engine = FakeEngine()
+        resident = self.a_resident(engine)
+        beat = resident.transport.door.beat
+        answered = []
+
+        def delayed_beat():
+            time.sleep(0.08)
+            answered.append(time.monotonic())
+            return beat()
+
+        resident.transport.door.beat = delayed_beat
+        host = Host("busy", engines=(engine,), learner=None, store=self.store,
+                    residents=(resident,))
+        host.measured.add(resident.label)
+
+        async def several_slow_replies():
+            task = asyncio.create_task(host.watch_residents(every=0.01, stall_s=0.3))
+            await asyncio.sleep(0.5)
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+
+        with patch("rlstack.runner.residents.HEARTBEAT_DEADLINE_S", 0.01):
+            go(several_slow_replies())
+        self.assertGreaterEqual(len(answered), 2)
+        self.assertEqual([e for e in self.store.read_host_log("busy")
                           if e.get("event") == "stalled"], [])
         self.assertFalse(engine.down)
 

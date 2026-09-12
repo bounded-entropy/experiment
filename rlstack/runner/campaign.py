@@ -77,8 +77,12 @@ def adapter_types_of(spec: ExperimentSpec) -> tuple[str, ...]:
     where there is still somewhere else to go (ADR 0007, Q4a). Sorted because
     a demand row is compared and journaled, and two orders of one set must
     not read as two different demands."""
+    from rlstack.registry import ADAPTER_TYPES
+
     return tuple(sorted({adapter.adapter_type
-                         for adapter in spec.policy.bank.values()}))
+                         for adapter in spec.policy.bank.values()
+                         if ADAPTER_TYPES.get(adapter.adapter_type).instance.serving
+                         is not None}))
 
 
 def anchor_demand(demands: Sequence[Demand], asked: str | None) -> Demand:
@@ -106,15 +110,19 @@ def anchor_demand(demands: Sequence[Demand], asked: str | None) -> Demand:
     return chosen
 
 
-def frame_for(spec: ExperimentSpec, subdir: str | None = None) -> dict:
+def frame_for(spec: ExperimentSpec, subdir: str | None = None,
+              resume: bool = False) -> dict:
     """The opaque frame a submission delivers: the canonical row, the
     client's code claim (the hashes the anchor host diffs against its own
     registry — the skew check's evidence), and the filing hint."""
     from rlstack.registry import code_hashes
     from rlstack.spec.canonical import canonical_json
 
-    return {"spec": json.loads(canonical_json(spec)),
-            "code": code_hashes(spec), "subdir": subdir}
+    frame = {"spec": json.loads(canonical_json(spec)),
+             "code": code_hashes(spec), "subdir": subdir}
+    if resume:
+        frame["resume"] = True
+    return frame
 
 
 class Campaigns:
@@ -127,11 +135,12 @@ class Campaigns:
 
     async def submit(self, spec: ExperimentSpec,
                      subdir: str | None = None,
-                     anchor: str | None = None, solo: bool = False) -> dict:
+                     anchor: str | None = None, solo: bool = False,
+                     resume: bool = False) -> dict:
         """A spec through the blind door: shaped here, delivered there.
         `anchor` names the member the frame lands on (demands_of's rule)."""
         return await self.desk.submit(demand_rows(demands_of(spec, anchor)),
-                                      frame_for(spec, subdir), solo=solo)
+                                      frame_for(spec, subdir, resume), solo=solo)
 
     async def serve(self, verb: str, payload: dict) -> dict:
         if verb == "migrate":

@@ -156,3 +156,76 @@ class OverlayTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class RosterTest(unittest.TestCase):
+    """The desk's pulse carries each live host's ROSTER, and a run the journal
+    leaves open on a live host that does not carry it is LOST, not running.
+    A carve name recurs per container generation, so a crashed generation's
+    never-detached attach sits in the very journal a live host of the same
+    name is writing (found on the yu-masala volume: a 09-01 attach reading
+    "running" beside 09-04's arms, because tonight's host bears its name)."""
+
+    def test_a_pulse_with_a_roster_puts_running_on_the_row(self) -> None:
+        rows = liveness_by_host([("h", beats([0.0, 30.0]))], now=60.0,
+                                desk=lambda: {"h": {"alive": True,
+                                                    "running": ["r1", "r0"]}})
+        self.assertEqual((rows["h"]["live"], rows["h"]["running"],
+                          rows["h"]["source"]), (True, ["r0", "r1"], "desk"))
+
+    def test_a_bare_bool_answer_still_reads_as_before(self) -> None:
+        rows = liveness_by_host([("h", beats([0.0, 30.0]))], now=60.0,
+                                desk=lambda: {"h": False})
+        self.assertEqual((rows["h"]["live"], rows["h"]["source"]),
+                         (False, "desk"))
+        self.assertNotIn("running", rows["h"])
+
+    def test_a_run_a_live_host_does_not_carry_is_lost(self) -> None:
+        rows = [{"status": "running", "run_id": "old", "open_hosts": ["h"]},
+                {"status": "running", "run_id": "r1", "open_hosts": ["h"]}]
+        stall_runs(rows, {"h": {"live": True, "running": ["r1"]}})
+        self.assertEqual([r["status"] for r in rows], ["lost", "running"])
+        self.assertEqual(rows[0]["lost_hosts"], ["h"])
+
+    def test_a_bool_only_desk_marks_nothing_lost(self) -> None:
+        """No roster, no verdict: a host that answered alive but was not
+        asked what it carries leaves the journal's word standing."""
+        rows = [{"status": "running", "run_id": "old", "open_hosts": ["h"]}]
+        stall_runs(rows, {"h": {"live": True}})
+        self.assertEqual(rows[0]["status"], "running")
+
+    def test_a_dead_host_is_stalled_before_it_is_lost(self) -> None:
+        """A corpse cannot be asked what it carries."""
+        rows = [{"status": "running", "run_id": "old", "open_hosts": ["h"]}]
+        stall_runs(rows, {"h": {"live": False, "running": []}})
+        self.assertEqual(rows[0]["status"], "stalled")
+        self.assertNotIn("lost_hosts", rows[0])
+
+
+class BoundedProbeTest(unittest.TestCase):
+    """A page must never hang behind one probe: `bounded` answers within its
+    deadline or answers nothing, and nothing is a journal-only reading."""
+
+    def test_a_prompt_probe_answers_as_itself(self) -> None:
+        from rlstack.observe.liveness import bounded
+
+        self.assertEqual(bounded(lambda: {"h": True}, 1.0)(), {"h": True})
+
+    def test_a_probe_past_its_deadline_answers_nothing(self) -> None:
+        import threading
+        from rlstack.observe.liveness import bounded
+
+        gate = threading.Event()
+
+        def stuck():
+            gate.wait(5.0)
+            return {"h": True}
+        try:
+            self.assertEqual(bounded(stuck, 0.05)(), {})
+        finally:
+            gate.set()
+
+    def test_a_probe_that_answers_none_is_nothing_too(self) -> None:
+        from rlstack.observe.liveness import bounded
+
+        self.assertEqual(bounded(lambda: None, 1.0)(), {})

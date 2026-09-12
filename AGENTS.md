@@ -31,12 +31,26 @@ uncertainty and counterexamples.
 - Use only `MODAL_PROFILE=yu-masala-workspace` for Modal commands. Respect the
   user's GPU ceiling across all apps, including old deployments and screens.
   Release and verify the old allocation before replacing it at that ceiling.
+- Automatic GPU idle shutdown must always remain enabled: the user's funds
+  are limited. Never set an infinite/`None` idle limit, pin GPU allocations,
+  or use keepalives to bypass idle release, including during setup or recovery.
+  Verify finite idle limits after allocation and recovery. Fix premature
+  shutdown in the shared lifecycle code instead of disabling shutdown.
 - Use the standing observer for progress and shared metal measurement doors
   for evaluation. The observer must remain read-only: discover manifests and
   committed artifacts; never create fake host events or attach a run just to
   make it visible. Missing host evidence means unknown liveness, not running.
 
 ## Integration and validation
+
+Run directories are explicit (ADR 0010). Pass the correct `subdir` when
+submitting; omitted means the root. Reads, parent checkpoints and replay refs
+use `subdir/run_id` (for example `store://family/run_id@16`). They never search
+other folders. Use `resume=True` on desk/host submissions to require an existing
+run; use `create=False` on `Store.open_run` when offering a manifest for resume
+validation. Observer links carry `?subdir=...`; use the returned `run_ref` for
+follow-up reads. Browsing/listing runs is an explicit operation, not a lookup
+fallback. Never treat a missing exact path as permission to rediscover another.
 
 Preserve staged and unstaged user work separately. Inspect the actual checked
 out code and commit ancestry; an accepted ADR document does not prove its

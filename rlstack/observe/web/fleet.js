@@ -6,18 +6,53 @@
 import {C, WHEEL, ago, brief, clock, drawnOnce, el, esc, getJSON, lostTick,
         okTick, pulseDot, raw, section, storeTail, when} from "./dom.js";
 import {card, emptyCard, residencyTip, timeline} from "./charts.js";
-import {ctx, hostPath, withHours} from "./nav.js";
+import {lazyDetails} from "./lazy.js";
+import {ctx, hostPath, withHours, route, query} from "./nav.js";
+
+const openHosts = new Set();
 
 export async function drawFleet() {
-  const page = await getJSON(withHours("/api/fleet/page"));   // ONE request
-  const fleet = page && page.fleet, flow = page && page.flow;
-  if (!fleet) {                        // the freshness contract (dom.js)
+  const page = await getJSON("/api/hosts/index" + query(route.folder));
+  if (!page) {
     if (drawnOnce()) { lostTick(); return; }
-    document.getElementById("page").textContent =
-        "observer unreachable — press r";
+    document.getElementById("page").textContent = "Could not load hosts — press r to retry.";
     return;
   }
   const holder = document.getElementById("page");
+  holder.replaceChildren();
+  ctx(`<span class="meta">${page.hosts.length} hosts · expand one to load its details</span>`);
+  for (const h of page.hosts) {
+    const key = JSON.stringify([h.folder, h.host]);
+    const label = h.folder ? h.folder + "/" + h.host : h.host;
+    holder.append(lazyDetails(esc(label), async body => {
+      const host = await getJSON(withHours("/api/host/" + encodeURIComponent(h.host) + "/summary" + query(h.folder)));
+      if (!host) throw new Error("Host read failed");
+      body.replaceChildren();
+      body.append(el("p", {}, pulseDot(host.pulse, host.now)
+        + ` <a href="${hostPath(h.host, h.folder)}">Open host charts and history</a>`));
+      const attached = host.open_attachments;
+      body.append(el("p", {class: "k"}, `${attached} open journaled attachments · `
+        + `${host.events} events · last seen ${esc(ago(host.last_seen, host.now))}`));
+      body.append(el("p", {}, `Engines: ${esc(host.engines.join(", ") || "unknown")}`));
+    }, key, openHosts));
+  }
+  holder.append(lazyDetails("Fleet-wide charts and placement", drawFleetHistory, "fleet-history", openHosts));
+  okTick();
+}
+
+function localSection(holder, title, kind) {
+  holder.append(el("h2", {}, esc(title)));
+  const grid = el("div", {class: "grid " + kind});
+  holder.append(grid);
+  return grid;
+}
+
+async function drawFleetHistory(holder) {
+  const page = await getJSON(withHours("/api/fleet/page"));   // ONE request
+  const fleet = page && page.fleet, flow = page && page.flow;
+  if (!fleet) {                        // the freshness contract (dom.js)
+    throw new Error("Fleet read failed");
+  }
   holder.innerHTML = "";
   // a host name is unique per store, not per fleet: when two roots journal
   // the same name, the folder is what tells them apart
@@ -29,10 +64,11 @@ export async function drawFleet() {
   }
   const label = h => shared.has(h.host) ? `${h.folder || "(top)"}/${h.host}` : h.host;
   const link = h => hostPath(h.host, shared.has(h.host) ? h.folder : null);
-  ctx(`<span class="meta">${fleet.hosts.length} host${fleet.hosts.length === 1 ? "" : "s"}
+  /* Full fleet statistics are requested explicitly below. */
+  holder.append(el("p", {}, `<span class="meta">${fleet.hosts.length} host${fleet.hosts.length === 1 ? "" : "s"}
      · ${fleet.runs.length} experiment${fleet.runs.length === 1 ? "" : "s"}</span>`
     + `<span class="meta" title="${fleet.stores.map(esc).join(" ")}">`
-    + `${fleet.stores.map(s => esc(storeTail(s))).join(" ")}</span>`);
+    + `${fleet.stores.map(s => esc(storeTail(s))).join(" ")}</span>`));
   if (!fleet.hosts.length) {
     holder.append(el("p", {style: "padding:22px"},
         "no hosts journaled in this store yet"));
@@ -46,11 +82,11 @@ export async function drawFleet() {
           detail: (t.pools || []).join(", ")}))})),
     fleet.window, residencyTip));
 
-  drawAggregates(flow, fleet.now);
+  drawAggregates(flow, fleet.now, holder);
 
   const busy = fleet.hosts.filter(h => h.util.length);
   if (busy.length) {
-    const grid = section("utilization", "wide");
+    const grid = localSection(holder, "utilization", "wide");
     grid.append(card("gpu util", busy.map(label).join(" · "),
         busy.map((h, i) => ({label: label(h), color: WHEEL[i % WHEEL.length],
                              points: h.util})),
@@ -96,17 +132,17 @@ export async function drawFleet() {
                   esc(ago(h.last_seen, fleet.now))));
     table.append(row);
   }
-  document.getElementById("page").append(el("h2", {}, "hosts"));
-  document.getElementById("page").append(table);
+  holder.append(el("h2", {}, "hosts"));
+  holder.append(table);
   okTick();
 }
 
 // ---- the two aggregates: one per kind of partition ------------------------
 
-function drawAggregates(flow, asOf) {
+function drawAggregates(flow, asOf, holder) {
   const inference = (flow || {}).inference || [];
   const training = (flow || {}).training || [];
-  const grid = section("fleet throughput", "half");
+  const grid = localSection(holder, "fleet throughput", "half");
   if (!inference.length && !training.length) {
     grid.append(emptyCard("inference", "traffic events",
         "no traffic events journaled yet"));

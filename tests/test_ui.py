@@ -109,7 +109,7 @@ class UiTest(unittest.TestCase):
         key = f"{run.run_dir}/adapters/pi@9.bin"
         self.store._write(key, b"unsealed")
         before = {key: self.store._read(key) for key in self.store._list("")}
-        row = run_row([self.store], "unhosted", "")
+        row = run_row([self.store], "research/replication/unhosted", "")
         self.assertEqual((row["status"], row["committed"], row["target"]),
                          ("unknown", 0, 4))
         self.assertEqual(row["hosts"], [])

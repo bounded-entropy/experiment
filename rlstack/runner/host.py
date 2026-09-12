@@ -32,9 +32,10 @@ from collections.abc import Callable, Mapping, Sequence
 from typing import TYPE_CHECKING
 from dataclasses import dataclass, field
 
-from rlstack.data.stores.base import Store
+from rlstack.data.stores.base import Store, run_reference
 from rlstack.policy.siteschema import SiteSchema
 from rlstack.runner.arbiter import Arbiter
+from rlstack.runner.signals import store_work
 from rlstack.runner.interfaces import Engine, Learner
 from rlstack.runner.loop import (
     RunReport, experiment_identity, run_experiment_async,
@@ -152,6 +153,7 @@ class Tenancy:
     completed: int | None = None
     extent: str = ""
     attached_at: float = field(default_factory=time.time)
+    subdir: str = ""
 
 
 class Host:
@@ -403,7 +405,8 @@ class Host:
                      max_inflight: int = 64,
                      remotes: Mapping[str, Engine] | None = None,
                      subdir: str | None = None,
-                     learner: Learner | None = None) -> RunReport:
+                     learner: Learner | None = None,
+                     resume: bool = False) -> RunReport:
         """Run one experiment on this host's metal: bind, fit, solo, attest, run.
         `remotes` maps pool names served by OTHER hosts to their RemotePools
         and `learner` is a learner worn by another host (None: this host's
@@ -420,8 +423,8 @@ class Host:
         self.check_solo(rid)
         self.roster[rid] = Tenancy(rid, pools={
             name: (engine.base or "*") for name, engine in sorted(binding.items())},
-            store=run_store.describe())
-        self.store.append_host_event(self.name, {
+            store=run_store.describe(), subdir=subdir or "")
+        await store_work(self.store.append_host_event, self.name, {
             "event": "attach", "t": time.time(), "run_id": rid,
             "pools": sorted(binding), "remotes": sorted(remote_pools),
             # WHICH LIFE OF THIS HOST is carrying the run (ADR 0008, F2): a
@@ -440,14 +443,14 @@ class Host:
         try:
             report = await run_experiment_async(
                 spec, schema, run_store, binding, learner,
-                max_inflight, arbiter=self.arbiter, subdir=subdir,
+                max_inflight, arbiter=self.arbiter, subdir=subdir, resume=resume,
                 # the tenant knows its own phases but not its metal: this is
                 # the door through which its update timings reach THIS host's
                 # journal, and the only reason the runner learns a host name
                 journal=HostJournal(self.store, self.name))
         except BaseException:
             self.roster[rid].status = "failed"
-            self.store.append_host_event(self.name, {
+            await store_work(self.store.append_host_event, self.name, {
                 "event": "detach", "t": time.time(), "run_id": rid,
                 "status": "failed"})
             raise
@@ -456,7 +459,7 @@ class Host:
         self.roster[rid].status = "done"
         self.roster[rid].completed = report.completed
         self.roster[rid].extent = report.extent
-        self.store.append_host_event(self.name, {
+        await store_work(self.store.append_host_event, self.name, {
             "event": "detach", "t": time.time(), "run_id": rid,
             "status": "done", "completed": report.completed,
             "extent": report.extent})
@@ -488,7 +491,7 @@ class Host:
     async def adopt(self, spec_row: Mapping,
                     routes: Mapping[str, str] | None = None,
                     code: Mapping[str, str] | None = None,
-                    subdir: str | None = None) -> dict:
+                    subdir: str | None = None, resume: bool = False) -> dict:
         """Take an experiment IN OVER THE WIRE and run it as one more tenancy
         on this host's own loop — submit, without the submitter in-process.
 
@@ -511,18 +514,26 @@ class Host:
         try:
             spec = self.decode_adoption(spec_row)
             self.check_code_agreement(spec, code)
-            schema = self.derive_schema(spec)
+            # Config lookup may wait on a model registry. It must not hold
+            # the same loop that renews leases and answers health probes.
+            schema = await asyncio.to_thread(self.derive_schema, spec)
             routed = self.resolve_routes(spec, routes or {})
             binding = self.bind_pools(spec, remotes=frozenset(routed.pools))
             self.check_fit(spec, binding, remotes=frozenset(routed.pools),
                            learner=routed.learner)
             rid = experiment_identity(spec, schema)
             self.check_solo(rid)
+            reference = run_reference(rid, subdir)
+            if resume and await store_work(self.store.peek_manifest, reference) is None:
+                raise HostError(f"cannot resume: run does not exist at runs/{reference}")
         except (HostError, TypeError, ValueError) as refusal:
             return {"accepted": False, "error": str(refusal)}
         live = self._adoptions.get(rid)
         if live is not None and not live.done():
-            return {"accepted": True, "run_id": rid, "state": "running"}
+            if self.roster[rid].subdir != (subdir or ""):
+                return {"accepted": False, "run_id": rid,
+                        "error": "run is active at a different subdirectory; supply its exact location"}
+            return {"accepted": True, "run_id": rid, "run_ref": reference, "state": "running"}
         # ACCEPTANCE IS VISIBLE THE MOMENT IT IS GIVEN: the tenancy enters the
         # roster HERE, synchronously, not when the background task gets its
         # first tick — otherwise two adopts in one breath both pass check_solo
@@ -532,10 +543,10 @@ class Host:
         self.roster[rid] = Tenancy(rid, pools={
             name: (engine.base or "*")
             for name, engine in sorted((binding | routed.pools).items())},
-            store=self.store.describe())
+            store=self.store.describe(), subdir=subdir or "")
         task = asyncio.create_task(
             self.submit(spec, schema, remotes=routed.pools, subdir=subdir,
-                        learner=routed.learner))
+                        learner=routed.learner, resume=resume))
         # a failed run already journals and rosters its failure (submit's own
         # except path) — but the EXCEPTION ITSELF would otherwise vanish into
         # a retrieved future, and a silent adoption death is undiagnosable
@@ -551,7 +562,7 @@ class Host:
                 print(f"[host {host}] adoption {rid} DIED:\n{told[-4000:]}")
         task.add_done_callback(adoption_ended)
         self._adoptions[rid] = task
-        return {"accepted": True, "run_id": rid, "state": "adopted"}
+        return {"accepted": True, "run_id": rid, "run_ref": reference, "state": "adopted"}
 
     async def stop(self, run_id: str) -> dict:
         """A tenancy told to die — adopt's per-run inverse, and the verb a
@@ -581,7 +592,7 @@ class Host:
             # row is still "running", so submit could not write its own
             # bookkeeping — the journal must not lose a detach
             told.status = "failed"
-            self.store.append_host_event(self.name, {
+            await store_work(self.store.append_host_event, self.name, {
                 "event": "detach", "t": time.time(), "run_id": run_id,
                 "status": "failed"})
         return {"stopped": True, "run_id": run_id,
@@ -737,7 +748,7 @@ class Host:
             while True:
                 sample = await asyncio.to_thread(self.sampler)
                 if sample is not None:
-                    self.store.append_host_event(self.name, {
+                    await store_work(self.store.append_host_event, self.name, {
                         "event": "stats", "t": time.time(), **sample})
                 if draining is None or draining.done():
                     draining = asyncio.create_task(self.journal_traffic())
@@ -776,7 +787,7 @@ class Host:
                     pending = asked.get(resident.label)
                     if pending is None or pending.done():
                         asked[resident.label] = asyncio.create_task(
-                            self.ask_heartbeat(resident, heard))
+                            self.ask_heartbeat(resident, heard, deadline_s=stall_s))
                     await self.take_first_contact(resident)
                     silent = now - heard[resident.label]
                     if silent > stall_s:
@@ -812,7 +823,7 @@ class Host:
         if not report:
             return                  # there has been no first contact yet
         self.measured.add(resident.label)
-        self.store.append_host_event(self.name, {
+        await store_work(self.store.append_host_event, self.name, {
             "event": "first-contact", "t": time.time(),
             "resident": resident.label, "kind": resident.regime.capability,
             "declared_gb": resident.birth.vram_gb,
@@ -820,11 +831,16 @@ class Host:
             "measured": dict(report)})
 
     async def ask_heartbeat(self, resident: "Resident",
-                            heard: dict[str, float]) -> None:
-        """One round trip to one resident, off this loop. A refusal is a
-        silence like any other — the bound above is what decides."""
+                            heard: dict[str, float], *, deadline_s: float) -> None:
+        """Keep a queued reply until the stall bound, while the watchdog ticks.
+
+        A shorter probe deadline can discard every reply from a busy resident
+        even when it answers regularly within the permitted phase duration.
+        Only one probe remains in flight; the watchdog still ends a resident
+        that reaches its unchanged stall bound without an answer.
+        """
         try:
-            await asyncio.to_thread(resident.heartbeat)
+            await asyncio.to_thread(resident.heartbeat, deadline_s=deadline_s)
         except Exception:
             return
         heard[resident.label] = time.time()
@@ -839,7 +855,7 @@ class Host:
         rerouted — which is the recovery path this fleet already has. The
         journal line is what makes the twelve silent minutes a fact instead
         of a mystery."""
-        self.store.append_host_event(self.name, {
+        await store_work(self.store.append_host_event, self.name, {
             "event": "stalled", "t": time.time(), "resident": resident.label,
             "kind": resident.regime.capability, "pid": resident.pid(),
             "silent_s": round(silent_s, 1), "bound_s": bound_s})
@@ -849,7 +865,7 @@ class Host:
         # OFF THE LOOP: the teardown ladder is a stop frame, a SIGTERM and a
         # SIGKILL, each joining what it signalled — up to half a minute, and
         # this host's other duties are still its own meanwhile.
-        await asyncio.to_thread(resident.stop)
+        await asyncio.to_thread(resident.stop, report_exit=True)
 
     async def journal_traffic(self) -> None:
         """One traffic window, drained and journaled — the stats tick's own
@@ -863,9 +879,9 @@ class Host:
             print(f"[host {self.name}] traffic: no window this tick: {refused}",
                   flush=True)
             return
-        self.store.append_host_event(self.name, {
+        await store_work(self.store.append_host_event, self.name, {
             "event": "traffic", "t": now, **row})
-        self.check_meter_advanced(row, now)
+        await store_work(self.check_meter_advanced, row, now)
 
     def check_meter_advanced(self, row: dict, now: float) -> None:
         """A WINDOW THAT CANNOT BE READING THE TRUTH, NAMED (ADR 0008, F5).

@@ -40,7 +40,7 @@ import json
 from collections.abc import Callable, Sequence
 from urllib.parse import parse_qs, unquote
 
-from rlstack.data.stores.base import Store
+from rlstack.data.stores.base import Store, StoreError, check_subdir
 from rlstack.observe.aggregate import (
     fleet_throughput, moments, run_timing, traffic_channels,
 )
@@ -198,7 +198,34 @@ def api(roots: Sequence[Root], route: list[str], folder: str | None,
     unquoted: ["api", "run", <id>, "wave", <n>] and its shorter kin; `folder`
     is the ?root= the link carried."""
     now = time.time() if now is None else now
+    if len(route) >= 3 and route[:2] == ["api", "run"]:
+        from rlstack.data.stores.base import run_reference
+
+        subdir = ((params or {}).get("subdir") or [""])[0]
+        route = [*route[:2], run_reference(route[2], subdir), *route[3:]]
     match route:
+        case ["api", "browse"]:
+            asked = params or {}
+            path = (asked.get("path") or [""])[0]
+            try:
+                path = check_subdir(path) if path else ""
+                offset = max(0, int((asked.get("offset") or ["0"])[0]))
+            except (StoreError, ValueError):
+                return {"error": "invalid folder or offset"}, "400 Bad Request"
+            selected = in_folder(roots, folder)
+            if folder is None and len(selected) > 1:
+                entries = [{"name": root.folder or "(top)", "kind": "root",
+                            "folder": root.folder, "path": ""} for root in selected]
+            else:
+                entries = [{**entry, "folder": root.folder}
+                           for root in selected for entry in root.store.run_children(path)]
+            return {"entries": entries[offset:offset + 100], "path": path,
+                    "next": offset + 100 if len(entries) > offset + 100 else None,
+                    "now": now}, "200 OK"
+        case ["api", "hosts", "index"]:
+            return {"hosts": [{"host": host, "folder": root.folder}
+                              for root in in_folder(roots, folder)
+                              for host in root.store.list_hosts()], "now": now}, "200 OK"
         case ["api", "runs"]:
             rows = runs_data(roots)
             stall_runs(rows, pulses_for(roots, now, desk))
@@ -229,10 +256,30 @@ def api(roots: Sequence[Root], route: list[str], folder: str | None,
         case ["api", "fleet"]:
             return fleet_throughput([root.store for root in roots],
                                     since=since), "200 OK"
+        case ["api", "host", host, "summary"]:
+            selected = in_folder(roots, folder)
+            journals = journals_for(selected, host)
+            events = sorted((e for _, rows in journals for e in rows), key=lambda e: e.get("t") or 0)
+            if not events:
+                return {"error": "unknown host"}, NOT_FOUND
+            birth = next((e for e in reversed(events) if e.get("event") == "host-up"), {})
+            opened = set()
+            for e in events:
+                if e.get("event") == "attach":
+                    opened.add(e.get("run_id"))
+                elif e.get("event") == "detach":
+                    opened.discard(e.get("run_id"))
+            return {"host": host, "engines": birth.get("engines", []),
+                    "events": len(events), "open_attachments": len(opened),
+                    "last_seen": events[-1].get("t"), "now": now,
+                    "pulse": liveness_by_host([(host, rows) for _, rows in journals], now, desk).get(host)
+                    }, "200 OK"
         case ["api", "host", host]:
             page = host_page(in_folder(roots, folder), host, since)
             if page is not None:
-                page["pulse"] = pulses_for(roots, now, desk).get(host)
+                page["pulse"] = liveness_by_host(
+                    [(host, rows) for _, rows in journals_for(in_folder(roots, folder), host)],
+                    now, desk).get(host)
                 page["now"] = now
             return _found(page, "unknown host")
         case ["api", "run", run_id]:

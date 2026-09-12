@@ -96,6 +96,37 @@ class AdoptTest(unittest.TestCase):
             return reply
         return go(drive())
 
+    def test_slow_schema_lookup_does_not_block_other_host_work(self):
+        import threading
+
+        entered, release = threading.Event(), threading.Event()
+
+        def schema(base):
+            entered.set()
+            release.wait(2)
+            return SCHEMA
+
+        host = self.host(schema_for=schema)
+
+        async def drive():
+            adoption = asyncio.create_task(host.adopt(row_of(arith_spec(self.train))))
+            while not entered.is_set():
+                await asyncio.sleep(0)
+            responsive = not release.is_set()
+            release.set()
+            reply = await adoption
+            await host._adoptions[reply['run_id']]
+            return responsive
+
+        # A backstop lets the old blocking implementation finish and fail.
+        timer = threading.Timer(1, release.set)
+        timer.start()
+        try:
+            self.assertTrue(go(drive()), 'schema lookup blocked the host event loop')
+        finally:
+            release.set()
+            timer.cancel()
+
     def test_an_adopted_run_is_byte_identical_to_a_submitted_one(self) -> None:
         """The door adds transport, never semantics."""
         spec = arith_spec(self.train)

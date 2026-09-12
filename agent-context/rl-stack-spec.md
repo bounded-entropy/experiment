@@ -122,6 +122,17 @@ submission; the host journals it, and the observer flags the same run_id seen
 in two stores as a fork. Observers never attach: attach sweeps unsealed work,
 so reading a live run goes through the store's read-only peeks.
 
+*(Delta, CONTEXT #89 / ADR 0010, 2026-09-11: a run address includes its
+directory within the bound store: `<subdir>/<run_id>`, or `<run_id>` at the
+root. The directory does not enter scientific identity. Callers must supply
+it; normal reads and creation never discover a home elsewhere. A missing
+resume-only address fails without creating a directory. Ordinary submission
+with a manifest remains create-or-resume at exactly the supplied address.
+There is no cross-directory uniqueness search. Parent and replay URIs use
+the full reference, e.g. `store://family/id@16` and
+`store://family/id/rollouts/0#0`; observers carry `run_ref` and use an explicit
+`subdir` query in links. Explicit browsing may enumerate history. Fold at v4.)*
+
 **I11 — Runs self-describe.** At creation the runner writes `dictionary.json`
 (the flow graph serialized): every column the run will contain, its producer,
 consumers, phase, granularity, and whether it feeds the loss. Derived, never
@@ -147,6 +158,10 @@ inverse and the one rung the desk climbs DOWN: metal nothing has run on for
 `idle_s` is delisted, told `release` (residents down, the shift ended so the
 venue reclaims the container) and kept as inventory the next placement may
 knock awake.
+The current deployment always enforces finite GPU idle limits. Its recovery
+generation permits automatic retries only for explicit submissions made in
+that generation; a clean reset preserves historical parked work without
+restarting it when new metal registers (ADR 0010).
 A multi-regime host ALTERNATES its regimes on its own arbiter group — one host wearing masks, never two hosts
 coordinating — so a multi-member HostSpec places onto exactly one host. A run
 is ANCHORED on one member's host — its runner lives there — and reaches every

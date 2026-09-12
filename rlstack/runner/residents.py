@@ -691,10 +691,9 @@ def resident_main(birth_row: dict, conn) -> None:
 # ---------------------------------------------------------------------------
 
 HEARTBEAT_DEADLINE_S = 5.0
-"""The bound on ONE watchdog tick's round trip (ADR 0008, F3). Short, because
-the tick is every RESIDENT_HEARTBEAT_S and a resident that cannot answer in
-five seconds has not answered this tick — which is all the watchdog is
-asking. Silence past the PHASE bound is what ends it, not one missed tick."""
+"""The default bound for a standalone heartbeat or first-contact read.
+The host watchdog supplies its full stall bound so a queued late reply still
+counts as evidence of life (ADR 0008, F1/F3)."""
 
 GRACE_S = 10.0
 """How long a child gets to hear the polite word and leave on its own. Short
@@ -792,6 +791,8 @@ class Resident:
         self.hello = hello
         self.process = process
         self.stopping = False
+        self.on_exit: Callable[[Resident], None] | None = None
+        self.exit_lock = threading.Lock()
 
     @property
     def label(self) -> str:
@@ -861,14 +862,14 @@ class Resident:
         return Blocking.run(
             self.transport.ask(verb, payload, deadline_s=deadline_s))
 
-    def heartbeat(self) -> dict:
+    def heartbeat(self, *, deadline_s: float = HEARTBEAT_DEADLINE_S) -> dict:
         """One round trip to the child and back — the host's watchdog asks
         this every RESIDENT_HEARTBEAT_S (ADR 0008, F1). Synchronous, on the
         ask path, because the point is to learn whether the child's own loop
         is still turning; the host runs it off its loop, at most one in
         flight, so a resident that never answers holds up nothing but its own
         verdict."""
-        return self.say("heartbeat", {}, HEARTBEAT_DEADLINE_S)
+        return self.say("heartbeat", {}, deadline_s)
 
     def first_contact(self) -> dict:
         """WHAT THIS RESIDENT ACTUALLY TOOK, or {} before it has served
@@ -895,6 +896,7 @@ class Resident:
         Started by the metal once the host is in its books, so the report
         always finds a host to decarve — and a child already dead by then is
         reported at once."""
+        self.on_exit = on_exit
         if self.process is None:
             return
 
@@ -905,28 +907,42 @@ class Resident:
             # leaves the reap to whoever asks is_alive() next, on one thread.
             multiprocessing.connection.wait([self.process.sentinel])
             if not self.stopping:
-                on_exit(self)
+                self.notify_exit()
 
         threading.Thread(target=wait_for_exit, daemon=True,
                          name=f"resident-watch:{self.label}").start()
 
+    def notify_exit(self) -> None:
+        """Report a failed resident once, even if its watcher races a stop."""
+        with self.exit_lock:
+            callback, self.on_exit = self.on_exit, None
+        if callback is not None:
+            callback(self)
+
     def stop(self, *, grace_s: float = GRACE_S,
-             signal_grace_s: float = SIGNAL_GRACE_S) -> Teardown:
+             signal_grace_s: float = SIGNAL_GRACE_S,
+             report_exit: bool = False) -> Teardown:
         """End the resident: the stop frame (the child releases its object —
         a learner's own chorus ladder runs inside this grace — and exits),
         then SIGTERM, then SIGKILL, each rung joining what it signalled.
-        Idempotent; bounded by grace_s + 2 x signal_grace_s."""
+        Idempotent; bounded by grace_s + 2 x signal_grace_s. A watchdog
+        passes report_exit so the metal retires the failed host after the
+        ladder has joined the child; ordinary teardown stays silent."""
         self.stopping = True
         if self.process is None:
             self.say("stop", {}, grace_s)
-            return Teardown()
-        if not self.process.is_alive():
-            return Teardown()
-        heard = self._say_stop(grace_s)
-        teardown = escalate((self.process,), grace_s=grace_s if heard else 0.0,
-                            signal_grace_s=signal_grace_s)
-        self.transport.close()
-        return replace(teardown, heard_the_farewell=heard)
+            teardown = Teardown()
+        elif not self.process.is_alive():
+            teardown = Teardown()
+        else:
+            heard = self._say_stop(grace_s)
+            teardown = escalate((self.process,), grace_s=grace_s if heard else 0.0,
+                                signal_grace_s=signal_grace_s)
+            self.transport.close()
+            teardown = replace(teardown, heard_the_farewell=heard)
+        if report_exit and not teardown.lost:
+            self.notify_exit()
+        return teardown
 
     def _say_stop(self, timeout_s: float) -> bool:
         """The polite word, on a thread with a deadline: a child wedged in a

@@ -51,7 +51,7 @@ from collections.abc import Callable, Mapping, Sequence
 from typing import Any
 from dataclasses import dataclass
 
-from rlstack.data.stores.base import Store, run_done
+from rlstack.data.stores.base import Store, run_done, run_reference
 from rlstack.policy.siteschema import SiteSchema
 from rlstack.runner.host import LEARNER_ROUTE, Host, Partition, Regime
 from rlstack.runner.residents import (
@@ -333,12 +333,17 @@ def submit_key(frame: Mapping) -> str:
                    default=str).encode("utf-8")).hexdigest()[:16]
 
 
+def running_tenants(told: Mapping | None) -> int:
+    """Count active tenancies in one snapshot, excluding finished history."""
+    return sum(t.get("status") == "running"
+               for t in (told or {}).get("tenants", {}).values())
+
+
 def occupied_in(told: Mapping | None) -> bool:
     """Is a running tenancy on this host, read off ONE status frame? The one
     reading, shared by the live probe and the snapshot placement is decided
     against."""
-    return any(t.get("status") == "running"
-               for t in (told or {}).get("tenants", {}).values())
+    return running_tenants(told) > 0
 
 
 def first_fit(free: Sequence[float], count: int,
@@ -493,8 +498,12 @@ class Desk:
                  residual_deadline_s: float = RESIDUAL_DEADLINE_S,
                  probe_deadline_s: float = PROBE_DEADLINE_S,
                  clock: Callable[[], float] = time.time,
+                 bootable_metals: frozenset[str] | None = None,
+                 recovery_generation: str = "",
                  ) -> None:
         self.store = store
+        self.recovery_generation = recovery_generation
+        self.require_finite_idle = False
         # THE CLOCK, injectable (ADR 0008): every lease reading goes through
         # `now()`, so a test can drive a whole lease's worth of silence in a
         # millisecond instead of sleeping through a minute of it.
@@ -535,6 +544,9 @@ class Desk:
         # means the knock IS the boot (Modal: a call to a stopped-but-deployed
         # container starts one), so the reaper knocks with `describe()`.
         self.boot_for = boot_for
+        # Inventory may include old deployments this campaign is not
+        # authorized to restart. None permits all; an empty set permits none.
+        self.bootable_metals = bootable_metals
         # THE HAND THAT ENDS A CONTAINER (2026-09-05): an awaitable of the
         # container id a metal registered with, which the substrate uses to
         # terminate that container. Without it a released metal only stops
@@ -577,6 +589,10 @@ class Desk:
         # retry and a registration's retry off the same run without either of
         # them holding a lock across the wire (ADR 0008, F3).
         self.retrying: set[str] = set()
+        # Opaque frame keys shared by submit and every reroute path. The
+        # journal alone cannot guard the await in already_submitted, or the
+        # gap between stopping an old owner and delivering its replacement.
+        self.delivering: set[str] = set()
         self._placing: asyncio.Lock | None = None
         self._placing_loop: asyncio.AbstractEventLoop | None = None
 
@@ -592,6 +608,8 @@ class Desk:
                      residual_deadline_s: float = RESIDUAL_DEADLINE_S,
                      probe_deadline_s: float = PROBE_DEADLINE_S,
                      clock: Callable[[], float] = time.time,
+                     bootable_metals: frozenset[str] | None = None,
+                     recovery_generation: str = "",
                      ) -> "Desk":
         """The desk, rebuilt from its own record: every `list` event resolves
         its address again, and so does every addressed `metal` event — the
@@ -618,7 +636,9 @@ class Desk:
                    terminate_for=terminate_for,
                    lease_s=lease_s, heartbeat_s=heartbeat_s,
                    residual_deadline_s=residual_deadline_s,
-                   probe_deadline_s=probe_deadline_s, clock=clock)
+                   probe_deadline_s=probe_deadline_s, clock=clock,
+                   bootable_metals=bootable_metals,
+                   recovery_generation=recovery_generation)
         born = desk.now()
         for event in store.read_fleet_log():
             if event.get("event") == "list":
@@ -818,6 +838,12 @@ class Desk:
         A NEW epoch at the SAME address is a container generation turning
         over, which is what the corpse reconciliation below is for — and the
         old epoch's frames are refused by the newborn from that moment."""
+        if self.require_finite_idle:
+            import math
+
+            limit = self.idle_s if isinstance(idle_s, Undeclared) else idle_s
+            if limit is None or not math.isfinite(limit):
+                raise DeskError("this deployment requires finite automatic GPU idle shutdown")
         known = metal.name in self.metal
         if known and self.metal_addresses.get(metal.name) != address:
             raise DeskError(
@@ -1118,7 +1144,8 @@ class Desk:
         """THE PLACEMENT LADDER AS A PURE FUNCTION — no wire, no store, no
         clock, so it is exactly what may be held under the placement lock.
 
-        Rung one, JOIN: sorted-name order, coverage by `covers()` (the one
+        Rung one, JOIN: fewest running tenancies first, name order for ties,
+        coverage by `covers()` (the one
         join rule — capability equality plus the metal recipe's `serves`,
         matched against descriptions), a listing whose LEASE has lapsed
         skipped (F1), one that did not ANSWER the snapshot's probe skipped
@@ -1142,9 +1169,16 @@ class Desk:
 
     def join_rung(self, unit: tuple[Demand, ...], avoid: frozenset[str],
                   snapshot: "Snapshot") -> str:
-        """RUNG ONE, the join rule alone: the name of the first listing that
-        covers this unit and may take it, or "" — see `decide`."""
-        for name in sorted(self.listings):
+        """Join an eligible listing with the fewest running tenancies.
+
+        The snapshot already carries rosters, so balancing takes no extra
+        wire call or journal read under the placement lock. Counts are an
+        estimate of load, not a promise of equal compute: concurrent submits
+        can see the same counts, and jobs can have different costs.
+        """
+        ordered = sorted(self.listings, key=lambda name:
+                         (running_tenants(snapshot.rosters.get(name)), name))
+        for name in ordered:
             if name in avoid or not self.leased(name):
                 continue
             if name not in snapshot.rosters:
@@ -1347,6 +1381,18 @@ class Desk:
                     "error": f"a delivery needs exactly one anchor demand "
                              f"(where the frame lands); got {len(anchored)}"}
         key = submit_key(frame)
+        in_flight = self.claim_delivery(key)
+        if in_flight is not None:
+            return in_flight
+        try:
+            return await self.submit_claimed(demands, rows, frame, key, solo)
+        finally:
+            self.delivering.discard(key)
+
+    async def submit_claimed(self, demands: Sequence[Demand],
+                             rows: Sequence[Mapping], frame: Mapping,
+                             key: str, solo: bool) -> dict:
+        """Check custody, journal intent, and deliver under one frame claim."""
         standing = await self.already_submitted(key)
         if standing is not None:
             return standing
@@ -1366,6 +1412,20 @@ class Desk:
                              "standing acquire is a human's)"}
         return await self.deliver(demands, placement, rows, frame, key)
 
+    def claim_delivery(self, key: str) -> dict | None:
+        """Claim a frame before any await, or refuse the overlapping verb.
+
+        Submit, manual moves, and automatic retries share this claim. It is
+        local to this desk instance; the journal remains the restart record.
+        Different frames can proceed while this one's wire calls wait.
+        """
+        if key in self.delivering:
+            return {"accepted": False, "in_flight": True, "key": key,
+                    "error": f"a delivery with key {key} is already in "
+                             f"flight at this desk — ask again once it lands"}
+        self.delivering.add(key)
+        return None
+
     def journal_intent(self, key: str, frame: Mapping) -> None:
         """THE INTENT, WRITTEN BEFORE THE ACT (ADR 0008, F4): this desk is
         about to place this submission. Written first, so a desk that dies
@@ -1379,7 +1439,8 @@ class Desk:
         the contents."""
         self.store.append_fleet_event({
             "event": "submit-intent", "t": self.now(), "key": key,
-            "folder": frame.get("subdir") or ""})
+            "folder": frame.get("subdir") or "",
+            "recovery_generation": self.recovery_generation})
 
     async def already_submitted(self, key: str) -> dict | None:
         """HAS THIS EXACT SUBMISSION ALREADY BEEN PLACED? (ADR 0008, F4.)
@@ -1426,6 +1487,7 @@ class Desk:
                     "event": "submit-replayed", "t": self.now(), "key": key,
                     "run_id": run_id, "host": delivery.get("host")})
                 return {"accepted": True, "run_id": run_id,
+                        "run_ref": run_reference(run_id, delivery.get("frame", {}).get("subdir")),
                         "state": "running", "host": delivery.get("host"),
                         "pools": delivery.get("pools", {})}
             return None
@@ -1460,7 +1522,7 @@ class Desk:
         try:
             reply = await anchor_listing.host.adopt(
                 frame.get("spec"), routes, frame.get("code"),
-                frame.get("subdir"))
+                frame.get("subdir"), resume=bool(frame.get("resume", False)))
         except Exception as down:
             # the probe passed and the container died between it and the
             # knock — or the adopt outlived its deadline: the reply says so
@@ -1534,31 +1596,50 @@ class Desk:
         return sorted(rid for rid, pools in placed.items()
                       if rid in running and wanted & set(pools.values()))
 
-    async def running_runs(self) -> set[str]:
-        """Every run some listing's roster says is RUNNING right now, off one
-        concurrent bounded pass over the fleet (ADR 0008, F3). A silent host
-        holds nothing running — that is the reaper's business, not this
-        rule's — and a probe that expires says the same thing, bounded."""
-        names = sorted(self.listings)
+    async def known_rosters(self) -> list[tuple[Listing, dict]]:
+        """Require a reply from every listed owner before deciding custody.
+
+        A bounded status miss is unknown, not an empty roster. In particular,
+        it cannot authorize another writer or a guarded teardown. The reaper
+        concludes a lost listing separately; this read never concludes one.
+        """
+        listings = [self.listings[name] for name in sorted(self.listings)]
         answers = await asyncio.gather(
-            *(self.listings[name].told(self.probe_deadline_s)
-              for name in names))
-        return {rid for told in answers
-                for rid, said in (told or {}).get("tenants", {}).items()
+            *(listing.told(self.probe_deadline_s) for listing in listings))
+        unknown = [listing.name for listing, answer in zip(listings, answers)
+                   if answer is None]
+        if unknown:
+            raise DeskError(f"custody is unknown: no roster reply from "
+                            f"{', '.join(unknown)}; reconcile before moving, "
+                            "resuming, or tearing down work")
+        return list(zip(listings, answers))
+
+    async def running_runs(self) -> set[str]:
+        """Running tenants from one complete bounded custody read."""
+        return {rid for _, told in await self.known_rosters()
+                for rid, said in told.get("tenants", {}).items()
                 if said.get("status") == "running"}
 
     async def stop_anchored(self, run_id: str) -> dict:
         """Stop a tenancy WHEREVER it runs: probe the listings' rosters for
         the one carrying `run_id` running — tenancies live only at their
         anchor, so at most one listing answers — and tell that host to stop
-        it (cancellation awaited host-side). A run nobody carries answers
-        stopped: False; already dead is the goal state, not an error."""
-        for name in sorted(self.listings):
-            listing = self.listings[name]
-            told = await listing.told(self.probe_deadline_s)
-            if (told or {}).get("tenants", {}).get(
-                    run_id, {}).get("status") == "running":
-                return await listing.host.stop(run_id)
+        it (cancellation awaited host-side). Only a complete roster read can
+        establish that nobody carries the run. Unknown or duplicate custody
+        refuses the move before stopping or redelivering anything.
+
+        Cleanup can wait for a queued store commit. Give that acknowledged
+        stop the build/move deadline, not a status probe's shorter budget.
+        """
+        owners = [listing for listing, told in await self.known_rosters()
+                  if told.get("tenants", {}).get(run_id, {}).get("status")
+                  == "running"]
+        if len(owners) > 1:
+            raise DeskError(f"run {run_id} has multiple running owners: "
+                            f"{', '.join(owner.name for owner in owners)}; "
+                            "reconcile custody before moving it")
+        if owners:
+            return await owners[0].host.stop(run_id, deadline_s=BUILD_DEADLINE_S)
         return {"stopped": False, "run_id": run_id, "state": "unlisted"}
 
     async def reroute(self, run_id: str, avoiding: str = "",
@@ -1593,6 +1674,19 @@ class Desk:
                               "through its campaign", avoiding=avoiding)
             return {"rerouted": False, "parked": True, "run_id": run_id,
                     "stopped": stopped}
+        key = submit_key(frame)
+        in_flight = self.claim_delivery(key)
+        if in_flight is not None:
+            return {"rerouted": False, "run_id": run_id, **in_flight}
+        try:
+            return await self.reroute_claimed(run_id, rows, frame, avoiding, park)
+        finally:
+            self.delivering.discard(key)
+
+    async def reroute_claimed(self, run_id: str, rows: Sequence[Mapping],
+                              frame: Mapping, avoiding: str, park: bool) -> dict:
+        """Keep a frame claimed from placement through acknowledged stop
+        and redelivery, including moves requested outside retry_parked."""
         demands = demands_from(rows)
         avoid = frozenset({avoiding}) if avoiding else frozenset()
         placement, boot = await self.place_listings(demands, avoid)
@@ -1776,6 +1870,10 @@ class Desk:
         but a venue that never said how to wake it, and the reap → knock →
         re-register → reroute loop degrading into a silent no-op is how that
         bug hides for an hour. It is journaled and named instead."""
+        if self.bootable_metals is not None and name not in self.bootable_metals:
+            return self.refuse_knock(
+                name, "automatic acquisition is restricted by the operator; "
+                      f"bootable metal: {', '.join(sorted(self.bootable_metals)) or 'none'}")
         address = self.metal_addresses.get(name)
         if self.boot_for is not None:
             # off the loop, because a venue's boot is a blocking spawn and the
@@ -1872,7 +1970,8 @@ class Desk:
         against the rollout plan where it only generates (ADR 0006 Part B).
         The one predicate, shared with the observer — a run with no plan on
         record is taken to be work."""
-        return run_done(self.store, run_id)
+        frame = self.placements().get(run_id, {}).get("frame", {})
+        return run_done(self.store, run_reference(run_id, frame.get("subdir")))
 
     def parked(self) -> dict[str, str]:
         """THE QUEUE, read off the journal: every run whose latest disposition
@@ -1913,16 +2012,38 @@ class Desk:
         holding something another verb needs. Two retries therefore proceed
         together over DIFFERENT runs and neither touches a run the other has."""
         verdicts: dict[str, str] = {}
+        eligible = self.recovery_keys()
+        placements = self.placements()
         for run_id, avoiding in sorted(self.parked().items()):
+            frame = placements.get(run_id, {}).get("frame")
+            if eligible is not None and (frame is None or submit_key(frame) not in eligible):
+                continue
+            if self.finished(run_id):
+                continue                # completion supersedes an old parked event
             if not self.claim(run_id):
                 continue                # another retry has this one
             try:
                 reply = await self.reroute(run_id, avoiding=avoiding, park=True)
             finally:
                 self.retrying.discard(run_id)
+            if reply.get("in_flight"):
+                continue                # another verb is moving it, not parking it
             verdicts[run_id] = ("rerouted" if reply.get("rerouted")
                                 else "parked")
         return verdicts
+
+    def recovery_keys(self) -> set[str] | None:
+        """Only explicitly submitted frames opt into this deployment's recovery.
+
+        An empty generation retains the library default. A configured value
+        survives CPU restarts and leaves older parked history inspectable,
+        without letting new metal registration revive it.
+        """
+        if not self.recovery_generation:
+            return None
+        return {event["key"] for event in self.store.read_fleet_log()
+                if event.get("event") == "submit-intent"
+                and event.get("recovery_generation") == self.recovery_generation}
 
     def claim(self, run_id: str) -> bool:
         """Take this run for a reroute, or say someone else has it. The whole
@@ -1956,11 +2077,11 @@ class Desk:
         The reading is recorded in `seen` for the next tick, and a listing
         observed for the FIRST time is busy: metal is released on evidence
         of idleness, never on the absence of a reading. A silent listing
-        holds nothing running — that is the reaper's business, not this
-        rule's."""
+        also returns True: the idle sweep cannot establish that it is idle.
+        Concluding an unreachable host dead is the reaper's business."""
         told = await listing.told(self.probe_deadline_s)
         if told is None:
-            return False
+            return True
         admitted = int(told.get("admitted", 0))
         seen[listing.name] = admitted
         if listing.name not in self.admitted_at:
@@ -1983,10 +2104,15 @@ class Desk:
         remembered: a delisted host's counter leaves with it."""
         seen: dict[str, int] = {}
         for name in sorted(self.metal_remotes):
-            busy = [listing for listing in self.listings.values()
-                    if listing.metal == name
-                    and await self.listing_busy(listing, seen)]
-            if busy:
+            listings = tuple(listing for listing in self.listings.values()
+                             if listing.metal == name)
+            busy = [listing for listing in listings
+                    if await self.listing_busy(listing, seen)]
+            current = tuple(listing for listing in self.listings.values()
+                            if listing.metal == name)
+            if busy or current != listings:
+                # Listings can change while a status probe awaits the wire.
+                # Such a tick cannot establish continuous idleness.
                 self.idle_since.pop(name, None)
             else:
                 self.idle_since.setdefault(name, now)
@@ -2111,7 +2237,9 @@ class Desk:
         HEARTBEAT's, because placement's own read is live (Q3, amended) and
         this is what the row says between placements."""
         now = self.now()
-        return {"listings": {name: {
+        return {**({"bootable_metals": sorted(self.bootable_metals)}
+                   if self.bootable_metals is not None else {}),
+            "listings": {name: {
             "address": listing.address, "solo": listing.solo,
             "regimes": [r.name for r in listing.regimes],
             "partition": listing.partition, "metal": listing.metal,
@@ -2618,7 +2746,7 @@ class MetalService:
                                   main, tasks, pools=others)
         return {"measured": list(fresh), "run_id": payload["run_id"],
                 "points": self.store.read_measurements(
-                    payload["run_id"]).get(measurement.name, {})
+                    payload["run_id"].rsplit("/", 1)[-1]).get(measurement.name, {})
                     .get("points", [])}
 
     def pool_for(self, base: str | None, tp: int) -> RemotePool:
@@ -2682,7 +2810,7 @@ class MetalService:
                               signal_grace_s=SIGNAL_GRACE_S)
             raise
 
-    def decarve(self, name: str) -> dict:
+    async def decarve(self, name: str) -> dict:
         """The inverse, for the reaper and the deliberate retirement: every
         resident is ended down the ladder, the host leaves the books, and its
         GB is residual again. The desk journals the departure (its delist) —
@@ -2693,7 +2821,9 @@ class MetalService:
                     "error": f"no host {name!r} on metal {self.metal.name!r}"}
         address = self.addresses.pop(name)
         self.unroute(address)
-        teardowns = self.end_residents(host)
+        # a resident's stop frame WAITS on the child; asked from a thread so
+        # this container's doors keep answering meanwhile (check_off_loop)
+        teardowns = await asyncio.to_thread(self.end_residents, host)
         return {"decarved": True, "host": name,
                 "partition": host.partition.row(),
                 "teardown": [t.line() for t in teardowns if not t.graceful]}
@@ -2731,7 +2861,10 @@ class MetalService:
               f"unbidden (pid {resident.pid()}): decarving host {host_name!r}",
               flush=True)
         self.deaths.append(host_name)
-        self.decarve(host_name)
+        try:
+            asyncio.get_running_loop().create_task(self.decarve(host_name))
+        except RuntimeError:
+            asyncio.run(self.decarve(host_name))     # no loop: the sync fallback
 
     def shutdown(self) -> list[Teardown]:
         """The container's way out: every host's residents down the ladder,
@@ -2741,7 +2874,7 @@ class MetalService:
             teardowns.extend(self.end_residents(self.hosts[name]))
         return teardowns
 
-    def release(self) -> dict:
+    async def release(self) -> dict:
         """THE DESK'S RELEASE, EXECUTED HERE (ADR 0003): every resident down
         the ladder, the books emptied — and THE SHIFT ENDED, so whatever
         holds this container open returns and the venue reclaims it. The
@@ -2751,7 +2884,7 @@ class MetalService:
         Idempotent: a bare metal, or one already released, answers released
         just the same — released is a GOAL STATE, not an event, which is what
         lets the desk retry a release it is unsure landed."""
-        teardowns = self.shutdown()
+        teardowns = await asyncio.to_thread(self.shutdown)
         self.hosts.clear()
         self.addresses.clear()
         for address in list(self.services):
@@ -2850,11 +2983,11 @@ class MetalService:
         if verb == "carve":
             return await self.carve(payload)
         if verb == "decarve":
-            return self.decarve(payload["host"])
+            return await self.decarve(payload["host"])
         if verb == "release":
             # the third metal command (ADR 0003): carve's and decarve's
             # wholesale cousin — every host down, and the shift with them
-            return self.release()
+            return await self.release()
         raise ValueError(f"unknown metal verb {verb!r}")
 
     def answer(self, verb: str, payload: dict) -> dict:
