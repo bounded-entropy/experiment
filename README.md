@@ -13,3 +13,9 @@ Layout:
   rlstack/data.py        Trajectory/Turn/Wave/TokenBatch/packing (numpy, no torch)
   rlstack/store.py       runs/<id>/ store: manifest, ledger, rollouts, cas, resume
   tests/                 unit tests (CPU, fast, no network)
+
+## Persistent HTTP services
+
+See [the HTTP transport guide](examples/http-services.md) for calling resident
+learner and inference services through `transport_for`, including Strange Loop
+SSH forwarding and the opt-in CUDA/vLLM protocol probe.
