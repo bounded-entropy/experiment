@@ -40,7 +40,7 @@ TRAIN_STATS = ("tokens", "microbatches")
 class PipelineSplit:
     """One post pipeline cut by WHERE its processors run.
 
-    `pooled` addresses pools, so it is the Scorer daemon's half, run beside the
+    `pooled` addresses pools, so it is the Scorer runner's half, run beside the
     metal it talks to; `inline` touches no pool, so it is arithmetic over
     columns and stays in the Trainer's own post phase. Each half keeps the
     pipeline's declared order, and their concatenation is a permutation of it —
@@ -53,11 +53,13 @@ class PipelineSplit:
 
 def split_pipeline(pipeline: Sequence[str]) -> PipelineSplit:
     """THE SPLIT RULE: a processor declaring `pools` is SCORER-RUN, a pool-less
-    one is TRAINER-INLINE.
+    one is TRAINER-INLINE — and so is one declaring `fits` (ADR 0019), whatever
+    else it declares: it fits on the run's own learner, and the Trainer is the
+    runner that holds it.
 
     Declared, never guessed. `pools` already names every pool a processor sends
     traffic to — the submit gate vets it and the runner admits engines for it —
-    so the same declaration answers WHICH daemon runs it: sending traffic is
+    so the same declaration answers WHICH runner runs it: sending traffic is
     what makes a processor slow, and slow is what has to leave the gradient's
     critical path. A pipeline with no pooled half plans no Scorer at all and
     the Trainer's post phase is exactly what it always was.
@@ -68,7 +70,9 @@ def split_pipeline(pipeline: Sequence[str]) -> PipelineSplit:
     pooled: list[str] = []
     inline: list[str] = []
     for name in pipeline:
-        (pooled if name in POST and POST.get(name).pools else inline).append(name)
+        pdef = POST.get(name) if name in POST else None
+        scorer_run = pdef is not None and bool(pdef.pools) and not pdef.fits
+        (pooled if scorer_run else inline).append(name)
     return PipelineSplit(tuple(pooled), tuple(inline))
 
 

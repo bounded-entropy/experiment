@@ -12,7 +12,7 @@ What makes this sound is two standing rules: eval was always FIREWALLED
 (nothing training-side reads measurement), and retention keeps every adapter
 version forever (KeepRestorable) precisely so "a version the run has long
 moved past" can be rebuilt — so a measurer can BACKFILL the past, which no
-in-run daemon ever could, and follow the ledger's future on any cadence.
+in-run runner ever could, and follow the ledger's future on any cadence.
 
 `measure_run` is one idempotent pass: every EVERY-th committed version not
 yet measured, restored from blobs (content-addressed proof), sampled on the

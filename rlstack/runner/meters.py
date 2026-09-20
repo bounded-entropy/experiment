@@ -296,7 +296,7 @@ class HostJournal:
     """A tenant's write door onto the journal of the host it landed on: the
     store that journals that host, and the host's name.
 
-    Handed down from Host.submit, because a daemon knows its run and its own
+    Handed down from Host.submit, because a runner knows its run and its own
     phases but not which metal it is running on — and a raw run_experiment
     (no host, no journal) simply has None and emits nothing. Observability
     only: nothing written through this door is ever read back by correctness,

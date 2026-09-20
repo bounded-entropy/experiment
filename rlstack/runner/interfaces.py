@@ -75,6 +75,7 @@ class TrainStats:
     grad_norm: float
     tokens: int
     provided: Mapping[str, float] = field(default_factory=dict)
+    components: Mapping[str, float] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -199,6 +200,19 @@ class Engine(Protocol):
         """Register a compiled bundle (the add_lora analog)."""
         ...
 
+    def add_library(self, name: str, payload: bytes) -> None:
+        """Hold one NAMED PAYLOAD for routes to read (ADR 0019): the bytes
+        `lora_torch.emit` writes for one LoRA set, read from the store by a
+        ROLE and handed over here — an engine never opens a store.
+
+        Idempotent (a name is write-once, so the same name with different
+        bytes is refused), safe under traffic, and LRU-bounded by the build's
+        `max_library`. Eviction is not a loss and not announced: a caller that
+        routes under `lib:<name>` hands the bytes again before it samples, and
+        a route naming a library adapter this engine does not hold is refused
+        at the request."""
+        ...
+
     def knows_bundle(self, bundle_id: str) -> bool:
         """Is this bundle resident on this engine right now?
 
@@ -260,13 +274,54 @@ class Learner(Protocol):
         experiment (ADR 0002)."""
         ...
 
+    def tokenize(self, tenant: str, text: str) -> tuple[int, ...]:
+        """Tokenize injected text with the installed base, without special tokens.
+
+        Generated token IDs remain recorded data; only injected spans need this
+        CPU operation. Training never needs an inference resident to flatten.
+        """
+        ...
+
     def forward_backward(self, tenant: str, batch: TokenBatch) -> TrainStats:
         """One microbatch under `tenant`'s adapters: trainer-kernel forward,
         loss, backward. Grads accumulate on that tenant's params."""
         ...
 
-    def optim_step(self, tenant: str) -> None:
-        """Apply `tenant`'s accumulated gradients; its deltas advance one version."""
+    def forward(self, tenant: str, batch: TokenBatch) -> tuple[float, ...]:
+        """The no-grad twin of `forward_backward` (ADR 0019): one float per
+        document, its mean NLL over its loss_mask tokens, under `tenant`'s
+        adapters and each row's own route. Nothing accumulates."""
+        ...
+
+    def optim_step(self, tenant: str,
+                   lr_scales: Mapping[str, float] | None = None) -> None:
+        """Apply `tenant`'s accumulated gradients; its deltas advance one version.
+
+        `lr_scales` multiplies each NAMED param group's BASE learning rate for
+        THIS step only — keyed by group name (`"memory:03"`), by `entry.group`
+        where two entries share a group name, or by entry for all of its
+        groups (`lr_scale_of` is the rule). A schedule is therefore the
+        caller's pure function of the step; nothing compounds. None is the
+        step this verb always took."""
+        ...
+
+    def load_set(self, tenant: str, entry: str, route: str,
+                 payload: bytes | None) -> None:
+        """Start ONE set of bank entry `entry` over (ADR 0019): from a NAMED
+        PAYLOAD (one LoRA set as `lora_torch.emit` writes it), or from the
+        set's own deterministic init when None. Either way that set's
+        optimizer moments are reset. A route `lib:<name>` installs a FROZEN
+        library set outside every optimizer group and outside `emit`."""
+        ...
+
+    def drop_set(self, tenant: str, entry: str, route: str) -> None:
+        """Forget one LIBRARY set (`lib:<name>`) of `entry`. Library sets
+        only; one nobody holds is already dropped."""
+        ...
+
+    def emit_set(self, tenant: str, entry: str, route: str) -> bytes:
+        """ONE set of `entry` as a named payload — what `load_set`, the store's
+        `write_named` and the engine's `add_library` all read."""
         ...
 
     def emit(self, tenant: str) -> Emitted:
@@ -298,3 +353,30 @@ class Learner(Protocol):
         re-attaching installs again and restores from the store's blobs, as
         every attach already does."""
         ...
+
+
+def lr_scale_of(lr_scales: Mapping[str, float], entry: str, group: str) -> float:
+    """The scale ONE named param group takes from an `optim_step`'s
+    `lr_scales`: `entry.group` wins, then the bare group name, then the entry
+    (every group of it), else 1.0 — the overrides' grammar, specific over
+    general. The one rule every Learner applies."""
+    if group and f"{entry}.{group}" in lr_scales:
+        return float(lr_scales[f"{entry}.{group}"])
+    if group and group in lr_scales:
+        return float(lr_scales[group])
+    return float(lr_scales.get(entry, 1.0))
+
+
+def check_lr_scales(lr_scales: Mapping[str, float],
+                    groups: Mapping[str, Sequence[str]]) -> None:
+    """Every key of `lr_scales` addresses a group this tenant steps (`groups`:
+    trainable entry -> its group names). A key that reaches nothing is a
+    schedule silently not applied, so it is refused."""
+    known = set(groups)
+    for entry, names in groups.items():
+        known.update(name for name in names if name)
+        known.update(f"{entry}.{name}" for name in names if name)
+    unknown = sorted(set(lr_scales) - known)
+    if unknown:
+        raise ValueError(f"lr_scales names no param group: {unknown} "
+                         f"(this tenant steps {sorted(known)})")

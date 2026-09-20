@@ -444,7 +444,7 @@ def run_tests() -> str:
 # ---------------------------------------------------------------------------
 
 @app.local_entrypoint()
-def up() -> None:
+def up(*, every: int) -> None:
     """Boot the metal (spawning the keepalive is the knock) and wait until
     it has registered itself with the desk."""
     call = metal_handle(APP).serve.spawn()
@@ -452,14 +452,14 @@ def up() -> None:
     print(json.dumps(wait_for_metal(METAL), indent=2))
 
 
-def submit_two_tenants(master: int) -> tuple[dict[str, str], bool]:
+def submit_two_tenants(master: int, *, every: int) -> tuple[dict[str, str], bool]:
     """Promise 3's first half: the two specs through the desk. Returns the
     run ids by bank name and whether the second JOINED the first's listings."""
     rows = build_specs(master)
     runs: dict[str, str] = {}
     hosts: dict[str, dict] = {}
     for name in ("lora", "steer"):
-        reply = submit_spec(rows[name], SUBDIR)
+        reply = submit_spec(rows[name], SUBDIR, every=every)
         runs[name] = reply["run_id"]
         hosts[name] = reply["pools"]
     joined = hosts["lora"] == hosts["steer"]
@@ -493,7 +493,7 @@ def await_runs(runs: dict[str, str], timeout_s: float = 3600.0) -> dict:
 
 
 @app.local_entrypoint()
-def check(master: int = 11) -> None:
+def check(master: int = 11, *, every: int) -> None:
     """THE CHECK: up, two tenants through the desk, their ledgers, then the
     desk's release with the keepalive observed to return — and, whatever
     happened, THIS venue's metal released and asserted freed. Its own, not
@@ -507,7 +507,7 @@ def check(master: int = 11) -> None:
     print(f"[check] {METAL} serving: call {call.object_id}", flush=True)
     try:
         print(json.dumps(wait_for_metal(METAL), indent=1), flush=True)
-        runs, joined = submit_two_tenants(master)
+        runs, joined = submit_two_tenants(master, every=every)
         rails = await_runs(runs)
         print(json.dumps({"joined": joined, "rails": rails}, indent=1), flush=True)
     finally:

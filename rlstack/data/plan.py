@@ -12,7 +12,7 @@ content-addressed like its tasks and pinned into identity.
 
 THE LEAF IS THE WHOLE TAXONOMY. `Sample` names a task to run under an
 environment, and until someone runs it the wave does not exist yet — that
-"not yet" is the only thing daemons ever await. `Replay` names a trajectory
+"not yet" is the only thing runners ever await. `Replay` names a trajectory
 that is already sealed somewhere: this run's own rollouts, another run's
 waves, a content-addressed file. `Derive` is mint-then-make: a registered
 task MAKER turns an already-sealed trajectory into a NEW task (its critique
@@ -32,7 +32,18 @@ import json
 from collections.abc import Iterator, Sequence
 from dataclasses import dataclass
 
-TRAIN = "train"          # the only role the gradient path understands (v0)
+TRAIN = "train"          # the default role: the row trains the policy as sealed
+EVAL = "eval"            # the row is evaluation traffic the loss masks out
+
+
+def route_of_role(role: str) -> str | None:
+    """THE ROLE→ROUTE RULE (ADR 0018): a leaf role that is neither `train`
+    nor `eval` names the SET the row trains under — `dreamer`, `memory:03` —
+    and `realize` stamps it into the row's turn facts as `route`, beside the
+    role itself. The two default roles stamp no route: `train` rows keep
+    whatever route the record carries, `eval` rows likewise (they were
+    sampled under a route and the loss masks them)."""
+    return None if role in (TRAIN, EVAL) else role
 
 
 class PlanError(ValueError):

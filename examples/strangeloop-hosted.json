@@ -1,0 +1,40 @@
+{
+  "store": "strangeloop://sl-scratch-REPLACE_WITH_ACCOUNT_UUID/rlstack",
+  "state_dir": "~/.local/state/rlstack-strangeloop",
+  "gateway_port": 18760,
+  "observer_port": 8321,
+  "worker_port": 8000,
+  "idle_s": 90,
+  "gpu_ceiling": 1,
+  "metals": [
+    {
+      "name": "sl-a100",
+      "gpu": "A100",
+      "devices": 1,
+      "image": "rlstack-py312",
+      "local_port": 18761,
+      "hours": 4,
+      "idle_s": 90,
+      "python": "/opt/rlstack/bin/python",
+      "blob_cache_dir": "/tmp/rlstack-blobs",
+      "blob_cache_bytes": 8589934592,
+      "mount_reads": true,
+      "builds": {
+        "engine": {
+          "type": "EngineBuild",
+          "max_model_len": 4096,
+          "serves": [
+            "lora"
+          ],
+          "enable_sleep_mode": true,
+          "enforce_eager": true
+        },
+        "learner": {
+          "type": "LearnerBuild",
+          "checkpoint_activations": true
+        }
+      }
+    }
+  ],
+  "operator_endpoint": "https://your-workspace--rlstack-sl-desk-gateway.modal.run"
+}

@@ -19,6 +19,7 @@ import tempfile
 import unittest
 
 from common import arith_spec, arith_store
+from rlstack.runner.checkpointing import EVERY_UPDATE
 from rlstack import (
     Bundle, FakeEngine, FakeLearner, Host, HostService, LocalStore,
     LocalTransport, Message, RemotePool, Role, SamplingSpec, Seeds,
@@ -161,7 +162,7 @@ class HostEmissionTest(unittest.TestCase):
         """One meter per host: the engine's prefill and decode tokens and the
         arbiter's admissions all land in it, and nothing is left in flight."""
         host = self.host()
-        go(host.submit(arith_spec(self.train), SCHEMA))
+        go(host.submit(arith_spec(self.train), SCHEMA, checkpointing=EVERY_UPDATE))
         window = host.meter.drain(host.meter.started + 1.0)
 
         self.assertGreater(window.prefill_tokens, 0)
@@ -173,7 +174,7 @@ class HostEmissionTest(unittest.TestCase):
 
     def test_the_stats_tick_journals_one_traffic_window(self) -> None:
         host = self.host()
-        go(host.submit(arith_spec(self.train), SCHEMA))
+        go(host.submit(arith_spec(self.train), SCHEMA, checkpointing=EVERY_UPDATE))
         go(one_tick(host))
 
         rows = events_of(host, "traffic")
@@ -200,7 +201,7 @@ class HostEmissionTest(unittest.TestCase):
 
     def test_one_update_event_per_commit(self) -> None:
         host = self.host()
-        report = go(host.submit(arith_spec(self.train), SCHEMA))
+        report = go(host.submit(arith_spec(self.train), SCHEMA, checkpointing=EVERY_UPDATE))
 
         rows = events_of(host, "update")
         self.assertEqual([row["update"] for row in rows], [1, 2, 3, 4])
@@ -221,8 +222,8 @@ class HostEmissionTest(unittest.TestCase):
         b = arith_spec(self.train, seeds=Seeds(master=99))
 
         async def both():
-            return await asyncio.gather(host.submit(a, SCHEMA),
-                                        host.submit(b, SCHEMA))
+            return await asyncio.gather(host.submit(a, SCHEMA, checkpointing=EVERY_UPDATE),
+                                        host.submit(b, SCHEMA, checkpointing=EVERY_UPDATE))
 
         reports = go(both())
 
@@ -236,13 +237,13 @@ class HostEmissionTest(unittest.TestCase):
         """THE HARD INVARIANT: the emission plane adds custody, never bytes —
         a hosted run's whole run directory still matches a raw run's."""
         host = self.host()
-        hosted = go(host.submit(arith_spec(self.train, self.heldout), SCHEMA))
+        hosted = go(host.submit(arith_spec(self.train, self.heldout), SCHEMA, checkpointing=EVERY_UPDATE))
 
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
         other, train, heldout = arith_store(tmp.name)
         raw = run_experiment(arith_spec(train, heldout), SCHEMA, other,
-                             FakeEngine(), FakeLearner())
+                             FakeEngine(), FakeLearner(), checkpointing=EVERY_UPDATE)
 
         self.assertEqual(hosted.run_id, raw.run_id)
         self.assertEqual(snapshot(self.store, hosted.run_id),
@@ -252,7 +253,7 @@ class HostEmissionTest(unittest.TestCase):
         """No host, no journal: run_experiment takes no HostJournal and emits
         no update events rather than inventing a host to blame."""
         run_experiment(arith_spec(self.train), SCHEMA, self.store,
-                       FakeEngine(), FakeLearner())
+                       FakeEngine(), FakeLearner(), checkpointing=EVERY_UPDATE)
         self.assertEqual(self.store.list_hosts(), [])
 
 
@@ -375,7 +376,7 @@ class RunTimingTest(unittest.TestCase):
         store, train, _ = arith_store(self.store.root)
         host = Host("l4-live", engines=(FakeEngine(),), learner=FakeLearner(),
                     store=store, sampler=lambda: None)
-        report = go(host.submit(arith_spec(train), SCHEMA))
+        report = go(host.submit(arith_spec(train), SCHEMA, checkpointing=EVERY_UPDATE))
         go(one_tick(host))
 
         page = host_series([store], "l4-live")

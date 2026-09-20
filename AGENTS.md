@@ -28,6 +28,18 @@ uncertainty and counterexamples.
 - Resume from saved specs and checkpoints after establishing that the old
   owner has stopped. An observation timeout is not proof of process death.
   Keep requests bounded without cancelling a shared synchronous container.
+- Every submission declares its `Checkpointing(every=…, delivery=…)` (ADR
+  0014). There is no default: say the cadence, and say why in the run's
+  notes. A crash costs at most `every` updates; resume is unchanged for the
+  caller. `delivery="wire"` unless the venue cannot carry bundles.
+- Stop deliberately, through the desk: `modal run deploy/desk.py::stop --run
+  <id>` / `--subdir <s>`, `python -m deploy.strangeloop … stop`, or `python -m
+  rlstack fleet --desk <address> stop`. A stop drains (checkpoints first) and
+  journals `stopped`, which nothing automatic revives; resubmit to move a
+  stopped run again. Never write sentinel files, private cancellation guards
+  or hand-rolled pause/resume clients — extend the desk's verbs instead. Read
+  `::dispositions` to tell `parked` (retried) from `stopped` and `failed`
+  (never retried; the error is on the row).
 - Use only `MODAL_PROFILE=yu-masala-workspace` for Modal commands. Respect the
   user's GPU ceiling across all apps, including old deployments and screens.
   Release and verify the old allocation before replacing it at that ceiling.

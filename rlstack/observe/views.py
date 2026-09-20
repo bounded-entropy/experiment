@@ -70,26 +70,46 @@ def fleet_notes(roots: Sequence[Store | Root]) -> dict:
                     what it WANTS (regimes, devices, GB), and since when.
                     Superseded by a later delivered placement, exactly as the
                     desk's own queue reads it.
+        stopped     the standing `stopped` row per run (ADR 0014, Part C): a
+                    deliberate stop — why, whether it drained, how far it got.
+                    Outranks parked; superseded by a later placement.
+        failed      the standing `failed` row per run: the experiment's own
+                    death, with the error the host reported. Same rules.
         unreachable the last `unreachable` row per metal and per host: a wire
                     verb that outlived its deadline, on the row it was about.
 
     The observer still writes nothing and still derives everything from
     committed bytes; the fleet journal is one more journal it reads."""
     parked: dict[str, dict] = {}
+    stopped: dict[str, dict] = {}
+    failed: dict[str, dict] = {}
     unreachable: dict[str, dict] = {}
     for root in rooted(roots):
         for event in root.store.read_fleet_log():
             kind, run_id = event.get("event"), event.get("run_id")
             if kind == "parked" and run_id:
-                parked[run_id] = {
-                    "reason": event.get("reason", ""),
-                    "avoiding": event.get("avoiding", ""),
-                    "wants": event.get("wants", []),
-                    "since": event.get("since", event.get("t")),
-                    "boot": event.get("boot", [])}
+                if run_id not in stopped and run_id not in failed:
+                    parked[run_id] = {
+                        "reason": event.get("reason", ""),
+                        "avoiding": event.get("avoiding", ""),
+                        "wants": event.get("wants", []),
+                        "since": event.get("since", event.get("t")),
+                        "boot": event.get("boot", [])}
+            elif kind == "stopped" and run_id:
+                stopped[run_id] = {
+                    "reason": event.get("reason", ""), "t": event.get("t"),
+                    "drained": bool(event.get("drained", False)),
+                    "completed": event.get("completed")}
+                parked.pop(run_id, None)
+            elif kind == "failed" and run_id:
+                failed[run_id] = {
+                    "error": event.get("error", ""), "t": event.get("t"),
+                    "host": event.get("host", "")}
+                parked.pop(run_id, None)
             elif kind == "place" and run_id and event.get("delivered") \
                     and event.get("accepted"):
-                parked.pop(run_id, None)
+                for table in (parked, stopped, failed):
+                    table.pop(run_id, None)
             elif kind == "unreachable":
                 name = event.get("metal") or event.get("host")
                 if name:
@@ -97,7 +117,8 @@ def fleet_notes(roots: Sequence[Store | Root]) -> dict:
                         "t": event.get("t"), "kind":
                             "metal" if event.get("metal") else "host",
                         "deadline_s": event.get("deadline_s")}
-    return {"parked": parked, "unreachable": unreachable}
+    return {"parked": parked, "stopped": stopped, "failed": failed,
+            "unreachable": unreachable}
 
 
 def note_the_fleet(rows: Sequence[dict], notes: dict, key: str) -> None:
@@ -114,10 +135,15 @@ def note_the_fleet(rows: Sequence[dict], notes: dict, key: str) -> None:
     fact about one ask and not a verdict about the thing."""
     for row in rows:
         name = row.get(key)
-        if key == "run_id" and name in notes["parked"] \
-                and row.get("status") != "done":
-            row["status"] = "parked"
-            row["parked"] = notes["parked"][name]
+        if key == "run_id" and row.get("status") != "done":
+            # the desk's dispositions, in rank order: stopped and failed
+            # outrank parked, and any of them outranks a host journal's
+            # last word (ADR 0014, Part C)
+            for table in ("stopped", "failed", "parked"):
+                if name in notes.get(table, {}):
+                    row["status"] = table
+                    row[table] = notes[table][name]
+                    break
         if name in notes["unreachable"]:
             row["unreachable"] = notes["unreachable"][name]
 
@@ -374,6 +400,7 @@ def _settle(row: dict, folder: str, run_id: str, known: Sequence[Root],
     # commits updates, a generation-only run seals rollouts
     row["extent"] = progress.extent
     row["committed"] = progress.completed
+    row["checkpointed"] = progress.checkpointed      # the last durable point (ADR 0014)
     row["target"] = "?" if progress.planned is None else progress.planned
     # THE PLAN IS TRUTH: a run whose extent is complete is done, whatever
     # the journal's tail says — a crashed container loses its detach

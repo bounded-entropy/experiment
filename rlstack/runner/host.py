@@ -35,6 +35,8 @@ from dataclasses import dataclass, field
 from rlstack.data.stores.base import Store, run_reference
 from rlstack.policy.siteschema import SiteSchema
 from rlstack.runner.arbiter import Arbiter
+from rlstack.runner.checkpointing import Checkpointing
+from rlstack.runner.roles.base import StopRequest
 from rlstack.runner.signals import store_work
 from rlstack.runner.interfaces import Engine, Learner
 from rlstack.runner.loop import (
@@ -46,7 +48,31 @@ from rlstack.runner.meters import (
 
 if TYPE_CHECKING:
     from rlstack.runner.residents import Resident
-from rlstack.runner.remote import spec_from_json
+from rlstack.runner.remote import (
+    BUILD_DEADLINE_S, Unreachable, WrongEpoch, spec_from_json,
+)
+from rlstack.runner.restore import BundleUnavailable
+
+
+WIRE_DEATHS = (Unreachable, WrongEpoch, BundleUnavailable)
+"""The deaths that are the WIRE's, not the experiment's (ADR 0014, Q7): a
+pool or a learner that stopped answering, a container wearing another
+epoch, a pool that lost a version no blob backs. The desk parks these and
+retries them from the checkpoint; everything else is `failed` and stays."""
+
+
+def is_wire_death(death: BaseException) -> bool:
+    """Was this tenancy's death the wire's? Looks through an ExceptionGroup
+    (the runners die under one TaskGroup) and through a cause chain."""
+    if isinstance(death, BaseExceptionGroup):
+        return any(is_wire_death(inner) for inner in death.exceptions)
+    seen: set[int] = set()
+    while death is not None and id(death) not in seen:
+        if isinstance(death, WIRE_DEATHS):
+            return True
+        seen.add(id(death))
+        death = death.__cause__ or death.__context__
+    return False
 from rlstack.spec.specs import ExperimentSpec, LearnerMember, PoolMember
 
 
@@ -114,7 +140,13 @@ RESIDENT_HEARTBEAT_S = 10.0
 0008, Q1) — the third and innermost lease: the metal heartbeats for its
 container, the host for its residency, and each resident for its process."""
 
-RESIDENT_STALL_S = 600.0
+RESIDENT_STALL_S = 1800.0    # 2026-09-17: three learners on a shared 4-GPU node were silent 600 s
+                             # inside `emit` while a 32B judge loaded from a network volume beside them
+RESIDENT_RECHECK_S = 5.0
+"""The one more question a stall verdict is confirmed by before it costs a
+host (ADR 0014, Part D): short, because a resident that is really wedged
+answers nothing however long one waits, and one that is merely slow behind
+a store queue has had its whole bound already."""
 """THE PHASE BOUND: how long a resident may answer nothing before the host
 concludes it is stalled and ends it. Generous, because an engine's weight load
 and a learner's device move are legitimately long synchronous stretches — and
@@ -146,7 +178,7 @@ class Tenancy:
     run_id: str
     pools: dict[str, str]           # pool name -> base the bound engine serves
     store: str = ""                 # locator of the run's OWN store
-    status: str = "running"         # running | done | failed
+    status: str = "running"         # running | done | stopped | failed (ADR 0014)
     # how far the run's EXTENT got and which plan that is (ADR 0006 Part B,
     # Q7): updates committed for a run that trains, rollouts sealed for one
     # that only generates. Observability, never identity.
@@ -154,6 +186,15 @@ class Tenancy:
     extent: str = ""
     attached_at: float = field(default_factory=time.time)
     subdir: str = ""
+    # HOW IT ENDED (ADR 0014, Part C): the error text of a failure, whether
+    # that failure was the WIRE's (a pool or learner that stopped answering —
+    # infrastructure, which the desk parks and retries) rather than the
+    # experiment's own (which the desk journals `failed` and leaves), and
+    # when — so a desk reading the roster after a later redelivery can tell
+    # an old death from a new one
+    error: str = ""
+    wire: bool = False
+    ended_t: float | None = None
 
 
 class Host:
@@ -183,7 +224,7 @@ class Host:
         # carved by a metal (ADR 0002): one per regime, each holding the door
         # its proxy speaks through. Empty for a hand-built host whose engines
         # and learner are plain objects in this process — the same Host,
-        # because the daemons cannot tell and were never meant to.
+        # because the runners cannot tell and were never meant to.
         self.residents = tuple(residents)
         self.store = store
         self.arbiter = arbiter or Arbiter()
@@ -205,6 +246,8 @@ class Host:
         self.transport_for = transport_for
         self.schema_for = schema_for
         self._adoptions: dict[str, asyncio.Task] = {}
+        # one StopRequest per adopted run: the handle a drained stop pulls
+        self._stops: dict[str, StopRequest] = {}
         self.sampler = sampler or sample_gpu
         self.meter = TrafficMeter()
         # residents whose FIRST CONTACT is already on the journal (F5): the
@@ -406,7 +449,9 @@ class Host:
                      remotes: Mapping[str, Engine] | None = None,
                      subdir: str | None = None,
                      learner: Learner | None = None,
-                     resume: bool = False) -> RunReport:
+                     resume: bool = False, *,
+                     checkpointing: Checkpointing,
+                     stop: StopRequest | None = None) -> RunReport:
         """Run one experiment on this host's metal: bind, fit, solo, attest, run.
         `remotes` maps pool names served by OTHER hosts to their RemotePools
         and `learner` is a learner worn by another host (None: this host's
@@ -444,26 +489,48 @@ class Host:
             report = await run_experiment_async(
                 spec, schema, run_store, binding, learner,
                 max_inflight, arbiter=self.arbiter, subdir=subdir, resume=resume,
+                checkpointing=checkpointing, stop=stop,
                 # the tenant knows its own phases but not its metal: this is
                 # the door through which its update timings reach THIS host's
                 # journal, and the only reason the runner learns a host name
                 journal=HostJournal(self.store, self.name))
-        except BaseException:
-            self.roster[rid].status = "failed"
-            await store_work(self.store.append_host_event, self.name, {
-                "event": "detach", "t": time.time(), "run_id": rid,
-                "status": "failed"})
+        except asyncio.CancelledError:
+            # a stop's doing (drain declined or expired): the tenancy ended
+            # deliberately, and says so — never `failed` (ADR 0014, Q6)
+            await self.end_tenancy(rid, "stopped")
+            raise
+        except BaseException as death:
+            await self.end_tenancy(
+                rid, "failed", error=f"{type(death).__name__}: {death}"[:2000],
+                wire=is_wire_death(death))
             raise
         finally:
             await self.release_tenant(learner, rid)
-        self.roster[rid].status = "done"
         self.roster[rid].completed = report.completed
         self.roster[rid].extent = report.extent
-        await store_work(self.store.append_host_event, self.name, {
-            "event": "detach", "t": time.time(), "run_id": rid,
-            "status": "done", "completed": report.completed,
-            "extent": report.extent})
+        await self.end_tenancy(rid, "stopped" if report.stopped else "done",
+                               completed=report.completed, extent=report.extent)
         return report
+
+    async def end_tenancy(self, run_id: str, status: str, *, error: str = "",
+                          wire: bool = False, completed: int | None = None,
+                          extent: str = "") -> None:
+        """THE ROSTER'S LAST WORD ON A TENANCY, and the journal's detach:
+        done, stopped (a deliberate stop, drained or not) or failed (with
+        the error, and whether it was the wire's). Written once; a row
+        already ended is left as it ended."""
+        told = self.roster.get(run_id)
+        if told is None or told.status != "running":
+            return
+        told.status, told.error, told.wire = status, error, wire
+        told.ended_t = time.time()
+        row = {"event": "detach", "t": told.ended_t, "run_id": run_id,
+               "status": status}
+        if error:
+            row["error"], row["wire"] = error, wire
+        if completed is not None:
+            row["completed"], row["extent"] = completed, extent
+        await store_work(self.store.append_host_event, self.name, row)
 
     async def release_tenant(self, learner: Learner | None, run_id: str) -> None:
         """THE TENANCY'S END AT THE LEARNER, whichever host wears it: the run
@@ -491,7 +558,8 @@ class Host:
     async def adopt(self, spec_row: Mapping,
                     routes: Mapping[str, str] | None = None,
                     code: Mapping[str, str] | None = None,
-                    subdir: str | None = None, resume: bool = False) -> dict:
+                    subdir: str | None = None, resume: bool = False,
+                    checkpointing: Mapping | None = None) -> dict:
         """Take an experiment IN OVER THE WIRE and run it as one more tenancy
         on this host's own loop — submit, without the submitter in-process.
 
@@ -512,6 +580,7 @@ class Host:
         host already finished is a RESUME, the same way resubmitting one is.
         """
         try:
+            cadence = Checkpointing.from_row(checkpointing)   # no default (ADR 0014)
             spec = self.decode_adoption(spec_row)
             self.check_code_agreement(spec, code)
             # Config lookup may wait on a model registry. It must not hold
@@ -544,9 +613,12 @@ class Host:
             name: (engine.base or "*")
             for name, engine in sorted((binding | routed.pools).items())},
             store=self.store.describe(), subdir=subdir or "")
+        stop = StopRequest()
+        self._stops[rid] = stop
         task = asyncio.create_task(
             self.submit(spec, schema, remotes=routed.pools, subdir=subdir,
-                        learner=routed.learner, resume=resume))
+                        learner=routed.learner, resume=resume,
+                        checkpointing=cadence, stop=stop))
         # a failed run already journals and rosters its failure (submit's own
         # except path) — but the EXCEPTION ITSELF would otherwise vanish into
         # a retrieved future, and a silent adoption death is undiagnosable
@@ -564,39 +636,51 @@ class Host:
         self._adoptions[rid] = task
         return {"accepted": True, "run_id": rid, "run_ref": reference, "state": "adopted"}
 
-    async def stop(self, run_id: str) -> dict:
-        """A tenancy told to die — adopt's per-run inverse, and the verb a
-        reroute rides: the adoption task is cancelled and AWAITED, so the
-        reply means the death is COMPLETE. The daemons unwind structurally
-        (they run under one TaskGroup, so cancelling the adoption cancels
-        them all), the roster row reads failed, the journal's detach is
-        written (submit's own except path does both), and the run_id is free
-        to adopt again — here or elsewhere. Stopping mid-update is safe by
-        resume-equivalence: the uncommitted update is redone on resume, and
-        nothing else exists outside the store. A run this host is not
-        running answers stopped: False instead of raising — already dead is
-        the goal state, not an error."""
+    async def stop(self, run_id: str, *, drain: bool = True,
+                   deadline_s: float = BUILD_DEADLINE_S,
+                   reason: str = "") -> dict:
+        """A tenancy told to end — adopt's per-run inverse, and the verb a
+        reroute and a deliberate stop both ride. DRAINED by default (ADR
+        0014, Q6): the run's StopRequest is raised, the Trainer reads it at
+        its next update boundary, checkpoints the update it last committed,
+        and the runners end — so a stop loses nothing. Past `deadline_s`,
+        or with `drain=False`, the adoption task is cancelled and AWAITED
+        instead, which loses at most one checkpoint interval and is safe by
+        resume-equivalence. Either way the reply means the end is COMPLETE:
+        the roster row reads stopped, the journal's detach is written, and
+        the run_id is free to adopt again — here or elsewhere. A run this
+        host is not running answers stopped: False — already ended is the
+        goal state, not an error."""
         task = self._adoptions.get(run_id)
         if task is None or task.done():
             told = self.roster.get(run_id)
             return {"stopped": False, "run_id": run_id,
                     "state": told.status if told is not None else "unknown"}
-        task.cancel()
-        # swallow the task's CancelledError, propagate our own (gather keeps
-        # the two apart; a real failure was already rostered and journaled by
-        # submit's except path)
-        await asyncio.gather(task, return_exceptions=True)
+        drained = False
+        request = self._stops.get(run_id)
+        if drain and request is not None:
+            request.request(reason)
+            try:
+                await asyncio.wait_for(asyncio.shield(task), timeout=deadline_s)
+            except TimeoutError:
+                pass                    # the drain outlived its deadline
+            except BaseException:
+                pass                    # a death mid-drain: rostered by submit
+            drained = request.drained
+        if not task.done():
+            task.cancel()
+            # swallow the task's CancelledError, propagate our own (gather
+            # keeps the two apart; a death was already rostered by submit)
+            await asyncio.gather(task, return_exceptions=True)
         told = self.roster.get(run_id)
         if told is not None and told.status == "running":
             # cancelled before submit's try block ever ran: the eager roster
             # row is still "running", so submit could not write its own
             # bookkeeping — the journal must not lose a detach
-            told.status = "failed"
-            await store_work(self.store.append_host_event, self.name, {
-                "event": "detach", "t": time.time(), "run_id": run_id,
-                "status": "failed"})
-        return {"stopped": True, "run_id": run_id,
-                "state": told.status if told is not None else "unknown"}
+            await self.end_tenancy(run_id, "stopped")
+        return {"stopped": True, "run_id": run_id, "drained": drained,
+                "state": told.status if told is not None else "unknown",
+                "completed": told.completed if told is not None else None}
 
     def check_code_agreement(self, spec: ExperimentSpec,
                              claimed: Mapping[str, str] | None) -> None:
@@ -792,7 +876,7 @@ class Host:
                     silent = now - heard[resident.label]
                     if silent > stall_s:
                         heard[resident.label] = now
-                        await self.kill_stalled(resident, silent, stall_s)
+                        await self.kill_stalled(resident, silent, stall_s, heard)
                 await asyncio.sleep(every)
         finally:
             for task in asked.values():
@@ -846,19 +930,43 @@ class Host:
         heard[resident.label] = time.time()
 
     async def kill_stalled(self, resident: "Resident", silent_s: float,
-                           bound_s: float) -> None:
-        """A resident past its bound, ENDED and journaled `stalled` (Q7).
+                           bound_s: float,
+                           heard: dict[str, float] | None = None) -> None:
+        """A resident past its bound, RECHECKED, then ENDED and journaled
+        `stalled` (Q7; ADR 0014, Part D).
 
-        Killed rather than waited on, because a host is atomic: a resident
-        that exits takes its host down (`MetalService.resident_exited`), the
-        desk's next probe reaps the listing and the run is parked and
-        rerouted — which is the recovery path this fleet already has. The
-        journal line is what makes the twelve silent minutes a fact instead
-        of a mystery."""
-        await store_work(self.store.append_host_event, self.name, {
-            "event": "stalled", "t": time.time(), "resident": resident.label,
-            "kind": resident.regime.capability, "pid": resident.pid(),
-            "silent_s": round(silent_s, 1), "bound_s": bound_s})
+        RECHECKED FIRST, with a short deadline of its own: on 2026-09-12 the
+        watchdog twice called a resident dead that had committed 75 updates
+        in the window — the replies were queued behind a saturated store
+        thread, not missing — so a verdict reached on silence is confirmed
+        by one more question before it costs a host. A resident that answers
+        now is journaled `stall-recovered` and kept.
+
+        Killed rather than waited on otherwise, because a host is atomic: a
+        resident that exits takes its host down
+        (`MetalService.resident_exited`), the desk's next probe reaps the
+        listing and the run is parked and rerouted — which is the recovery
+        path this fleet already has. THE KILL COMES BEFORE THE JOURNAL LINE:
+        a journal append rides the same store queue whose saturation made
+        the resident look dead, and a watchdog that waited on it before
+        acting would be the stall it is watching for. The line is what makes
+        the twelve silent minutes a fact instead of a mystery."""
+        try:
+            await asyncio.to_thread(resident.heartbeat,
+                                    deadline_s=min(RESIDENT_RECHECK_S, bound_s))
+            answered = True
+        except Exception:
+            answered = False
+        if answered:
+            if heard is not None:
+                heard[resident.label] = time.time()
+            print(f"[host {self.name}] resident {resident.label!r} answered "
+                  f"on recheck after {silent_s:.1f}s of silence: kept", flush=True)
+            await store_work(self.store.append_host_event, self.name, {
+                "event": "stall-recovered", "t": time.time(),
+                "resident": resident.label, "kind": resident.regime.capability,
+                "silent_s": round(silent_s, 1), "bound_s": bound_s})
+            return
         print(f"[host {self.name}] resident {resident.label!r} has answered "
               f"nothing for {silent_s:.1f}s (bound {bound_s:g}s): stalled, "
               f"ending it", flush=True)
@@ -866,6 +974,10 @@ class Host:
         # SIGKILL, each joining what it signalled — up to half a minute, and
         # this host's other duties are still its own meanwhile.
         await asyncio.to_thread(resident.stop, report_exit=True)
+        await store_work(self.store.append_host_event, self.name, {
+            "event": "stalled", "t": time.time(), "resident": resident.label,
+            "kind": resident.regime.capability, "pid": resident.pid(),
+            "silent_s": round(silent_s, 1), "bound_s": bound_s})
 
     async def journal_traffic(self) -> None:
         """One traffic window, drained and journaled — the stats tick's own
@@ -946,7 +1058,9 @@ class Host:
             "admitted": self.arbiter.admitted(),
             "residents": [r.row() for r in self.residents],
             "tenants": {rid: {"status": t.status, "pools": t.pools,
-                              "completed": t.completed, "extent": t.extent}
+                              "completed": t.completed, "extent": t.extent,
+                              "error": t.error, "wire": t.wire,
+                              "ended_t": t.ended_t}
                         for rid, t in sorted(self.roster.items())},
         }
 

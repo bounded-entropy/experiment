@@ -125,7 +125,7 @@ class TestHappyPath(unittest.TestCase):
         spec = clean_spec(gen=None, plans=Plans(train="cas://plan/train"))
         self.assertEqual(validate(spec, SCHEMA), [])
 
-    def test_a_spec_with_no_gen_and_no_algo_needs_no_daemons_and_is_refused(self) -> None:
+    def test_a_spec_with_no_gen_and_no_algo_needs_no_runners_and_is_refused(self) -> None:
         """ADR 0006 Part B read backwards: with no algo there is no Trainer
         and with no gen there may be no rollout plan, so such a spec declares
         a run that would do nothing at all."""
@@ -454,7 +454,7 @@ class TestCoherence(unittest.TestCase):
                          {"no-extent", "algo-without-train-plan"})
 
     def test_a_train_plan_and_an_algo_are_one_declaration(self) -> None:
-        """Read from two ends: the extent's plan must have a daemon to
+        """Read from two ends: the extent's plan must have a runner to
         consume it, and the Trainer an algo brings must have a plan."""
         self.assertEqual(codes(generation_only(
             plans=Plans(train="cas://plan/train", rollout="cas://plan/roll"))),

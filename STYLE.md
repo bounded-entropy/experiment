@@ -47,11 +47,12 @@ The one reader is Samarth, six months from now, mid-experiment. Optimize for
                    — imports no other rlstack package; dumb and estimator-free
    runner/         the substrate: Engine/Learner protocols, the blackboard
                    (signals.py: awaitable store predicates; lease.py: who may
-                   occupy the metal), the loop (phases 0-1 + plan_daemons),
+                   occupy the metal), the loop (phases 0-1 + plan_runners),
                    fakes; the one package allowed to import both worlds
-   runner/daemons/ one daemon per GPU responsibility (generator / trainer /
-                   evaluator), synchronized ONLY via the store; each daemon's
-                   acquisition condition is a named, overridable method
+   runner/roles/   the three RUNNER roles of one run — one per GPU
+                   responsibility (generator / scorer / trainer), synchronized
+                   ONLY via the store, clients of the hosts they address; each
+                   role's acquisition condition is a named, overridable method
    runner/sources/ where training data comes from — one base (WaveFeed:
                    rows exist in the run's own waves/, or not yet),
                    one file per option (live / replay / static)
@@ -59,6 +60,20 @@ The one reader is Samarth, six months from now, mid-experiment. Optimize for
    runner/learners/ real training metal (torch_learner) — both import their
                    heavy deps at module scope and are therefore imported
                    LAZILY, never from the package root (rule 7)
+   runner/transports/ the wire substrates, one per file, behind the one
+                   Transport protocol (modal_cls, http + http_blobs) — the
+                   third lazy region: `transport_for` imports the branch an
+                   address's scheme names, and provider SDKs stay lazy at
+                   their callers
+   runner/venues/  provider-neutral lifecycle: the shared Desk/Metal runtimes
+                   (runtime.py), the AllocationProvider contract and the
+                   common VenueClient; the shared modules import no provider.
+                   One folder per provider (modal/, strangeloop/), each with
+                   provider.py, desk.py, worker.py; no provider imports
+                   another (ADR 0017)
+   runner/exporters/ companion workers reading COMMITTED run data out to
+                   external formats (wandb), beside the trainer and never
+                   inside it
    observe/        the observer: read-only derivations over stores and
                    journals (views, store locators) — never attaches, never
                    writes; imports the data layer and nothing else

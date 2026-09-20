@@ -21,11 +21,14 @@ import asyncio
 from collections.abc import Callable, Mapping, Sequence
 from typing import Any
 
+import copy
+
 from rlstack.data.plan import (
-    Derive, GroupPlan, PlanError, Replay, Sample, WavePlan, WaveRef, Waves,
+    TRAIN, Derive, GroupPlan, PlanError, Replay, Sample, WavePlan, WaveRef, Waves,
+    route_of_role,
 )
 from rlstack.data.trajectory import Group, Task, Trajectory, Wave, trajectory_from_row
-from rlstack.registry import MAKERS
+from rlstack.registry import ENVS, MAKERS
 from rlstack.runner.refs import RefReader
 from rlstack.runner.seeds import derive
 from rlstack.runner.traffic import EnginePoolClient, Routes, run_episode
@@ -87,7 +90,10 @@ async def sample_wave(plan: WavePlan, *, index: int, tasks: Mapping[str, Task],
                         f"which no declared task set contains")
                 task = tasks[leaf.task_id]
             seed = derive(master, phase, index, group_key, position)
-            client = EnginePoolClient(routes, sampling, seed)
+            # an environment's own sampling wins over the run's (an answering
+            # environment is greedy while the dreams sample); None inherits
+            own = ENVS.get(leaf.env).instance.sampling
+            client = EnginePoolClient(routes, own or sampling, seed)
             return await run_episode(leaf.env, task, client)
 
     for group in plan.groups:
@@ -128,22 +134,44 @@ def realize(entry: Waves, reader: RefReader) -> list[dict[str, Any]] | None:
         return reader.rows(entry.ref)          # the sealed wave IS its groups
     rows: list[dict[str, Any]] = []
     for group in entry.groups:
-        for row in _group_rows(group, reader):
+        for leaf, row in _group_rows(group, reader):
             if row is None:
                 return None                    # not yet: leave the wave unbuilt
-            rows.append(dict(row, group=group.key))
+            rows.append(dict(stamped(row, leaf.role), group=group.key))
     return rows
 
 
 def _group_rows(group: GroupPlan, reader: RefReader):
-    """One group's rows in leaf order, each None while it is unsealed."""
+    """One group's (leaf, row) pairs in leaf order, the row None while it is
+    unsealed."""
     for leaf in group.leaves:
         if not isinstance(leaf, Replay):
             raise PlanError(
                 f"group {group.key!r}: a train plan TAKES trajectories, so its "
                 f"leaves are Replay or a WaveRef; got {type(leaf).__name__} — "
                 f"sampling belongs to the rollout plan")
-        yield reader.row(leaf.ref)
+        yield leaf, reader.row(leaf.ref)
+
+
+def stamped(row: dict[str, Any], role: str) -> dict[str, Any]:
+    """THE LEAF'S ROLE, AS THE ROW'S FACTS (ADR 0018): a `train` leaf leaves
+    the sealed row untouched, byte for byte; any other role is written into
+    every turn's facts as `role`, and — when the role names a set — as
+    `route`, which is what a replay lowering routes by. A copy, never the
+    cached row: the same sealed rollout may be replayed under several roles
+    in one plan, and the reader's cache holds the record as sealed.
+
+    Realized on the Scorer and the Trainer alike, so the rows they see agree
+    byte for byte, and `waves/<u>` records exactly what trained."""
+    if role == TRAIN:
+        return row
+    stamped_row = copy.deepcopy(row)
+    route = route_of_role(role)
+    for turn in stamped_row["turns"]:
+        turn["turn_extras"]["role"] = role
+        if route is not None:
+            turn["turn_extras"]["route"] = route
+    return stamped_row
 
 
 def pending_refs(entry: Waves) -> tuple[str, ...]:
@@ -158,7 +186,7 @@ def rollouts_needed(waves: Sequence[Waves]) -> dict[int, int]:
     """rollout index -> the FIRST update that consumes it.
 
     The generator's lag rule reads this: a rollout is due when the update that
-    first needs it is due, which is how one plan paces two daemons without
+    first needs it is due, which is how one plan paces two runners without
     either calling the other.
     """
     from rlstack.runner.refs import SELF, parse

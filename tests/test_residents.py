@@ -25,8 +25,10 @@ import signal
 import tempfile
 import time
 import unittest
+from unittest.mock import patch
 
 from common import arith_spec, arith_store
+from rlstack.runner.checkpointing import EVERY_UPDATE
 from rlstack import (
     Builds, Emitted, EntryInstall, FakeEngine, FakeEngineBuild, FakeLearner,
     FakeLearnerBuild, Topology, HostSpec, Host, LearnerService,
@@ -125,14 +127,14 @@ class LearnerWireTest(unittest.TestCase):
         self.addCleanup(tmp_a.cleanup)
         store_a, train_a, heldout_a = arith_store(tmp_a.name)
         local = run_experiment(arith_spec(train_a, heldout_a), SCHEMA,
-                               store_a, FakeEngine(), FakeLearner())
+                               store_a, FakeEngine(), FakeLearner(), checkpointing=EVERY_UPDATE)
 
         tmp_b = tempfile.TemporaryDirectory()
         self.addCleanup(tmp_b.cleanup)
         store_b, train_b, heldout_b = arith_store(tmp_b.name)
         remote = RemoteLearner(LocalTransport(LearnerService(FakeLearner())))
         result = run_experiment(arith_spec(train_b, heldout_b), SCHEMA,
-                                store_b, FakeEngine(), remote)
+                                store_b, FakeEngine(), remote, checkpointing=EVERY_UPDATE)
 
         self.assertEqual(local.run_id, result.run_id)
         for key in ("ledger.jsonl", "waves/000001.jsonl.gz"):
@@ -324,7 +326,7 @@ class ProcessResidentTest(ProcessFixture):
         desk = self.desk(service)
 
         async def drive():
-            reply = await Campaigns(desk).submit(alternating_spec(self.train))
+            reply = await Campaigns(desk).submit(alternating_spec(self.train), checkpointing=EVERY_UPDATE)
             self.assertTrue(reply["accepted"], reply)
             await service.hosts[reply["host"]]._adoptions[reply["run_id"]]
             return reply
@@ -353,7 +355,7 @@ class ProcessResidentTest(ProcessFixture):
         other_store, other_train, _ = arith_store(tmp.name)
         plain = Host("plain", engines=(FakeEngine(base=BASE),),
                      learner=FakeLearner(), store=other_store)
-        report = go(plain.submit(alternating_spec(other_train), SCHEMA))
+        report = go(plain.submit(alternating_spec(other_train), SCHEMA, checkpointing=EVERY_UPDATE))
         self.assertEqual(reply["run_id"], report.run_id)
         for key in ("ledger.jsonl", "waves/000001.jsonl.gz"):
             self.assertEqual(
@@ -396,7 +398,10 @@ class ProcessResidentTest(ProcessFixture):
             self.assertTrue(born["carved"], born)
             host = service.hosts[born["host"]]
             resident, = host.residents
-            await host.kill_stalled(resident, silent_s=601, bound_s=600)
+            # the watchdog RECHECKS before it kills (ADR 0014, Part D): a
+            # resident that answers is kept, so this one must not answer
+            with patch.object(resident, "heartbeat", side_effect=TimeoutError("silent")):
+                await host.kill_stalled(resident, silent_s=601, bound_s=600)
             self.assertFalse(resident.alive())
             deadline = time.monotonic() + 5
             while host.name in service.hosts and time.monotonic() < deadline:

@@ -682,7 +682,7 @@ def probe_base(base: str) -> dict:
 
 
 @app.local_entrypoint()
-def bases(only: str = "") -> None:
+def bases(only: str = "", *, every: int) -> None:
     """Every base in the matrix, one L4 each, in parallel. A base that fails
     a stage reports the stage; the matrix never aborts on one base."""
     chosen = [(b, note) for b, note in BASES if not only or only in b]
@@ -723,10 +723,10 @@ def bases(only: str = "") -> None:
 # the fleet doors
 # ---------------------------------------------------------------------------
 
-def submit(name: str, row: dict, anchor: str | None = None) -> dict:
+def submit(name: str, row: dict, anchor: str | None = None, *, every: int) -> dict:
     """One spec through THE desk, named in the log line."""
     print(f"[submit] {name}:", flush=True)
-    return submit_spec(row, SUBDIR, anchor)
+    return submit_spec(row, SUBDIR, anchor, every=every)
 
 
 def await_runs(runs: dict[str, str], targets: dict[str, int],
@@ -758,7 +758,7 @@ def report_rails(runs: dict[str, str], progress: dict) -> dict:
 
 
 @app.local_entrypoint()
-def topology(master: int = 41) -> None:
+def topology(master: int = 41, *, every: int) -> None:
     """Three tenants — lora, steer, soft_prompt — through the desk onto ONE
     tp=TP serving host and ONE fsdp=FSDP learner, two updates each, then the
     release. What this shows: every adapter type's rollout lowering on a
@@ -774,7 +774,7 @@ def topology(master: int = 41) -> None:
                                   [master, master + 1, master + 2])
         runs, pools = {}, {}
         for name in names:
-            reply = submit(name, rows[name])
+            reply = submit(name, rows[name], every=every)
             runs[name] = reply["run_id"]
             pools[name] = reply["pools"]
         joined = len({json.dumps(p, sort_keys=True) for p in pools.values()}) == 1
@@ -789,7 +789,7 @@ def topology(master: int = 41) -> None:
 
 
 @app.local_entrypoint()
-def latejoin(master: int = 51) -> None:
+def latejoin(master: int = 51, *, every: int) -> None:
     """A runs first (lora, UPDATES_A updates); once A has committed at
     least one update, B (steer) is submitted and JOINS A's serving host and
     learner mid-run. What this shows: additive install on a learner that is
@@ -801,12 +801,12 @@ def latejoin(master: int = 51) -> None:
         print(json.dumps(wait_for_metal(METAL), indent=1), flush=True)
         rows = build_specs(["lora", "steer"], [UPDATES_A, UPDATES],
                                   [master, master + 1])
-        a = submit("A=lora", rows["lora"])
+        a = submit("A=lora", rows["lora"], every=every)
         runs = {"A": a["run_id"]}
         progress = await_runs(runs, {"A": 1}, until_any=True)
         a_before = progress[runs["A"]]["committed"]
         print(f"[latejoin] A has committed {a_before}; B joins now", flush=True)
-        b = submit("B=steer", rows["steer"])
+        b = submit("B=steer", rows["steer"], every=every)
         runs["B"] = b["run_id"]
         joined = a["pools"] == b["pools"]
         print(f"[join] {'B joined A: one serving host, one learner' if joined else 'NOT joined: ' + json.dumps([a['pools'], b['pools']])}",
@@ -825,7 +825,7 @@ def latejoin(master: int = 51) -> None:
 
 
 @app.local_entrypoint()
-def remote_learner(master: int = 61) -> None:
+def remote_learner(master: int = 61, *, every: int) -> None:
     """THE RUNNER AWAY FROM ITS LEARNER (ADR 0006 Part A) — WRITTEN, UNRUN.
 
     One lora tenant submitted with `anchor="main"`, so the desk delivers the
@@ -848,7 +848,7 @@ def remote_learner(master: int = 61) -> None:
     try:
         print(json.dumps(wait_for_metal(METAL), indent=1), flush=True)
         rows = build_specs(["lora"], [UPDATES], [master])
-        reply = submit("anchored-on-main", rows["lora"], anchor="main")
+        reply = submit("anchored-on-main", rows["lora"], anchor="main", every=every)
         runs = {"anchored-on-main": reply["run_id"]}
         pools = reply["pools"]
         away = pools["main"] != pools["learner"]

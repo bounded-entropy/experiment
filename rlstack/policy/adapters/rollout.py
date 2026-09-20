@@ -18,7 +18,10 @@ type's own *_vllm.py is the compute.
 
 from __future__ import annotations
 
+import contextlib
+import hashlib
 import itertools
+import threading
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -26,6 +29,126 @@ from typing import Any, ClassVar
 
 from rlstack.policy.adapters.base import Directive, Mechanism
 from rlstack.policy.siteschema import SiteMeta
+
+
+class Library:
+    """THE ENGINE'S LIBRARY (ADR 0019): named payloads, handed in as BYTES by
+    a role (`Engine.add_library`) and read by adapter types at request time.
+
+    A named payload is exactly what `lora_torch.emit` writes for ONE LoRA set
+    (scaling 1), and a name is write-once in the store — so `add` is
+    idempotent, and the same name arriving with DIFFERENT bytes is refused
+    rather than replaced: an engine outlives runs, and replacing would serve
+    one tenant another's weights under the name it asked for.
+
+    THE RULE is BundleResidency's, for the same reason: hold at most
+    `capacity` names, evict least-recently-used first, and never a name a
+    request is pinning — so the bound is soft by exactly the in-flight set.
+    Eviction is not a loss: the store holds the name, and the caller that
+    routes under it hands the bytes again before it samples.
+
+    One lock, because `add` arrives on whatever thread the door answers on
+    while requests read from the engine's loop. `forget` is called AFTER the
+    lock is released, so a lowering may take its own lock inside it.
+    """
+
+    def __init__(self, capacity: int = 32,
+                 forget: Callable[[str], None] | None = None) -> None:
+        if capacity < 1:
+            raise ValueError(f"a library holds at least one name, got {capacity}")
+        self.capacity = capacity
+        self.forget = forget                    # told each evicted name
+        self.log: list[str] = []                # every name first held, in order
+        # name -> payload in LEAST-RECENTLY-USED order (reinsertion = touch)
+        self._held: dict[str, bytes] = {}
+        self._digest: dict[str, str] = {}
+        self._inflight: dict[str, int] = {}     # name -> requests pinning
+        self._lock = threading.Lock()
+
+    def add(self, name: str, payload: bytes) -> None:
+        """Hold one named payload, then come back within the bound."""
+        digest = hashlib.sha256(payload).hexdigest()
+        with self._lock:
+            if name in self._held:
+                if self._digest[name] != digest:
+                    raise ValueError(
+                        f"library adapter {name!r} is already held with "
+                        f"different bytes ({self._digest[name][:12]} vs "
+                        f"{digest[:12]}); a name is write-once, so this is "
+                        f"another experiment's adapter under the same name")
+                self._held[name] = self._held.pop(name)
+                return
+            self._held[name] = payload
+            self._digest[name] = digest
+            self.log.append(name)
+            evicted = self._evict_until_within_bound()
+        if self.forget is not None:
+            for gone in evicted:
+                self.forget(gone)
+
+    def knows(self, name: str) -> bool:
+        with self._lock:
+            return name in self._held
+
+    def names(self) -> tuple[str, ...]:
+        """What is held right now, least recently used first."""
+        with self._lock:
+            return tuple(self._held)
+
+    def get(self, name: str) -> bytes:
+        """The payload a route names, marked most-recently-used — or the
+        refusal that proves the order of things: bytes first, then a route."""
+        with self._lock:
+            self._check_held(name)
+            self._held[name] = self._held.pop(name)
+            return self._held[name]
+
+    def digest(self, name: str) -> str:
+        """The content hash of what `name` holds (the fakes score by it)."""
+        with self._lock:
+            self._check_held(name)
+            return self._digest[name]
+
+    @contextlib.contextmanager
+    def pinned(self, names: Sequence[str]):
+        """One request's hold on the names its route reads: immune from
+        eviction until the last token is out."""
+        with self._lock:
+            for name in names:
+                self._check_held(name)
+            for name in names:
+                self._inflight[name] = self._inflight.get(name, 0) + 1
+        try:
+            yield
+        finally:
+            with self._lock:
+                for name in names:
+                    if self._inflight[name] > 1:
+                        self._inflight[name] -= 1
+                    else:
+                        self._inflight.pop(name)
+
+    def _check_held(self, name: str) -> None:
+        if name not in self._held:
+            raise RuntimeError(
+                f"library adapter {name!r} is not on this engine (held: "
+                f"{len(self._held)} of {self.capacity}); a caller hands its "
+                f"bytes first (Engine.add_library) and routes under it after")
+
+    def _evict_until_within_bound(self) -> list[str]:
+        """Drop least-recently-used names until the bound holds: never the
+        newest, never a pinned one (skipped, so it does not shield the stale
+        names behind it)."""
+        evicted: list[str] = []
+        for name in list(self._held)[:-1]:
+            if len(self._held) <= self.capacity:
+                break
+            if self._inflight.get(name):
+                continue
+            del self._held[name]
+            del self._digest[name]
+            evicted.append(name)
+        return evicted
 
 
 @dataclass(frozen=True)
@@ -57,6 +180,10 @@ class ServingBuild:
     lora_ids: Iterator[int] = field(
         default_factory=lambda: itertools.count(1), repr=False, compare=False)
 
+    # THE ENGINE'S LIBRARY, the same sharing: the one object the engine's
+    # `add_library` writes and every lowering reads at request time.
+    library: Library = field(default_factory=Library, repr=False, compare=False)
+
     def next_lora_id(self) -> int:
         """Allocate a unique LoRA slot across every lowering on this engine.
 
@@ -77,6 +204,17 @@ class ServingBuild:
         capacity is a BUILD fact every served type must agree on
         (check_demand_fits)."""
         return self.max_bundles * (self.max_members + 1)
+
+
+def check_rank_fits(what: str, rank: int, build: ServingBuild) -> None:
+    """A delta wider than the build's kernels is refused where it is attached
+    (ADR 0019): punica's slot bank is allocated at `max_rank` once, at build
+    time, and a stack of two sets is as wide as their SUM."""
+    if rank > build.max_rank:
+        raise ValueError(
+            f"{what} has rank {rank}, but this build serves max_rank "
+            f"{build.max_rank}; a stacked route needs max_rank >= the sum of "
+            f"its two parts' ranks (EngineBuild.max_rank is a build fact)")
 
 
 @dataclass(frozen=True)
@@ -179,6 +317,10 @@ class Levers:
     engine folds into the FinishEvent and the seal freezes into
     Turn.turn_extras (I6). A fact recorded here is one replay cannot re-derive
     — the draw already happened — so it is data, exactly like the token ids.
+
+    `library` names the library adapters this contribution READS (ADR 0019):
+    the engine pins them in its Library until the request's last token is
+    out, exactly as it pins the bundle.
     """
 
     prompt: Any | None = None
@@ -186,6 +328,7 @@ class Levers:
     extra_args: Mapping[str, Any] = field(default_factory=dict)
     cache_salt: str | None = None
     turn_extras: Mapping[str, Any] = field(default_factory=dict)
+    library: tuple[str, ...] = ()
 
     def merged_with(self, other: "Levers") -> "Levers":
         """Fold one adapter type's contribution into the request so far.
@@ -210,7 +353,8 @@ class Levers:
             extra_args={**self.extra_args, **other.extra_args},
             cache_salt=(other.cache_salt if other.cache_salt is not None
                         else self.cache_salt),
-            turn_extras={**self.turn_extras, **other.turn_extras})
+            turn_extras={**self.turn_extras, **other.turn_extras},
+            library=self.library + other.library)
 
 
 @dataclass(frozen=True)
@@ -289,6 +433,11 @@ class RolloutLowering:
             f"{type(self).__name__} has no detach: what attach made resident "
             f"cannot be released, so a pool serving this adapter type can only "
             f"grow")
+
+    def forget_library(self, name: str) -> None:
+        """The engine's Library evicted `name`: release whatever this adapter
+        type materialized from it. Default: nothing — an adapter type that
+        never reads the library made nothing from it."""
 
 
 def check_levers_compose(bundle_id: str,

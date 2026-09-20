@@ -20,6 +20,7 @@ import unittest
 
 from common import arith_spec, arith_store
 from test_resume import snapshot
+from rlstack.runner.checkpointing import EVERY_UPDATE
 from rlstack import (
     Arbiter, FakeEngine, FakeLearner, Host, HostService, LocalTransport,
     Regime, RemoteLearner, fake_qwen_schema,
@@ -78,7 +79,7 @@ class UninstallVerbTest(unittest.TestCase):
         self.assertIsNotNone(learner.emit("run-b"))   # a co-tenant is untouched
 
     def test_every_verb_round_trips_through_the_resident_door(self) -> None:
-        """The six verbs over LearnerService + a RemoteLearner: what the
+        """The learner verbs over LearnerService + a RemoteLearner: what the
         wire carries must equal what the object does, byte for byte."""
         direct, served = FakeLearner(), FakeLearner()
         proxy = RemoteLearner(LocalTransport(LearnerService(served)))
@@ -86,6 +87,7 @@ class UninstallVerbTest(unittest.TestCase):
             learner.install("run-a", a_parameterization())
             learner.load("run-a", {"pi": b"fake-delta:pi:deadbeef"}, None)
             learner.optim_step("run-a")
+        self.assertEqual(proxy.tokenize("run-a", "λ + 2"), direct.tokenize("run-a", "λ + 2"))
         self.assertEqual(direct.emit("run-a").adapters,
                          proxy.emit("run-a").adapters)
         proxy.uninstall("run-a")
@@ -124,10 +126,11 @@ class LearnerDoorTest(unittest.TestCase):
         lives — not where the Trainer sits."""
         self.routed.install("run-a", a_parameterization())
         self.routed.optim_step("run-a")
+        self.assertEqual(self.routed.tokenize("run-a", "hi"), (104, 105))
         self.assertEqual(self.host.arbiter.switches, ["alt:train"])
         self.assertEqual(self.host.arbiter.residency(),
                          {"host:alt": "alt:train"})
-        self.assertEqual(self.host.arbiter.admitted(), 2)
+        self.assertEqual(self.host.arbiter.admitted(), 3)
         self.assertEqual(self.host.arbiter.in_flight(), 0)
 
     def test_the_learners_host_journals_who_is_on_it(self) -> None:
@@ -247,7 +250,7 @@ class AnchorTest(unittest.TestCase):
                         else (serving, {"learner": "fleet://train"}))
 
         async def drive():
-            reply = await host.adopt(json.loads(canonical_json(spec)), routes)
+            reply = await host.adopt(json.loads(canonical_json(spec)), routes, checkpointing=EVERY_UPDATE.row())
             self.assertTrue(reply.get("accepted"), reply)
             await host._adoptions[reply["run_id"]]
             return reply["run_id"]
@@ -292,7 +295,7 @@ class AnchorTest(unittest.TestCase):
         host = Host("solo", engines=(FakeEngine(),), learner=FailingLearner(),
                     store=store)
         with self.assertRaises(Boom):
-            go(host.submit(arith_spec(train), SCHEMA))
+            go(host.submit(arith_spec(train), SCHEMA, checkpointing=EVERY_UPDATE))
         self.assertEqual(host.learner._tenants, {})
 
     def test_a_routed_learner_is_a_free_resident_at_the_runner(self) -> None:

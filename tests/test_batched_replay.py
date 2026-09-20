@@ -314,6 +314,11 @@ class ChunkedLogprobTest(unittest.TestCase):
         return torch.log_softmax(logits.float(), dim=-1).gather(
             2, targets[..., None])[..., 0]
 
+    def test_no_position_at_all_is_no_logprob_at_all(self) -> None:
+        """Documents one token long leave `logits[:, :-1]` with no position."""
+        chosen = chosen_logprobs(torch.randn(2, 0, 11), torch.zeros(2, 0, dtype=torch.long))
+        self.assertEqual((tuple(chosen.shape), chosen.dtype), ((2, 0), torch.float32))
+
     def test_same_values_and_gradients_as_the_whole_copy(self) -> None:
         torch.manual_seed(0)
         logits = torch.randn(3, 7, 11, dtype=torch.bfloat16, requires_grad=True)

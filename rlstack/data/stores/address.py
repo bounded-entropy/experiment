@@ -13,13 +13,19 @@ from __future__ import annotations
 from rlstack.data.stores.base import Store, StoreAddress
 from rlstack.data.stores.local import LocalStore
 from rlstack.data.stores.modal_volume import ModalVolumeStore
+from rlstack.data.stores.strangeloop import ScratchClient, StrangeLoopStore
 
 
 def open_store(address: StoreAddress) -> Store:
     """The store at `address`, reopened here. A volume-backed store reopens
     as a mount-only view (no volume handle, so nothing it writes would
     persist) — which is exactly a resident's relation to the store: it reads
-    cas blobs and journals nothing."""
+    cas blobs and journals nothing. Scratch residents refuse writes and use
+    authoritative HTTP for mutable keys. Inherited deploy settings permit a
+    shared local cache and already-visible hashed mounted bytes (ADR 0020)."""
+    if address.backend == "strangeloop":
+        return StrangeLoopStore(ScratchClient.from_locator(address.locator), read_only=True,
+                                mount_root=address.root or None)
     if address.backend == "local":
         return LocalStore(address.root)
     if address.backend == "modal_volume":

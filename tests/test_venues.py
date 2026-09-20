@@ -23,27 +23,19 @@ from __future__ import annotations
 
 import ast
 import importlib.util
+import inspect
 import json
 import pathlib
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 
 from venue_stub import modal_stubbed
 
 REPO = pathlib.Path(__file__).resolve().parent.parent
 DEPLOY = REPO / "deploy"
 ROWS = json.loads((REPO / "tests" / "venue_spec_rows.json").read_text())
-
-DAPO_SETS = (
-    "09499d32b51e5e1b2a644b1c65e01b44aa42ff1a5bfac78ead41f98f89f09c93",
-    "82ae4626dbb59a2c50e2b13cbe7250c5f1ddd02dfb81edc7495efb77759d420b",
-)
-"""The two task-set digests the L4 venues PIN in their specs (#60). A spec
-names them by uri and never reads them, except for `spec_for`'s one assertion
-that the screened task is in the train set — so the test seeds those two keys
-with a stand-in set containing it. What is pinned is the uri, and the uri is
-what the fixture compares."""
 
 SCREENED = "dapo-math-17k/a6d38312-86c7-4022-b8d2-adcf19fa0c3a"
 
@@ -108,21 +100,27 @@ class VenueFixture(unittest.TestCase):
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
         self.store, self.concept_tasks = self.seeded_store(tmp.name)
+        # Canonical fixtures pin the real dataset URIs. Stub the membership
+        # check at its loader, rather than storing fake bytes under those hashes.
+        from rlstack.data.tasks.base import Task
+        dapo = [Task(id=SCREENED, prompt="1+1?", meta={}),
+                Task(id="dapo-math-17k/other", prompt="2+2?", meta={})]
+        from rlstack.data.tasks import load_tasks
+        def fixture_tasks(store, uri):
+            if uri in (self.steer_l4.TRAIN_TASKS, self.stress_fleet.TRAIN_TASKS):
+                return dapo
+            return load_tasks(store, uri)
+        loader = patch("rlstack.data.tasks.load_tasks", side_effect=fixture_tasks)
+        loader.start()
+        self.addCleanup(loader.stop)
 
     @staticmethod
     def seeded_store(root: str):
-        """A LocalStore holding the two pinned dapo sets and enough concept
-        prompts for the teacher's plan (64 waves of 32, plus the split's
-        headroom)."""
+        """Real content-addressed concept prompts for the teacher's plan."""
         from rlstack import LocalStore
         from rlstack.data.tasks.base import Task, write_tasks
 
         store = LocalStore(root)
-        dapo = [{"id": SCREENED, "prompt": "1+1?", "meta": {}},
-                {"id": "dapo-math-17k/other", "prompt": "2+2?", "meta": {}}]
-        rows = "".join(json.dumps(row, sort_keys=True) + "\n" for row in dapo)
-        for digest in DAPO_SETS:
-            store._write(f"cas/{digest}/blob", rows.encode())
         concept = write_tasks(store, [Task(id=f"p{i:05d}", prompt=f"q{i}",
                                            meta={}) for i in range(2304)])
         return store, concept
@@ -221,7 +219,7 @@ class ChassisTest(VenueFixture):
         """Promise 4: one desk app, one journal. A venue that declared its own
         `Desk` class had its own fleet and could not share metal (Q2)."""
         desks = [path.name for path in sorted(DEPLOY.glob("*.py"))
-                 if "class Desk" in path.read_text()]
+                 if calls_named(path, {"desk_class"})]
         self.assertEqual(desks, ["desk.py"])
 
     def test_no_venue_keeps_its_own_fleet_journal(self) -> None:
@@ -267,9 +265,18 @@ class ChassisTest(VenueFixture):
         """F1: the lease constants are the desk's; the venue carries only the
         fallback it uses until the registration reply tells it otherwise."""
         self.assertEqual(self.modal_venue.HEARTBEAT_S, 20.0)
-        source = (DEPLOY / "modal_venue.py").read_text()
-        self.assertIn("heartbeat_s", source)
-        self.assertIn("watch_residents", source)
+        from unittest.mock import patch
+        from rlstack.runner.desk import Metal, MetalService
+        from rlstack.runner.venues.runtime import MetalRuntime
+
+        with patch.object(MetalService, "measure", return_value=Metal("test", "L4", 1, 24)):
+            runtime = MetalRuntime.measured(
+                "test", self.store, self.modal_venue.desk(), address="modal://test/MetalS",
+                host_address=lambda host, epoch: host, container="ta-test", idle_s=90,
+                heartbeat_s=self.modal_venue.HEARTBEAT_S)
+        self.assertEqual(runtime.heartbeat_s, 20.0)
+        runtime.learn_heartbeat({"heartbeat_s": 7.0})
+        self.assertEqual(runtime.heartbeat_s, 7.0)
 
     def test_both_doors_of_every_container_are_async(self) -> None:
         """ADR 0008, Q4: a cancelled input of a SYNCHRONOUS method on a
@@ -277,11 +284,12 @@ class ChassisTest(VenueFixture):
         container down — which is how the desk died three times on
         2026-09-04. Both doors are async methods now, on the metal and on the
         desk alike."""
-        for path in (DEPLOY / "modal_venue.py", DEPLOY / "desk.py"):
-            source = path.read_text()
-            self.assertIn("async def door(", source, path.name)
-            self.assertIn("async def door_ask(", source, path.name)
-            self.assertNotIn("\n    def door_ask(", source, path.name)
+        worker = self.modal_venue.metal_class(
+            self.modal_venue.modal.App("test"), "test", "test", "L4", None,
+            module="venue_test")
+        for container in (worker, self.desk_venue.Desk):
+            self.assertTrue(inspect.iscoroutinefunction(container.door))
+            self.assertTrue(inspect.iscoroutinefunction(container.door_ask))
 
     def test_no_venue_helper_wraps_a_desk_call_in_a_timeout(self) -> None:
         """Q4's other half: a client NEVER cancels a fleet input — the
@@ -332,7 +340,8 @@ class ChassisTest(VenueFixture):
         chassis = (DEPLOY / "modal_venue.py").read_text()
         self.assertNotIn("def progress_function(", chassis)
         self.assertIn("def canonical_row(", chassis)
-        self.assertIn("/api/run/", chassis)
+        from rlstack.runner.venues.client import VenueClient
+        self.assertIn("/api/run/", inspect.getsource(VenueClient.progress))
 
     def test_the_chassis_follows_a_run_through_the_observer(self) -> None:
         """F6: progress is a store read and a read-only service over the

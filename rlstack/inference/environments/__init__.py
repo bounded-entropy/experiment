@@ -8,5 +8,6 @@ from rlstack.inference.environments.base import (  # noqa: F401
     Environment, EnvironmentDef, PoolClient, environment,
 )
 from rlstack.inference.environments import (  # noqa: F401  (registers builtins)
-    conditioned_teacher, dapo_math, math_single_turn, noop, reflect_retry, single_turn,
+    answer, closed_book, conditioned_teacher, dapo_math, math_single_turn, noop, reflect_retry,
+    routed_turn, single_turn,
 )

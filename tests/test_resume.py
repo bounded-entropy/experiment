@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Any
 
 from common import arith_spec, arith_store, generation_spec
+from rlstack.runner.checkpointing import EVERY_UPDATE
 from rlstack import (
     FakeEngine, FakeLearner, FinishEvent, LocalStore, fake_qwen_schema,
     run_experiment,
@@ -95,7 +96,7 @@ class ResumeEquivalenceTest(unittest.TestCase):
         self.addCleanup(tmp.cleanup)
         store, train, _ = arith_store(tmp.name)
         report = run_experiment(arith_spec(train), SCHEMA, store,
-                                FakeEngine(), FakeLearner())
+                                FakeEngine(), FakeLearner(), checkpointing=EVERY_UPDATE)
         return store, report.run_id
 
     def test_crash_anywhere_then_resume_is_byte_identical(self) -> None:
@@ -112,12 +113,12 @@ class ResumeEquivalenceTest(unittest.TestCase):
 
                 with self.assertRaises(SimulatedCrash):
                     run_experiment(arith_spec(train), SCHEMA, crashing,
-                                   FakeEngine(), FakeLearner())
+                                   FakeEngine(), FakeLearner(), checkpointing=EVERY_UPDATE)
 
                 # fresh store handle, fresh fakes: nothing survives but disk
                 resumed = run_experiment(arith_spec(train), SCHEMA,
                                          LocalStore(tmp.name), FakeEngine(),
-                                         FakeLearner())
+                                         FakeLearner(), checkpointing=EVERY_UPDATE)
                 self.assertEqual(resumed.run_id, run_id)
                 self.assertIsNotNone(resumed.resumed_from)
                 self.assertEqual(snapshot(LocalStore(tmp.name), run_id), reference)
@@ -134,7 +135,7 @@ class GenerationOnlyResumeTest(unittest.TestCase):
         self.addCleanup(tmp.cleanup)
         store, train, _ = arith_store(tmp.name)
         report = run_experiment(generation_spec(train), SCHEMA, store,
-                                FakeEngine(), None)
+                                FakeEngine(), None, checkpointing=EVERY_UPDATE)
         return store, report.run_id
 
     def test_crash_mid_generation_then_resume_is_byte_identical(self) -> None:
@@ -150,12 +151,12 @@ class GenerationOnlyResumeTest(unittest.TestCase):
 
                 with self.assertRaises(SimulatedCrash):
                     run_experiment(generation_spec(train), SCHEMA, crashing,
-                                   FakeEngine(), None)
+                                   FakeEngine(), None, checkpointing=EVERY_UPDATE)
 
                 # fresh store handle, fresh engine: nothing survives but disk
                 resumed = run_experiment(generation_spec(train), SCHEMA,
                                          LocalStore(tmp.name), FakeEngine(),
-                                         None)
+                                         None, checkpointing=EVERY_UPDATE)
                 self.assertEqual(resumed.run_id, run_id)
                 self.assertEqual((resumed.completed, resumed.extent),
                                  (4, "rollout"))
@@ -173,7 +174,7 @@ class DeterminismTest(unittest.TestCase):
             self.addCleanup(tmp.cleanup)
             store, train, heldout = arith_store(tmp.name)
             report = run_experiment(arith_spec(train, heldout), SCHEMA, store,
-                                    FakeEngine(), FakeLearner())
+                                    FakeEngine(), FakeLearner(), checkpointing=EVERY_UPDATE)
             snapshots.append(snapshot(store, report.run_id))
         self.assertEqual(snapshots[0], snapshots[1])
 
@@ -223,7 +224,7 @@ class CompletionOrderTest(unittest.TestCase):
         self.addCleanup(tmp.cleanup)
         store, train, heldout = arith_store(tmp.name)
         report = run_experiment(arith_spec(train, heldout), SCHEMA, store,
-                                engine, FakeLearner(), max_inflight)
+                                engine, FakeLearner(), max_inflight, checkpointing=EVERY_UPDATE)
         return snapshot(store, report.run_id)
 
     def test_run_bytes_do_not_depend_on_the_completion_order(self) -> None:
@@ -254,7 +255,7 @@ class AnnotationLeavesTheRunAloneTest(unittest.TestCase):
         self.addCleanup(tmp.cleanup)
         store, train, heldout = arith_store(tmp.name)
         report = run_experiment(arith_spec(train, heldout), SCHEMA, store,
-                                FakeEngine(), FakeLearner())
+                                FakeEngine(), FakeLearner(), checkpointing=EVERY_UPDATE)
         before = snapshot(store, report.run_id)
         self.assertTrue(before)
 

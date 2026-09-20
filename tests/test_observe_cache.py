@@ -43,6 +43,7 @@ def seeded_store():
     run = store.open_run("r1", manifest={"run_id": "r1"})
     run.append_ledger({"update": 1, "train": {"loss": 0.5},
                        "versions": {"pi": 1}})
+    run.append_checkpoint(1, {"pi": 1})
     store.append_host_event("h", {"event": "stats", "t": 1.0})
     return tmp, store
 
@@ -78,6 +79,7 @@ class CachedReadStoreTest(unittest.TestCase):
         run = store.open_run("r1")       # the attach reads on its own account
         run.append_ledger({"update": 2, "train": {"loss": 0.4},
                            "versions": {"pi": 2}})
+        run.append_checkpoint(2, {"pi": 2})
         before = len(store.reads)
         rows = cached.peek_ledger("r1")                       # size grew
         self.assertEqual([r["update"] for r in rows], [1, 2])

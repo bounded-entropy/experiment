@@ -26,6 +26,7 @@ from __future__ import annotations
 import time
 
 from rlstack.data.stores.base import Store, StoreError
+from rlstack.data.stores.strangeloop import StrangeLoopStore
 
 LIST_TTL = 2.0      # seconds a directory listing may serve stale
 ABSENT_TTL = 2.0    # seconds a miss may serve stale
@@ -53,6 +54,9 @@ class CachedReadStore(Store):
 
     def __init__(self, inner: Store) -> None:
         self.inner = inner
+        # Scratch can replace mutable files without changing their size, and
+        # its API has no reload blink. Never outrank an authoritative answer.
+        self._authoritative = isinstance(inner, StrangeLoopStore)
         self._bytes: dict[str, tuple[int, bytes]] = {}    # key -> (size, data)
         self._absent: dict[str, float] = {}               # key -> noticed at
         self._lists: dict[str, tuple[float, list[str]]] = {}
@@ -78,7 +82,7 @@ class CachedReadStore(Store):
         if held is not None and time.time() - held[0] < LIST_TTL:
             return held[1]
         homes = self.inner._run_directories()
-        if not homes and held is not None and held[1]:
+        if not self._authoritative and not homes and held is not None and held[1]:
             self._homes = (time.time(), held[1])
             return held[1]
         self._homes = (time.time(), homes)
@@ -87,6 +91,8 @@ class CachedReadStore(Store):
     # ---- cached byte verbs --------------------------------------------------
 
     def _read(self, key: str) -> bytes:
+        if self._authoritative:
+            return self.inner._read(key)
         held = self._bytes.get(key)
         if held is not None:
             if immutable(key):
@@ -117,7 +123,7 @@ class CachedReadStore(Store):
         return data
 
     def _exists(self, key: str) -> bool:
-        if immutable(key) and key in self._bytes:
+        if not self._authoritative and immutable(key) and key in self._bytes:
             return True
         return self.inner._exists(key)
 
@@ -129,7 +135,7 @@ class CachedReadStore(Store):
         if held is not None and time.time() - held[0] < LIST_TTL:
             return held[1]
         keys = self.inner._list(prefix)
-        if (not keys and held is not None and held[1]
+        if (not self._authoritative and not keys and held is not None and held[1]
                 and not deletable(prefix)):
             # a populated tree does not empty itself (runs and journals are
             # never deleted; measurements/ is the exception and skips this):

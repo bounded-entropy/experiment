@@ -85,7 +85,25 @@ def main(argv: list[str] | None = None) -> None:
     sweep.add_argument("store_root", help="THE run's own store root — the "
                                           "folder it was born in")
     sweep.add_argument("run_id")
+    fleet = sub.add_parser("fleet", help="talk to a standing desk, on any venue")
+    fleet.add_argument("--desk", required=True,
+                       help="the desk's address (modal://app/Desk, http://host:port, ...)")
+    fleet_verbs = fleet.add_subparsers(dest="fleet_verb", required=True)
+    stop = fleet_verbs.add_parser("stop", help="a deliberate stop: drained, "
+                                              "journaled, never revived (ADR 0014)")
+    which = stop.add_mutually_exclusive_group(required=True)
+    which.add_argument("--run", help="one run id")
+    which.add_argument("--subdir", help="every unfinished run filed under this subdir")
+    stop.add_argument("--reason", default="stopped by hand")
+    stop.add_argument("--no-drain", action="store_true",
+                      help="cancel at once instead of checkpointing first")
+    fleet_verbs.add_parser("dispositions", help="what is parked, stopped by hand, or failed")
+    fleet_verbs.add_parser("status", help="the desk's inventory")
     args = parser.parse_args(argv)
+
+    if args.command == "fleet":
+        fleet_verb(args)
+        return
 
     if args.command == "tag":
         annotate(args)
@@ -110,6 +128,28 @@ def main(argv: list[str] | None = None) -> None:
         print(render_runs(roots, grep=args.grep), end="")
         return
     print(VIEWS[args.command](roots), end="")
+
+
+def fleet_verb(args) -> None:
+    """One desk verb over whatever transport its address names — the
+    venue-neutral operator door (ADR 0014, Part C)."""
+    import asyncio
+    import json
+
+    from rlstack.runner.remote import RemoteDesk, transport_for
+
+    desk = RemoteDesk(transport_for(args.desk))
+    if args.fleet_verb == "stop":
+        if args.subdir:
+            reply = asyncio.run(desk.stop_subdir(args.subdir, args.reason,
+                                                 drain=not args.no_drain))
+        else:
+            reply = asyncio.run(desk.stop(args.run, args.reason, drain=not args.no_drain))
+    elif args.fleet_verb == "dispositions":
+        reply = asyncio.run(desk.dispositions())
+    else:
+        reply = asyncio.run(desk.status())
+    print(json.dumps(reply, indent=2, default=str))
 
 
 def fractions(splits: list[str] | None) -> dict[str, float]:

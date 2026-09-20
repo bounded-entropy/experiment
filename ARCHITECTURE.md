@@ -31,7 +31,7 @@ producing a mutable **Rollout**, which the runner **seals** into a frozen
 — pure math over named columns (I9) — turns those into a gradient. The only
 thing crossing back is a compiled **bundle**. Both directions meet at the
 **store**: the run directory is the single source of truth, the **ledger** is
-the commit bit, and daemons synchronize through it and nothing else.
+the commit bit, and runners synchronize through it and nothing else.
 
 ---
 
@@ -73,10 +73,21 @@ so any part of a run can be regenerated in isolation.
 
 **Determinism / resume-equivalence** — on fakes, two runs of one spec produce
 byte-identical run directories, and a killed-and-resumed run equals a straight
-one. The property is what the seed tree, the commit protocol and
-order-independent reductions exist to protect. On real metal the equivalent
-signal is the ledger's `logprob_gap` staying at the kernel floor.
-`tests/test_resume.py`, `rlstack/runner/fakes.py`
+one — under EVERY checkpoint cadence, at every crash point of the two-step
+protocol (ADR 0014). The property is what the seed tree, the commit protocol,
+the rewind and order-independent reductions exist to protect. On real metal
+the equivalent signal is the ledger's `logprob_gap` staying at the kernel
+floor.
+`tests/test_resume.py`, `tests/test_checkpointing.py`, `rlstack/runner/fakes.py`
+
+**Checkpointing** — a PLACEMENT-TIME declaration (ADR 0014): `every`, the
+cadence in updates at which the run is durable, and `delivery`, how its policy
+reaches its pools (`wire`, the default — `store`, the file-system-only path,
+bound to `every=1`). Rides the frame beside `subdir` and `resume`, required at
+every submission door and defaulted nowhere: what a crash may cost is a
+deliberate decision. Never hashed (I5) — the same spec under any cadence is the
+same run, and a resume may change its cadence.
+`rlstack/runner/checkpointing.py`
 
 **Schedule** — what is left of the wave-shape knobs once the plan states the
 shape (#59): `microbatch_tokens` (the one engineering knob) and
@@ -260,6 +271,20 @@ banks compile to identical ids everywhere. `Bundle.pin(id, versions)` is the
 payload-less address a request carries. The bundle is the ONLY data channel
 from the training world back to the inference world (I2).
 `rlstack/policy/compile.py`
+
+**Delivery / the wire** — how a bundle reaches the pools that serve the policy
+(ADR 0014, Part B). THERE NEED NOT BE ONE: `serving_pools(spec)` is `main`
+when the topology declares it on the policy base, and empty is a complete run —
+a learner alone opens no transport to any engine. Where one exists, `wire`
+(the default) has the Trainer push each committed bundle to it before the
+ledger line, over whatever transport the placement resolved for that pool
+(`LocalTransport`, `PipeTransport`, `ModalClsTransport`, `HttpTransport`);
+consumers ask the engine (`knows_bundle`), fault a checkpointed version in
+from the store on a miss, and raise **`BundleUnavailable`** on a miss no blob
+backs — an infrastructure death the desk parks and resumes from the
+checkpoint. `store` has the Trainer touch no engine and every consumer fault
+in from the blobs, which is why it is bound to `every=1`.
+`rlstack/spec/validate.py` (`serving_pools`), `rlstack/runner/roles/trainer.py` (`deliver`), `rlstack/runner/restore.py`
 
 **SiteWrapper / the chain** — the shared half of every module-replacing
 replay site: one wrapper per (family, path), and NESTING when different
@@ -468,7 +493,7 @@ identifies the store root; a SUBDIR locates the run inside it.
 
 **Desk** — placement as a service and the fleet journal's one writer (the
 Trainer/ledger pattern on the fleet plane). THERE IS ONE (ADR 0007, Q2):
-`deploy/desk.py` is the only file that stands a desk container up, every
+for Modal, `deploy/desk.py` stands the desk container up; every
 venue's metal registers with it and every campaign submits to it, and it
 rebuilds from ONE journal — which is what makes two campaigns serialize
 through one placement ladder instead of double-reading one residual (#68).
@@ -514,6 +539,12 @@ unguarded, because its evidence — nothing busy for the metal's whole limit —
 is stronger than the guard's.
 `rlstack/runner/desk.py` (`Desk`, `Listing`), `rlstack/runner/remote.py` (`RemoteDesk`), `deploy/desk.py`
 
+**Venue runtime** — both providers assemble the same `DeskRuntime` and `MetalRuntime` in `runner/venues/runtime.py` (ADR 0017). These own service routing, registration, heartbeats, host supervision, idle/recovery clocks and shutdown around the existing Desk and MetalService. `runner/venues/provider.py` defines `AllocationProvider`: boot named capacity and confirm termination of an exact allocation. A stop request being accepted does not establish termination. `runner/venues/client.py` holds shared spec submission, readiness polling, guarded release and observer reads, using an explicit RemoteDesk/observer endpoint. `Desk.automatic_recovery` is the venue's switch: off, the desk places and releases idle metal but never reaps, reconciles or retries a parked run.
+
+**Provider adapters** — matching `provider.py`, `desk.py` and `worker.py` modules live in each of `runner/venues/modal/` and `runner/venues/strangeloop/`. Provider modules handle platform allocation APIs and addressing; desk and worker modules adapt process startup and RPC serving to the shared runtimes. Modal supplies decorators and class RPC; Strange Loop supplies the local gateway and SSH routes to an HTTP GPU service. Stores retain their separate publication contracts. `deploy/desk.py`, `deploy/modal_venue.py` and `deploy/strangeloop.py` bind resources and expose operator commands; `deploy/ui.py` deploys the existing read-only observer. Shared runtimes cannot import a provider, and one provider cannot import another; the architecture tests enforce this.
+
+**Metric exporter** — `runner/exporters/wandb.py` is a separate companion process reading committed ledger entries into offline W&B bundles. It does not author scientific data or participate in placement. Store implementations remain in `data/stores/`, and network transports remain in `runner/transports/`.
+
 **Campaign layer** — where SPECS meet the fleet, the only such place:
 `demands_of(spec, anchor)` (which demand the frame lands on — and therefore
 where the run's Trainer sits: the learner's by default, `main` with no learner
@@ -530,7 +561,7 @@ the desk's own Transport contract. A campaign's whole surface is
 Phase 0, and the desk still interprets nothing. A CAMPAIGN DOOR SUBMITS AND
 FOLLOWS; IT NEVER RELEASES (Q6): idle metal is the desk's to collect, and
 under one desk a door's teardown would take whatever else had joined.
-`rlstack/runner/campaign.py`, `deploy/modal_venue.py` (`submit_and_follow`)
+`rlstack/runner/campaign.py`, `rlstack/runner/venues/client.py` (`submit_and_follow`)
 
 **MetalService / the metal plane** — the metal-side end of the standing
 carve: the container that owns a device wears it by default. One MEASURED
@@ -600,6 +631,14 @@ anywhere may join a standing learner — its verbs (`install`, `uninstall`,
 admitted at the arbiter of the host that wears it, exactly as an engine's are.
 Its `install` takes a **Parameterization** and its package imports no spec
 class; `uninstall` ends a tenancy, and the host that ran the run issues it.
+Since ADR 0019 it is the engine's backprop twin verb for verb: `forward` is
+the no-grad pass (one mean NLL per document over its loss_mask tokens, rows
+routed by their own facts), `optim_step(lr_scales=...)` multiplies named param
+groups' BASE learning rates for one step, and `load_set` / `emit_set` /
+`drop_set` move ONE set of a bank entry by route as a **named payload** —
+exactly `lora_torch.emit`'s bytes for one LoRA set — with `lib:<name>` routes
+held frozen outside every optimizer group. They cross both doors as `load` and
+`emit` do.
 `rlstack/runner/interfaces.py`, `rlstack/runner/learners/`
 
 **Parameterization** — what `install` builds, projected off the spec BY THE
@@ -700,11 +739,13 @@ because "has this instance spoken" is the stronger question and the cheaper
 one. Three levels, three things that can die: the metal heartbeats for its
 container, the host's lease is renewed by the same duty (a host is an object
 inside that one control process), and each RESIDENT answers its host's
-watchdog — one that answers nothing past its phase's bound is ended and
-journaled `stalled`.
+watchdog — one that answers nothing past its phase's bound, and nothing on
+one more recheck with a short deadline (ADR 0014, Part D), is ended and THEN
+journaled `stalled`; one that answers the recheck is journaled
+`stall-recovered` and kept.
 `rlstack/runner/desk.py` (`Lease`, `mint_epoch`, `Desk.heartbeat`,
 `Desk.leased`), `rlstack/runner/remote.py` (`check_epoch`, `with_epoch`),
-`rlstack/runner/host.py` (`watch_residents`), `deploy/modal_venue.py`
+`rlstack/runner/host.py` (`watch_residents`), `rlstack/runner/venues/runtime.py`
 
 **First contact** — what a resident ACTUALLY took, measured once it has served
 something and journaled beside what it was DECLARED at (ADR 0008, F5). The
@@ -734,24 +775,51 @@ against two stores forks history silently — which the observer flags rather
 than prevents.
 `rlstack/runner/host.py` (`submit`), `rlstack/observe/views.py`
 
-**Ledger** — `ledger.jsonl`, append-only and strictly increasing: the commit
-record and the commit bus. The Trainer is its only writer. Everything written
-before an update's ledger line is UNSEALED and is discarded on attach.
+**Ledger** — `ledger.jsonl`, append-only and strictly increasing: the COMMIT
+record — one line per update, the version map and the bundle id, what the
+Generator pins from and what the observer reads. The Trainer is its only
+writer. Lines above the CHECKPOINT tail are provisional: attach rewinds them.
 `rlstack/data/stores/base.py`
 
-**Commit** — the ledger append that seals one update. It is the durability bit
-the whole blackboard is ordered around; kill -9 at any other point loses only
-work that regenerates.
-`rlstack/runner/daemons/trainer.py`
+**Commit** — the ledger append that records one update. Cheap, every update;
+under `wire` delivery it lands AFTER the bundle is on the pools, so a reader
+of the commit never pins a version its pool lacks.
+`rlstack/runner/roles/trainer.py`
+
+**Checkpoint / the checkpoint record** — the DURABLE point (ADR 0014): every
+trainable entry's adapter and optimizer blobs at the committed version, then
+one line in `checkpoints.jsonl` — `{update, versions}` — that seals them.
+Taken at the declared cadence, always at the extent's last update, always on a
+drained stop, and at update 0 for the initial blobs. The Trainer's alone. What
+resume restores and what attach rewinds to; a directory with no record is a
+pre-0014 run where every ledger line was a checkpoint. Kill -9 at any other
+point loses only work that regenerates — at most `every` updates of it.
+`rlstack/data/stores/base.py`, `rlstack/runner/roles/trainer.py`
+
+**Rewind** — what attach does (ADR 0014): with the checkpoint tail at update
+`c` and versions `V_c`, ledger lines above `c` are cut (as a torn line is),
+waves and postdata above `c` and blob versions above `V_c` are deleted, and
+rollouts pinned to a version above `V_c` are deleted newest-first — a rollout
+sampled at a version that no longer exists would pin a bundle no store can
+rebuild. The Trainer redoes the interval and writes the same bytes again.
+`rlstack/data/stores/base.py` (`_discard_unsealed`)
+
+**Drain** — a deliberate stop's first act (ADR 0014, Q6): the run's
+`StopRequest` is raised, the Trainer reads it at its next wait or update
+boundary, checkpoints the update it last committed, and every runner ends. A
+stop loses nothing. Past its deadline, or asked without drain, the adoption is
+cancelled instead — at most one interval lost, safe by resume-equivalence.
+`rlstack/runner/roles/base.py` (`StopRequest`), `rlstack/runner/roles/trainer.py` (`drain`), `rlstack/runner/loop.py` (`end_on_stop`)
 
 **Retention** — what a run's store may forget, as a policy class: a pure
-function of the ledger naming expendable blob versions — a versioned blob
-under `adapters/` or `optim/` and nothing else, so the append-only guards are
-out of reach by construction. The default, `KeepRestorable`, keeps every
-adapter (restore pins historical versions forever) and only the ledger tail's
-optimizer moments (`restore_tenant` reads nothing else). Retention changes
-what is RECOVERABLE, never what was COMPUTED: nothing about it is hashed,
-journaled, or written to a run directory.
+function of the CHECKPOINT record naming expendable blob versions — a
+versioned blob under `adapters/` or `optim/` and nothing else, so the
+append-only guards are out of reach by construction. The default,
+`KeepRestorable`, keeps every checkpointed adapter (restore pins historical
+versions forever) and only the checkpoint tail's optimizer moments
+(`restore_tenant` reads nothing else). Retention changes what is RECOVERABLE,
+never what was COMPUTED: nothing about it is hashed, journaled, or written to
+a run directory.
 `rlstack/data/stores/retention.py`
 
 **CAS** — `cas/<sha256>/blob`: content-addressed objects, how task files and
@@ -760,9 +828,11 @@ static trajectory datasets are named (`cas://<sha>/...`).
 
 **Journal** — `hosts/<name>/log.jsonl` and `fleet/log.jsonl`: append-only
 observability. Placement, boots, tenancies, gpu samples, traffic windows,
-update timings and carves land here, deliberately outside run manifests so
-placement stays out of identity. Correctness never reads a journal; torn tails
-are tolerated.
+update timings, carves and dispositions land here, deliberately outside run
+manifests so placement stays out of identity. Correctness never reads a
+journal; torn tails are tolerated — and a host journal line stages, riding the
+next commit or a flush timer, never a commit of its own (ADR 0014, Q11); the
+fleet journal, the desk's truth, is still written per event.
 `rlstack/data/stores/base.py`, `rlstack/runner/host.py`, `rlstack/runner/desk.py`
 
 **Emission plane** — the measurement side of observability: a `TrafficMeter`
@@ -787,37 +857,43 @@ own `dictionary.json`.
 
 ### The runtime
 
-**Blackboard** — Phase 2's shape: daemons synchronized ONLY through the store.
+**Blackboard** — Phase 2's shape: runners synchronized ONLY through the store.
 Nobody calls anybody; the ledger is the commit bus and `waves/` the data bus
 (a run with no Trainer has neither, and its Generator writes `rollouts/`
 alone). The *logical* half is awaitable predicates over the store; the
 *physical* half is the arbiter.
 `rlstack/runner/loop.py`, `rlstack/runner/signals.py`
 
-**DaemonNeed / needs_of** — a run IS a set of daemon needs, each naming its
-daemon, the plan it consumes, the pools whose engines it admits and whether it
-admits the learner. `needs_of(spec)` is the one place a spec becomes daemons
-and the experiment is its special case; `plan_daemons` executes the needs.
+**RunnerNeed / needs_of** — a run IS a set of runner needs, each naming its
+runner, the plan it consumes, the pools whose engines it admits and whether it
+admits the learner. `needs_of(spec)` is the one place a spec becomes runners
+and the experiment is its special case; `plan_runners` executes the needs.
 Phase 1 asks the needs what this run requires — a learner? — before Phase 2
 runs any of it (ADR 0006 Part B).
 `rlstack/runner/loop.py`
 
-**Daemon** — one GPU responsibility, four beats: await its condition, admit the
+**Runner** — one GPU responsibility, four beats: await its condition, admit the
 residents its work occupies, do the work, write the store and notify. The
 **Generator** samples waves at the newest committed bundle within the lag
 buffer — or unpaced, when nothing consumes what it makes; the **Scorer** runs
 the pooled half of the post pipeline beside the pools it addresses and writes
 it as a postdata part; the **Trainer** runs the inline half + gradient +
-commit and is the ledger's only writer. Each exists exactly where its NEED
+commit and is the ledger's only writer. The Trainer uses only the learner and
+storage: it writes blobs, then commits, without installing any engine bundle.
+Generator and Scorer restore their selected versions from storage and install
+them on their own pools before inference (ADR 0011). Initial version zero is
+persisted at setup and loaded on demand in the same way. A replay run without
+pooled scoring therefore needs only a learner. Each exists exactly where its NEED
 does (`needs_of`), so a run with no algo is a Generator and nothing else, and
 each condition method is a named, overridable seam. (The Evaluator retired in
 #70: measurement left the run.)
-`rlstack/runner/daemons/`
+`rlstack/runner/roles/`
 
-**Resident / daemon** — the two kinds of runtime thing, named: a RESIDENT is
+**Resident / runner** — the two kinds of runtime thing, named: a RESIDENT is
 the heavy object living on a partition (an Engine, a Learner — nouns of
-capability), a DAEMON is the thin loop that watches the store and pokes a
-resident (Generator, Trainer, Scorer — agent nouns). Daemons synchronize
+capability), a RUNNER is the thin loop that watches the store and pokes a
+resident (Generator, Trainer, Scorer — the three ROLES of one run, clients of
+the hosts they address; the hosts are the standing services). Runners synchronize
 through the store ONLY, so colocation with their resident is a transport
 choice, not architecture — and since ADR 0006 Part A that is true of the
 Trainer too: it sits where the run is ANCHORED, which is the learner's host by
@@ -841,7 +917,7 @@ Swapping what a run is measured on, mid-run, is a non-event.
 
 **The split rule** — a postprocessor declaring `pools` is SCORER-RUN, a
 pool-less one is TRAINER-INLINE: sending traffic is what makes a processor
-slow, so the same declaration that names the traffic names the daemon. The two
+slow, so the same declaration that names the traffic names the runner. The two
 halves meet once, at the part, so the gate refuses a pooled processor consuming
 an inline one's column. A pipeline with no pooled half plans no Scorer.
 `rlstack/spec/flow.py` (`split_pipeline`)
@@ -909,6 +985,12 @@ and nothing else.
   `apply` writes (the prompt form, or a generate keyword), so two adapter types
   claiming one lever are refused at `add_bundle` while the bundle is still just
   an id.
+- **forget_library** — the engine's **Library** (ADR 0019: named payloads,
+  `name -> bytes` of ONE LoRA set, held LRU up to the build's `max_library`,
+  write-once per name, a name a request reads pinned until its last token)
+  evicted a name: release what this adapter type materialized from it. A
+  lowering reads the Library through its `ServingBuild` at `apply`, and names
+  what it read in `Levers.library` so the engine can pin it.
 
 ### The adapter type (`rlstack/policy/adapters/base.py`)
 
@@ -922,7 +1004,10 @@ The declaration half is class attributes (`serving`, `engine_plugin`,
   mean) for the update's ledger line.
 - **param_groups** — named optimizer groups for one bank entry; `""` is the
   whole entry (the default), and `OptimSpec.overrides` addresses them by
-  `entry` or `entry.group`, the dotted form winning.
+  `entry` or `entry.group`, the dotted form winning. A group named
+  `family:member` (dream_bank's one group per route, `memory:03`) is also
+  reached by `entry.family`, between the two. `optim_step`'s `lr_scales`
+  addresses the same names (`interfaces.lr_scale_of`).
 - **install_replay** — wire the replay lowering into the trainer forward.
   Additive: every installed tenant stays wired (I8).
 - **uninstall_replay** — its exact inverse. Install is additive, so without the
@@ -967,14 +1052,24 @@ submit, status and reap behind it for an hour.
   ALREADY OWNS is not new: a released one is re-acquired by knock, no human
   (ADR 0003, Q4).
 - **idle** — a metal nothing has run on: no listing on it reports a running
-  tenancy, none has work IN FLIGHT at its arbiter, and no listing's `admitted`
+  tenancy, none has work IN FLIGHT at its arbiter, no listing's `admitted`
   counter moved since the previous observation (ADR 0003, Q1 — the counter is
-  what sees a PURE CLIENT, whose traffic holds no tenancy at all) — or the
-  metal holds no listings. A listing observed for the FIRST time is busy:
+  what sees a PURE CLIENT, whose traffic holds no tenancy at all), and NO
+  RUNNING PLACEMENT ROUTES THROUGH any listing on it (ADR 0014, Q9 — the
+  fourth yes: a training run anchored elsewhere, between waves, whose next
+  sample lands here; the tick's own rosters say which runs still run) — or
+  the metal holds no listings. A listing observed for the FIRST time is busy:
   idleness is read from evidence, never from the absence of a reading.
-  `observe_idle(now)` is one tick — the first idle observation stamps
-  `idle_since` and a busy one clears it, so the clock measures CONTINUOUS
-  idleness — and it lives in the desk's MEMORY, so a restart costs one tick.
+  `observe_idle(now)` is one tick — every carved listing probed once,
+  concurrently; the first idle observation stamps `idle_since` and a busy one
+  clears it, so the clock measures CONTINUOUS idleness — and it lives in the
+  desk's MEMORY, so a restart costs one tick.
+- **host clock** — the same rule one level down (ADR 0014, Q9): a carved
+  listing not busy for `Desk(host_idle_s=)` (the metal's limit, unsaid) is
+  DECARVED at its metal — residents down, GB back to residual — and delisted
+  `idle`, journaled, before the metal's own clock releases the container. A
+  shared A100 returns capacity as its carves go quiet. A hand-listed host is
+  never decarved.
 - **release** — ACQUIRE'S INVERSE, and the one rung the desk climbs DOWN.
   Metal idle past its limit (`Desk(idle_s=)`, default 1800 s, overridden per
   metal at registration — None there PINS it, never released) has every
@@ -1036,6 +1131,17 @@ submit, status and reap behind it for an hour.
   AND THE TICK REAPS LAPSED LEASES FIRST, before it probes anything: "has this
   instance spoken within its lease" is the stronger question and the cheaper
   one, and a released container that still answers a probe fails it.
+- **disposition** — THE STANDING WORD ON A RUN THAT IS NOT RUNNING (ADR 0014,
+  Part C), three rows on the fleet journal read in one pass: `parked` (a wire
+  death, a reaped host, nowhere to go — the QUEUE, retried from the
+  checkpoint on every reap and registration), `stopped` (`Desk.stop` /
+  `stop_subdir` — deliberate, drained, NEVER revived by a reap, a
+  registration or a knock), `failed` (the experiment's own death, journaled
+  once off the roster on the reaper's tick with the host's error text, never
+  retried). `stopped` and `failed` outrank `parked`; `strand` and `park`
+  honour them; a later DELIVERED placement supersedes all three, because
+  resubmitting is how a run moves again. The observer ranks them the same
+  way over a host journal's last word.
 - **submit** — journal-first and idempotent by its key (ADR 0008, F4, because
   every wire is at-least-once): `submit-intent {key, folder, t}` is written
   BEFORE the placement, where the key is a digest of the opaque frame (a run
@@ -1067,10 +1173,15 @@ submit, status and reap behind it for an hour.
   host's shared arbiter against the experiment's own store.
 - **attach / detach** — a resident's registration with the arbiter, and a
   tenancy's entry in the roster and the journal.
-- **stop** — adopt's per-run inverse: the adoption task cancelled and
-  AWAITED (the daemons run under one TaskGroup, so cancellation is
-  structural), the detach journaled, the run_id free to adopt again — here
-  or elsewhere. Safe mid-update by resume-equivalence.
+- **stop** — adopt's per-run inverse, DRAINED by default (ADR 0014): the
+  run's StopRequest raised, the Trainer's drain checkpoint awaited, every
+  runner ended; past the deadline or with `drain=False` the adoption task is
+  cancelled and AWAITED instead (the runners run under one TaskGroup, so
+  cancellation is structural). The roster reads `stopped`, the detach is
+  journaled, the run_id is free to adopt again — here or elsewhere. A
+  tenancy that dies on its own reads `failed`, with the error and whether
+  the death was the WIRE's (`Unreachable`, `WrongEpoch`,
+  `BundleUnavailable`) or the experiment's.
 - **admit** — the one verb work wraps itself in; entering it guarantees the
   resident is resident.
 - **sleep / wake** — a build fact of `VllmEngine` (and the learner's offload),
@@ -1098,20 +1209,34 @@ submit, status and reap behind it for an hour.
   deterministic and seedless. Judges sample; teachers score.
 - **collect** — schedule one wave of episodes deterministically given `(master,
   update)`, assigning group keys.
-- **add_bundle / reachability / tokenize** — the admission-free verbs: additive
-  registration and build facts, which by the tenancy invariant never disturb
-  traffic (`ask` on the wire; `sample`/`score` ride `call`).
+- **Learner.tokenize(tenant, text)** — injected prompt text tokenized on the
+  learner's CPU with its base tokenizer, without special tokens. Generated
+  tokens stay verbatim. The Trainer caches results per tenant (bounded at
+  4,096 texts). The wire verb is `learner_tokenize`, through the existing
+  learner admission path; FSDP tokenizes on the lead rank without a collective.
+- **add_bundle / add_library / reachability / tokenize** — the admission-free
+  verbs: additive registration and build facts, which by the tenancy invariant
+  never disturb traffic (`ask` on the wire; `sample`/`score` ride `call`).
+  `add_library(name, payload)` hands an engine one named payload as BYTES (a
+  role read the store; an engine never does): a route `lib:<name>` is served
+  as that adapter, `lib:<name>+dreamer` as ONE adapter whose weights are the
+  two parts concatenated, and a route naming a library adapter the engine does
+  not hold is refused at the request.
 
 ### The store (`rlstack/data/stores/base.py`)
 
-- **cas_put / cas_get** — content-addressed objects by sha256.
+- **cas_put / cas_get** — content-addressed objects by sha256. CAS and named-adapter payloads use `_write_hashed` / `_read_hashed` (ADR 0020): every returned payload matches its hash. Strange Loop can serve a shared local cache or already-visible mounted bytes, with HTTP fallback and no refresh; mutable keys keep their authoritative protocol.
 - **open_run** — attach-or-create; attach discards everything the ledger never
   committed.
 - **write_wave / read_wave**, **write_postdata / read_postdata**,
   **write_postdata_part / read_postdata_part** (one producer's columns; the
   read answers None while absent, because it is an await predicate),
   **write_blob / read_blob**, **write_eval** — the run's data sections.
-- **append_ledger** — THE commit point, and the Trainer's alone.
+- **append_ledger** — THE commit, one line per update, the Trainer's alone.
+- **append_checkpoint / checkpoint_tail / read_checkpoints** — THE durable
+  point (ADR 0014): the line written after every trainable entry's blobs at
+  a version are on the store; the tail is what resume restores; a run with
+  no record is read as one where every ledger line was a checkpoint.
 - **sweep** — deletion's second meaning, the same rule read twice: attach
   sweeps what the ledger NEVER COMMITTED; `RunHandle.sweep(policy)` frees what
   the ledger has MOVED PAST. The Trainer sweeps at every commit and on start;
@@ -1138,13 +1263,14 @@ result.
 
 **The store plane** goes over the volume: waves, postdata, blobs, the ledger,
 the journals. It carries everything durable, and its one signal is the
-*durability commit bit* — the ledger append. Daemons wait on predicates over
+*durability commit bit* — the ledger append. Runners wait on predicates over
 this plane and never on each other. Work not sealed by a ledger line does not
 exist and regenerates.
 
 The consequence worth stating: an availability signal must never be mistaken
 for a commit. A bundle registered on an engine is availability; the ledger line
-naming it is the commit. A host journal entry is observability; the run's
+naming it is the commit. Training never waits for engine registration; the
+inference runner loads the committed version before using it. A host journal entry is observability; the run's
 manifest and ledger are truth.
 
 **And the control plane is neither** — it is the third thing, and since ADR
@@ -1162,7 +1288,7 @@ for an hour on 2026-09-04 the platform scheduled none — and on a platform
 where a pod is created by an explicit call there is no scheduler to lean on at
 all. Waiting for capacity is the visible, journaled `parked` state (with what
 the run WANTS and since when), never a hang inside a door.
-`deploy/modal_venue.py` (`canonical_row`, `progress`, `ledgers`),
+`rlstack/runner/venues/client.py` (`canonical_row`, `progress`, `ledgers`),
 `rlstack/runner/desk.py` (`Desk.put_plan`, `MetalService.measure_the_run`),
 `rlstack/observe/views.py` (`fleet_notes`)
 

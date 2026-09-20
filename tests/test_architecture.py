@@ -113,6 +113,21 @@ class TestMembrane(unittest.TestCase):
             imports = rlstack_imports(PACKAGE / module)
             self.assertFalse(imports, f"{module} imports {sorted(imports)}")
 
+    def test_venue_runtime_does_not_depend_on_a_provider(self) -> None:
+        """ADR 0017: shared lifecycle and clients cannot reach into an adapter,
+        and one provider folder never imports another."""
+        venues = PACKAGE / "runner/venues"
+        providers = {path.name for path in venues.iterdir() if path.is_dir()
+                     and (path / "__init__.py").exists()}
+        prefixes = tuple(f"rlstack.runner.venues.{name}" for name in providers)
+        for path in venues.glob("*.py"):
+            bad = {name for name in rlstack_imports(path) if name.startswith(prefixes)}
+            self.assertFalse(bad, f"{path.name} depends on a provider: {sorted(bad)}")
+        for provider in providers:
+            for other in providers - {provider}:
+                self.assert_never_imports(f"runner/venues/{provider}",
+                                          f"rlstack.runner.venues.{other}")
+
     def test_the_learners_import_no_spec_class(self) -> None:
         """ADR 0002's acid test, in #69's shape: a learner owns tensors, not
         experiments. What reaches it is a Parameterization built by the runner

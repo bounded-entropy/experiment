@@ -23,11 +23,12 @@ import dataclasses
 import json
 from collections.abc import Mapping, Sequence
 
+from rlstack.runner.checkpointing import Checkpointing
 from rlstack.runner.desk import Demand, Desk, DeskError, demand_rows
 from rlstack.runner.host import LEARNER_ROUTE
 from rlstack.spec.specs import ExperimentSpec, PoolMember
 
-MAIN_POOL = "main"
+from rlstack.spec.validate import MAIN_POOL  # noqa: E402 — one definition, the spec's
 """The policy pool every spec declares (the loop refuses an engine map
 without it) — and therefore the anchor when no learner is declared."""
 
@@ -48,17 +49,20 @@ def demands_of(spec: ExperimentSpec,
     names (ADR 0007, Q4a) — the projection that lets the join rule check a
     metal's engine recipe without the desk ever learning what an adapter type
     IS. Reading the spec is this module's whole job; comparing the strings is
-    the desk's."""
+    the desk's. A pool declared on ANOTHER base (a judge pool) can hold none
+    of this bank's deltas, so its demand names nothing: it is a FROZEN pool,
+    which is what lets a solo submission share one standing judge (2026-09-17)."""
     serves = adapter_types_of(spec)
     out: list[Demand] = []
     for hi, host in enumerate(spec.topology.hosts):
         for member in host.members:
             if isinstance(member, PoolMember):
+                own_base = member.base is None or member.base == spec.policy.base
                 out.append(Demand(
                     pool=member.name, capability="inference",
                     base=member.base or spec.policy.base, shape=member.tp,
                     vram_gb=member.vram_gb, group=hi,
-                    adapter_types=serves))
+                    adapter_types=serves if own_base else ()))
             else:
                 out.append(Demand(
                     pool=None, capability="training", base=spec.policy.base,
@@ -111,15 +115,19 @@ def anchor_demand(demands: Sequence[Demand], asked: str | None) -> Demand:
 
 
 def frame_for(spec: ExperimentSpec, subdir: str | None = None,
-              resume: bool = False) -> dict:
+              resume: bool = False, *,
+              checkpointing: Checkpointing) -> dict:
     """The opaque frame a submission delivers: the canonical row, the
     client's code claim (the hashes the anchor host diffs against its own
-    registry — the skew check's evidence), and the filing hint."""
+    registry — the skew check's evidence), the filing hint, and the
+    submission's CHECKPOINTING — its deliberate cadence and delivery (ADR
+    0014), required here because there is no default anywhere."""
     from rlstack.registry import code_hashes
     from rlstack.spec.canonical import canonical_json
 
     frame = {"spec": json.loads(canonical_json(spec)),
-             "code": code_hashes(spec), "subdir": subdir}
+             "code": code_hashes(spec), "subdir": subdir,
+             "checkpointing": checkpointing.row()}
     if resume:
         frame["resume"] = True
     return frame
@@ -136,17 +144,23 @@ class Campaigns:
     async def submit(self, spec: ExperimentSpec,
                      subdir: str | None = None,
                      anchor: str | None = None, solo: bool = False,
-                     resume: bool = False) -> dict:
+                     resume: bool = False, *,
+                     checkpointing: Checkpointing) -> dict:
         """A spec through the blind door: shaped here, delivered there.
-        `anchor` names the member the frame lands on (demands_of's rule)."""
-        return await self.desk.submit(demand_rows(demands_of(spec, anchor)),
-                                      frame_for(spec, subdir, resume), solo=solo)
+        `anchor` names the member the frame lands on (demands_of's rule);
+        `checkpointing` is the submission's own decision (ADR 0014)."""
+        return await self.desk.submit(
+            demand_rows(demands_of(spec, anchor)),
+            frame_for(spec, subdir, resume, checkpointing=checkpointing),
+            solo=solo)
 
     async def serve(self, verb: str, payload: dict) -> dict:
         if verb == "migrate":
+            row = payload.get("checkpointing")
             return await self.migrate(
                 payload["run_ids"], optim=payload.get("optim", "load"),
-                remaining_only=bool(payload.get("remaining_only", False)))
+                remaining_only=bool(payload.get("remaining_only", False)),
+                checkpointing=Checkpointing.from_row(row) if row else None)
         return await self.desk.serve(verb, payload)
 
     def answer(self, verb: str, payload: dict) -> dict:
@@ -156,7 +170,8 @@ class Campaigns:
 
     async def migrate(self, run_ids: Sequence[str], *,
                       optim: str = "load",
-                      remaining_only: bool = False) -> dict:
+                      remaining_only: bool = False,
+                      checkpointing: Checkpointing | None = None) -> dict:
         """Warm-fork each named run into a NEW experiment continuing from its
         ledger tail — the code-refresh move: containers were replaced, the
         old runs' code hashes no longer exist anywhere, so each run's spec is
@@ -202,7 +217,14 @@ class Campaigns:
                 if remaining_only:
                     child = dataclasses.replace(
                         child, plans=self.sliced_plans(rid, spec, committed))
-                reply = await self.submit(child)
+                # the child keeps the parent's declared cadence and delivery
+                # (ADR 0014) unless the caller says otherwise: read off the
+                # parent's archived frame, never defaulted — a parent placed
+                # before 0014 needs the caller to say it
+                archived = self.desk.placements().get(rid, {}).get("frame", {})
+                cadence = (checkpointing if checkpointing is not None
+                           else Checkpointing.from_row(archived.get("checkpointing")))
+                reply = await self.submit(child, checkpointing=cadence)
                 if reply.get("accepted"):
                     self.store.append_fleet_event({
                         "event": "migrate", "t": time.time(), "parent": rid,

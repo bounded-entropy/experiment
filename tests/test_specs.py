@@ -253,9 +253,10 @@ class TestDefaults(unittest.TestCase):
     def test_measurement_left_the_spec(self) -> None:
         """#70: a run's identity is its training loop. Plans carries no eval
         and the spec no EvalSpec — measurement is an observation OUTSIDE the
-        run (runner/measure.py), configured by its own manifest."""
+        run (runner/measure.py), configured by its own manifest. (`fit` is
+        ADR 0019's plan kind: a fit run's jobs, in identity only when set.)"""
         self.assertEqual([f.name for f in fields(Plans)],
-                         ["train", "rollout"])
+                         ["train", "rollout", "fit"])
         self.assertNotIn("eval",
                          [f.name for f in fields(ExperimentSpec)])
 

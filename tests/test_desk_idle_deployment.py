@@ -11,8 +11,8 @@ from rlstack.runner.desk import Desk, DeskError, Metal
 from venue_stub import modal_stubbed
 
 
-class FiniteIdleDeployment(unittest.TestCase):
-    def test_replayed_pins_become_finite_without_registration_or_recovery(self):
+class FiniteIdleDeployment(unittest.IsolatedAsyncioTestCase):
+    async def test_replayed_pins_become_finite_without_registration_or_recovery(self):
         with tempfile.TemporaryDirectory() as directory:
             store = LocalStore(directory)
             previous = Desk(store, host_for=lambda address: None)
@@ -29,7 +29,8 @@ class FiniteIdleDeployment(unittest.TestCase):
                     spec.loader.exec_module(module)
                 instance = module.Desk()
                 with patch.object(module, 'a_store', return_value=store):
-                    instance.bring_up()
+                    await instance.bring_up()
+                    await instance.bring_down()
             self.assertEqual(instance.desk.idle_limit('pinned'), 300.0)
             self.assertEqual(instance.desk.idle_limit('five-minutes'), 300.0)
             self.assertEqual(instance.desk.idle_limit('short'), 90.0)

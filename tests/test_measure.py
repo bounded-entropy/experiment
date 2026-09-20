@@ -20,6 +20,7 @@ import unittest
 from common import arith_spec, arith_store
 from test_resume import InterleavingEngine
 
+from rlstack.runner.checkpointing import EVERY_UPDATE
 from rlstack import (
     FakeEngine, FakeLearner, Measurement, fake_qwen_schema, load_tasks,
     measure_run, run_experiment,
@@ -41,7 +42,7 @@ class MeasureFixture(unittest.TestCase):
         self.store, self.train, self.heldout = arith_store(tmp.name)
         self.engine = FakeEngine()
         self.report = run_experiment(arith_spec(self.train), SCHEMA,
-                                     self.store, self.engine, FakeLearner())
+                                     self.store, self.engine, FakeLearner(), checkpointing=EVERY_UPDATE)
         self.tasks = {t.id: t for t in load_tasks(self.store, self.heldout)}
         self.measurement = Measurement(
             name="heldout", env="math_single_turn",
@@ -95,7 +96,7 @@ class MeasureRunTest(MeasureFixture):
         store, train, heldout = arith_store(other.name)
         scrambler = InterleavingEngine()
         report = run_experiment(arith_spec(train), SCHEMA, store, scrambler,
-                                FakeLearner())
+                                FakeLearner(), checkpointing=EVERY_UPDATE)
         tasks = {t.id: t for t in load_tasks(store, heldout)}
         go(measure_run(store, report.run_id, self.measurement, scrambler,
                        tasks, max_inflight=64))

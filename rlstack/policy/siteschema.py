@@ -60,8 +60,17 @@ def is_module_name(name: str) -> bool:
     return "." in name and " -> " not in name and "[" not in name
 
 
+ALTERNATION = "|"
+
+
 def segment_matches(pattern_segment: str, name_segment: str) -> bool:
-    """One dot-segment: numeric range ("0-15") or fnmatch wildcards."""
+    """One dot-segment: an alternation of LITERAL names ("q_proj|v_proj", ADR
+    0019 — the name segment must equal one of them, no wildcard and no range
+    inside an alternative), a numeric range ("0-15"), or fnmatch wildcards.
+    No module name holds a "|", so no pattern written before the alternation
+    existed changes what it matches."""
+    if ALTERNATION in pattern_segment:
+        return name_segment in pattern_segment.split(ALTERNATION)
     numeric = _RANGE.fullmatch(pattern_segment)
     if numeric is not None:
         if not name_segment.isdigit():

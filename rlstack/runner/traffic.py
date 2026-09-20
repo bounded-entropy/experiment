@@ -34,18 +34,22 @@ class EnginePoolClient:
 
     def __init__(self, routes: Routes, sampling: SamplingSpec, episode_seed: int,
                  pool_name: str = "main", _counter: list[int] | None = None) -> None:
-        if pool_name not in routes:
-            raise KeyError(
-                f"unknown engine pool {pool_name!r}; pools: {sorted(routes)}")
         self._routes = routes
         self._sampling = sampling
         self._episode_seed = episode_seed
         self._pool_name = pool_name
-        self._engine, self._bundle = routes[pool_name]
         self._counter = _counter if _counter is not None else [0]
+
+    def route(self, name: str) -> tuple[Engine, Bundle]:
+        """Resolve only actual traffic; a pool-less processor needs no main."""
+        if name not in self._routes:
+            raise KeyError(
+                f"unknown engine pool {name!r}; pools: {sorted(self._routes)}")
+        return self._routes[name]
 
     def pool(self, name: str) -> "EnginePoolClient":
         """A sibling client for another pool, sharing this episode's seeds."""
+        self.route(name)
         return EnginePoolClient(self._routes, self._sampling, self._episode_seed,
                                   name, self._counter)
 
@@ -55,13 +59,15 @@ class EnginePoolClient:
         """Score given tokens under this pool's pinned bundle. Deterministic:
         consumes NO seed from the episode's sequence (scoring draws nothing),
         so adding a scoring processor never shifts sampling seeds."""
-        return await self._engine.score_tokens(
-            messages, tuple(token_ids), self._bundle.bundle_id,
+        engine, bundle = self.route(self._pool_name)
+        return await engine.score_tokens(
+            messages, tuple(token_ids), bundle.bundle_id,
             tuple(directives))
 
     async def sample(self, messages: Sequence[Message],
                      stop: tuple[str, ...] = (), *,
                      directives: Sequence[Directive] = ()) -> Turn:
+        engine, bundle = self.route(self._pool_name)
         seed = derive(self._episode_seed, "call", self._counter[0])
         self._counter[0] += 1
 
@@ -71,8 +77,8 @@ class EnginePoolClient:
         columns: dict[str, list] = {}
         finish: FinishEvent | None = None
 
-        stream = self._engine.sample_tokens(
-            messages, self._sampling, stop, self._bundle.bundle_id, seed,
+        stream = engine.sample_tokens(
+            messages, self._sampling, stop, bundle.bundle_id, seed,
             tuple(directives))
         async for event in stream:
             if isinstance(event, FinishEvent):
@@ -96,8 +102,8 @@ class EnginePoolClient:
             behavior_logprobs=tuple(logprobs),
             finish=finish.finish,
             stop_hit=finish.stop_hit,
-            bundle_id=self._bundle.bundle_id,
-            policy_version=dict(self._bundle.policy_version),
+            bundle_id=bundle.bundle_id,
+            policy_version=dict(bundle.policy_version),
             seed=seed,
             token_extras={k: tuple(v) for k, v in columns.items()},
             turn_extras=dict(finish.turn_extras),

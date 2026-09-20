@@ -182,6 +182,14 @@ class PackTest(unittest.TestCase):
                          tuple(range(0, 4)) + tuple(range(100, 104)))
         self.assertEqual(batches[1].token_ids, tuple(range(200, 204)))
 
+    def test_the_budget_is_the_padded_footprint(self) -> None:
+        # two short rows fit beside each other, but a long third row would
+        # pad all three to its length: 3 × 6 > 10, so it starts a new batch
+        # even though the real tokens (2 + 2 + 6) would have fitted
+        batches = pack([doc(2, 0), doc(2, 100), doc(6, 200)], microbatch_tokens=10)
+        self.assertEqual([len(b) for b in batches], [4, 6])
+        self.assertEqual([b.doc_starts for b in batches], [(0, 2), (0,)])
+
     def test_oversized_document_gets_its_own_batch(self) -> None:
         batches = pack([doc(12, 0), doc(3, 100)], microbatch_tokens=10)
         self.assertEqual([len(b) for b in batches], [12, 3])
@@ -194,7 +202,8 @@ class PackTest(unittest.TestCase):
         self.assertEqual([b.doc_starts for b in batches], [(0,), (0,), (0,)])
 
     def test_doc_starts_track_offsets(self) -> None:
-        batches = pack([doc(2, 0), doc(3, 100), doc(4, 200)], microbatch_tokens=9)
+        # three rows padded to the longest (4) is a footprint of 12
+        batches = pack([doc(2, 0), doc(3, 100), doc(4, 200)], microbatch_tokens=12)
         self.assertEqual(len(batches), 1)
         batch = batches[0]
         self.assertEqual(batch.doc_starts, (0, 2, 5))

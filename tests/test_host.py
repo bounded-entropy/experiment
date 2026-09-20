@@ -15,6 +15,7 @@ import unittest
 from dataclasses import replace
 
 from common import arith_spec, arith_store
+from rlstack.runner.checkpointing import EVERY_UPDATE
 from rlstack import (
     Bundle, FakeEngine, FakeLearner, Topology, HostSpec, Host, HostError,
     Message, Partition, Regime, Role, SamplingSpec, Seeds, SpecError,
@@ -89,7 +90,7 @@ class HostTest(unittest.TestCase):
         host = self.host()
 
         async def check():
-            task = asyncio.create_task(host.submit(arith_spec(self.train), SCHEMA))
+            task = asyncio.create_task(host.submit(arith_spec(self.train), SCHEMA, checkpointing=EVERY_UPDATE))
             try:
                 self.assertTrue(await asyncio.to_thread(entered.wait, 2))
                 self.assertFalse(finished.is_set(), "ledger commit blocked the host loop")
@@ -105,13 +106,13 @@ class HostTest(unittest.TestCase):
         """The host adds custody (binding, fit, roster, journal) and NOTHING
         else: the run directory it produces matches raw run_experiment's."""
         spec = arith_spec(self.train)
-        report = go(self.host().submit(spec, SCHEMA))
+        report = go(self.host().submit(spec, SCHEMA, checkpointing=EVERY_UPDATE))
 
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
         other_store, other_train, _ = arith_store(tmp.name)
         raw = run_experiment(arith_spec(other_train), SCHEMA, other_store,
-                             FakeEngine(), FakeLearner())
+                             FakeEngine(), FakeLearner(), checkpointing=EVERY_UPDATE)
         self.assertEqual(report.run_id, raw.run_id)
         self.assertEqual(
             self.store.path_of(f"runs/{report.run_id}/ledger.jsonl").read_bytes(),
@@ -123,8 +124,8 @@ class HostTest(unittest.TestCase):
         b = arith_spec(self.train, seeds=Seeds(master=99))
 
         async def both():
-            return await asyncio.gather(host.submit(a, SCHEMA),
-                                        host.submit(b, SCHEMA))
+            return await asyncio.gather(host.submit(a, SCHEMA, checkpointing=EVERY_UPDATE),
+                                        host.submit(b, SCHEMA, checkpointing=EVERY_UPDATE))
 
         report_a, report_b = go(both())
         self.assertNotEqual(report_a.run_id, report_b.run_id)
@@ -159,18 +160,18 @@ class HostTest(unittest.TestCase):
         heavy = arith_spec(self.train, topology=Topology(hosts=(
             HostSpec((pool("main", vram_gb=60),)),
             HostSpec((learner(vram_gb=60),)))))
-        go(host.submit(heavy, SCHEMA))
-        go(host.submit(replace(heavy, seeds=Seeds(master=99)), SCHEMA))
+        go(host.submit(heavy, SCHEMA, checkpointing=EVERY_UPDATE))
+        go(host.submit(replace(heavy, seeds=Seeds(master=99)), SCHEMA, checkpointing=EVERY_UPDATE))
         self.assertEqual(host.arbiter.declared_load(), 0.0)
 
         engine_only = self.host(learner=None)
         with self.assertRaises(HostError) as caught:
-            go(engine_only.submit(heavy, SCHEMA))
+            go(engine_only.submit(heavy, SCHEMA, checkpointing=EVERY_UPDATE))
         self.assertIn("no training regime", str(caught.exception))
 
     def test_journal_records_attach_detach_and_failure(self) -> None:
         host = self.host()
-        go(host.submit(arith_spec(self.train), SCHEMA))
+        go(host.submit(arith_spec(self.train), SCHEMA, checkpointing=EVERY_UPDATE))
 
         class Boom(RuntimeError):
             pass
@@ -183,7 +184,7 @@ class HostTest(unittest.TestCase):
                        learner=FailingLearner(), store=self.store)
         with self.assertRaises(Boom):
             go(failing.submit(arith_spec(self.train, seeds=Seeds(master=99)),
-                              SCHEMA))
+                              SCHEMA, checkpointing=EVERY_UPDATE))
 
         events = self.store.read_host_log("test-host")
         kinds = [e["event"] for e in events]
@@ -200,7 +201,7 @@ class HostTest(unittest.TestCase):
         fake_sample = {"gpus": [{"util": 55, "mem_used": 9000,
                                  "mem_total": 23034}]}
         host = self.host(sampler=lambda: dict(fake_sample))
-        report = go(host.submit(arith_spec(self.train), SCHEMA))
+        report = go(host.submit(arith_spec(self.train), SCHEMA, checkpointing=EVERY_UPDATE))
 
         async def sample_twice():
             task = asyncio.get_running_loop().create_task(
@@ -231,7 +232,7 @@ class HostTest(unittest.TestCase):
         """An observer peeks; only attach may sweep. A staged (uncommitted)
         wave must survive a peek — open_run would have deleted it."""
         host = self.host()
-        report = go(host.submit(arith_spec(self.train), SCHEMA))
+        report = go(host.submit(arith_spec(self.train), SCHEMA, checkpointing=EVERY_UPDATE))
         run = self.store.open_run(report.run_id)
         staged = self.store.path_of(
             f"runs/{report.run_id}/waves/000099.jsonl.gz")
@@ -283,7 +284,7 @@ class StoreOwnershipTest(unittest.TestCase):
 
         host = Host("test-host", engines=(FakeEngine(),), learner=FakeLearner(),
                     store=self.journal_store)
-        report = go(host.submit(arith_spec(train), SCHEMA, store=run_store))
+        report = go(host.submit(arith_spec(train), SCHEMA, store=run_store, checkpointing=EVERY_UPDATE))
 
         # the run lives in ITS store; the journal lives in the host's — and
         # records where the run went
@@ -300,10 +301,10 @@ class StoreOwnershipTest(unittest.TestCase):
 
         host = Host("test-host", engines=(FakeEngine(),), learner=FakeLearner(),
                     store=self.journal_store)
-        report = go(host.submit(arith_spec(self.train), SCHEMA))
+        report = go(host.submit(arith_spec(self.train), SCHEMA, checkpointing=EVERY_UPDATE))
         # the SAME identity run against a different store: a silent fork
         run_experiment(arith_spec(other_train), SCHEMA, other_store,
-                       FakeEngine(), FakeLearner())
+                       FakeEngine(), FakeLearner(), checkpointing=EVERY_UPDATE)
 
         text = render_runs([self.journal_store, other_store])
         self.assertIn(report.run_id, text)
@@ -397,8 +398,8 @@ class ShapeAndRegimeTest(unittest.TestCase):
                                   HostSpec((pool("main", vram_gb=30),
                                             learner(vram_gb=20))),)))
 
-        report = go(host.submit(heavy(17), SCHEMA))     # two full-fraction
-        go(host.submit(heavy(99), SCHEMA))              # tenants both admit
+        report = go(host.submit(heavy(17), SCHEMA, checkpointing=EVERY_UPDATE))     # two full-fraction
+        go(host.submit(heavy(99), SCHEMA, checkpointing=EVERY_UPDATE))              # tenants both admit
         self.assertEqual((report.completed, report.extent), (4, "train"))
         self.assertEqual(host.arbiter.declared_load(), 0.0)
         self.assertGreater(len(host.arbiter.switches), 1)
@@ -424,7 +425,7 @@ class ShapeAndRegimeTest(unittest.TestCase):
             HostSpec((pool("main"),)), HostSpec((learner(fsdp=2),)))))
         with self.assertRaises(SpecError) as caught:
             run_experiment(spec, SCHEMA, self.store, FakeEngine(),
-                           FakeLearner())
+                           FakeLearner(), checkpointing=EVERY_UPDATE)
         self.assertIn("learner-shape-mismatch", str(caught.exception))
 
 
@@ -448,9 +449,9 @@ class SoloTest(unittest.TestCase):
 
         async def both():
             return await asyncio.gather(
-                host.submit(arith_spec(self.train), SCHEMA),
+                host.submit(arith_spec(self.train), SCHEMA, checkpointing=EVERY_UPDATE),
                 host.submit(arith_spec(self.train, seeds=Seeds(master=99)),
-                            SCHEMA))
+                            SCHEMA, checkpointing=EVERY_UPDATE))
 
         a, b = go(both())
         self.assertNotEqual(a.run_id, b.run_id)
@@ -460,9 +461,9 @@ class SoloTest(unittest.TestCase):
 
         async def both():
             return await asyncio.gather(
-                host.submit(arith_spec(self.train), SCHEMA),
+                host.submit(arith_spec(self.train), SCHEMA, checkpointing=EVERY_UPDATE),
                 host.submit(arith_spec(self.train, seeds=Seeds(master=99)),
-                            SCHEMA))
+                            SCHEMA, checkpointing=EVERY_UPDATE))
 
         with self.assertRaises(HostError) as caught:
             go(both())
@@ -472,16 +473,16 @@ class SoloTest(unittest.TestCase):
         """`occupied` is about what is RUNNING: the roster keeps finished
         tenancies for the observer, and a host that finished a run is free."""
         host = self.host(solo=True)
-        go(host.submit(arith_spec(self.train), SCHEMA))
+        go(host.submit(arith_spec(self.train), SCHEMA, checkpointing=EVERY_UPDATE))
         self.assertFalse(host.occupied())
-        go(host.submit(arith_spec(self.train, seeds=Seeds(master=99)), SCHEMA))
+        go(host.submit(arith_spec(self.train, seeds=Seeds(master=99)), SCHEMA, checkpointing=EVERY_UPDATE))
         self.assertEqual(len(host.roster), 2)
 
     def test_resubmitting_the_same_experiment_is_a_resume(self) -> None:
         host = self.host(solo=True)
         spec = arith_spec(self.train)
-        first = go(host.submit(spec, SCHEMA))
-        second = go(host.submit(spec, SCHEMA))
+        first = go(host.submit(spec, SCHEMA, checkpointing=EVERY_UPDATE))
+        second = go(host.submit(spec, SCHEMA, checkpointing=EVERY_UPDATE))
         self.assertEqual(first.run_id, second.run_id)
 
     def test_the_birth_fact_is_journaled_and_reported(self) -> None:

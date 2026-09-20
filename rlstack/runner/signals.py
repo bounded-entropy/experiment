@@ -1,6 +1,6 @@
 """RunSignals: the awaitable half of the blackboard.
 
-Daemons never call each other — they write the store and wait on predicates
+Runners never call each other — they write the store and wait on predicates
 OVER the store. This object is only wake-up plumbing: the store stays the
 single source of truth (a predicate re-reads it on every check) and notify is a
 latency hint, so the periodic timeout is what makes a writer in another process
@@ -42,7 +42,7 @@ class RunSignals:
         self._poll_seconds = poll_seconds
 
     async def notify(self) -> None:
-        """Call after writing the store; wakes every waiting daemon."""
+        """Call after writing the store; wakes every waiting runner."""
         async with self._condition:
             self._condition.notify_all()
 
@@ -54,9 +54,16 @@ class RunSignals:
             value = await store_work(predicate)
             if value:
                 return value
-            async with self._condition:
-                try:
-                    await asyncio.wait_for(self._condition.wait(),
-                                           self._poll_seconds)
-                except TimeoutError:
-                    pass
+            await self.wait_once()
+
+    async def wait_once(self) -> None:
+        """One beat of the blackboard: until the next notify, or the poll
+        interval — the unit `wait_for` loops on, exposed so a waiter with a
+        second condition (a stop request, ADR 0014) can check it between
+        beats without inventing a second wake-up."""
+        async with self._condition:
+            try:
+                await asyncio.wait_for(self._condition.wait(),
+                                       self._poll_seconds)
+            except TimeoutError:
+                pass

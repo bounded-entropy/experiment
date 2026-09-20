@@ -80,6 +80,11 @@ class EngineBuild:
     max_bundles: int = 32
     max_rank: int = 16
     max_members: int = 0
+    # how many named library adapters the engine holds, LRU (ADR 0019). A
+    # stacked route is as wide as its two parts' SUM, so `max_rank` prices
+    # that, and library adapters and stacks spend `max_members`' slots — the
+    # arithmetic is dream_bank_vllm's docstring.
+    max_library: int = 32
     serves: tuple[str, ...] = ("lora",)
     enable_sleep_mode: bool = False
     enforce_eager: bool = True
@@ -104,6 +109,7 @@ class FakeEngineBuild:
     record_draws: bool = False
     record_latent: bool = False
     sleeps: bool = False
+    max_library: int = 32
 
 
 @dataclass(frozen=True)
@@ -233,7 +239,8 @@ def build_engine(regime: Regime, partition: Partition, build: Build,
         return FakeEngine(p_correct=build.p_correct,
                           record_draws=build.record_draws,
                           record_latent=build.record_latent,
-                          base=regime.base, tp=regime.shape, sleeps=build.sleeps)
+                          base=regime.base, tp=regime.shape, sleeps=build.sleeps,
+                          max_library=build.max_library)
     if isinstance(build, EngineBuild):
         from rlstack.runner.engines.vllm_engine import VllmEngine
 
@@ -242,7 +249,7 @@ def build_engine(regime: Regime, partition: Partition, build: Build,
             gpu_memory_utilization=partition.memory,
             max_model_len=build.max_model_len, max_bundles=build.max_bundles,
             max_rank=build.max_rank, max_members=build.max_members,
-            cas_get=store.cas_get, serves=build.serves,
+            max_library=build.max_library, cas_get=store.cas_get, serves=build.serves,
             enable_sleep_mode=build.enable_sleep_mode,
             enforce_eager=build.enforce_eager)
     raise ResidentError(

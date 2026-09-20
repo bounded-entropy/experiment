@@ -29,10 +29,12 @@ from typing import Any
 
 
 class RetentionPolicy(ABC):
-    """What may be deleted from a run's store, decided from the ledger alone.
+    """What may be deleted from a run's store, decided from the CHECKPOINT
+    record alone (ADR 0014: the durable points, `checkpoints.jsonl`; for a
+    pre-0014 run every ledger line was one, and the ledger is the record).
 
-    A policy is a PURE FUNCTION OF THE COMMIT RECORD. It is handed the ledger
-    and nothing else — no store, no spec, no clock, no tuning arguments — so it
+    A policy is a PURE FUNCTION OF THE CHECKPOINT RECORD. It is handed that
+    record and nothing else — no store, no spec, no clock, no tuning arguments — so it
     can be read, reasoned about and tested without a byte on disk, and the same
     ledger always frees the same blobs. Subclass, implement `expendable`, and
     state the rule you enforce in its docstring.
@@ -49,12 +51,12 @@ class RetentionPolicy(ABC):
     """
 
     @abstractmethod
-    def expendable(self, ledger: Sequence[Mapping[str, Any]],
+    def expendable(self, record: Sequence[Mapping[str, Any]],
                    ) -> Iterable[tuple[str, str, int]]:
         """The (section, name, version) blobs no reader can ever want again.
 
-        `ledger` is every committed entry, oldest first; the last is the tail,
-        and a run's live state is exactly what the tail names. Naming a blob
+        `record` is every checkpoint entry, oldest first; the last is the
+        tail, and a run's restorable state is exactly what the tail names. Naming a blob
         that is already gone is not an error — the sweep skips absent keys — so
         a policy states a standing truth about the run and never has to know
         which sweep it is.
@@ -93,7 +95,7 @@ class KeepRestorable(RetentionPolicy):
     starting from the parent's tail — what `extend` does — is unaffected.
     """
 
-    def expendable(self, ledger: Sequence[Mapping[str, Any]],
+    def expendable(self, record: Sequence[Mapping[str, Any]],
                    ) -> tuple[tuple[str, str, int], ...]:
         """Every optim version strictly below the tail's, per delta.
 
@@ -101,12 +103,12 @@ class KeepRestorable(RetentionPolicy):
         it is named either: the tail is the only evidence of what is live, and
         absent evidence keeps bytes.
         """
-        if not ledger:
+        if not record:
             return ()
-        live = _versions(ledger[-1])
+        live = _versions(record[-1])
         stale = {
             ("optim", name, version)
-            for entry in ledger
+            for entry in record
             for name, version in _versions(entry).items()
             if version < live.get(name, 0)
         }
@@ -114,7 +116,7 @@ class KeepRestorable(RetentionPolicy):
 
 
 def _versions(entry: Mapping[str, Any]) -> dict[str, int]:
-    """One ledger entry's {delta: version} map — the policy version it sealed.
+    """One record entry's {delta: version} map — the policy version it sealed.
     An entry carrying none (or a malformed one) contributes nothing."""
     versions = entry.get("versions")
     if not isinstance(versions, Mapping):

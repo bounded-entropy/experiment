@@ -17,6 +17,7 @@ import tempfile
 import unittest
 
 from common import arith_spec, arith_store
+from rlstack.runner.checkpointing import EVERY_UPDATE
 from rlstack import (
     Bundle, FakeEngine, FakeLearner, Arbiter, Topology, HostSpec, Host,
     HostService,
@@ -41,7 +42,7 @@ class RemoteRunTest(unittest.TestCase):
         self.addCleanup(tmp_a.cleanup)
         store_a, train_a, heldout_a = arith_store(tmp_a.name)
         local = run_experiment(arith_spec(train_a, heldout_a), SCHEMA,
-                               store_a, FakeEngine(), FakeLearner())
+                               store_a, FakeEngine(), FakeLearner(), checkpointing=EVERY_UPDATE)
 
         tmp_b = tempfile.TemporaryDirectory()
         self.addCleanup(tmp_b.cleanup)
@@ -50,7 +51,7 @@ class RemoteRunTest(unittest.TestCase):
                        store=store_b)
         remote = RemotePool(LocalTransport(HostService(serving)))
         result = run_experiment(arith_spec(train_b, heldout_b), SCHEMA,
-                                store_b, remote, FakeLearner())
+                                store_b, remote, FakeLearner(), checkpointing=EVERY_UPDATE)
 
         self.assertEqual(local.run_id, result.run_id)
         for key in ("ledger.jsonl", "waves/000001.jsonl.gz"):
@@ -78,7 +79,7 @@ class RemoteRunTest(unittest.TestCase):
             HostSpec((pool("main"), pool("aux"))), HostSpec((learner(),)))))
         arbiter = Arbiter()
         report = run_experiment(spec, SCHEMA, store, {"main": main, "aux": aux},
-                                FakeLearner(), arbiter=arbiter)
+                                FakeLearner(), arbiter=arbiter, checkpointing=EVERY_UPDATE)
         self.assertEqual((report.completed, report.extent), (4, "train"))
         self.assertIsNone(arbiter.attached_group(main))
         self.assertIsNone(arbiter.attached_group(aux))
@@ -196,7 +197,7 @@ class DeskDeadlineTest(unittest.TestCase):
                     deadline_s / 1000, verb)
 
         remote = RemoteDesk(SlowDesk())
-        self.assertEqual(go(remote.submit(arith_spec("cas://train"))),
+        self.assertEqual(go(remote.submit(arith_spec("cas://train"), checkpointing=EVERY_UPDATE)),
                          {"finished": "submit"})
         self.assertEqual(go(remote.reap(probes=3, wait=30)),
                          {"finished": "reap"})

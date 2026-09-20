@@ -48,6 +48,9 @@ class LossResult:
     mean_ratio: float             # masked mean of exp(lp - behavior_lp)
     logprob_gap: float            # masked mean |lp - behavior_lp| — the
                                   # trainer/sampler mismatch alarm
+    components: Mapping[str, float] = field(default_factory=dict)
+    # Loss-owned sufficient statistics, retained per microbatch. A reader
+    # must use the named denominators rather than averaging batch means.
 
 
 def token_tensors(out: PolicyOutputs, batch: Any):

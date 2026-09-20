@@ -12,20 +12,64 @@ ONE runner, TWO callers. A pipeline is split by `split_pipeline` into the
 pooled half the Scorer runs and the pool-less half the Trainer runs, and each
 half comes through here unchanged — same order, same seed paths, same
 validation. `given` is the seam: wave-order columns the OTHER caller already
-produced, sliced back per group so a processor cannot tell which daemon
+produced, sliced back per group so a processor cannot tell which runner
 produced what it consumes.
+
+A processor that declares `fits` (ADR 0019) is handed a FittingClient: the
+same pool client, plus `fit` (the run's FitClient — runner/fit.py) and `names`
+(a NamesReader over the run's subdir). Only the Trainer has them to give.
 """
 
 from __future__ import annotations
 
 import asyncio
 from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 
-from rlstack.data.trajectory import Group, Wave
+from rlstack.client import Fits, Names, PoolClient
+from rlstack.data.stores.base import RunHandle
+from rlstack.data.trajectory import Group, Message, Turn, Wave
+from rlstack.policy.adapters.base import Directive
 from rlstack.registry import POST
+from rlstack.runner.names import names_subdir
+from rlstack.runner.signals import store_work
 from rlstack.runner.traffic import EnginePoolClient, Routes
 from rlstack.runner.seeds import derive
 from rlstack.spec.specs import SamplingSpec
+
+
+@dataclass(frozen=True)
+class NamesReader:
+    """`client.names` (ADR 0019): named adapters under the run's own subdir,
+    READ-ONLY — a processor never writes or promises a name."""
+
+    run: RunHandle
+
+    async def read_named(self, name: str) -> bytes | None:
+        return await store_work(self.run.store.read_named,
+                                names_subdir(self.run), name)
+
+
+@dataclass(frozen=True)
+class FittingClient:
+    """The client a `fits` processor is handed (client.FittingPoolClient):
+    every pool verb passes through to the episode's own pool client, and
+    `fit` and `names` ride beside them."""
+
+    pools: PoolClient
+    fit: Fits
+    names: Names
+
+    async def sample(self, messages: Sequence[Message], stop: tuple[str, ...] = (), *,
+                     directives: Sequence[Directive] = ()) -> Turn:
+        return await self.pools.sample(messages, stop, directives=directives)
+
+    async def score(self, messages: Sequence[Message], token_ids: Sequence[int], *,
+                    directives: Sequence[Directive] = ()) -> tuple[float, ...]:
+        return await self.pools.score(messages, token_ids, directives=directives)
+
+    def pool(self, name: str) -> PoolClient:
+        return self.pools.pool(name)
 
 
 def _token_vector(processor: str, column: str, traj, value) -> list[float]:
@@ -64,6 +108,8 @@ async def run_pipeline(
     update: int,
     phase: str = "post",
     given: Mapping[str, Sequence] | None = None,
+    fit: Fits | None = None,
+    names: Names | None = None,
 ) -> dict[str, list[float]]:
     """The pipeline over every group; columns aligned to wave order.
 
@@ -75,6 +121,10 @@ async def run_pipeline(
     processor reads its declared inputs and nothing else, and every declared
     input is produced earlier (checked at Phase 0), so no processor can observe
     which half of the split it is in.
+
+    `fit` and `names` are what a `fits` processor's client carries (ADR
+    0019); the Trainer passes them, and a caller that has none — the Scorer,
+    a Measurement — refuses such a processor by name.
     """
 
     async def one_group(index: int, group: Group) -> dict[str, list[float]]:
@@ -88,6 +138,14 @@ async def run_pipeline(
             client = EnginePoolClient(
                 routes, pdef.instance.sampling or sampling,
                 derive(master, phase, update, group.key, name))
+            if pdef.fits:
+                if fit is None or names is None:
+                    raise RuntimeError(
+                        f"postprocessor {name!r} declares fits, and this "
+                        f"caller has no learner to fit on: a fitting "
+                        f"processor runs inline in the Trainer of a run "
+                        f"whose bank holds a dream_bank entry")
+                client = FittingClient(client, fit, names)
             out = await pdef.instance.process(group, data, client)
             if set(out) != set(pdef.produces):
                 raise ValueError(

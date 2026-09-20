@@ -4,6 +4,7 @@ import asyncio
 import unittest
 
 from test_desk import DeskFixture, go
+from rlstack.runner.checkpointing import EVERY_UPDATE
 from rlstack.runner.campaign import demands_of, frame_for
 from rlstack.runner.desk import DeskError, demand_rows
 from rlstack.runner.remote import Unreachable
@@ -15,7 +16,7 @@ class CustodyDeadlineTest(DeskFixture):
         self.metal_service(devices=2, sample_gate=gate)
         desk = self.desk_with_metal("fake-metal")
         spec = self.split_spec()
-        rows, frame = demand_rows(demands_of(spec)), frame_for(spec)
+        rows, frame = demand_rows(demands_of(spec)), frame_for(spec, checkpointing=EVERY_UPDATE)
         first = await desk.submit(rows, frame)
         self.assertTrue(first["accepted"])
         owner = desk.listings[first["host"]].host

@@ -18,6 +18,7 @@ import unittest
 
 from common import char_tokenize, make_turn
 from test_resume import CrashingStore, SimulatedCrash, snapshot
+from rlstack.runner.checkpointing import EVERY_UPDATE
 from rlstack import (
     POST, AlgoSpec, Bundle, EnginePoolClient, ExperimentSpec, FakeEngine,
     FakeLearner, GenSpec, Group, GroupPlan, HostSpec, LocalStore, Mechanism,
@@ -247,7 +248,7 @@ class ReverseKLTest(unittest.TestCase):
 class SplitOrderTest(unittest.TestCase):
     """A POOLED processor followed by an INLINE one is the legal direction:
     the Scorer writes its part first, the Trainer's half consumes it as
-    `given` and cannot tell which daemon produced what it reads."""
+    `given` and cannot tell which runner produced what it reads."""
 
     def spec(self):
         import tempfile
@@ -369,7 +370,7 @@ class DistillEndToEndTest(unittest.TestCase):
     def generate(self, root: str) -> tuple[LocalStore, str]:
         store, tasks_uri, rollout_uri = teacher_seeded(root)
         report = run_experiment(teacher_spec(tasks_uri, rollout_uri), SCHEMA,
-                                store, FakeEngine(), None)
+                                store, FakeEngine(), None, checkpointing=EVERY_UPDATE)
         return store, report.run_id
 
     def distill(self, root: str, store: LocalStore, teacher_run: str,
@@ -379,7 +380,7 @@ class DistillEndToEndTest(unittest.TestCase):
         from common import cas_uri
         return run_experiment(student_spec(cas_uri(plan)), SCHEMA,
                               write or store, FakeEngine(plugins=RESIDUAL),
-                              FakeLearner())
+                              FakeLearner(), checkpointing=EVERY_UPDATE)
 
     def both(self, root: str):
         store, teacher_run = self.generate(root)

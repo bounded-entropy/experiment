@@ -49,7 +49,7 @@ import json
 import time
 from collections.abc import Callable, Mapping, Sequence
 from typing import Any
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from rlstack.data.stores.base import Store, run_done, run_reference
 from rlstack.policy.siteschema import SiteSchema
@@ -247,6 +247,13 @@ def builds_proposed(payload: Mapping) -> Builds | None:
     door."""
     row = payload.get("builds")
     return Builds.from_row(dict(row)) if row else None
+
+
+def frozen_unit(unit: Sequence[Demand]) -> bool:
+    """A unit of inference demands naming no adapter type: nothing of the
+    run's own policy lives on it (a judge pool on another base), so it may
+    be shared across runs that otherwise keep to themselves."""
+    return all(d.capability == "inference" and not d.adapter_types for d in unit)
 
 
 def placement_units(demands: Sequence[Demand]) -> tuple[tuple[Demand, ...], ...]:
@@ -499,11 +506,23 @@ class Desk:
                  probe_deadline_s: float = PROBE_DEADLINE_S,
                  clock: Callable[[], float] = time.time,
                  bootable_metals: frozenset[str] | None = None,
-                 recovery_generation: str = "",
+                 host_idle_s: float | None = None,
                  ) -> None:
         self.store = store
-        self.recovery_generation = recovery_generation
         self.require_finite_idle = False
+        # THE HOST CLOCK (ADR 0014, Q9): a carved host not busy for this long
+        # is DECARVED — its GB back to residual — before its metal's own
+        # clock releases the container; None means the metal's limit
+        self.host_idle_s = host_idle_s
+        self.host_idle_since: dict[str, float] = {}
+        # AUTOMATIC RECOVERY IS A VENUE'S CHOICE (ADR 0017, Q12 of ADR 0014).
+        # A venue that cannot yet prove an unreachable old owner stopped (a
+        # Strange Loop lease behind an SSH timeout is not a dead process)
+        # runs placement and idle release as ever and turns THIS off: no
+        # reap, no registration-time reconciliation, no parked-run retry —
+        # a parked run waits for an explicit resubmit. On by default, which
+        # is every desk that existed before the switch.
+        self.automatic_recovery = True
         # THE CLOCK, injectable (ADR 0008): every lease reading goes through
         # `now()`, so a test can drive a whole lease's worth of silence in a
         # millisecond instead of sleeping through a minute of it.
@@ -609,7 +628,7 @@ class Desk:
                      probe_deadline_s: float = PROBE_DEADLINE_S,
                      clock: Callable[[], float] = time.time,
                      bootable_metals: frozenset[str] | None = None,
-                     recovery_generation: str = "",
+                     host_idle_s: float | None = None,
                      ) -> "Desk":
         """The desk, rebuilt from its own record: every `list` event resolves
         its address again, and so does every addressed `metal` event — the
@@ -637,8 +656,7 @@ class Desk:
                    lease_s=lease_s, heartbeat_s=heartbeat_s,
                    residual_deadline_s=residual_deadline_s,
                    probe_deadline_s=probe_deadline_s, clock=clock,
-                   bootable_metals=bootable_metals,
-                   recovery_generation=recovery_generation)
+                   bootable_metals=bootable_metals, host_idle_s=host_idle_s)
         born = desk.now()
         for event in store.read_fleet_log():
             if event.get("event") == "list":
@@ -902,7 +920,12 @@ class Desk:
         (ADR 0008, F2): no probe can make that untrue, and none is taken.
         Everything else is PROBED, concurrently and bounded — which is what
         makes a double `up` a no-op: living hosts answer and stay listed, and
-        a host carved onto the newborn before its frame landed answers too."""
+        a host carved onto the newborn before its frame landed answers too.
+
+        Under `automatic_recovery=False` nothing is probed and nothing is
+        concluded: a silent listing stays listed until an operator acts."""
+        if not self.automatic_recovery:
+            return []
         epoch = self.epoch_of(name)
         mine = [host for host in sorted(self.listings)
                 if self.listings[host].metal == name]
@@ -1077,7 +1100,9 @@ class Desk:
         snapshot = await self.read_fleet()
         placement: dict[str | None, Listing] = {}
         boot: list[dict] = []
-        if solo:
+        standing = frozenset(self.listings)      # what stood before this placement
+        beside: str | None = None                # the metal the unit before landed on
+        for unit in placement_units(demands):
             # SOLO (2026-09-05): nothing that stood before this placement is
             # joined — every unit CARVES, on a metal with nothing standing
             # where one is registered live, never by knocking released metal
@@ -1085,38 +1110,48 @@ class Desk:
             # What it carves is the campaign's own and stays joinable: the
             # next submit's join rung finds it like any listing, which is how
             # six arms of one campaign share the card the first one carved.
-            avoid = avoid | frozenset(self.listings)
-        standing = frozenset(self.listings)      # what stood before this placement
-        for unit in placement_units(demands):
-            listing = await self.settle(unit, avoid, snapshot,
-                                        solo=solo, standing=standing)
+            # A FROZEN unit (2026-09-17) is the exception: a pool that names
+            # no adapter type serves nothing of this run's own — a judge on
+            # another base — so it JOINS the standing one the first arm
+            # carved, and twelve arms dial one judge instead of twelve.
+            frozen = frozen_unit(unit)
+            shunned = avoid | standing if solo and not frozen else avoid
+            # ...and it prefers the metal its own arm landed on: a pool on
+            # the same metal is dialed in-process, one on another metal
+            # through the desk's relay, which is what a desk restart cuts.
+            listing = await self.settle(unit, shunned, snapshot, solo=solo,
+                                        standing=standing, beside=beside if frozen else None)
             if listing is None:
                 boot.append(wants_of_unit(unit))
                 continue
+            if not frozen:
+                beside = listing.metal
             for demand in unit:
                 placement[demand.pool] = listing
         return placement, boot
 
     async def settle(self, unit: tuple[Demand, ...], avoid: frozenset[str],
                      snapshot: "Snapshot", solo: bool = False,
-                     standing: frozenset[str] = frozenset()) -> Listing | None:
+                     standing: frozenset[str] = frozenset(),
+                     beside: str | None = None) -> Listing | None:
         """ONE UNIT PLACED: decide, act, and — where nothing standing fits —
         KNOCK a metal the desk RELEASED whose recorded facts could hold it,
         read the fleet again, and decide once more (ADR 0003, Q4).
         Re-acquiring metal the fleet already owns needs no human: the human
         act was the deploy. What no metal, released or live, can hold is a
         boot instruction, and that stays a human's."""
-        listing = await self.attempt(unit, avoid, snapshot, solo, standing)
+        listing = await self.attempt(unit, avoid, snapshot, solo, standing, beside)
         if listing is not None or solo:
             return listing          # solo never knocks: a fresh card is live metal or a boot
         if not await self.knock_released(unit):
             return None
         snapshot.absorb(await self.read_fleet())
-        return await self.attempt(unit, avoid, snapshot, solo, standing)
+        return await self.attempt(unit, avoid, snapshot, solo, standing, beside)
 
     async def attempt(self, unit: tuple[Demand, ...], avoid: frozenset[str],
                       snapshot: "Snapshot", solo: bool = False,
-                      standing: frozenset[str] = frozenset()) -> Listing | None:
+                      standing: frozenset[str] = frozenset(),
+                      beside: str | None = None) -> Listing | None:
         """The decision under the lock, the act outside it, and a metal that
         refuses its carve tried once and then passed over — the metal's own
         booking is the enforcement half, so a deduction gone stale between
@@ -1125,7 +1160,7 @@ class Desk:
         while True:
             async with self.placing():
                 decision = self.decide(unit, avoid, snapshot, tried,
-                                       solo, standing)
+                                       solo, standing, beside)
             for metal_name, reason in decision.refusals:
                 self.refuse_carve(metal_name, reason)
             if decision.join:
@@ -1140,7 +1175,8 @@ class Desk:
     def decide(self, unit: tuple[Demand, ...], avoid: frozenset[str],
                snapshot: "Snapshot",
                tried: set[str] = frozenset(), solo: bool = False,
-               standing: frozenset[str] = frozenset()) -> "Decision":
+               standing: frozenset[str] = frozenset(),
+               beside: str | None = None) -> "Decision":
         """THE PLACEMENT LADDER AS A PURE FUNCTION — no wire, no store, no
         clock, so it is exactly what may be held under the placement lock.
 
@@ -1162,14 +1198,26 @@ class Desk:
 
         Rung three is not here: what nothing holds is no decision, and the
         caller turns it into a knock or a boot instruction."""
-        joined = self.join_rung(unit, avoid, snapshot)
+        joined = self.join_rung(unit, avoid, snapshot, beside)
+        if joined and (beside is None or self.listings[joined].metal == beside):
+            return Decision(join=joined)
+        if beside is not None:
+            # BESIDE (2026-09-17): a frozen pool's own metal first — a join
+            # there, else a carve there — and only then the fleet's usual
+            # rungs, since a pool on another metal is reached through the
+            # desk's relay, which a desk restart cuts under the run.
+            own = self.carve_rung(unit, snapshot, tried, solo, standing, beside, only=beside)
+            if own.carve:
+                return own
         if joined:
             return Decision(join=joined)
-        return self.carve_rung(unit, snapshot, tried, solo, standing)
+        return self.carve_rung(unit, snapshot, tried, solo, standing, beside)
 
     def join_rung(self, unit: tuple[Demand, ...], avoid: frozenset[str],
-                  snapshot: "Snapshot") -> str:
-        """Join an eligible listing with the fewest running tenancies.
+                  snapshot: "Snapshot", beside: str | None = None) -> str:
+        """Join an eligible listing with the fewest running tenancies —
+        a listing on the metal `beside` names before any other, since a
+        pool on the caller's own metal is dialed in-process (2026-09-17).
 
         The snapshot already carries rosters, so balancing takes no extra
         wire call or journal read under the placement lock. Counts are an
@@ -1177,7 +1225,8 @@ class Desk:
         can see the same counts, and jobs can have different costs.
         """
         ordered = sorted(self.listings, key=lambda name:
-                         (running_tenants(snapshot.rosters.get(name)), name))
+                         (beside is not None and self.listings[name].metal != beside,
+                          running_tenants(snapshot.rosters.get(name)), name))
         for name in ordered:
             if name in avoid or not self.leased(name):
                 continue
@@ -1194,7 +1243,8 @@ class Desk:
 
     def carve_rung(self, unit: tuple[Demand, ...], snapshot: "Snapshot",
                    tried: set[str] = frozenset(), solo: bool = False,
-                   standing: frozenset[str] = frozenset()) -> "Decision":
+                   standing: frozenset[str] = frozenset(),
+                   beside: str | None = None, only: str | None = None) -> "Decision":
         """RUNG TWO, the carve alone, RESERVING what it takes — see
         `decide`. A SOLO carve wants a card of its own: metals with nothing
         STANDING on them (listed before this placement began — this
@@ -1205,7 +1255,10 @@ class Desk:
         occupied = {self.listings[host].metal for host in standing
                     if host in self.listings}
         for metal_name in sorted(self.metal_remotes,
-                                 key=lambda n: (solo and n in occupied, n)):
+                                 key=lambda n: (beside is not None and n != beside,
+                                                solo and n in occupied, n)):
+            if only is not None and metal_name != only:
+                continue                    # the one metal this rung may take
             if metal_name in tried or not self.leased(metal_name):
                 continue
             if metal_name not in snapshot.residual:
@@ -1264,9 +1317,17 @@ class Desk:
         request = self.carve_request(unit, metal_name, decision.gb, solo=solo)
         try:
             born = await self.metal_remotes[metal_name].carve(request)
-        except Exception:
+        except Exception as error:
+            # A COMMANDED CARVE THAT FAILED IS ON THE RECORD (2026-09-18): a
+            # pod that could not build its engine — a base missing from an
+            # offline cache — answered a submit with "no registered metal can
+            # hold them" and nothing anywhere said why but the pod's own log.
+            self.refuse_carve(metal_name, f"the commanded carve failed: "
+                                          f"{type(error).__name__}: {str(error)[:600]}")
             return None
         if not born.get("carved"):
+            self.refuse_carve(metal_name, f"the metal declined the carve: "
+                                          f"{str(born.get('error') or born)[:600]}")
             return None                 # raced: booked away between read and command
         corpse = self.listings.get(born["host"])
         if corpse is not None and corpse.metal == metal_name:
@@ -1334,6 +1395,8 @@ class Desk:
         the canon a reborn container is rebuilt from (Q5c) and, since ADR
         0007, the only recipe there is: the metal boots bare."""
         recipe = self.recipe_for(metal_name)
+        if recipe is not None and frozen_unit(unit):
+            recipe = serving_nothing(recipe)
         return {
             "regimes": [{"name": regime_of(d).name,
                          "capability": d.capability,
@@ -1410,7 +1473,7 @@ class Desk:
                              "registered metal can hold them — boot or "
                              "register metal wearing the named regimes (the "
                              "standing acquire is a human's)"}
-        return await self.deliver(demands, placement, rows, frame, key)
+        return await self.deliver(demands, placement, rows, frame, key, solo=solo)
 
     def claim_delivery(self, key: str) -> dict | None:
         """Claim a frame before any await, or refuse the overlapping verb.
@@ -1439,8 +1502,7 @@ class Desk:
         the contents."""
         self.store.append_fleet_event({
             "event": "submit-intent", "t": self.now(), "key": key,
-            "folder": frame.get("subdir") or "",
-            "recovery_generation": self.recovery_generation})
+            "folder": frame.get("subdir") or ""})
 
     async def already_submitted(self, key: str) -> dict | None:
         """HAS THIS EXACT SUBMISSION ALREADY BEEN PLACED? (ADR 0008, F4.)
@@ -1503,7 +1565,7 @@ class Desk:
     async def deliver(self, demands: Sequence[Demand],
                       placement: Mapping[str | None, Listing],
                       rows: Sequence[Mapping], frame: Mapping,
-                      key: str = "") -> dict:
+                      key: str = "", solo: bool = False) -> dict:
         """The delivery half of a submission — submit's and reroute's ONE
         copy: the frame lands at the anchor demand's host with every other
         MEMBER's address threaded as routes under its own name (read off the
@@ -1522,7 +1584,8 @@ class Desk:
         try:
             reply = await anchor_listing.host.adopt(
                 frame.get("spec"), routes, frame.get("code"),
-                frame.get("subdir"), resume=bool(frame.get("resume", False)))
+                frame.get("subdir"), resume=bool(frame.get("resume", False)),
+                checkpointing=frame.get("checkpointing"))
         except Exception as down:
             # the probe passed and the container died between it and the
             # knock — or the adopt outlived its deadline: the reply says so
@@ -1544,6 +1607,10 @@ class Desk:
             "key": key or submit_key(frame),
             "host": anchor_listing.name, "pools": pools,
             "accepted": bool(reply.get("accepted")),
+            # the placement MODE rides the archive: a reroute of a solo
+            # submission carves solo again instead of joining (2026-09-17:
+            # a reaped 7B arm was rerouted onto another arm's card)
+            "solo": bool(solo),
             "demands": [dict(row) for row in rows], "frame": dict(frame)})
         return {**reply, "host": anchor_listing.name, "pools": pools}
 
@@ -1558,7 +1625,8 @@ class Desk:
         for event in self.store.read_fleet_log():
             if event.get("event") == "place" and event.get("run_id"):
                 row = {"pools": event.get("pools", {}),
-                       "host": event.get("host")}
+                       "host": event.get("host"),
+                       "solo": bool(event.get("solo", False))}
                 if event.get("demands") is not None:
                     row["demands"] = event["demands"]
                 if event.get("frame") is not None:
@@ -1620,7 +1688,8 @@ class Desk:
                 for rid, said in told.get("tenants", {}).items()
                 if said.get("status") == "running"}
 
-    async def stop_anchored(self, run_id: str) -> dict:
+    async def stop_anchored(self, run_id: str, *, drain: bool = True,
+                            reason: str = "") -> dict:
         """Stop a tenancy WHEREVER it runs: probe the listings' rosters for
         the one carrying `run_id` running — tenancies live only at their
         anchor, so at most one listing answers — and tell that host to stop
@@ -1639,8 +1708,87 @@ class Desk:
                             f"{', '.join(owner.name for owner in owners)}; "
                             "reconcile custody before moving it")
         if owners:
-            return await owners[0].host.stop(run_id, deadline_s=BUILD_DEADLINE_S)
+            return await owners[0].host.stop(run_id, deadline_s=BUILD_DEADLINE_S,
+                                             drain=drain, reason=reason)
         return {"stopped": False, "run_id": run_id, "state": "unlisted"}
+
+    async def stop(self, run_id: str, reason: str = "stopped by hand", *,
+                   drain: bool = True) -> dict:
+        """A DELIBERATE STOP (ADR 0014, Part C): the tenancy ended wherever
+        it runs — DRAINED, so its last commit is checkpointed first — and
+        `stopped` journaled, the disposition that outranks `parked`. Nothing
+        automatic revives a stopped run: not a reap, not a registration, not
+        a knock; only a new submission moves it, and that delivery
+        supersedes the stop on the record. A run nobody carries — parked,
+        say — is stopped by exactly this too: the row is what stops it."""
+        reply = await self.stop_anchored(run_id, drain=drain, reason=reason)
+        frame = self.placements().get(run_id, {}).get("frame", {})
+        row = {"event": "stopped", "t": self.now(), "run_id": run_id,
+               "subdir": frame.get("subdir") or "", "reason": reason,
+               "was_running": bool(reply.get("stopped")),
+               "drained": bool(reply.get("drained", False)),
+               "completed": reply.get("completed")}
+        self.store.append_fleet_event(row)
+        return {"stopped": True, "run_id": run_id,
+                "state": reply.get("state", "unlisted"),
+                **{k: row[k] for k in ("was_running", "drained", "completed", "reason")}}
+
+    async def stop_subdir(self, subdir: str, reason: str = "stopped by hand", *,
+                          drain: bool = True) -> dict:
+        """Every unfinished placement filed under `subdir`, stopped — a
+        campaign taken down in one verb, one `stopped` row per run. A run
+        already stopped or already done is left alone."""
+        settled = self.dispositions()["stopped"]
+        stopped: dict[str, dict] = {}
+        for run_id, row in sorted(self.placements().items()):
+            if (row.get("frame", {}).get("subdir") or "") != (subdir or ""):
+                continue
+            if run_id in settled or self.finished(run_id):
+                continue
+            stopped[run_id] = await self.stop(run_id, reason, drain=drain)
+        return {"subdir": subdir, "stopped": stopped}
+
+    async def record_deaths(self, only: Sequence[str] | None = None) -> dict[str, str]:
+        """WHAT THE ROSTERS SAY DIED (ADR 0014, Part C), journaled once: a
+        tenancy a live host reports `failed` since its latest placement is
+        PARKED when it died of the wire (a pool or learner that stopped
+        answering — infrastructure, retried from the checkpoint) and
+        journaled FAILED with its error otherwise (the experiment's own
+        death, never retried). Stopped runs and runs already settled are
+        left alone; a host that does not answer contributes nothing — an
+        unknown roster is not evidence."""
+        settled = self.dispositions()
+        verdicts: dict[str, str] = {}
+        names = sorted(self.listings) if only is None else [n for n in only if n in self.listings]
+        listings = [self.listings[name] for name in names]
+        answers = await asyncio.gather(
+            *(listing.told(self.probe_deadline_s) for listing in listings))
+        for listing, told in zip(listings, answers):
+            for run_id, tenant in sorted((told or {}).get("tenants", {}).items()):
+                if tenant.get("status") != "failed":
+                    continue
+                if any(run_id in settled[table] for table in ("parked", "stopped", "failed")):
+                    continue
+                ended = tenant.get("ended_t")
+                if ended is not None and ended < settled["placed_t"].get(run_id, 0.0):
+                    continue            # an older life of this run; it was redelivered since
+                if self.finished(run_id):
+                    continue
+                error = str(tenant.get("error") or "")
+                if tenant.get("wire"):
+                    # avoiding nothing: the anchor answered (it reported the
+                    # death); what died is a dependency the placement
+                    # snapshot will pass over on its own if it is still down
+                    self.park(run_id, f"wire death on {listing.name}: {error}"[:500])
+                    verdicts[run_id] = "parked"
+                else:
+                    frame = self.placements().get(run_id, {}).get("frame", {})
+                    self.store.append_fleet_event({
+                        "event": "failed", "t": self.now(), "run_id": run_id,
+                        "subdir": frame.get("subdir") or "", "host": listing.name,
+                        "error": error[:2000]})
+                    verdicts[run_id] = "failed"
+        return verdicts
 
     async def reroute(self, run_id: str, avoiding: str = "",
                       park: bool = False) -> dict:
@@ -1660,6 +1808,7 @@ class Desk:
         its campaign revives it. A delivery from before the archive carried
         rows and frame cannot be replayed — refused (or parked) with the
         same cure named."""
+        self.check_recovery_enabled()
         archived = self.placements().get(run_id, {})
         rows, frame = archived.get("demands"), archived.get("frame")
         if rows is None or frame is None:
@@ -1679,17 +1828,20 @@ class Desk:
         if in_flight is not None:
             return {"rerouted": False, "run_id": run_id, **in_flight}
         try:
-            return await self.reroute_claimed(run_id, rows, frame, avoiding, park)
+            return await self.reroute_claimed(run_id, rows, frame, avoiding, park,
+                                              solo=bool(archived.get("solo", False)))
         finally:
             self.delivering.discard(key)
 
     async def reroute_claimed(self, run_id: str, rows: Sequence[Mapping],
-                              frame: Mapping, avoiding: str, park: bool) -> dict:
+                              frame: Mapping, avoiding: str, park: bool,
+                              solo: bool = False) -> dict:
         """Keep a frame claimed from placement through acknowledged stop
-        and redelivery, including moves requested outside retry_parked."""
+        and redelivery, including moves requested outside retry_parked.
+        `solo` is the archived submission's placement mode, replayed."""
         demands = demands_from(rows)
         avoid = frozenset({avoiding}) if avoiding else frozenset()
-        placement, boot = await self.place_listings(demands, avoid)
+        placement, boot = await self.place_listings(demands, avoid, solo=solo)
         if boot and not park:
             return {"rerouted": False, "run_id": run_id, "boot": boot,
                     "error": "nowhere to go: nothing else serves these "
@@ -1702,7 +1854,7 @@ class Desk:
                       boot=boot)
             return {"rerouted": False, "parked": True, "run_id": run_id,
                     "boot": boot, "stopped": stopped}
-        reply = await self.deliver(demands, placement, rows, frame)
+        reply = await self.deliver(demands, placement, rows, frame, solo=solo)
         if not reply.get("accepted"):
             self.park(run_id, f"redelivery refused: {reply.get('error')}",
                       avoiding=avoiding)
@@ -1727,6 +1879,8 @@ class Desk:
         when the container died. The freed metal is reallocated by nothing
         more than existing rules — residual grew, so the next placement's
         carve may land there."""
+        if reroute:
+            self.check_recovery_enabled()
         listing = self.listings.get(name)
         if listing is None:
             raise DeskError(f"host {name!r} is not listed with this desk")
@@ -1791,6 +1945,7 @@ class Desk:
         is knocked. Verdicts: per listing alive | recovered | reaped | lapsed;
         per knocked metal whether it answered; per stranded or parked run
         rerouted | parked; plus the metal released."""
+        self.check_recovery_enabled()
         now = time.time()
         await self.observe_idle(now)
         released = await self.release_idle(now)
@@ -1819,12 +1974,16 @@ class Desk:
             reaped_by_metal.setdefault(name, [])
         reaped = [name for names in reaped_by_metal.values() for name in names]
         self.strand(reaped)
+        # only the listings that answered: a reaped one has nothing to say
+        deaths = await self.record_deaths(
+            [name for name, verdict in listings.items() if verdict in ("alive", "recovered")])
         knocked = {metal_name: await self.knock(metal_name)
                    for metal_name in sorted(reaped_by_metal)
                    if metal_name and metal_name not in self.released}
-        runs = await self.retry_parked() if reaped else {}
+        newly_parked = any(verdict == "parked" for verdict in deaths.values())
+        runs = await self.retry_parked() if reaped or newly_parked else {}
         return {"listings": listings, "knocked": knocked, "runs": runs,
-                "released": released}
+                "released": released, "deaths": deaths}
 
     async def recovers(self, listing: Listing, probes: int,
                        wait: float) -> bool:
@@ -1953,12 +2112,14 @@ class Desk:
         the intent on the record and the next event retries it. A run whose
         ledger already reached its plan is not work and is left alone; a run
         already parked is not parked twice."""
-        already = self.parked()
+        settled = self.dispositions()
         stranded: list[str] = []
         for run_id, row in sorted(self.placements().items()):
             lost = [host for host in hosts if host in row["pools"].values()]
-            if not lost or run_id in already or self.finished(run_id):
+            if not lost or self.finished(run_id):
                 continue
+            if any(run_id in settled[table] for table in ("parked", "stopped", "failed")):
+                continue                # queued already, or deliberately down
             self.park(run_id, f"host {lost[0]!r} reaped", avoiding=lost[0])
             stranded.append(run_id)
         return stranded
@@ -1986,17 +2147,51 @@ class Desk:
         what it is avoiding, what it wants and since when (ADR 0008, F6).
         `parked()` is this read down to its one key; the observer and the
         park writer read the rest."""
-        queue: dict[str, dict] = {}
+        return self.dispositions()["parked"]
+
+    def dispositions(self) -> dict[str, dict[str, dict]]:
+        """THE STANDING DISPOSITION PER RUN (ADR 0014, Part C), one pass over
+        the journal: `parked` is the queue — a wire death, a reaped host,
+        nowhere to go — and is RETRIED; `stopped` is a deliberate stop and is
+        NEVER retried; `failed` is the experiment's own death — a gate
+        refusal, an OOM, a loss that raised — and is never retried either.
+        `stopped` and `failed` outrank `parked`: a run in either leaves the
+        queue. A later DELIVERED placement supersedes all three, because
+        resubmitting is how a run moves again, and `placed_t` says when."""
+        parked: dict[str, dict] = {}
+        stopped: dict[str, dict] = {}
+        failed: dict[str, dict] = {}
+        placed_t: dict[str, float] = {}
         for event in self.store.read_fleet_log():
-            run_id = event.get("run_id")
+            run_id, kind = event.get("run_id"), event.get("event")
             if not run_id:
                 continue
-            if event.get("event") == "place" and event.get("delivered") \
-                    and event.get("accepted"):
-                queue.pop(run_id, None)
-            elif event.get("event") == "parked":
-                queue[run_id] = dict(event)
-        return queue
+            if kind == "place" and event.get("delivered") and event.get("accepted"):
+                for table in (parked, stopped, failed):
+                    table.pop(run_id, None)
+                placed_t[run_id] = float(event.get("t", 0.0))
+            elif kind == "parked":
+                if run_id not in stopped and run_id not in failed:
+                    parked[run_id] = dict(event)
+            elif kind == "stopped":
+                stopped[run_id] = dict(event)
+                parked.pop(run_id, None)
+            elif kind == "failed":
+                failed[run_id] = dict(event)
+                parked.pop(run_id, None)
+        return {"parked": parked, "stopped": stopped, "failed": failed,
+                "placed_t": placed_t}
+
+    def stopped(self) -> dict[str, dict]:
+        """Every run under a standing deliberate stop: never revived by a
+        reap, a registration or a knock — only by a new submission."""
+        return self.dispositions()["stopped"]
+
+    def failed(self) -> dict[str, dict]:
+        """Every run under a standing failure of its own — the error text on
+        the row, so an operator can tell an OOM from a lost pod without
+        pulling a log."""
+        return self.dispositions()["failed"]
 
     async def retry_parked(self) -> dict[str, str]:
         """Every parked run rerouted with `park=True`: placed onto whatever
@@ -2011,13 +2206,10 @@ class Desk:
         since ADR 0008 nothing in this desk waits on a container while
         holding something another verb needs. Two retries therefore proceed
         together over DIFFERENT runs and neither touches a run the other has."""
+        if not self.automatic_recovery:
+            return {}
         verdicts: dict[str, str] = {}
-        eligible = self.recovery_keys()
-        placements = self.placements()
         for run_id, avoiding in sorted(self.parked().items()):
-            frame = placements.get(run_id, {}).get("frame")
-            if eligible is not None and (frame is None or submit_key(frame) not in eligible):
-                continue
             if self.finished(run_id):
                 continue                # completion supersedes an old parked event
             if not self.claim(run_id):
@@ -2032,18 +2224,12 @@ class Desk:
                                 else "parked")
         return verdicts
 
-    def recovery_keys(self) -> set[str] | None:
-        """Only explicitly submitted frames opt into this deployment's recovery.
-
-        An empty generation retains the library default. A configured value
-        survives CPU restarts and leaves older parked history inspectable,
-        without letting new metal registration revive it.
-        """
-        if not self.recovery_generation:
-            return None
-        return {event["key"] for event in self.store.read_fleet_log()
-                if event.get("event") == "submit-intent"
-                and event.get("recovery_generation") == self.recovery_generation}
+    def check_recovery_enabled(self) -> None:
+        """Do not turn a silent owner into permission to resume on this venue."""
+        if not self.automatic_recovery:
+            raise DeskError(
+                "recovery is disabled until the old owner is confirmed stopped; "
+                "resume explicitly after establishing that ownership")
 
     def claim(self, run_id: str) -> bool:
         """Take this run for a reroute, or say someone else has it. The whole
@@ -2063,23 +2249,31 @@ class Desk:
         none. None is PINNED — never released, however long it sits."""
         return self.metal_idle_s.get(name, self.idle_s)
 
-    async def listing_busy(self, listing: Listing,
-                           seen: dict[str, int]) -> bool:
-        """IS THIS LISTING WORKING? Three ways to say yes, all read off ONE
-        status frame: a RUNNING tenancy, work IN FLIGHT at its arbiter right
-        now, or an `admitted` counter that MOVED since the previous
+    async def listing_busy(self, listing: Listing, seen: dict[str, int],
+                           told: Mapping | None | Undeclared = DESK_DEFAULT,
+                           routed: frozenset[str] = frozenset()) -> bool:
+        """IS THIS LISTING WORKING? Four ways to say yes. Three are read off
+        ONE status frame: a RUNNING tenancy, work IN FLIGHT at its arbiter
+        right now, or an `admitted` counter that MOVED since the previous
         observation. The counter is what sees a PURE CLIENT — a measurement
         cron, an evaluator: admitted traffic, no tenancy — whose host would
         otherwise be released out from under its own sampling (ADR 0003,
         Q1); in-flight is what sees one long admission that spans two ticks
-        and moves no counter.
+        and moves no counter. THE FOURTH (ADR 0014, Q9) is read off the
+        fleet: a RUNNING placement ROUTES THROUGH this listing — a training
+        run anchored elsewhere, between waves, whose next sample lands here.
+        On 2026-09-13 06:14 UTC the desk released a pool under four such
+        runs; `routed` is the set of listing names the tick's rosters say
+        are still depended on.
 
         The reading is recorded in `seen` for the next tick, and a listing
         observed for the FIRST time is busy: metal is released on evidence
         of idleness, never on the absence of a reading. A silent listing
         also returns True: the idle sweep cannot establish that it is idle.
-        Concluding an unreachable host dead is the reaper's business."""
-        told = await listing.told(self.probe_deadline_s)
+        Concluding an unreachable host dead is the reaper's business. `told`
+        is the frame the tick already read; unsaid, this asks."""
+        if isinstance(told, Undeclared):
+            told = await listing.told(self.probe_deadline_s)
         if told is None:
             return True
         admitted = int(told.get("admitted", 0))
@@ -2090,8 +2284,23 @@ class Desk:
             return True
         if int(told.get("in_flight", 0)) > 0:
             return True
+        if listing.name in routed:
+            return True
         return any(tenant.get("status") == "running"
                    for tenant in told.get("tenants", {}).values())
+
+    def routed_through(self, frames: Mapping[str, Mapping | None]) -> frozenset[str]:
+        """The listings a RUNNING placement routes through, off the tick's
+        own roster frames: every run some roster says is running, joined to
+        the pools its latest journaled placement landed on. The fourth yes
+        of `listing_busy`, computed once per tick."""
+        running = {rid for told in frames.values()
+                   for rid, said in (told or {}).get("tenants", {}).items()
+                   if said.get("status") == "running"}
+        if not running:
+            return frozenset()
+        return frozenset(host for rid, row in self.placements().items()
+                         if rid in running for host in row["pools"].values())
 
     async def observe_idle(self, now: float) -> None:
         """ONE TICK OF THE IDLE CLOCK. For every carve-able metal: it is IDLE
@@ -2100,14 +2309,34 @@ class Desk:
         `idle_since`; a busy one clears it, so the clock measures CONTINUOUS
         idleness and never sums two quiet spells across a busy one.
 
-        Every listing is probed once, and only the listings observed here are
-        remembered: a delisted host's counter leaves with it."""
+        Every listing is probed once — CONCURRENTLY, so a tick costs the
+        slowest probe — and only the listings observed here are remembered:
+        a delisted host's counter leaves with it. The same frames feed THE
+        HOST CLOCK (ADR 0014, Q9): a carved listing that is not busy stamps
+        `host_idle_since`, a busy one clears it, and `release_idle` decarves
+        what sits past its limit."""
         seen: dict[str, int] = {}
+        # the carved listings — what the clocks are about; a hand-listed host
+        # (no metal of the desk's) is neither released nor decarved, and is
+        # not probed here (its liveness is the reaper's question)
+        names = sorted(name for name, listing in self.listings.items()
+                       if listing.metal in self.metal_remotes)
+        answers = await asyncio.gather(
+            *(self.listings[name].told(self.probe_deadline_s) for name in names))
+        frames: dict[str, Mapping | None] = dict(zip(names, answers))
+        routed = self.routed_through(frames)
+        busy_hosts: set[str] = set()
+        for name in names:
+            listing = self.listings.get(name)
+            if listing is None:
+                continue
+            if await self.listing_busy(listing, seen, frames.get(name), routed):
+                busy_hosts.add(name)
         for name in sorted(self.metal_remotes):
             listings = tuple(listing for listing in self.listings.values()
                              if listing.metal == name)
-            busy = [listing for listing in listings
-                    if await self.listing_busy(listing, seen)]
+            busy = [listing for listing in listings if listing.name in busy_hosts
+                    or listing.name not in frames]
             current = tuple(listing for listing in self.listings.values()
                             if listing.metal == name)
             if busy or current != listings:
@@ -2116,12 +2345,53 @@ class Desk:
                 self.idle_since.pop(name, None)
             else:
                 self.idle_since.setdefault(name, now)
+        for name in names:
+            listing = self.listings.get(name)
+            if listing is None or not listing.metal or listing.metal not in self.metal_remotes:
+                self.host_idle_since.pop(name, None)     # hand-listed: never decarved
+            elif name in busy_hosts or name not in frames:
+                self.host_idle_since.pop(name, None)
+            else:
+                self.host_idle_since.setdefault(name, now)
         self.admitted_at = seen
+
+    def host_idle_limit(self, metal: str) -> float | None:
+        """The seconds of idleness a carved host on `metal` is decarved
+        after: the desk's own host limit, or the metal's limit where none
+        was said — one clock shape at two levels (ADR 0014, Q9)."""
+        return self.host_idle_s if self.host_idle_s is not None else self.idle_limit(metal)
+
+    async def decarve_idle(self, now: float) -> list[str]:
+        """THE HOST CLOCK'S HAND: every carved listing idle past its limit is
+        DECARVED at its metal — residents down, its GB back to residual — and
+        delisted `idle`, journaled. A shared A100 returns capacity as its
+        carves go quiet instead of waiting for the whole metal to."""
+        due = [name for name, since in sorted(self.host_idle_since.items())
+               if name in self.listings
+               and self.host_idle_limit(self.listings[name].metal) is not None
+               and now - since >= self.host_idle_limit(self.listings[name].metal)]
+        for name in due:
+            listing = self.listings[name]
+            self.store.append_fleet_event({
+                "event": "decarve", "t": time.time(), "host": name,
+                "metal": listing.metal, "reason": "idle",
+                "host_idle_s": self.host_idle_limit(listing.metal)})
+            remote = self.metal_remotes.get(listing.metal)
+            if remote is not None:
+                try:
+                    await remote.decarve(name)
+                except Exception:
+                    pass            # the metal is silent: the reaper's business
+            self.delist(name, reason="idle")
+            self.host_idle_since.pop(name, None)
+        return due
 
     async def release_idle(self, now: float) -> list[str]:
         """Every metal idle past ITS limit, released — the sweep's second
         half, and the only place the clock is read. A pinned metal (limit
-        None) is never due, however long its clock has run."""
+        None) is never due, however long its clock has run. The host clock
+        is read first (`decarve_idle`): a host goes before its metal does."""
+        await self.decarve_idle(now)
         due = [name for name, since in sorted(self.idle_since.items())
                if self.idle_limit(name) is not None
                and now - since >= self.idle_limit(name)]
@@ -2183,6 +2453,8 @@ class Desk:
         terminated = await self.terminate(name)
         self.released.add(name)
         self.idle_since.pop(name, None)
+        for host in listings:
+            self.host_idle_since.pop(host, None)
         return {"released": True, "metal": name, "listings": listings,
                 "told": told, "terminated": terminated, "running": holding}
 
@@ -2310,6 +2582,16 @@ class Desk:
             return await self.reroute(
                 payload["run_id"], avoiding=payload.get("avoiding", ""),
                 park=bool(payload.get("park", False)))
+        if verb == "stop":
+            # THE DELIBERATE STOP (ADR 0014, Part C): drained unless told
+            # otherwise, journaled as a disposition nothing automatic undoes
+            return await self.stop(payload["run_id"],
+                                   payload.get("reason", "stopped by hand"),
+                                   drain=bool(payload.get("drain", True)))
+        if verb == "stop_subdir":
+            return await self.stop_subdir(payload["subdir"],
+                                          payload.get("reason", "stopped by hand"),
+                                          drain=bool(payload.get("drain", True)))
         if verb == "metal":
             # the metal container phones home its OWN existence, address
             # included — after this the desk can deduce and command against
@@ -2374,6 +2656,9 @@ class Desk:
             return self.status()
         if verb == "placements":
             return {"placements": self.placements()}
+        if verb == "dispositions":
+            told = self.dispositions()
+            return {table: told[table] for table in ("parked", "stopped", "failed")}
         raise ValueError(f"unknown admission-free fleet verb {verb!r}")
 
     async def liveness(self) -> dict:
@@ -2454,6 +2739,18 @@ def recipe_serves(recipe: Builds | None, demand: Demand) -> bool:
     if recipe is None or not isinstance(recipe.engine, EngineBuild):
         return True                 # a fake engine build declares no `serves`
     return set(demand.adapter_types) <= set(serves_of(recipe))
+
+
+def serving_nothing(recipe: Builds) -> Builds:
+    """THE RECIPE A FROZEN UNIT IS BUILT FROM (2026-09-19): the metal's, with an
+    engine that serves no adapter type. An engine pays for every type it
+    serves before it holds one — a dream_bank recipe sized for rank-32 library
+    adapters reserved 13 GB of adapter slots inside a 32B judge that will
+    never attach one, and the judge's KV cache came out at -3.5 GB on every
+    metal. A pool that names no adapter type is built paying for none."""
+    if not isinstance(recipe.engine, EngineBuild):
+        return recipe
+    return replace(recipe, engine=replace(recipe.engine, serves=()))
 
 
 def serves_of(recipe: Builds) -> tuple[str, ...]:

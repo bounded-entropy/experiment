@@ -80,6 +80,12 @@ class AdapterType:
     directive: type[Directive] | None = None  # the per-request record it accepts
 
     provides: frozenset[str] = frozenset()
+    clips_by_group: bool = False
+    """WHOSE GRADIENT NORM IS ONE NORM (ADR 0019): False clips an entry's
+    parameters together, as one model; True clips each optimizer group by
+    itself. An entry whose groups are INDEPENDENT fits sharing a forward (a
+    dream_bank's lanes) must say True, or one lane's large gradient scales
+    its neighbours' steps and K lanes stop equalling K tenants."""
     """Training-forward tensors this adapter type computes, by name.
 
     NOT ONLY THE LOSS-INPUT CHANNEL. A declared provide is emitted per update
@@ -232,6 +238,26 @@ class AdapterType:
         """emit's inverse: restore params in place from an emitted payload
         (resume and warm-start walk through here)."""
         raise NotImplementedError
+
+    def load_set(self, params: Any, route: str, payload: bytes | None,
+                 optimizer: Any) -> None:
+        """Start ONE named set of this entry over (ADR 0019): from `payload`
+        (a named payload — one LoRA set as `lora_torch.emit` writes it), or
+        from its own deterministic init when None; either way that set's
+        moments in `optimizer` are reset. Only an adapter type that holds
+        sets by route has this verb."""
+        raise ValueError(f"{type(self).__name__} holds no sets by route: "
+                         f"load_set({route!r}) has nothing to address")
+
+    def emit_set(self, params: Any, route: str) -> bytes:
+        """ONE set of this entry as a named payload (ADR 0019)."""
+        raise ValueError(f"{type(self).__name__} holds no sets by route: "
+                         f"emit_set({route!r}) has nothing to address")
+
+    def drop_set(self, params: Any, route: str) -> None:
+        """Forget one LIBRARY set (`lib:<name>`) of this entry (ADR 0019)."""
+        raise ValueError(f"{type(self).__name__} holds no sets by route: "
+                         f"drop_set({route!r}) has nothing to address")
 
     def after_step(self, params: Any) -> None:
         """Called by the learner after every optimizer step on this entry —

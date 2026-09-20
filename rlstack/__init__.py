@@ -14,7 +14,7 @@ folders are the architecture:
   training/        the gradient world — post/ processors, losses/
   data/            the membrane — trajectory→group→wave, flatten+pack, stores/
   runner/          the substrate — Engine/Learner, the fleet and the wire, the
-                   blackboard, daemons/, engines/, learners/, fakes
+                   blackboard, roles/, engines/, learners/, fakes
   observe/         read-only derivations over stores and journals
   rlstack_engine/  (sibling package) what ships in the ENGINE image
 """
@@ -67,7 +67,8 @@ from rlstack.data.tasks import load_tasks, split_tasks, write_tasks
 from rlstack.data.stores import (
     DEFAULT_RETENTION, KeepRestorable, LedgerError, LocalStore,
     ManifestMismatch, ModalVolumeStore, RetentionPolicy, RunHandle,
-    RunProgress, Store, StoreAddress, StoreError, Swept, bump, open_store,
+    RunProgress, ScratchClient, Store, StoreAddress, StoreError,
+    StrangeLoopLocalStore, StrangeLoopStore, Swept, bump, open_store,
     run_done, run_progress,
 )
 from rlstack.policy.compile import (
@@ -84,7 +85,7 @@ from rlstack.runner.refs import RefReader
 from rlstack.runner.post import run_pipeline
 from rlstack.runner.signals import RunSignals
 from rlstack.runner.arbiter import Arbiter
-from rlstack.runner.daemons import Daemon, Generator, Scorer, Trainer
+from rlstack.runner.roles import Runner, Generator, Scorer, Trainer
 from rlstack.runner.host import (
     Host, HostError, Partition, Regime, Tenancy,
 )
@@ -103,7 +104,7 @@ from rlstack.runner.desk import (
 )
 from rlstack.runner.measure import Measurement, measure_run
 from rlstack.runner.loop import (
-    DaemonNeed, RunReport, experiment_identity, needs_of, parameterization_of,
-    plan_daemons, run_experiment,
+    RunnerNeed, RunReport, experiment_identity, needs_of, parameterization_of,
+    plan_runners, run_experiment,
 )
 from rlstack.runner.fakes import FakeAdapter, FakeEngine, FakeLearner

@@ -15,6 +15,7 @@ import threading
 from types import SimpleNamespace
 from unittest.mock import patch
 
+from rlstack.runner.checkpointing import EVERY_UPDATE
 from rlstack import ModalVolumeStore
 
 
@@ -253,6 +254,7 @@ class ModalVolumeStoreTest(unittest.TestCase):
         for version in (1, 2):
             run.write_blob("optim", "pi", version, b"moments")
             run.append_ledger({"update": version, "versions": {"pi": version}})
+            run.append_checkpoint(version, {"pi": version})
         run.sweep(DEFAULT_RETENTION)
         reads.clear()
         run.sweep(DEFAULT_RETENTION)

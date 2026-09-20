@@ -17,14 +17,22 @@ the reference):
                   adapters/<name>@<v>.bin      delta payloads
                   optim/<name>@<v>.bin         optimizer moments (lockstep)
                   eval/<update>/...            PRE-#70 in-run eval (legacy read)
+    runs/<subdir>/names/<name>.bin             NAMED ADAPTERS (ADR 0019): one
+                         <name>.json           LoRA set's payload, written once
+                         <name>.promise        under the experiment's subdir;
+                                               the meta seals it, the promise
+                                               says which run will write it
     measurements/<run_id>/<name>/manifest.json observation OUTSIDE the run
                                  points.jsonl  (#70): not identity, not
                                                resume-equivalence, deletable —
                                                supersede by NAME
     cas/<sha256>/blob                          content-addressed objects
     hosts/<name>/log.jsonl                     the host and fleet journals:
-    fleet/log.jsonl                            observability only (correctness
-                                               never reads them)
+    fleet/log.jsonl                            observability only (no run's
+                                               bytes ever read them; a wait on
+                                               a named adapter reads the
+                                               fleet's stopped/failed rows to
+                                               REFUSE instead of waiting)
     panels.json                                user-defined derived graphs
                                                (observer reads; never identity)
     annotations.jsonl                          names, tags and notes a human
@@ -32,13 +40,18 @@ the reference):
                                                beside runs/ and never inside it
 
 Writes are atomic; the ledger is append-only, strictly increasing, and the
-commit bit; resume is attach plus the ledger tail, and work no ledger line
-committed is UNSEALED and is discarded on attach.
+COMMIT record — one line per update. The CHECKPOINT record (ADR 0014) is its
+sibling, `checkpoints.jsonl`: one line per update at which every trainable
+entry's blobs are durable, at a cadence the submission declared. Resume is
+attach plus the CHECKPOINT tail: attach REWINDS to it — ledger lines, waves,
+postdata past its update and rollouts pinned past its versions are UNSEALED
+and discarded, and the Trainer redoes them. A run with no checkpoint record
+at all is a pre-0014 run, where every ledger line was a checkpoint.
 
 Deletion has exactly two meanings, and they are the same rule read twice:
-attach deletes what the ledger NEVER COMMITTED, and a sweep (retention.py)
-deletes what the ledger has MOVED PAST. Neither can reach a byte the run's
-identity or its commit record is made of.
+attach deletes what the checkpoint record NEVER SEALED, and a sweep
+(retention.py) deletes what it has MOVED PAST. Neither can reach a byte the
+run's identity or its commit record is made of.
 """
 
 from __future__ import annotations
@@ -49,6 +62,7 @@ import io
 import json
 import re
 import time
+from collections import OrderedDict
 from abc import ABC, abstractmethod
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
@@ -57,6 +71,9 @@ from typing import Any
 from rlstack.data.stores.retention import RetentionPolicy, Swept
 
 BLOB_SECTIONS = ("adapters", "optim")
+
+CHECKPOINTS = "checkpoints.jsonl"
+"""The checkpoint record's file name (ADR 0014), beside `ledger.jsonl`."""
 
 # Sections holding one artifact per update, committed by the ledger.
 UPDATE_SECTIONS = (("waves", ".jsonl.gz"), ("postdata", ".json"))
@@ -76,6 +93,11 @@ class ManifestMismatch(StoreError):
 
 class LedgerError(StoreError, ValueError):
     """Malformed or non-monotonic ledger entry (the ledger is append-only)."""
+
+
+class NamedAdapterConflict(StoreError):
+    """A name that already holds bytes was offered DIFFERENT bytes (ADR 0019):
+    a named adapter is written once, and a changed adapter is a new name."""
 
 
 def _canonical(obj: Any) -> str:
@@ -105,6 +127,63 @@ def check_subdir(subdir: str) -> str:
                 f"subdir segment {seg!r} is not a plain name segment "
                 f"([A-Za-z0-9._-]+, never '.' or '..')")
     return "/".join(segments)
+
+
+PROMISES_FOLDER = "_promises"
+"""ONE PROMISE FILE PER WRITER (2026-09-19): names/_promises/<digest>.json holds
+{"writer", "names"}. The first fit runs on metal promised their 200 names one
+file each and spent half an hour of ten-second scratch writes before their
+first step; a writer now says everything it will write in one write."""
+
+NAMED_PAYLOADS_HELD = 16
+"""How many named payloads one store object keeps after reading them."""
+
+NAMED_PAYLOAD, NAMED_META, NAMED_PROMISE = ".bin", ".json", ".promise"
+"""The three files one named adapter may have (ADR 0019): its bytes, the meta
+that SEALS them (written second, so a name is present exactly when its meta
+is), and the promise its writer left at birth."""
+
+PRESENT, PROMISED, ORPHANED, UNKNOWN = "present", "promised", "orphaned", "unknown"
+"""What `Store.named_state` answers — the four things a consumer can learn
+about a name it needs."""
+
+
+def check_name(name: str) -> str:
+    """An adapter's NAME, validated (ADR 0019): `[A-Za-z0-9._/-]+`, no leading
+    slash, no `..`. A "/" files names into folders, so every segment must name
+    something (no empty segment, no trailing slash). The last segment is never
+    `manifest`: a name's meta is `<name>.json`, and a `manifest.json` anywhere
+    under runs/ is what marks a RUN directory. `+` and `:` are outside the
+    grammar on purpose — they are what a route (`lib:<name>+dreamer`) is cut
+    on."""
+    text = str(name)
+    if (not re.fullmatch(r"[A-Za-z0-9._/-]+", text) or text.startswith("/")
+            or ".." in text or "" in text.split("/")):
+        raise StoreError(
+            f"adapter name {name!r} is not a name ([A-Za-z0-9._/-]+, no "
+            f"leading or trailing slash, no empty segment, no '..')")
+    if text.split("/", 1)[0] == PROMISES_FOLDER:
+        raise StoreError(
+            f"adapter name {name!r} begins with {PROMISES_FOLDER!r}: that folder "
+            f"holds the writers' promise files")
+    if text.rsplit("/", 1)[-1] == "manifest":
+        raise StoreError(
+            f"adapter name {name!r} ends in 'manifest': its meta would be a "
+            f"manifest.json, which is what marks a run directory")
+    return text
+
+
+def named_key(subdir: str, name: str, suffix: str) -> str:
+    """Where one file of a named adapter lives: under the experiment's subdir,
+    beside the runs filed there (runs/<subdir>/names/<name><suffix>). One
+    function, so the writer, every waiting consumer and the observer agree."""
+    return f"runs/{check_subdir(subdir)}/names/{check_name(name)}{suffix}"
+
+
+def promises_key(subdir: str, writer: str) -> str:
+    """The one file in which `writer` says every name it will write."""
+    digest = hashlib.sha256(writer.encode("utf-8")).hexdigest()[:16]
+    return f"runs/{check_subdir(subdir)}/names/{PROMISES_FOLDER}/{digest}.json"
 
 
 def run_reference(run_id: str, subdir: str | None = None) -> str:
@@ -286,6 +365,9 @@ class Store(ABC):
                     f"run does not exist at {home!r}; resume requires its exact directory")
             self._write(manifest_key, _canonical(manifest).encode("utf-8"))
             self._append_line(f"{home}/ledger.jsonl", "")
+            # the checkpoint record is born with the run: its ABSENCE is what
+            # marks a pre-0014 directory, so a new run always has one
+            self._append_line(f"{home}/{CHECKPOINTS}", "")
             return RunHandle(self, run_id, _canonical(manifest), home)
 
         stored = self._read(manifest_key).decode("utf-8")
@@ -306,12 +388,27 @@ class Store(ABC):
         """sha256 hex of `data` — the store's only identity function (I3)."""
         return hashlib.sha256(data).hexdigest()
 
+    def _verify_hash(self, key: str, data: bytes, sha256: str) -> bytes:
+        """Never return hashed bytes that disagree with their key or seal."""
+        actual = self.fingerprint(data)
+        if actual != sha256:
+            raise StoreError(f"hash mismatch for {key!r}: expected {sha256}, actual {actual}")
+        return data
+
+    def _read_hashed(self, key: str, sha256: str) -> bytes:
+        """Read through the backend's miss fallback, then verify (ADR 0020)."""
+        return self._verify_hash(key, self._read(key), sha256)
+
+    def _write_hashed(self, key: str, data: bytes, sha256: str) -> None:
+        """Publish bytes whose expected hash every consumer will check."""
+        self._write(key, data)
+
     def cas_put(self, data: bytes) -> str:
         """Store `data` under its own hash; identical bytes dedupe."""
         digest = self.fingerprint(data)
         key = f"cas/{digest}/blob"
         if not self._exists(key):
-            self._write(key, data)
+            self._write_hashed(key, data, digest)
         return f"cas://{digest}"
 
     def cas_get(self, uri: str) -> bytes:
@@ -326,9 +423,167 @@ class Store(ABC):
             raise ValueError(f"not a cas uri: {uri!r}")
         digest = uri[len("cas://"):].strip("/").split("/")[0]
         try:
-            return self._read(f"cas/{digest}/blob")
+            return self._read_hashed(f"cas/{digest}/blob", digest)
         except FileNotFoundError:
             raise FileNotFoundError(f"cas object not found: {uri}") from None
+
+    # ---- named adapters (ADR 0019) -------------------------------------------
+    #
+    # runs/<subdir>/names/<name>.bin + .json + .promise. A name is WRITTEN
+    # ONCE and is present exactly when its meta is: the payload lands first,
+    # the meta seals it, and a payload with no meta is debris a rerun of the
+    # same fit overwrites. Reads go THROUGH `_read` (never an existence
+    # pre-check on a mount), for the reason `cas_get` states: the consumer of
+    # a name is usually another container than its writer.
+
+    def write_named(self, subdir: str, name: str, payload: bytes,
+                    meta: Mapping[str, Any]) -> None:
+        """WRITE-ONCE: a name that is present and holds these same bytes is a
+        no-op (a resumed fit run rewriting what it already wrote); one that
+        holds different bytes raises NamedAdapterConflict — a changed adapter
+        is a new name. The stored meta is the caller's plus `sha256`, the
+        payload's fingerprint, which is what the comparison reads, so a
+        rewrite never pulls the old payload back. Persisted at once: a
+        consumer on other metal is waiting on exactly this write."""
+        digest = self.fingerprint(payload)
+        sealed = self.named_meta(subdir, name)
+        if sealed is not None:
+            if sealed.get("sha256") != digest:
+                raise NamedAdapterConflict(
+                    f"adapter {name!r} under {subdir!r} is already written "
+                    f"({str(sealed.get('sha256'))[:12]}) and was offered "
+                    f"different bytes ({digest[:12]}): a name is written "
+                    f"once — a changed adapter is a new name")
+            return
+        self._write_hashed(named_key(subdir, name, NAMED_PAYLOAD), payload, digest)
+        self._write(named_key(subdir, name, NAMED_META),
+                    _canonical({**dict(meta), "sha256": digest}).encode("utf-8"))
+        self._persist()
+
+    def read_named(self, subdir: str, name: str) -> bytes | None:
+        """A present name's payload — exactly the bytes `lora_torch.emit`
+        produces for one LoRA set — or None while the name is not present.
+        None rather than FileNotFoundError because this read is an await
+        predicate, like `read_postdata_part`."""
+        key = named_key(subdir, name, NAMED_PAYLOAD)
+        held = self._named_payloads()
+        if key in held:
+            digest, payload = held[key]
+            if self.fingerprint(payload) == digest:
+                held.move_to_end(key)
+                return payload
+            del held[key]
+        meta = self.named_meta(subdir, name)
+        if meta is None:
+            return None
+        digest = meta.get("sha256")
+        if not isinstance(digest, str) or not re.fullmatch(r"[0-9a-f]{64}", digest):
+            raise StoreError(f"named adapter {key!r} has an invalid sha256 seal")
+        try:
+            payload = self._read_hashed(key, digest)
+        except FileNotFoundError as error:
+            raise StoreError(f"sealed named adapter {key!r} has no payload") from error
+        held[key] = (digest, payload)
+        while len(held) > NAMED_PAYLOADS_HELD:
+            held.popitem(last=False)
+        return payload
+
+    def _named_payloads(self) -> "OrderedDict[str, tuple[str, bytes]]":
+        """PRESENT NAMES ARE WRITE-ONCE, SO A PAYLOAD READ ONCE IS READ
+        (2026-09-19): a run that stacks its dreamer on a memory hands the same
+        ~60 MB to its engine, its learner and its fork fits every update, and
+        the scratch store moves about five megabytes a second. The last
+        NAMED_PAYLOADS_HELD payloads stay in this process."""
+        return self.__dict__.setdefault("_named_payload_cache", OrderedDict())
+
+    def named_meta(self, subdir: str, name: str) -> dict[str, Any] | None:
+        """A present name's meta (what its writer said of it, plus `sha256`),
+        or None while the name is not present. The meta is the seal, so this
+        is also the presence question, at the cost of one small read."""
+        try:
+            return json.loads(
+                self._read(named_key(subdir, name, NAMED_META)).decode("utf-8"))
+        except FileNotFoundError:
+            return None
+
+    def _promise_files(self) -> dict[str, tuple[str, frozenset[str]]]:
+        """Promise files already read, by key: a writer's file never changes
+        (a rewrite is this store's own and evicts its entry), so each is read
+        once per store object and a waiting consumer's poll costs one listing."""
+        return self.__dict__.setdefault("_promise_file_cache", {})
+
+    def promise_named(self, subdir: str, names: Sequence[str], writer: str) -> None:
+        """`writer` (a run reference) WILL write these names — said at the
+        writer's birth, before its first job, so a consumer that finds a name
+        absent can tell "still coming" from "never coming". ONE write, however
+        many names (PROMISES_FOLDER). A resubmitted fit run is a new writer
+        with its own file, and a name several writers promised is still coming
+        while ANY of them is still work; a resumed run restates its own file
+        for free."""
+        reference = run_reference(writer)
+        stated = _canonical({"writer": reference,
+                             "names": sorted(check_name(name) for name in names)}).encode("utf-8")
+        key = promises_key(subdir, reference)
+        try:
+            if self._read(key) == stated:
+                return
+        except FileNotFoundError:
+            pass
+        self._write(key, stated)
+        self._promise_files().pop(key, None)
+        self._persist()
+
+    def named_writers(self, subdir: str, name: str) -> tuple[str, ...]:
+        """Every run that promised this name: the writers' files, read once
+        each (a writer's file never changes), and the one-file-per-name
+        promise the first fit runs left."""
+        found: list[str] = []
+        try:
+            raw = self._read(named_key(subdir, name, NAMED_PROMISE))
+            found.append(str(json.loads(raw.decode("utf-8"))["writer"]))
+        except FileNotFoundError:
+            pass
+        folder = f"runs/{check_subdir(subdir)}/names/{PROMISES_FOLDER}/"
+        for key in sorted(self._list(folder)):
+            key = key if key.startswith("runs/") else folder + key.rsplit("/", 1)[-1]
+            if key not in self._promise_files():
+                try:
+                    row = json.loads(self._read(key).decode("utf-8"))
+                except FileNotFoundError:
+                    continue
+                self._promise_files()[key] = (str(row["writer"]), frozenset(row["names"]))
+            promiser, promised = self._promise_files()[key]
+            if name in promised and promiser not in found:
+                found.append(promiser)
+        return tuple(found)
+
+    def named_writer(self, subdir: str, name: str) -> str | None:
+        """The run that promised this name — one that is still work when
+        several did — or None when nobody has."""
+        writers = self.named_writers(subdir, name)
+        for writer in writers:
+            if not run_ended(self, writer):
+                return writer
+        return writers[-1] if writers else None
+
+    def named_state(self, subdir: str, name: str) -> str:
+        """What a consumer can know about a name: `present` (its bytes are
+        sealed), `promised` (a run that is still work said it will write it),
+        `orphaned` (the run that promised it is done, stopped or failed and
+        the bytes are absent — it is never coming), `unknown` (no bytes, no
+        promise: its writer may simply not be born yet).
+
+        Presence is asked AGAIN after the writer is found ended: a writer
+        that sealed its last name and finished between the two reads left a
+        present name, not an orphan."""
+        if self.named_meta(subdir, name) is not None:
+            return PRESENT
+        writer = self.named_writer(subdir, name)
+        if writer is None:
+            return UNKNOWN
+        if not run_ended(self, writer):
+            return PROMISED
+        return PRESENT if self.named_meta(subdir, name) is not None else ORPHANED
 
     def describe(self) -> str:
         """Where this store's data lives, for journals and CLIs — a path,
@@ -381,6 +636,16 @@ class Store(ABC):
                 except json.JSONDecodeError:
                     pass
         return out
+
+    def peek_checkpoints(self, run_id: str) -> list[dict[str, Any]]:
+        """The checkpoint record, read-only: every durable point, oldest
+        first, `{update, versions}`. A directory with no record is a pre-0014
+        run, where every ledger line was a checkpoint, so its ledger IS its
+        record."""
+        home = self.run_prefix(run_id)
+        if not self._exists(f"{home}/{CHECKPOINTS}"):
+            return self.peek_ledger(run_id)
+        return _parse_record(self._read(f"{home}/{CHECKPOINTS}"))
 
     def peek_wave(self, run_id: str, update: int) -> list[dict[str, Any]] | None:
         """One sealed wave's trajectory rows WITHOUT attaching. The observer's
@@ -646,15 +911,20 @@ class RunProgress:
     extent: str
     completed: int
     planned: int | None
+    checkpointed: int | None = None
 
     @property
     def done(self) -> bool:
         """A run is done when its EXTENT is: the ledger reached the train
-        plan's length, or the rollout plan's last wave is sealed. A run with
+        plan's length AND the checkpoint record sealed that last update (ADR
+        0014 — a run whose final blobs never landed rewinds on attach and is
+        still work), or the rollout plan's last wave is sealed. A run with
         no plan on record is still work — the one predicate the desk's
         reaper, the observer and the host all read, so no copy of it can
         drift (Q3)."""
-        return self.planned is not None and self.completed >= self.planned
+        if self.planned is None or self.completed < self.planned:
+            return False
+        return self.checkpointed is None or self.checkpointed >= self.planned
 
 
 def run_progress(store: "Store", run_id: str) -> RunProgress:
@@ -673,9 +943,22 @@ def run_progress(store: "Store", run_id: str) -> RunProgress:
     train = store.peek_plan(run_id, "train")
     if train is not None:
         entries = store.peek_ledger(run_id)
+        sealed = store.peek_checkpoints(run_id)
         return RunProgress("train",
                            int(entries[-1]["update"]) if entries else 0,
-                           wave_count(train))
+                           wave_count(train),
+                           checkpointed=int(sealed[-1]["update"]) if sealed else 0)
+    fit = store.peek_plan(run_id, "fit")
+    if fit is not None:
+        # a FIT RUN (ADR 0019): one ledger line per fit job, so the ledger is
+        # the count and the fit plan's length the extent, sealed like a
+        # training run's by its checkpoint record
+        entries = store.peek_ledger(run_id)
+        sealed = store.peek_checkpoints(run_id)
+        return RunProgress("fit",
+                           int(entries[-1]["update"]) if entries else 0,
+                           wave_count(fit),
+                           checkpointed=int(sealed[-1]["update"]) if sealed else 0)
     rollout = store.peek_plan(run_id, "rollout")
     if rollout is None:
         return RunProgress("", 0, None)
@@ -688,6 +971,39 @@ def run_done(store: "Store", run_id: str) -> bool:
     store is the run (I10) — what the desk's reaper asks of a run whose host
     died, and what the observer's "done" means."""
     return run_progress(store, run_id).done
+
+
+def standing_disposition(store: "Store", run_id: str) -> str | None:
+    """`stopped` or `failed` when that is the desk's standing word on this
+    run, else None — the fleet journal's fold (ADR 0014, Part C) read for ONE
+    run: a deliberate stop or the run's own death stands until a later
+    DELIVERED placement supersedes it, because resubmitting is how a run
+    moves again. `parked` is not an answer here: a parked run is retried.
+    The journal names a run by its bare id, wherever it was filed.
+
+    The journal is observability and no byte of any run is computed from it;
+    this read can only turn a consumer's WAIT into a REFUSAL (`run_ended`),
+    which is the one thing a stop or a failure is recorded nowhere else to
+    say."""
+    bare = run_id.rsplit("/", 1)[-1]
+    standing: str | None = None
+    for event in store.read_fleet_log():
+        if event.get("run_id") != bare:
+            continue
+        kind = event.get("event")
+        if kind in ("stopped", "failed"):
+            standing = kind
+        elif kind == "place" and event.get("delivered") and event.get("accepted"):
+            standing = None
+    return standing
+
+
+def run_ended(store: "Store", run_id: str) -> bool:
+    """Will this run never write again? Its extent is done, or the desk's
+    standing word on it is `stopped` or `failed`. What turns a promised name
+    into an orphan (ADR 0019): a consumer waits on a writer that is still
+    work — parked, placed, or not yet born — and refuses one that ended."""
+    return run_done(store, run_id) or standing_disposition(store, run_id) is not None
 
 
 @dataclass
@@ -747,8 +1063,12 @@ class RunHandle:
 
     def _repair_ledger(self) -> None:
         """Rewrite the ledger without any torn tail (a torn append never committed)."""
+        self._repair_record(self.ledger_key)
+
+    def _repair_record(self, key: str) -> None:
+        """Rewrite one append-only jsonl record without its torn tail."""
         try:
-            raw = self.store._read(self.ledger_key)
+            raw = self.store._read(key)
         except FileNotFoundError:
             return
         keep = 0
@@ -762,7 +1082,7 @@ class RunHandle:
                 break
             keep = newline + 1
         if keep != len(raw):
-            self.store._write(self.ledger_key, raw[:keep])
+            self.store._write(key, raw[:keep])
 
     def append_ledger(self, entry: dict[str, Any]) -> None:
         """THE commit point: one canonical json line, durable, and the Trainer's
@@ -778,6 +1098,61 @@ class RunHandle:
             raise LedgerError(
                 f"ledger update must strictly increase: {update} <= {tail['update']}")
         self.store._append_line(self.ledger_key, _canonical(entry))
+
+    # ---- the checkpoint record (ADR 0014) -----------------------------------
+
+    @property
+    def checkpoints_key(self) -> str:
+        return self._key(CHECKPOINTS)
+
+    def read_checkpoints(self) -> list[dict[str, Any]]:
+        """Every durable point, oldest first: `{update, versions}`, the last
+        being what resume restores. A torn final line is dropped. A run with
+        no record at all is a pre-0014 directory: every ledger line was a
+        checkpoint, so the ledger is returned as the record."""
+        try:
+            raw = self.store._read(self.checkpoints_key)
+        except FileNotFoundError:
+            return self.read_ledger()
+        return _parse_record(raw)
+
+    def checkpoint_tail(self) -> dict[str, Any] | None:
+        """The last durable point — what resume restores and attach rewinds
+        to — or None on a run that has never checkpointed."""
+        entries = self.read_checkpoints()
+        return entries[-1] if entries else None
+
+    def append_checkpoint(self, update: int, versions: Mapping[str, int]) -> None:
+        """THE DURABLE POINT: written AFTER every trainable entry's blobs at
+        `versions` are on the store, and the Trainer's alone. `update` must
+        strictly increase and may not run ahead of the ledger (0 is the
+        initial blobs, before any line); the versions must be the ones the
+        ledger line at that update committed."""
+        self._repair_record(self.checkpoints_key)
+        if isinstance(update, bool) or not isinstance(update, int) or update < 0:
+            raise LedgerError(f"checkpoint 'update' must be an int >= 0, got {update!r}")
+        try:
+            previous = _parse_record(self.store._read(self.checkpoints_key))
+        except FileNotFoundError:
+            previous = []
+        if previous and update <= int(previous[-1]["update"]):
+            raise LedgerError(
+                f"checkpoint update must strictly increase: {update} <= {previous[-1]['update']}")
+        tail = self.ledger_tail()
+        committed = int(tail["update"]) if tail is not None else 0
+        if update > committed:
+            raise LedgerError(
+                f"checkpoint {update} runs ahead of the ledger ({committed}): a "
+                f"checkpoint seals a committed update")
+        if tail is not None and int(tail["update"]) == update \
+                and isinstance(tail.get("versions"), dict) \
+                and {k: int(v) for k, v in tail["versions"].items()} != \
+                {k: int(v) for k, v in versions.items()}:
+            raise LedgerError(
+                f"checkpoint {update} names versions {dict(versions)} but the ledger "
+                f"line at {update} committed {tail['versions']}")
+        self.store._append_line(self.checkpoints_key, _canonical(
+            {"update": update, "versions": {k: int(v) for k, v in sorted(versions.items())}}))
 
     # ---- per-update artifacts: waves + postdata --------------------------
 
@@ -859,7 +1234,7 @@ class RunHandle:
         """One producer's columns, or None while it has not written them.
 
         None rather than FileNotFoundError because this read is an AWAIT
-        PREDICATE: the Trainer blocks on exactly this absence, and a daemon
+        PREDICATE: the Trainer blocks on exactly this absence, and a runner
         waiting on a store predicate should be reading a value, not catching an
         exception.
         """
@@ -924,9 +1299,9 @@ class RunHandle:
         asked for. A blob already gone is skipped, which is what makes
         sweeping twice free nothing the second time.
         """
-        tail = self.ledger_tail()
+        tail = self.checkpoint_tail()
         named = []
-        for section, name, version in policy.expendable(self.read_ledger()):
+        for section, name, version in policy.expendable(self.read_checkpoints()):
             self._refuse_live_version(tail, section, name, version)
             named.append(((section, name, version),
                           self._blob_key(section, name, version)))
@@ -954,8 +1329,9 @@ class RunHandle:
 
     def _refuse_live_version(self, tail: dict[str, Any] | None, section: str,
                              name: str, version: int) -> None:
-        """The version the ledger tail names is the run's LIVE state — resume
-        reads exactly it — so no policy may free it, whatever it says.
+        """The version the CHECKPOINT tail names is the run's restorable
+        state — resume reads exactly it — so no policy may free it, whatever
+        it says.
 
         The floor under every retention policy, enforced here and not there: a
         swept run still resumes.
@@ -966,7 +1342,7 @@ class RunHandle:
         if isinstance(live, dict) and name in live and int(version) == int(live[name]):
             raise StoreError(
                 f"retention named {section}/{name}@{version}, the version the "
-                f"ledger tail commits: the tail is what resume reads")
+                f"checkpoint tail seals: the tail is what resume reads")
 
     # ---- eval ---------------------------------------------------------------
 
@@ -977,21 +1353,31 @@ class RunHandle:
     # ---- crash recovery (runs on every attach) ------------------------------
 
     def _discard_unsealed(self) -> None:
-        """Drop everything no ledger line committed — work is sealed by its
-        ledger entry and nothing else.
+        """THE REWIND (ADR 0014): drop everything the checkpoint record never
+        sealed — work is durable at its checkpoint and nowhere else.
 
-        A torn final ledger line is repaired away; per-update artifacts (waves,
+        Torn tails of both records are repaired away. With the checkpoint
+        tail at update c and versions V_c: ledger lines above c are cut (the
+        learner state that produced them is gone, so the Trainer redoes them
+        and writes the same lines again); per-update artifacts (waves,
         postdata, and the postdata PARTS a Scorer wrote ahead of the Trainer)
-        beyond the tail are deleted; blob versions above each delta's committed
-        version are deleted; backend write debris is swept.
+        above c are deleted; blob versions above V_c are deleted; rollouts
+        pinned to a version above V_c are deleted, newest first, because a
+        rollout sampled at a version that no longer exists would pin a bundle
+        no store can rebuild; backend write debris is swept. A pre-0014
+        directory has no record and every ledger line was a checkpoint, so
+        for it this is exactly the old rule.
 
-        Sweeping a part costs nothing to recover: scoring is deterministic
-        seedless prefill at a pinned bundle, so the daemon that wrote it writes
-        the same bytes again on the next attach.
+        Redoing costs nothing but compute: every discarded byte is a pure
+        function of (spec, code, data) from the checkpoint on, which is what
+        `tests/test_resume.py` proves at every cadence.
         """
         self._repair_ledger()
-        entries = self.read_ledger()
-        tail_update = int(entries[-1]["update"]) if entries else -1
+        self._repair_record(self.checkpoints_key)
+        sealed = self.read_checkpoints()
+        # no checkpoint at all: NOTHING is sealed, update 0's artifacts included
+        tail_update = int(sealed[-1]["update"]) if sealed else -1
+        self._cut_ledger_above(tail_update)
 
         for section, suffix in UPDATE_SECTIONS:
             for key in self.store._list(self._key(section)):
@@ -999,15 +1385,52 @@ class RunHandle:
                 if update is not None and update > tail_update:
                     self.store._delete(key)
 
-        committed = _committed_versions(entries)
+        committed = _committed_versions(sealed)
         if committed is not None:
             for section in BLOB_SECTIONS:
                 for key in self.store._list(self._key(section)):
                     name, version = _parse_blob(key)
                     if version is not None and version > committed.get(name, 0):
                         self.store._delete(key)
+            self._discard_rollouts_above(committed)
 
         self.store._sweep_partial(self._key())
+
+    def _cut_ledger_above(self, update: int) -> None:
+        """Rewrite the ledger with every line above `update` removed — the
+        provisional tail past the checkpoint, cut exactly as a torn line is.
+        The kept bytes are the kept lines, untouched."""
+        try:
+            raw = self.store._read(self.ledger_key)
+        except FileNotFoundError:
+            return
+        keep = 0
+        for line in raw.split(b"\n"):
+            if not line:
+                break
+            if int(json.loads(line.decode("utf-8"))["update"]) > update:
+                break
+            keep += len(line) + 1
+        if keep < len(raw):
+            self.store._write(self.ledger_key, raw[:keep])
+
+    def _discard_rollouts_above(self, committed: Mapping[str, int]) -> None:
+        """Delete every sealed rollout whose turns pin a version above the
+        checkpoint's, NEWEST FIRST and stopping at the first that does not:
+        the Generator samples in index order at a version that only ever
+        rises, so the discarded set is a suffix and the scan costs one read
+        per discarded rollout plus one."""
+        indexed = []
+        for key in self.store._list(self._key("rollouts")):
+            index = _parse_update(key, ".jsonl.gz")
+            if index is not None:
+                indexed.append((index, key))
+        for index, key in sorted(indexed, reverse=True):
+            raw = gzip.decompress(self.store._read(key)).decode("utf-8")
+            rows = [json.loads(line) for line in raw.split("\n") if line]
+            if not _pinned_above(rows, committed):
+                break
+            self.store._delete(key)
 
 
 def _committed_versions(entries: list[dict[str, Any]]) -> dict[str, int] | None:
@@ -1026,6 +1449,33 @@ def _committed_versions(entries: list[dict[str, Any]]) -> dict[str, int] | None:
             for name, version in versions.items():
                 out[str(name)] = max(out.get(str(name), 0), int(version))
     return out if found else None
+
+
+def _pinned_above(rows: Sequence[Mapping[str, Any]],
+                  committed: Mapping[str, int]) -> bool:
+    """Does any turn in these sealed rows pin a delta version above the
+    checkpoint's? A delta the checkpoint never named has sealed version 0."""
+    for row in rows:
+        for turn in row.get("turns", ()):
+            for name, version in (turn.get("policy_version") or {}).items():
+                if int(version) > int(committed.get(str(name), 0)):
+                    return True
+    return False
+
+
+def _parse_record(raw: bytes) -> list[dict[str, Any]]:
+    """One append-only jsonl record's entries; a torn final line is dropped,
+    any other bad line is a corrupt record."""
+    lines = [line for line in raw.decode("utf-8").split("\n") if line]
+    entries: list[dict[str, Any]] = []
+    for index, line in enumerate(lines):
+        try:
+            entries.append(json.loads(line))
+        except json.JSONDecodeError:
+            if index == len(lines) - 1:
+                break
+            raise LedgerError(f"corrupt record line {index}") from None
+    return entries
 
 
 def _parse_update(key: str, suffix: str) -> int | None:

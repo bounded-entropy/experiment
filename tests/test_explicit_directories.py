@@ -8,6 +8,7 @@ import unittest
 from unittest.mock import AsyncMock, patch
 
 from common import arith_spec, arith_store
+from rlstack.runner.checkpointing import EVERY_UPDATE
 from rlstack import FakeEngine, FakeLearner, Host, LocalStore, ModalVolumeStore, WarmStart, fake_qwen_schema
 from rlstack.data.stores.base import StoreError
 from rlstack.observe.cache import CachedReadStore
@@ -106,17 +107,17 @@ class ExplicitDirectoryTest(unittest.TestCase):
         store, train, _ = arith_store(self.tmp.name)
         schema = fake_qwen_schema(4, base="Qwen/Qwen3-0.6B")
         report = run_experiment(arith_spec(train), schema, store, FakeEngine(),
-                                FakeLearner(), subdir="sync/nested")
+                                FakeLearner(), subdir="sync/nested", checkpointing=EVERY_UPDATE)
         ref = f"sync/nested/{report.run_id}"
         ledger = store._read(f"runs/{ref}/ledger.jsonl")
         self.assertIsNone(store.peek_manifest(report.run_id))
         again = run_experiment(arith_spec(train), schema, store, FakeEngine(),
-                              FakeLearner(), subdir="sync/nested", resume=True)
+                              FakeLearner(), subdir="sync/nested", resume=True, checkpointing=EVERY_UPDATE)
         self.assertEqual(again.run_id, report.run_id)
         self.assertEqual(store._read(f"runs/{ref}/ledger.jsonl"), ledger)
         with self.assertRaisesRegex(StoreError, "runs/wrong/"):
             run_experiment(arith_spec(train), schema, store, FakeEngine(),
-                           FakeLearner(), subdir="wrong", resume=True)
+                           FakeLearner(), subdir="wrong", resume=True, checkpointing=EVERY_UPDATE)
 
     def test_remote_resume_refuses_wrong_directory_before_accepting(self):
         store, train, _ = arith_store(self.tmp.name)
@@ -126,10 +127,10 @@ class ExplicitDirectoryTest(unittest.TestCase):
         remote = RemoteHost(LocalTransport(HostService(host)))
 
         async def drive():
-            first = await remote.adopt(arith_spec(train), subdir="right")
+            first = await remote.adopt(arith_spec(train), subdir="right", checkpointing=EVERY_UPDATE.row())
             await host._adoptions[first["run_id"]]
-            wrong = await remote.adopt(arith_spec(train), subdir="wrong", resume=True)
-            right = await remote.adopt(arith_spec(train), subdir="right", resume=True)
+            wrong = await remote.adopt(arith_spec(train), subdir="wrong", resume=True, checkpointing=EVERY_UPDATE.row())
+            right = await remote.adopt(arith_spec(train), subdir="right", resume=True, checkpointing=EVERY_UPDATE.row())
             await host._adoptions[right["run_id"]]
             return first, wrong, right
 
@@ -138,29 +139,3 @@ class ExplicitDirectoryTest(unittest.TestCase):
         self.assertIn("runs/wrong/", wrong["error"])
         self.assertEqual(right["run_ref"], first["run_ref"])
         self.assertFalse(store.path_of("runs/wrong").exists())
-
-
-class RecoveryGenerationTest(unittest.TestCase):
-    def test_registration_skips_old_parked_frames_until_explicit_resubmission(self):
-        with tempfile.TemporaryDirectory() as directory:
-            store = LocalStore(directory)
-            frame = {"spec": {}, "subdir": "old"}
-            store.append_fleet_event({"event": "place", "run_id": "r", "frame": frame})
-            desk = Desk(store, host_for=lambda address: None, recovery_generation="new-campaign")
-            desk.park("r", "historical paused work")
-            move = AsyncMock(return_value={"rerouted": True})
-            with patch.object(desk, "reroute", move), patch.object(desk, "finished", return_value=False):
-                asyncio.run(desk.serve("metal", {"name": "new-metal", "gpu": "L4", "devices": 1,
-                                                  "vram_gb": 24, "idle_s": 300}))
-                move.assert_not_awaited()
-                desk.journal_intent("wrong-frame-key", frame)
-                self.assertEqual(asyncio.run(desk.retry_parked()), {})
-                from rlstack.runner.desk import submit_key
-                desk.journal_intent(submit_key(frame), frame)
-                self.assertEqual(asyncio.run(desk.retry_parked()), {"r": "rerouted"})
-            rebuilt = Desk.from_journal(store, host_for=lambda address: None,
-                                        recovery_generation="new-campaign")
-            self.assertEqual(rebuilt.recovery_keys(), desk.recovery_keys())
-            other = Desk.from_journal(store, host_for=lambda address: None,
-                                      recovery_generation="next-campaign")
-            self.assertEqual(other.recovery_keys(), set())

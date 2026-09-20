@@ -17,6 +17,7 @@ import unittest
 from unittest import mock
 
 from common import arith_spec, arith_store
+from rlstack.runner.checkpointing import EVERY_UPDATE
 from rlstack import (
     FakeEngine, FakeLearner, Host, LocalStore, fake_qwen_schema,
 )
@@ -89,7 +90,7 @@ class SubdirThreadingTest(unittest.TestCase):
 
     def test_submit_files_the_run_and_identity_ignores_it(self) -> None:
         spec = arith_spec(self.train)
-        report = go(self.host().submit(spec, SCHEMA, subdir="sweeps/arith"))
+        report = go(self.host().submit(spec, SCHEMA, subdir="sweeps/arith", checkpointing=EVERY_UPDATE))
         self.assertTrue(self.store.path_of(
             f"runs/sweeps/arith/{report.run_id}/ledger.jsonl").exists())
 
@@ -98,7 +99,7 @@ class SubdirThreadingTest(unittest.TestCase):
         other_store, other_train, _ = arith_store(tmp.name)
         top = Host("top-host", engines=(FakeEngine(),), learner=FakeLearner(),
                    store=other_store)
-        plain = go(top.submit(arith_spec(other_train), SCHEMA))
+        plain = go(top.submit(arith_spec(other_train), SCHEMA, checkpointing=EVERY_UPDATE))
         self.assertEqual(report.run_id, plain.run_id)   # filing never hashes
         self.assertEqual(
             self.store.path_of(
@@ -112,7 +113,7 @@ class SubdirThreadingTest(unittest.TestCase):
         spec = arith_spec(self.train)
 
         async def drive():
-            reply = await remote.adopt(spec, subdir="desk/filed")
+            reply = await remote.adopt(spec, subdir="desk/filed", checkpointing=EVERY_UPDATE.row())
             await host._adoptions[reply["run_id"]]
             return reply
         reply = go(drive())
@@ -122,7 +123,7 @@ class SubdirThreadingTest(unittest.TestCase):
 
     def test_the_observer_says_where_each_run_lives(self) -> None:
         go(self.host().submit(arith_spec(self.train), SCHEMA,
-                              subdir="sweeps/arith"))
+                              subdir="sweeps/arith", checkpointing=EVERY_UPDATE))
         (row,) = runs_data([self.store])
         self.assertEqual(row["subdir"], "sweeps/arith")
 

@@ -217,7 +217,7 @@ class RankGroup:
         The announce is itself a collective: against a dead or mis-sequenced
         follower it never matches and blocks until the process group's own
         timeout (1800s by default) — so the farewell that exists to END the
-        chorus would be the thing that wedges rank 0. It goes out on a daemon
+        chorus would be the thing that wedges rank 0. It goes out on a runner
         thread with a deadline instead; not returning in time — or raising on
         a group that is already broken — means the chorus is past hearing, and
         the ladder below is what ends it."""

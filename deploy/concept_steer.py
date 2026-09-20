@@ -352,21 +352,21 @@ def up() -> None:
 
 
 @app.local_entrypoint()
-def distill_set(train_tasks: str = "", timeout_s: float = 14400.0) -> None:
+def distill_set(train_tasks: str = "", timeout_s: float = 14400.0, *, every: int) -> None:
     """THE TEACHER'S TRAJECTORY SET, as a generation-only run. Prints the
     run_id the three arms name in their plans."""
     if not train_tasks:
         raise SystemExit("--train-tasks <cas uri from ::prompts>")
     metal_handle(APP).serve.spawn()
     print(json.dumps(wait_for_metal(METAL), indent=1), flush=True)
-    run_id = submit_and_follow(teacher_row(train_tasks), SUBDIR, timeout_s)
+    run_id = submit_and_follow(teacher_row(train_tasks), SUBDIR, timeout_s, every=every)
     print(f"[set] the teacher's rollouts are run {run_id} — "
           f"pass it to ::train --teacher-run", flush=True)
 
 
 @app.local_entrypoint()
 def train(layer: int = 0, teacher_run: str = "",
-          timeout_s: float = 14400.0, adapter: str = "steer") -> None:
+          timeout_s: float = 14400.0, adapter: str = "steer", *, every: int) -> None:
     """ONE ARM: the steer at `resid_pre.<layer>`, SFT over the teacher's set.
     Three arms run back to back on ONE booted metal — which is exactly what
     the campaign door not releasing buys (Q6)."""
@@ -377,7 +377,7 @@ def train(layer: int = 0, teacher_run: str = "",
     metal_handle(APP).serve.spawn()
     print(json.dumps(wait_for_metal(METAL), indent=1), flush=True)
     run_id = submit_and_follow(student_row(teacher_run, layer, adapter), SUBDIR,
-                               timeout_s)
+                               timeout_s, every=every)
     print(f"[arm] resid_pre.{layer} trained as run {run_id}", flush=True)
 
 
@@ -386,7 +386,7 @@ def follow_run(run_id: str = "", timeout_s: float = 14400.0) -> None:
     """RE-ATTACH to a run already on the metal and follow it to its extent.
     A driver that died (this venue's first teacher run lost its follower to
     a chassis bug) leaves the run untouched: the tenancy is the desk's and
-    the daemons are the host's, and only the watching stopped."""
+    the runners are the host's, and only the watching stopped."""
     if not run_id:
         raise SystemExit("--run-id <rid>")
     print(f"[follow] {follow(run_id, timeout_s, folder=SUBDIR)} reached its "

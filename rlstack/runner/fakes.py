@@ -11,10 +11,11 @@ equivalence depends on it.
 
 from __future__ import annotations
 
+import hashlib
 import random
 import re
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from collections.abc import AsyncIterator, Mapping, Sequence
 
 from rlstack.data.flatten import TokenBatch
@@ -22,12 +23,16 @@ from rlstack.data.trajectory import Message
 from rlstack.policy.adapters.base import (
     AdapterType, Directive, Mechanism, adapter_type,
 )
-from rlstack.policy.adapters.rollout import Request
+from rlstack.policy.adapters.dream_bank import (
+    BASE, Route, check_route, check_trains_at_most_one, is_library,
+    library_names_of, parts_of, route_of,
+)
+from rlstack.policy.adapters.rollout import Library, Request
 from rlstack.policy.compile import Bundle
 from rlstack.policy.siteschema import SiteMeta
 from rlstack.registry import ADAPTER_TYPES
 from rlstack.runner.interfaces import (
-    Emitted, FinishEvent, Parameterization, TokenEvent, TrainStats,
+    Emitted, FinishEvent, Parameterization, TokenEvent, TrainStats, lr_scale_of,
 )
 from rlstack.runner.meters import TrafficMeter
 from rlstack.runner.seeds import derive
@@ -35,6 +40,14 @@ from rlstack.spec.canonical import content_hash
 from rlstack.spec.specs import SamplingSpec
 
 _ARITH = re.compile(r"(\d+)\s*\+\s*(\d+)")
+
+def library_names(directives: Sequence[Directive]) -> tuple[str, ...]:
+    """The library adapters a request's route reads (ADR 0019): the `lib:`
+    parts of its dream_bank Route, stacked or alone — read by the one route
+    grammar (`dream_bank.library_names_of`)."""
+    return tuple(name
+                 for directive in directives if isinstance(directive, Route)
+                 for name in library_names_of(directive.name))
 
 
 class FakeEngine:
@@ -49,13 +62,21 @@ class FakeEngine:
     exercisable with no GPU. `plugins` is this fake build's set of installed
     plugin mechanisms — reachability honestly reports NONE for a plugin
     mechanism that is not in it.
+
+    THE LIBRARY (ADR 0019) is the real engine's: the same `Library`, bounded
+    by `max_library`, so idempotence, the write-once refusal and LRU eviction
+    are the real rules. A request routed under `lib:<name>` — alone or stacked
+    — is REFUSED unless that name is held, which is what proves a Generator
+    handed the bytes before it sampled; a score under one is a function of
+    the named payloads too, so a library adapter visibly changes what it
+    scores. A request naming none is answered exactly as before.
     """
 
     def __init__(self, p_correct: float = 0.5, record_draws: bool = False,
                  record_latent: bool = False,
                  plugins: frozenset[Mechanism] = frozenset(),
                  base: str | None = None, tp: int = 1,
-                 sleeps: bool = False) -> None:
+                 sleeps: bool = False, max_library: int = 32) -> None:
         self.base = base            # None: fake metal serves any base
         self.tp = tp                # build fact: a fake TP-2 engine is tp=2
         # build fact, as on the real engine: can this build hand the device
@@ -73,6 +94,7 @@ class FakeEngine:
         # `first_contact` empty until there has BEEN a first contact
         self.served = 0
         self.bundle_log: list[str] = []       # every add_bundle, in order
+        self.library = Library(max_library)   # its `log`: every name first held
         self._known: set[str] = set()
         # bundle -> the adapter types its payloads carry: what a request's
         # directives are recorded against (record_directives below)
@@ -148,6 +170,19 @@ class FakeEngine:
             dict.fromkeys(bundle.adapter_types[name]
                           for name in sorted(bundle.adapter_types)))
 
+    def add_library(self, name: str, payload: bytes) -> None:
+        self.library.add(name, payload)
+
+    def library_read(self, directives: Sequence[Directive]) -> dict[str, str]:
+        """Every library adapter this request's route reads, by name, as the
+        content hash of its payload — or the Library's refusal of a name
+        nobody handed in. Reading marks the name recently used, as on the
+        real engine."""
+        names = library_names(directives)
+        for name in names:
+            self.library.get(name)
+        return {name: self.library.digest(name) for name in names}
+
     def record_directives(self, bundle_id: str, token_ids: tuple[int, ...],
                           seed: int | None,
                           directives: Sequence[Directive]) -> dict:
@@ -182,6 +217,7 @@ class FakeEngine:
         if bundle_id not in self._known:
             raise RuntimeError(f"bundle {bundle_id!r} was never registered")
         self.directives_seen.append(tuple(directives))
+        library = self.library_read(directives)
         context = "".join(m.content for m in messages)
         self.record_directives(bundle_id, tuple(ord(c) for c in context),
                                None, directives)
@@ -190,7 +226,8 @@ class FakeEngine:
         return tuple(
             -0.2 - 0.5 * (int(content_hash({
                 "bundle": bundle_id, "ctx": context,
-                "tok": int(tok), "pos": pos})[:6], 16) / 16 ** 6)
+                "tok": int(tok), "pos": pos,
+                **({"library": library} if library else {})})[:6], 16) / 16 ** 6)
             for pos, tok in enumerate(token_ids))
 
     async def sample_tokens(
@@ -205,6 +242,7 @@ class FakeEngine:
         if bundle_id not in self._known:
             raise RuntimeError(f"bundle {bundle_id!r} was never registered")
         self.directives_seen.append(tuple(directives))
+        self.library_read(directives)
         rng = random.Random(seed)
         text = self._completion(messages[-1].content, rng)
         # char-level metal: one token per character, so the prompt's token
@@ -286,6 +324,20 @@ def fake_initial_payload(sites: Sequence[SiteMeta],
     })[:16]).encode()
 
 
+def fake_set_digest(payload: bytes) -> str:
+    """The digest a named payload carries. The fake's own payloads carry
+    theirs verbatim — so emit_set -> load_set -> emit_set is exact — and any
+    other bytes (a test's stand-in library) are their sha256."""
+    if payload.startswith(FAKE_SET):
+        return payload[len(FAKE_SET):].decode()
+    return hashlib.sha256(payload).hexdigest()
+
+
+def _doc_spans(batch: TokenBatch) -> list[tuple[int, int]]:
+    starts = list(batch.doc_starts)
+    return list(zip(starts, starts[1:] + [len(batch.token_ids)]))
+
+
 @dataclass
 class FakeParams:
     """What FakeAdapter builds: the payload, and nothing else. A fake adapter
@@ -322,6 +374,29 @@ class FakeAdapter(AdapterType):
         params.payload = payload
 
 
+FAKE_SET = b"fake-set:"
+"""The fake world's NAMED PAYLOAD (ADR 0019): this prefix and one set's digest
+— what `FakeLearner.emit_set` writes and `load_set` reads back exactly."""
+
+FAKE_MEMORIES = 100
+"""The memory bound a fake entry whose init names none is checked against:
+every two-digit `memory:NN` — the fake checks a route's GRAMMAR, as the torch
+side does, without needing a dream_bank to have been declared."""
+
+
+@dataclass
+class _FakeSet:
+    """One named set's digest state (ADR 0019): the set as of its last step or
+    load, the documents folded into it since (its accumulated "gradient"),
+    and its own step count. Nothing of the tenant, the entry's other sets or
+    the lane's name enters the fold — which is the fakes' exact proof that K
+    lanes in one tenant train as K tenants would."""
+
+    state: str
+    pending: str | None = None
+    steps: int = 0
+
+
 @dataclass
 class _FakeTenant:
     """One experiment's digest state on this fake learner."""
@@ -333,6 +408,13 @@ class _FakeTenant:
     init: str
     state: str
     steps: int = 0
+    # ---- named sets (ADR 0019), beside the digest and never inside it: a run
+    # that never says load_set emits exactly the bytes it always did
+    set_inits: dict[str, str] = field(default_factory=dict)      # entry -> init digest
+    memories: dict[str, int] = field(default_factory=dict)       # entry -> its bound
+    sets: dict[tuple[str, str], _FakeSet] = field(default_factory=dict)
+    libraries: dict[tuple[str, str], str] = field(default_factory=dict)
+    lr_scales: list[dict[str, float]] = field(default_factory=list)  # one per step
 
 
 class FakeLearner:
@@ -403,12 +485,22 @@ class FakeLearner:
             # no learner builds for it (ADR 0006 Part B)
             frozen={name: fake_initial_payload(entry.sites, entry.init)
                     for name, entry in entries.items() if not entry.trainable},
-            init=init, state=init)
+            init=init, state=init,
+            set_inits={name: content_hash({
+                "seed": entry.init.get("seed"), "adapter_type": entry.adapter_type,
+                "sites": [m.name for m in entry.sites]})
+                for name, entry in entries.items()},
+            memories={name: int(entry.init.get("memories", FAKE_MEMORIES))
+                      for name, entry in entries.items()})
 
     def uninstall(self, tenant: str) -> None:
         """The tenancy ends and its digest state goes with it; a tenant
         nobody installed is already uninstalled (the protocol's rule)."""
         self._tenants.pop(tenant, None)
+
+    def tokenize(self, tenant: str, text: str) -> tuple[int, ...]:
+        self._tenant(tenant)
+        return tuple(ord(c) for c in text)
 
     def forward_backward(self, tenant: str, batch: TokenBatch) -> TrainStats:
         state = self._tenant(tenant)
@@ -420,6 +512,7 @@ class FakeLearner:
             "post": {k: batch.postdata[k] for k in sorted(batch.postdata)},
             "blp": batch.behavior_logprobs,
         })
+        self.fold_documents_into_their_sets(state, batch)
         return TrainStats(
             loss=int(state.state[:8], 16) / 16 ** 8,
             mean_ratio=1.0,
@@ -443,10 +536,172 @@ class FakeLearner:
                                         "provided": name})[:8], 16) / 16 ** 8
                 for name in state.provides}
 
-    def optim_step(self, tenant: str) -> None:
+    def optim_step(self, tenant: str,
+                   lr_scales: Mapping[str, float] | None = None) -> None:
+        """One step. With no scales the digest folds exactly what it always
+        did; given scales they are RECORDED (`lr_scales_of`), folded into the
+        tenant's digest, and each named set that accumulated documents steps
+        under its own scale — a set nobody fed does not move, as a parameter
+        with no gradient does not."""
         state = self._tenant(tenant)
+        scales = {key: float(lr_scales[key]) for key in sorted(lr_scales or {})}
+        state.lr_scales.append(scales)
         state.steps += 1
-        state.state = content_hash({"state": state.state, "step": state.steps})
+        fold: dict = {"state": state.state, "step": state.steps}
+        if scales:
+            fold["lr_scales"] = scales
+        state.state = content_hash(fold)
+        for (entry, route), held in state.sets.items():
+            if held.pending is None:
+                continue
+            held.steps += 1
+            held.state = content_hash({
+                "state": held.pending, "step": held.steps,
+                "scale": lr_scale_of(scales, entry, route)})
+            held.pending = None
+
+    def lr_scales_of(self, tenant: str) -> list[dict[str, float]]:
+        """What every `optim_step` of this tenant was told, in order ({} for
+        a plain step) — the fake's record of a schedule."""
+        return [dict(scales) for scales in self._tenant(tenant).lr_scales]
+
+    # ---- named sets and the no-grad forward (ADR 0019) ----------------------
+
+    def load_set(self, tenant: str, entry: str, route: str,
+                 payload: bytes | None) -> None:
+        """Start one set over: from a named payload, or from its deterministic
+        init (entry and route) when None; its accumulated documents and its
+        step count — the fake's moments — are reset either way. A `lib:<name>`
+        route installs a frozen library set, which needs its payload."""
+        state = self._tenant(tenant)
+        self.check_set_route(state, entry, route)
+        if is_library(route):
+            if payload is None:
+                raise ValueError(f"library set {route!r} has no init of its "
+                                 f"own: load_set needs its named payload")
+            state.libraries[(entry, route)] = fake_set_digest(payload)
+            return
+        digest = (self.set_init(state, entry, route) if payload is None
+                  else fake_set_digest(payload))
+        state.sets[(entry, route)] = _FakeSet(state=digest)
+
+    def drop_set(self, tenant: str, entry: str, route: str) -> None:
+        """Library sets only; one nobody holds is already dropped."""
+        state = self._tenant(tenant)
+        self.check_set_route(state, entry, route)
+        if not is_library(route):
+            raise ValueError(f"{route!r} is a set this entry owns; only a "
+                             f"library set (lib:<name>) can be dropped")
+        state.libraries.pop((entry, route), None)
+
+    def emit_set(self, tenant: str, entry: str, route: str) -> bytes:
+        """One set as the fake named payload. A set `load_set` started is its
+        own digest; one it never touched has trained (if at all) inside the
+        tenant's digest, so its payload is derived from that."""
+        state = self._tenant(tenant)
+        self.check_set_route(state, entry, route)
+        if is_library(route):
+            return FAKE_SET + self.library(state, route).encode()
+        held = state.sets.get((entry, route))
+        if held is not None:
+            return FAKE_SET + held.state.encode()
+        return FAKE_SET + content_hash({
+            "init": self.set_init(state, entry, route),
+            "state": state.state}).encode()
+
+    def forward(self, tenant: str, batch: TokenBatch) -> tuple[float, ...]:
+        """One deterministic float per document: a pure function of the
+        document's tokens and mask and of the CURRENT state of every part of
+        its route — so a probe moves exactly when the sets it reads moved.
+        Nothing is folded: a forward trains nothing."""
+        state = self._tenant(tenant)
+        self.forwards += 1
+        return tuple(
+            int(content_hash({
+                "ids": batch.token_ids[start:stop],
+                "mask": batch.loss_mask[start:stop],
+                "under": [self.part_state(state, part) for part in parts],
+            })[:8], 16) / 16 ** 8
+            for (start, stop), parts in zip(_doc_spans(batch),
+                                            self.doc_parts(state, batch)))
+
+    def fold_documents_into_their_sets(self, state: _FakeTenant,
+                                       batch: TokenBatch) -> None:
+        """forward_backward's named-set half: each document folds into the
+        trainable part of its route, IF `load_set` started that set — one
+        document at a time and in order, so how a lane's documents were packed
+        into microbatches (alone, or beside K−1 other lanes) cannot matter.
+        The library parts it ran under enter the fold; they are never folded
+        into."""
+        for (start, stop), parts in zip(_doc_spans(batch),
+                                        self.doc_parts(state, batch)):
+            under = [self.library(state, part) for part in parts if is_library(part)]
+            for part in parts:
+                for entry in state.trainable:
+                    held = state.sets.get((entry, part))
+                    if held is None:
+                        continue
+                    held.pending = content_hash({
+                        "state": held.pending or held.state,
+                        "ids": batch.token_ids[start:stop],
+                        "mask": batch.loss_mask[start:stop],
+                        "blp": batch.behavior_logprobs[start:stop],
+                        "post": {k: batch.postdata[k][start:stop]
+                                 for k in sorted(batch.postdata)},
+                        "under": under})
+
+    def doc_parts(self, state: _FakeTenant,
+                  batch: TokenBatch) -> list[tuple[str, ...]]:
+        """Each document's route parts, read off its turn facts exactly as the
+        replay lowering reads them (`route_of`: a document with no fact is the
+        dreamer's; `base` has no parts). A library part nobody loaded is
+        refused, as the torch forward refuses it."""
+        docs = batch.doc_turn_extras or ((),) * len(batch.doc_starts)
+        routed = []
+        for turns in docs:
+            route = route_of(turns)
+            check_trains_at_most_one(route)
+            parts = () if route == BASE else parts_of(route)
+            for part in parts:
+                if is_library(part):
+                    self.library(state, part)
+            routed.append(parts)
+        return routed
+
+    def part_state(self, state: _FakeTenant, part: str) -> list[str]:
+        """What a forward under `part` reads: a library's digest, the named
+        set's where `load_set` started one, else the tenant's own digest."""
+        if is_library(part):
+            return [self.library(state, part)]
+        held = [state.sets[key].state for key in sorted(state.sets) if key[1] == part]
+        return held or [state.state]
+
+    def library(self, state: _FakeTenant, part: str) -> str:
+        found = [digest for (_, route), digest in sorted(state.libraries.items())
+                 if route == part]
+        if not found:
+            raise ValueError(
+                f"route part {part!r} names a library set this tenant does "
+                f"not hold (loaded: "
+                f"{sorted({route for _, route in state.libraries}) or 'none'}); "
+                f"load_set installs one")
+        return found[0]
+
+    def check_set_route(self, state: _FakeTenant, entry: str, route: str) -> None:
+        """The named-set verbs address ONE set of a known entry: an entry set
+        or a library part — never `base`, never a stack."""
+        if entry not in state.all_names:
+            raise KeyError(f"this tenant has no bank entry {entry!r} "
+                           f"(entries: {state.all_names})")
+        check_route(route, state.memories[entry])
+        if route == BASE or len(parts_of(route)) != 1:
+            raise ValueError(f"{route!r} is not one set: the named-set verbs "
+                             f"take `dreamer`, `memory:NN` or `lib:<name>`")
+
+    def set_init(self, state: _FakeTenant, entry: str, route: str) -> str:
+        """A set's deterministic init: the entry's derived seed and the route,
+        as the torch side seeds each set off both."""
+        return content_hash({"init": state.set_inits[entry], "route": route})
 
     def emit(self, tenant: str) -> Emitted:
         state = self._tenant(tenant)

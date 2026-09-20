@@ -22,6 +22,7 @@ import tempfile
 import unittest
 
 from common import arith_spec, arith_store
+from rlstack.runner.checkpointing import EVERY_UPDATE
 from rlstack import (
     FakeEngine, FakeLearner, HostSpec, Metal, Topology, fake_qwen_schema,
     learner, pool, run_progress,
@@ -102,14 +103,14 @@ class ChassisTest(ChassisFixture):
         self.assertIsNone(service.builds)
 
         # a campaign submitted before the declaration finds nowhere to go
-        early = go(Campaigns(desk).submit(self.a_spec()))
+        early = go(Campaigns(desk).submit(self.a_spec(), checkpointing=EVERY_UPDATE))
         self.assertFalse(early["accepted"], early)
 
         # the desk's own door (deploy/desk.py::recipe): what this metal builds
         desk.recipe(self.METAL, Builds.fakes())
 
         async def drive():
-            reply = await Campaigns(desk).submit(self.a_spec())
+            reply = await Campaigns(desk).submit(self.a_spec(), checkpointing=EVERY_UPDATE)
             self.assertTrue(reply["accepted"], reply)
             await service.hosts[reply["host"]]._adoptions[reply["run_id"]]
             return reply
@@ -132,7 +133,7 @@ class ChassisTest(ChassisFixture):
         desk = self.a_desk()
         desk.register_metal(service.metal, address=self.PLANE, idle_s=None)
         desk.recipe(self.METAL, Builds.fakes())
-        go(Campaigns(desk).submit(self.a_spec()))
+        go(Campaigns(desk).submit(self.a_spec(), checkpointing=EVERY_UPDATE))
 
         listed = sorted(desk.listings)
         self.assertEqual(len(listed), 1)
@@ -154,7 +155,7 @@ class ChassisTest(ChassisFixture):
         desk = self.a_desk()
         desk.register_metal(service.metal, address=self.PLANE, idle_s=None)
         desk.recipe(self.METAL, Builds.fakes())
-        go(Campaigns(desk).submit(self.a_spec()))
+        go(Campaigns(desk).submit(self.a_spec(), checkpointing=EVERY_UPDATE))
         addresses = [listing.address for listing in desk.listings.values()]
 
         go(desk.release(self.METAL, reason="the door is done", force=True))
@@ -244,12 +245,12 @@ class ChassisLeaseTest(ChassisFixture):
         self.assertFalse(desk.leased(self.METAL))
 
         async def drive():
-            early = await Campaigns(desk).submit(self.a_spec())
+            early = await Campaigns(desk).submit(self.a_spec(), checkpointing=EVERY_UPDATE)
             self.assertFalse(early["accepted"], early)
             # one heartbeat, and the metal is placeable again — no
             # re-registration, no journal row, nothing but being heard
             await desk.heartbeat(self.METAL, service.epoch, service.residual())
-            reply = await Campaigns(desk).submit(self.a_spec())
+            reply = await Campaigns(desk).submit(self.a_spec(), checkpointing=EVERY_UPDATE)
             self.assertTrue(reply["accepted"], reply)
             await service.hosts[reply["host"]]._adoptions[reply["run_id"]]
         go(drive())
@@ -281,7 +282,7 @@ class ChassisLeaseTest(ChassisFixture):
         self.stood_up(desk, service)
 
         async def drive():
-            reply = await Campaigns(desk).submit(self.a_spec())
+            reply = await Campaigns(desk).submit(self.a_spec(), checkpointing=EVERY_UPDATE)
             self.assertTrue(reply["accepted"], reply)
             await service.hosts[reply["host"]]._adoptions[reply["run_id"]]
         go(drive())

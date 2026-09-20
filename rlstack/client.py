@@ -12,8 +12,9 @@ is what keeps multi-pool traffic deterministic. EnginePoolClient
 
 from __future__ import annotations
 
-from collections.abc import Sequence
-from typing import Protocol
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
+from typing import Any, Protocol
 
 from rlstack.data.trajectory import Message, Turn
 from rlstack.policy.adapters.base import Directive
@@ -49,3 +50,66 @@ class PoolClient(Protocol):
         ...
 
     def pool(self, name: str) -> "PoolClient": ...
+
+
+# ---------------------------------------------------------------------------
+# fits from a postprocessor (ADR 0019)
+# ---------------------------------------------------------------------------
+
+@dataclass(frozen=True)
+class Stage:
+    """One leg of a fit: `rows` ("cas://<sha>", a jsonl of trajectory rows)
+    for `epochs` passes in batches of `batch`, at peak learning rate `lr`
+    under `decay` ("linear": lr falls to 0 across the stage — HF Trainer's
+    default — or "constant"). Declared here because it is what a processor
+    hands `client.fit.forks`; the loop that runs one is runner/fit.py."""
+
+    rows: str
+    epochs: int
+    batch: int
+    lr: float
+    decay: str = "linear"
+
+
+class Fits(Protocol):
+    """`client.fit`: small LoRA fits on the run's OWN learner, under a
+    throwaway tenant, for a processor that declares `fits = True`."""
+
+    async def forks(self, start_payload: bytes | None,
+                    fork_rows: Sequence[Sequence[Mapping[str, Any]]],
+                    probe_rows: Sequence[Mapping[str, Any]],
+                    stage: Stage) -> list[tuple[float, ...]]:
+        """Fork `start_payload` (None = a fresh set) once per entry of
+        `fork_rows`, train fork k on `fork_rows[k]` (trajectory rows) under
+        `stage`'s epochs, batch, lr and decay — its `rows` is ignored — and
+        answer each fork's per-document mean NLL over `probe_rows` AFTER
+        training, in fork order."""
+        ...
+
+    async def tokenize(self, text: str) -> tuple[int, ...]:
+        """`text` as the learner's base tokenizes it, without special tokens:
+        a processor has no tokenizer of its own, and text it builds at run
+        time (a dream) becomes a trajectory row's tokens only through this."""
+        ...
+
+    async def rows(self, uri: str) -> list[dict[str, Any]]:
+        """The trajectory rows of a `cas://<sha>` jsonl in the run's store —
+        background and probe rows a task's meta names by uri."""
+        ...
+
+
+class Names(Protocol):
+    """`client.names`: named adapters, read-only."""
+
+    async def read_named(self, name: str) -> bytes | None:
+        """The named payload under this run's subdir, or None while it does
+        not exist."""
+        ...
+
+
+class FittingPoolClient(PoolClient, Protocol):
+    """What a `fits = True` processor's `client` is: the pools, plus `fit`
+    and `names`."""
+
+    fit: Fits
+    names: Names

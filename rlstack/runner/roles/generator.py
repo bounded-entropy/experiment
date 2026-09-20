@@ -3,9 +3,15 @@
 Its condition (`may_generate`) is the whole async-RL policy in one rule: a
 rollout may be sampled once the update that FIRST consumes it is within the lag
 buffer of the last commit. Which update that is comes from the train plan, so
-one plan paces both daemons without either calling the other (#59). WHICH
+one plan paces both runners without either calling the other (#59). WHICH
 policy version actually serves each wave stays opportunistic within the buffer
 and is recorded per turn — never prescribed, never re-derived.
+
+A WAVE THAT SAMPLES UNDER A LIBRARY SET WAITS FOR IT (ADR 0019): a leaf role
+or a task route naming `lib:<name>` makes the wave wait until that named
+adapter is present in the store, and the bytes are handed to the pool before
+the first request — the engine never reads a store. A plan that mentions no
+library name takes none of these steps, and this runner is the runner it was.
 
 The buffer comes from the CALLER (needs_of, ADR 0006 Part B): the lag when a
 Trainer consumes these rollouts, None when nothing does. None is UNPACED — the
@@ -24,22 +30,29 @@ from rlstack.data.trajectory import Task, wave_to_rows
 from rlstack.policy.compile import Bundle
 from rlstack.runner.arbiter import Arbiter
 from rlstack.runner.assemble import sample_wave
-from rlstack.runner.daemons.base import Daemon
+from rlstack.runner.roles.base import Runner
 from rlstack.runner.interfaces import Engine
-from rlstack.runner.signals import RunSignals
+from rlstack.runner.meters import HostJournal
+from rlstack.runner.names import (
+    check_plan_names, names_ready, names_subdir, wave_lib_names,
+)
+from rlstack.runner.signals import RunSignals, store_work
 from rlstack.runner.traffic import Routes
 from rlstack.spec.specs import ExperimentSpec
 
 
-class Generator(Daemon):
+class Generator(Runner):
     def __init__(self, signals: RunSignals, arbiter: Arbiter, run: RunHandle, *,
                  spec: ExperimentSpec, plan: RunPlan, due_at: Mapping[int, int],
                  tasks: Mapping[str, Task], engine: Engine,
                  routes_at: Callable[[Bundle], Routes],
                  initial_bundle: Bundle, max_inflight: int,
                  buffer: int | None,
-                 refs=None) -> None:
+                 refs=None, journal: HostJournal | None = None) -> None:
         super().__init__(signals, arbiter, run)
+        check_plan_names(plan)
+        # where a names wait says it is waiting, beside the log (ADR 0019)
+        self.journal = journal
         self.engine = engine
         self.gen = spec.gen
         self.master = spec.seeds.master
@@ -89,7 +102,7 @@ class Generator(Daemon):
             return False
         return True
 
-    # ---- the daemon ---------------------------------------------------------
+    # ---- the runner ---------------------------------------------------------
 
     async def run_forever(self) -> None:
         for index in range(1, len(self.plan) + 1):
@@ -101,11 +114,17 @@ class Generator(Daemon):
                     f"rollout {index} is a WaveRef: a rollout plan MAKES "
                     f"trajectories, so it names them leaf by leaf")
             await self.signals.wait_for(lambda: self.may_generate(index))
+            libraries = wave_lib_names(entry, self.tasks)
+            if libraries:
+                await names_ready(self.run.store, names_subdir(self.run),
+                                  libraries, self.signals, journal=self.journal)
             async with self.arbiter.admit(self.engine):
                 # routes_at restores the bundle on the pool by ASKING it —
                 # sync wire verbs — so it runs off the loop (check_off_loop)
                 routes = await asyncio.to_thread(self.routes_at,
                                                  self.newest_bundle())
+                if libraries:
+                    await self.hand_libraries(routes, libraries)
                 wave = await sample_wave(
                     entry, index=index, tasks=self.tasks,
                     sampling=self.gen.sampling, routes=routes,
@@ -114,9 +133,25 @@ class Generator(Daemon):
             self.run.write_rollout(index, wave_to_rows(wave))
             await self.signals.notify()
 
+    async def hand_libraries(self, routes: Routes, names: tuple[str, ...]) -> None:
+        """THE WAVE'S LIBRARY SETS, ON EVERY POOL IT ROUTES TO, as bytes (ADR
+        0019, Q2): this runner reads the store and the engine is handed a
+        payload, exactly as a bundle arrives. Once per wave and not once per
+        run, for the reason `routes_at` states — residency is not durable (the
+        engine's library is LRU-bounded, a restarted container starts empty)
+        and `add_library` is idempotent, so restating is the restore. Asked
+        from a thread: the pool may be another container."""
+        subdir = names_subdir(self.run)
+        engines = {id(engine): engine
+                   for _, (engine, _) in sorted(routes.items())}
+        for name in names:
+            payload = await store_work(self.run.store.read_named, subdir, name)
+            for engine in engines.values():
+                await asyncio.to_thread(engine.add_library, name, payload)
+
     def newest_bundle(self) -> Bundle:
         """The freshest committed policy, as the store tells it — a pinning
-        stub (id + versions); the engine already holds the payloads."""
+        stub (id + versions); routes_at loads its payloads from storage."""
         tail = self.run.ledger_tail()
         if tail is None:
             return self.initial_bundle

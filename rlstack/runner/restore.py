@@ -26,6 +26,14 @@ from rlstack.policy.compile import Bundle, ReadBlob, restore_bundle
 from rlstack.runner.interfaces import Engine, Learner
 
 
+class BundleUnavailable(RuntimeError):
+    """A pool does not hold a pinned version and no store can rebuild it
+    (ADR 0014, Part B): the version was committed but not CHECKPOINTED, so
+    its blobs never existed, and the engine that held it is gone. An
+    infrastructure death, not the experiment's: the tenancy parks and the
+    retry resumes from the checkpoint, where the blobs are."""
+
+
 def restore_bundle_on(engine: Engine, pin: Bundle, read_blob: ReadBlob,
                       servable: Iterable[str],
                       adapter_types: Mapping[str, str] | None = None) -> None:
@@ -34,7 +42,8 @@ def restore_bundle_on(engine: Engine, pin: Bundle, read_blob: ReadBlob,
     ASK FIRST: the common path is that the pool still holds the bundle, and
     that path must cost one cheap question rather than a store read. On a miss —
     an eviction, a restarted container, a pool that never saw this version —
-    the blobs come back, recompile, and re-register.
+    the blobs come back, recompile, and re-register. A miss on a version the
+    store never checkpointed is `BundleUnavailable` (ADR 0014).
 
     A pin carries the id and the full version map and no payloads, which is
     exactly what a request carries and what every ledger line records; that is
@@ -42,8 +51,15 @@ def restore_bundle_on(engine: Engine, pin: Bundle, read_blob: ReadBlob,
     """
     if engine.knows_bundle(pin.bundle_id):
         return
-    engine.add_bundle(restore_bundle(pin.policy_version, pin.bundle_id,
-                                     read_blob, servable, adapter_types))
+    try:
+        rebuilt = restore_bundle(pin.policy_version, pin.bundle_id,
+                                 read_blob, servable, adapter_types)
+    except FileNotFoundError as missing:
+        raise BundleUnavailable(
+            f"bundle {pin.bundle_id} at {dict(pin.policy_version)} is not resident "
+            f"on the pool and not checkpointed on the store ({missing}): the pool "
+            f"that held it is gone — resume from the last checkpoint") from None
+    engine.add_bundle(rebuilt)
 
 
 def restore_tenant(learner: Learner, tenant: str,

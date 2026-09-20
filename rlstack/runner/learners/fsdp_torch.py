@@ -160,12 +160,31 @@ class FsdpTorchLearner(TorchLearner):
         self.announce("forward_backward", (tenant, batch))
         return super().forward_backward(tenant, batch)
 
-    def optim_step(self, tenant: str) -> None:
+    def optim_step(self, tenant: str,
+                   lr_scales: Mapping[str, float] | None = None) -> None:
         """Announced, though it takes no collective: every rank holds a whole
         copy of the deltas and must step it, or the ranks would drift apart
         and the next forward would run different adapters on each."""
-        self.announce("optim_step", (tenant,))
-        super().optim_step(tenant)
+        self.announce("optim_step", (tenant, lr_scales))
+        super().optim_step(tenant, lr_scales)
+
+    def forward(self, tenant: str, batch: TokenBatch) -> tuple[float, ...]:
+        """Announced: a no-grad forward all-gathers the base exactly as a
+        training forward does. Rank 0's NLLs are the answer."""
+        self.announce("forward", (tenant, batch))
+        return super().forward(tenant, batch)
+
+    def load_set(self, tenant: str, entry: str, route: str,
+                 payload: bytes | None) -> None:
+        """Announced, for `load`'s reason: every rank holds a whole copy of
+        the sets and must start this one over from the same bytes."""
+        self.announce("load_set", (tenant, entry, route, payload))
+        super().load_set(tenant, entry, route, payload)
+
+    def drop_set(self, tenant: str, entry: str, route: str) -> None:
+        """Announced: every rank installed the library set."""
+        self.announce("drop_set", (tenant, entry, route))
+        super().drop_set(tenant, entry, route)
 
     def load(self, tenant: str, adapters: Mapping[str, bytes],
              optim: Mapping[str, bytes] | None) -> None:
@@ -503,6 +522,12 @@ class FsdpTorchLearner(TorchLearner):
             super().optim_step(*command.args)
         elif command.verb == "load":
             super().load(*command.args)
+        elif command.verb == "forward":
+            super().forward(*command.args)
+        elif command.verb == "load_set":
+            super().load_set(*command.args)
+        elif command.verb == "drop_set":
+            super().drop_set(*command.args)
         elif command.verb == "sleep":
             self.hand_the_device_back()
         elif command.verb == "wake":

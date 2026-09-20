@@ -54,7 +54,17 @@ class ModalVolumeStore(LocalStore):
     arriving during it waits for the next one.
     """
 
-    def __init__(self, root, volume=None, locator: str | None = None) -> None:
+    JOURNAL_FLUSH_S = 30.0
+    """HOW LONG A HOST JOURNAL LINE MAY WAIT FOR ITS COMMIT (ADR 0014, Q11).
+    A traffic window, a gpu sample and an update's timing line used to each
+    cost a `volume.commit()` of their own, queued on the same worker thread
+    as the ledger line they were measuring; now they stage, and the next
+    commit — a ledger line, a checkpoint, or this timer — carries them. A
+    crash loses at most this much observability and no run data; torn and
+    late tails were always tolerated."""
+
+    def __init__(self, root, volume=None, locator: str | None = None,
+                 journal_flush_s: float | None = None) -> None:
         super().__init__(root)
         self._volume = volume
         self._locator = locator
@@ -62,6 +72,9 @@ class ModalVolumeStore(LocalStore):
             max_workers=1)
         self._commit_lock = threading.Lock()
         self._pending_commit: concurrent.futures.Future[None] | None = None
+        self._journal_flush_s = (self.JOURNAL_FLUSH_S if journal_flush_s is None
+                                 else journal_flush_s)
+        self._journal_timer: threading.Timer | None = None
 
     def _on_the_volume_thread(self, fn):
         """The one door to the volume's RPCs (see the class docstring)."""
@@ -96,35 +109,72 @@ class ModalVolumeStore(LocalStore):
             pending.result()
 
     def _commit_waiting_writers(self) -> None:
-        """Close this group before the RPC; subsequent writers form a new one."""
+        """Close this group before the RPC; subsequent writers form a new one.
+        A commit carries every staged journal line too, so a pending flush
+        timer has nothing left to do."""
         with self._commit_lock:
             self._pending_commit = None
+            timer, self._journal_timer = self._journal_timer, None
+        if timer is not None:
+            timer.cancel()
         self._volume.commit()
 
+    def _persist_later(self) -> None:
+        """Stage a host journal line and arm ONE flush timer for it (ADR
+        0014, Q11): the first staged line starts the clock, later ones ride
+        it, and any commit in between disarms it."""
+        if self._volume is None:
+            return
+        with self._commit_lock:
+            if self._journal_timer is not None:
+                return
+            timer = threading.Timer(self._journal_flush_s, self._flush_journal)
+            timer.daemon = True
+            self._journal_timer = timer
+        timer.start()
+
+    def _flush_journal(self) -> None:
+        """The timer's hand: one commit for every journal line staged since
+        the last one. Failures are printed, never raised — a journal is
+        observability, and the next commit carries the same bytes."""
+        with self._commit_lock:
+            self._journal_timer = None
+        try:
+            self._persist()
+        except Exception as refused:      # any backend failure; see above
+            print(f"[store] journal flush refused: {refused}", flush=True)
+
     def open_run(self, run_id, manifest=None, subdir=None, *, create=None):
-        """An adopting writer starts from the committed ledger, never its mount.
+        """An adopting writer starts from the committed records, never its mount.
 
         The runner offers the manifest on both creation and resume. Before
-        resuming an existing run, copy its committed ledger into this mount:
-        reading through a missing file alone is insufficient because the next
-        local append would otherwise create a ledger containing only that line.
-        The desk must have ended the old writer's custody before adoption.
+        resuming an existing run, copy its committed ledger AND its committed
+        checkpoint record (ADR 0014) into this mount: reading through a
+        missing file alone is insufficient because the next local append
+        would otherwise create a record containing only that line, and a
+        STALE checkpoint record on the mount would rewind the attach past
+        work the volume has committed. The desk must have ended the old
+        writer's custody before adoption.
         """
         if self._volume is not None and manifest is not None:
             home = self.run_prefix(run_id, subdir)
             if self._exists(f"{home}/manifest.json"):
-                key = f"{home}/ledger.jsonl"
-
-                def committed_ledger():
+                def committed_record(key: str) -> bytes:
                     entries = self._volume.iterdir(home, recursive=False)
                     if not any(entry.path.lstrip("/") == key for entry in entries):
                         return b""  # creation can crash before its first append
                     return b"".join(self._volume.read_file(key))
 
-                # Observation failures propagate: unknown history must never
-                # be replaced by a stale local prefix or an empty ledger.
-                data = self._on_the_volume_thread(committed_ledger)
-                super()._write(key, data)
+                for name in ("ledger.jsonl", "checkpoints.jsonl"):
+                    key = f"{home}/{name}"
+                    # Observation failures propagate: unknown history must
+                    # never be replaced by a stale local prefix or an empty
+                    # record.
+                    data = self._on_the_volume_thread(lambda key=key: committed_record(key))
+                    if data or name == "ledger.jsonl":
+                        super()._write(key, data)
+                    # a run with no committed checkpoint record is a
+                    # pre-0014 directory: leave its absence alone
         return super().open_run(run_id, manifest=manifest, subdir=subdir, create=create)
 
     def _read(self, key: str) -> bytes:
@@ -180,9 +230,12 @@ class ModalVolumeStore(LocalStore):
 
     def _append_line(self, key: str, line: str) -> None:
         super()._append_line(key, line)
-        if key.endswith("ledger.jsonl"):
+        if key.endswith("ledger.jsonl") or key.endswith("checkpoints.jsonl"):
             self._persist()   # THE commit point: seals the whole update
-        elif (key.startswith(("hosts/", "fleet/", "measurements/"))
+        elif key.startswith("hosts/"):
+            self._persist_later()   # a host journal line rides the next
+                                    # commit, or the flush timer (Q11)
+        elif (key.startswith(("fleet/", "measurements/"))
               or key == "annotations.jsonl"):
-            self._persist()   # observability, measurement and flavortext
+            self._persist()   # the fleet's truth, measurement and flavortext
                               # should survive the container that wrote them

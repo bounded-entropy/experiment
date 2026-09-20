@@ -197,14 +197,14 @@ def up() -> None:
 
 
 @app.local_entrypoint()
-def distill_set(train_tasks: str = "", timeout_s: float = 7200.0) -> None:
+def distill_set(train_tasks: str = "", timeout_s: float = 7200.0, *, every: int) -> None:
     """THE TEACHER'S TRAJECTORY SET, as a generation-only run, followed to
     its extent. Prints the run_id the SFT arms name in their plans."""
     if not train_tasks:
         raise SystemExit("--train-tasks <cas uri from ::prompts>")
     metal_handle(APP).serve.spawn()
     print(json.dumps(wait_for_metal(METAL), indent=1), flush=True)
-    run_id = submit_and_follow(teacher_row(train_tasks), SUBDIR, timeout_s)
+    run_id = submit_and_follow(teacher_row(train_tasks), SUBDIR, timeout_s, every=every)
     print(f"[set] the teacher's rollouts are run {run_id} — "
           f"pass it to ::submit --teacher-run", flush=True)
 
@@ -212,7 +212,7 @@ def distill_set(train_tasks: str = "", timeout_s: float = 7200.0) -> None:
 @app.local_entrypoint()
 def submit(layer: int = 0, adapter: str = "nsteer", algo: str = "sft",
            teacher_run: str = "", train_tasks: str = "", site: str = "",
-           solo: bool = False) -> None:
+           solo: bool = False, *, every: int) -> None:
     """ONE ARM, submitted and left running — the desk's reply printed, the
     run followed by `::follow_run` or watched at the observer. An SFT arm
     names the teacher's set; an on-policy arm names the train set."""
@@ -231,7 +231,7 @@ def submit(layer: int = 0, adapter: str = "nsteer", algo: str = "sft",
            else student_row(teacher_run, where, adapter))
     # --solo: joins nothing that stands, carves its own listings (a card of
     # its own where one is registered bare) — "i want this to run fast"
-    print(json.dumps(submit_spec(row, SUBDIR, solo=solo), default=str)[:600], flush=True)
+    print(json.dumps(submit_spec(row, SUBDIR, solo=solo, every=every), default=str)[:600], flush=True)
 
 
 @app.local_entrypoint()

@@ -1,19 +1,20 @@
-"""The runner: Phase 0 (identity), Phase 1 (idempotent setup), Phase 2 (daemons).
+"""The runner: Phase 0 (identity), Phase 1 (idempotent setup), Phase 2 (runners).
 
-A RUN IS A SET OF DAEMON NEEDS, each naming its daemon, the plan it consumes
+A RUN IS A SET OF RUNNER NEEDS, each naming its runner, the plan it consumes
 and the residents it admits (ADR 0006 Part B). `needs_of` reads the
-experiment's needs off its spec — a Trainer iff there is an algo, a Scorer iff
-the post pipeline addresses a pool, a Generator iff there is a rollout plan —
-and everything after that is generic: Phase 1 sets up what the needs admit and
-Phase 2 is one TaskGroup over them, run by `plan_daemons`.
+experiment's needs off its spec — a Fitter iff there is a fit plan (ADR 0019),
+else a Trainer iff there is an algo, a Scorer iff the post pipeline addresses
+a pool, a Generator iff there is a rollout plan — and everything after that
+is generic: Phase 1 sets up what the needs admit and
+Phase 2 is one TaskGroup over them, run by `plan_runners`.
 
-Phase 2 is a blackboard, not a choreography: the daemons run concurrently,
+Phase 2 is a blackboard, not a choreography: the runners run concurrently,
 synchronized ONLY through the store (signals.py) and admitted onto shared metal
 by the arbiter. Nobody calls anybody: the ledger is the commit bus, waves/ the
 data bus, and postdata parts the scoring bus.
 
 Resume is re-running Phases 0-1 — attach discards everything the ledger never
-committed, and the daemons pick up from the ledger tail (a run whose extent is
+committed, and the runners pick up from the ledger tail (a run whose extent is
 its rollouts has no ledger: its Generator picks up from what is sealed).
 """
 
@@ -24,12 +25,16 @@ import json
 import hashlib
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from functools import partial
 
-from rlstack.data.stores.base import RunHandle, Store
+from rlstack.data.stores.base import RunHandle, Store, run_progress, run_reference
 from rlstack.policy.compile import Bundle, compile_bundle
 from rlstack.policy.siteschema import SiteSchema, resolve
 from rlstack.registry import ADAPTER_TYPES, POST, code_hashes
-from rlstack.runner.daemons import Daemon, Generator, Scorer, Trainer
+from rlstack.runner.checkpointing import Checkpointing
+from rlstack.runner.roles import Runner, Fitter, Generator, Scorer, Trainer
+from rlstack.runner.roles.base import StopRequest
+from rlstack.runner.roles.fitter import fit_entry
 from rlstack.runner.interfaces import (
     Emitted, Engine, EntryInstall, Learner, OptimSettings, Parameterization,
 )
@@ -37,6 +42,7 @@ from rlstack.runner.arbiter import Arbiter
 from rlstack.runner.meters import HostJournal
 from rlstack.data.plan import RunPlan, decode
 from rlstack.runner.assemble import rollouts_needed
+from rlstack.runner.fit import FitClient, FitJob, decode_jobs
 from rlstack.runner.refs import RefReader
 from rlstack.runner.restore import restore_bundle_on, restore_tenant
 from rlstack.runner.traffic import Routes, load_task_sets
@@ -47,13 +53,15 @@ from rlstack.spec.specs import ExperimentSpec, Plans, PoolMember, WarmStart
 from rlstack.runner.remote import RemoteLearner, RemotePool
 from rlstack.spec.validate import (
     SpecError, check_members_match_their_shape, check_pools_serve_their_base,
-    check_sites_reachable_on, site_space, traffic_pools, validate_or_raise,
+    check_sites_reachable_on, serving_pools, site_space, traffic_pools,
+    validate_or_raise,
 )
 
 
 @dataclass(frozen=True)
 class RunReport:
-    """What run_experiment hands back: how far the run's EXTENT got.
+    """What run_experiment hands back: how far the run's EXTENT got —
+    `stopped` when a deliberate stop drained it short of the plan.
 
     `completed` counts the extent's waves — updates committed for a run that
     trains, rollouts sealed for one that only generates — and `extent` names
@@ -65,20 +73,21 @@ class RunReport:
     completed: int
     extent: str
     resumed_from: int | None
+    stopped: bool = False
 
 
 @dataclass(frozen=True)
-class DaemonNeed:
-    """ONE DAEMON A RUN NEEDS, with the resources it occupies.
+class RunnerNeed:
+    """ONE RUNNER A RUN NEEDS, with the resources it occupies.
 
     A run is a set of these; the experiment is the set `needs_of` reads off an
     ExperimentSpec (ADR 0006 Part B). Stating a need as a VALUE rather than
-    building the daemon straight away is what lets Phase 1 ask what this run
+    building the runner straight away is what lets Phase 1 ask what this run
     requires — does anything here train? — before Phase 2 runs any of it.
     """
 
-    daemon: type[Daemon]
-    plan: str                          # "train" | "rollout": what it consumes
+    runner: type[Runner]
+    plan: str                          # "train" | "rollout" | "fit": what it consumes
     pools: tuple[str, ...] = ()        # pool names whose engines it admits
     learner: bool = False              # admits the learner
     buffer: int | None = None          # Generator only: None = unpaced
@@ -89,15 +98,19 @@ def run_experiment(spec: ExperimentSpec, schema: SiteSchema, store: Store,
                    learner: Learner | None,
                    max_inflight: int = 64,
                    arbiter: Arbiter | None = None,
-                   subdir: str | None = None, resume: bool = False) -> RunReport:
+                   subdir: str | None = None, resume: bool = False, *,
+                   checkpointing: Checkpointing) -> RunReport:
     """Submit and drive one experiment to completion. Safe to call again on the
     same spec: identical identity attaches and continues (or no-ops if done).
 
-    `engines` is one Engine (used as the "main" policy pool) or {pool: Engine}.
+    `engines` is one Engine (used as the "main" policy pool) or {pool: Engine}
+    — `{}` for a run that declares no pool at all. `checkpointing` is the
+    submission's deliberate cadence and delivery (ADR 0014); it has no default.
     """
     return asyncio.run(
         run_experiment_async(spec, schema, store, engines, learner, max_inflight,
-                             arbiter, subdir=subdir, resume=resume))
+                             arbiter, subdir=subdir, resume=resume,
+                             checkpointing=checkpointing))
 
 
 def data_fingerprint(spec: ExperimentSpec) -> str:
@@ -113,6 +126,10 @@ def data_fingerprint(spec: ExperimentSpec) -> str:
     parts = [spec.plans.train or "-", spec.plans.rollout or "-"]
     if spec.gen is not None:
         parts.extend(spec.gen.tasks)
+    if spec.plans.fit is not None:
+        # appended only when declared (ADR 0019), so every run that has no
+        # fit plan is fingerprinted exactly as it always was
+        parts.append(f"fit:{spec.plans.fit}")
     return "|".join(parts)
 
 
@@ -131,7 +148,9 @@ async def run_experiment_async(
         max_inflight: int = 64,
         arbiter: Arbiter | None = None,
         journal: HostJournal | None = None,
-        subdir: str | None = None, resume: bool = False) -> RunReport:
+        subdir: str | None = None, resume: bool = False, *,
+        checkpointing: Checkpointing,
+        stop: StopRequest | None = None) -> RunReport:
     """The async form of run_experiment — the multi-tenant entry.
 
     The multi-tenancy invariant (I8) is only expressible when several
@@ -148,18 +167,20 @@ async def run_experiment_async(
 
     `learner` is None for a run whose needs admit none — a generation-only run
     is a Generator and nothing else (ADR 0006 Part B).
+
+    `checkpointing` (ADR 0014) is the submission's declared cadence and
+    delivery — required, never defaulted — and `stop` is the host's handle
+    for a drained stop: the Trainer reads it at every update boundary.
     """
     needs = needs_of(spec)
     if any(need.learner for need in needs) and learner is None:
         raise ValueError(
-            "this run needs a Trainer (its spec declares an algo) and a "
-            "Trainer trains on a learner, but none was handed to the run: "
+            "this run needs a Trainer (its spec declares an algo) or a Fitter "
+            "(a fit plan), and both work on a learner, but none was handed to the run: "
             "either hand one, or drop the algo — a spec with no algo is a "
             "generation-only run, which needs no learner and writes no ledger")
     engine_map: dict[str, Engine] = (
         dict(engines) if isinstance(engines, Mapping) else {"main": engines})
-    if "main" not in engine_map:
-        raise ValueError(f"no 'main' engine pool; pools: {sorted(engine_map)}")
 
     # ---- Phase 0: identity — computed, never typed (I3) ----------------------
     validate_or_raise(spec, schema)
@@ -175,11 +196,12 @@ async def run_experiment_async(
     space = site_space(spec, schema)
     # a build fact asked over the wire — from a thread, so this loop keeps
     # dispatching while the serving pool answers (check_off_loop)
-    inventory = await asyncio.to_thread(engine_map["main"].reachability, space)
     binding_issues = (
-        check_sites_reachable_on(spec, schema, "main", inventory)
-        + check_pools_serve_their_base(spec, engine_map)
+        check_pools_serve_their_base(spec, engine_map)
         + check_members_match_their_shape(spec, engine_map, learner))
+    if "main" in traffic_pools(spec):
+        inventory = await asyncio.to_thread(engine_map["main"].reachability, space)
+        binding_issues += check_sites_reachable_on(spec, schema, "main", inventory)
     if binding_issues:
         raise SpecError(binding_issues)
     hashes = code_hashes(spec)
@@ -205,10 +227,9 @@ async def run_experiment_async(
         await store_work(run.write_plan, kind, data)
 
     # ---- Phase 1: idempotent setup ------------------------------------------
-    # The policy's initial bundle is EVERY run's — the main pool must serve the
-    # bank whether or not anything trains it — and it is built by one function
-    # either way: the learner's install when a need admits a learner, the
-    # adapter type's own init function when none does (ADR 0006 Part B, Q6).
+    # Every run persists its initial policy; inference loads it only when
+    # needed. Training initializes through the learner; generation-only runs
+    # use the adapter type's init function (ADR 0006 Part B, Q6).
     bank = spec.policy.bank
     trains = any(need.learner for need in needs)
     trainable = sorted(name for name, a in bank.items() if a.trainable)
@@ -227,21 +248,26 @@ async def run_experiment_async(
 
     policy_version = {name: 0 for name in bank}
     resumed_from: int | None = None
+    # THE CHECKPOINT TAIL is what resume restores (ADR 0014): attach has
+    # already rewound the ledger to it, so the two agree; checkpoint 0 is the
+    # initial blobs, written below on a run's first breath
+    tail = await store_work(run.checkpoint_tail)
     if trains:
-        tail = await store_work(run.ledger_tail)
         if tail is not None:
             policy_version = {name: int(v) for name, v in tail["versions"].items()}
             await asyncio.to_thread(restore_tenant, learner, rid,
                                     policy_version, run.read_blob, trainable)
-            resumed_from = int(tail["update"])
+            resumed_from = int(tail["update"]) or None
         elif spec.init is not None:
             await asyncio.to_thread(
                 _warm_start, spec.init, tenant=rid, bank_names=set(bank),
                 trainable=trainable, store=store, learner=learner)
-        adapters = (await asyncio.to_thread(learner.emit, rid)).adapters
+        emitted = await asyncio.to_thread(learner.emit, rid)
+        adapters, moments = emitted.adapters, emitted.optim
     else:
         adapters = await store_work(
             initial_adapters, bank_entries(spec, resolved), spec.init, store)
+        moments = {}
 
     # every servable delta's blob at the version the run STARTS from: the
     # frozen ones for life, the trainable ones at version 0 (the Trainer
@@ -250,17 +276,27 @@ async def run_experiment_async(
     # live: nine tenants on an eight-bundle pool, and the on-policy arms
     # died at their first route on `no adapters blob v@0`)
     await store_work(write_initial_blobs, run, adapters, policy_version, set(servable),
-                     fresh=(tail is None) if trains else True)
+                     fresh=(tail is None))
+    if tail is None:
+        # CHECKPOINT 0: the initial blobs, sealed — the point a run that dies
+        # before its first checkpoint rewinds to (ADR 0014). A checkpoint
+        # promises adapters AND moments, so the trainable entries' version-0
+        # moments land too: a warm start that loaded a parent's moments
+        # (`optim="load"`) must resume with them, not with fresh ones
+        for name in trainable:
+            if name in moments:
+                await store_work(run.write_blob, "optim", name,
+                                 policy_version[name], moments[name])
+        await store_work(run.append_checkpoint, 0, policy_version)
     bundle = compile_bundle(adapters, policy_version, servable, adapter_types)
-    await asyncio.to_thread(engine_map["main"].add_bundle, bundle)
 
-    # non-policy pools serve their own base; register a base bundle once each
+    # THE POOLS THAT SERVE THE POLICY (ADR 0014, Part B) get the policy's
+    # bundle; every other pool serves its own base, installed on demand.
+    serving = serving_pools(spec)
     base_bundles = {name: Bundle(f"bundle:base:{name}", {}, {})
-                    for name in engine_map if name != "main"}
-    for name, base_bundle in base_bundles.items():
-        await asyncio.to_thread(engine_map[name].add_bundle, base_bundle)
+                    for name in engine_map if name not in serving}
 
-    def routes_at(current: Bundle) -> Routes:
+    def routes_at(current: Bundle, *, pools: tuple[str, ...]) -> Routes:
         """Where this wave's traffic goes — and the one place that makes sure
         the policy pool can still serve the version it is about to pin.
 
@@ -268,29 +304,71 @@ async def run_experiment_async(
         starts empty), so the route is established by ASKING and restoring on a
         miss. It runs once per wave, never per request.
         """
-        restore_bundle_on(engine_map["main"], current, run.read_blob,
-                          servable, adapter_types)
-        return {name: (eng, current if name == "main" else base_bundles[name])
-                for name, eng in engine_map.items()}
+        routes: dict[str, tuple[Engine, Bundle]] = {}
+        for name in pools:
+            engine = engine_map[name]
+            if name in serving:
+                restore_bundle_on(engine, current, run.read_blob,
+                                  servable, adapter_types)
+                routes[name] = (engine, current)
+            else:
+                base_bundle = base_bundles[name]
+                if not engine.knows_bundle(base_bundle.bundle_id):
+                    engine.add_bundle(base_bundle)
+                routes[name] = (engine, base_bundle)
+        return routes
 
     # ---- Phase 2: the blackboard --------------------------------------------
-    daemons = plan_daemons(spec, needs=needs, run=run, store=store,
+    fit_client = (fit_client_of(spec, resolved, learner, arbiter, tenant=rid,
+                                refs=RefReader(store, run), journal=journal)
+                  if trains else None)
+    runners = plan_runners(spec, needs=needs, run=run, store=store,
+                           fit_client=fit_client,
                            engine_map=engine_map,
                            learner=learner, routes_at=routes_at, plans=plans,
                            initial_bundle=bundle,
                            initial_version=policy_version,
                            max_inflight=max_inflight,
-                           arbiter=arbiter, tenant=rid, journal=journal)
+                           arbiter=arbiter, tenant=rid, journal=journal,
+                           checkpointing=checkpointing, stop=stop)
     try:
         async with asyncio.TaskGroup() as group:
-            for daemon in daemons:
-                group.create_task(daemon.run_forever())
+            tasks = [group.create_task(runner.run_forever()) for runner in runners]
+            if stop is not None:
+                group.create_task(end_on_stop(
+                    stop, tasks,
+                    drains=any(isinstance(d, (Trainer, Fitter)) for d in runners)))
     except ExceptionGroup as failures:
         raise failures.exceptions[0] from None
+    finally:
+        if fit_client is not None:
+            await fit_client.close()        # the fork tenant ends with the run
 
     extent = spec.plans.extent
-    return RunReport(run_id=rid, completed=len(plans[extent]), extent=extent,
-                     resumed_from=resumed_from)
+    stopped = stop is not None and stop.requested
+    completed = (run_progress(store, run_reference(rid, subdir)).completed
+                 if stopped else len(plans[extent]))
+    return RunReport(run_id=rid, completed=completed, extent=extent,
+                     resumed_from=resumed_from, stopped=stopped)
+
+
+async def end_on_stop(stop: StopRequest, tasks: Sequence[asyncio.Task], *,
+                      drains: bool, poll_s: float = 0.05) -> None:
+    """A DELIBERATE STOP ENDS EVERY RUNNER (ADR 0014, Part C) — once the
+    Trainer has drained (its checkpoint is on the store), or at once for a
+    run with no Trainer, where there is nothing to drain. The runners are
+    cancelled structurally, as a host's stop cancels them; a Generator left
+    waiting for an update that will never commit is exactly what this
+    prevents. Returns quietly when the run ends on its own."""
+    while True:
+        if all(task.done() for task in tasks):
+            return
+        if stop.drained or (stop.requested and not drains):
+            for task in tasks:
+                if not task.done():
+                    task.cancel()
+            return
+        await asyncio.sleep(poll_s)
 
 
 def bank_entries(spec: ExperimentSpec,
@@ -377,16 +455,19 @@ def init_seed(master: int, entry: str) -> int:
     return int.from_bytes(digest[:8], "big")
 
 
-def load_plans(declared: Plans, store: Store) -> dict[str, RunPlan]:
+def load_plans(declared: Plans, store: Store) -> dict[str, RunPlan | tuple[FitJob, ...]]:
     """Resolve the declared plan uris, by kind. A plan the spec leaves None is
     absent from the map: no train plan is a run that never trains, no rollout
     plan is a run that never samples, and the gate refuses the spec that
-    declares neither."""
-    out = {}
+    declares none. A FIT plan (ADR 0019) decodes to its jobs — checked as it
+    decodes, the way a wave plan's leaves are — and its length is the run's."""
+    out: dict[str, RunPlan | tuple[FitJob, ...]] = {}
     for kind in ("train", "rollout"):
         uri = getattr(declared, kind)
         if uri is not None:
             out[kind] = decode(store.cas_get(uri))
+    if declared.fit is not None:
+        out["fit"] = decode_jobs(store.cas_get(declared.fit))
     return out
 
 
@@ -428,14 +509,17 @@ def write_initial_blobs(run, adapters: Mapping[str, bytes],
         run.write_blob("adapters", name, version, adapters[name])
 
 
-def needs_of(spec: ExperimentSpec) -> tuple[DaemonNeed, ...]:
-    """THE ONE PLACE A SPEC BECOMES DAEMONS (ADR 0006 Part B).
+def needs_of(spec: ExperimentSpec) -> tuple[RunnerNeed, ...]:
+    """THE ONE PLACE A SPEC BECOMES RUNNERS (ADR 0006 Part B).
 
-    A Trainer iff there is an algo — it is the ledger's only writer, so a run
+    A FITTER iff there is a fit plan (ADR 0019), and then nothing else: a fit
+    run declares an algo for its loss, optimizer and microbatch budget, but
+    its ledger's writer is the Fitter and no Trainer is planned. Otherwise a
+    Trainer iff there is an algo — it is the ledger's only writer, so a run
     without one commits nothing and its extent is its rollouts; a Scorer iff
     the post pipeline has a POOLED half; a Generator iff there is a rollout
-    plan. Each need names the RESIDENTS its daemon's work occupies: the
-    Trainer the learner and its inline half's pools, the Scorer the pools of
+    plan. Each need names the RESIDENTS its runner's work occupies: the
+    Trainer the learner, the Scorer the pools of
     its processors, the Generator its serving pool.
 
     The Generator's buffer is the lag when a Trainer consumes what it makes
@@ -447,32 +531,32 @@ def needs_of(spec: ExperimentSpec) -> tuple[DaemonNeed, ...]:
     follows the ledger from outside — runner/measure.py — and writes its own
     area, never the run dir).
     """
-    needs: list[DaemonNeed] = []
+    if spec.plans.fit is not None:
+        return (RunnerNeed(runner=Fitter, plan="fit", learner=True),)
+    needs: list[RunnerNeed] = []
     if spec.algo is not None:
         split = split_pipeline(spec.algo.post)
-        needs.append(DaemonNeed(
-            daemon=Trainer, plan="train", learner=True,
-            # empty by the split rule — a processor that occupies metal is the
-            # Scorer's — but read off the pipeline rather than written as (),
-            # so the Trainer stays right if the rule ever moves
-            pools=pipeline_pools(split.inline)))
+        needs.append(RunnerNeed(
+            runner=Trainer, plan="train", learner=True))
         if split.pooled:
-            needs.append(DaemonNeed(daemon=Scorer, plan="train",
+            needs.append(RunnerNeed(runner=Scorer, plan="train",
                                     pools=pipeline_pools(split.pooled)))
     if spec.plans.rollout is not None:
-        needs.append(DaemonNeed(
-            daemon=Generator, plan="rollout", pools=("main",),
+        needs.append(RunnerNeed(
+            runner=Generator, plan="rollout", pools=("main",),
             buffer=(spec.algo.schedule.max_policy_lag
                     if spec.algo is not None else None)))
     return tuple(needs)
 
 
-def plan_daemons(spec: ExperimentSpec, *, run, store, engine_map, learner,
+def plan_runners(spec: ExperimentSpec, *, run, store, engine_map, learner,
                  routes_at, plans, initial_bundle, initial_version,
-                 max_inflight, arbiter, tenant,
-                 needs: Sequence[DaemonNeed] | None = None,
-                 journal: HostJournal | None = None) -> list[Daemon]:
-    """THE EXECUTOR OF NEEDS: one daemon per need, built with the plan it
+                 max_inflight, arbiter, tenant, checkpointing: Checkpointing,
+                 needs: Sequence[RunnerNeed] | None = None,
+                 journal: HostJournal | None = None,
+                 stop: StopRequest | None = None,
+                 fit_client: FitClient | None = None) -> list[Runner]:
+    """THE EXECUTOR OF NEEDS: one runner per need, built with the plan it
     consumes and the engines behind the pools it admits (`needs_of` reads the
     needs off the spec; unasked, this asks it).
 
@@ -482,47 +566,81 @@ def plan_daemons(spec: ExperimentSpec, *, run, store, engine_map, learner,
     work that belongs with host adoption, not here.
 
     Only the Trainer takes the host journal: an update is the unit of progress
-    the other daemons orbit, so its phase timings are the run's own clock.
+    the other runners orbit, so its phase timings are the run's own clock.
+    Only the Trainer takes the wire (ADR 0014): under `wire` delivery it is
+    handed the engine behind every pool that serves the policy, and pushes
+    each committed bundle there; under `store` delivery, none.
     """
     signals = RunSignals()
     tasks = load_task_sets(store, spec.gen.tasks) if spec.gen is not None else {}
     # a rollout is due when the update that first consumes it is (#59); with
     # no train plan nothing consumes anything, and the Generator is unpaced
     due_at = rollouts_needed(plans["train"].waves) if "train" in plans else {}
-    daemons: list[Daemon] = []
-    # three needs, three daemons — the closed set needs_of produces; each is
+    runners: list[Runner] = []
+    # four needs, four runners — the closed set needs_of produces; each is
     # built with what only it takes (the Trainer its learner and journal, the
-    # Generator its tasks and pacing)
+    # Generator its tasks and pacing, the Fitter its jobs)
     for need in (needs_of(spec) if needs is None else needs):
         residents = pool_residents(need.pools, engine_map)
-        if need.daemon is Trainer:
-            daemons.append(Trainer(
+        if need.runner is Fitter:
+            runners.append(Fitter(
+                signals, arbiter, run,
+                spec=spec, jobs=plans[need.plan],
+                refs=RefReader(store, run), learner=learner, tenant=tenant,
+                initial_version=initial_version,
+                checkpointing=checkpointing, stop=stop, journal=journal))
+        elif need.runner is Trainer:
+            wire = ({name: engine_map[name] for name in serving_pools(spec)
+                     if name in engine_map}
+                    if checkpointing.delivery == "wire" else {})
+            runners.append(Trainer(
                 signals, arbiter, run,
                 spec=spec, plan=plans[need.plan], refs=RefReader(store, run),
-                engine=engine_map["main"], learner=learner, tenant=tenant,
-                post_residents=residents,
-                routes_at=routes_at, journal=journal,
-                initial_bundle=initial_bundle, initial_version=initial_version))
-        elif need.daemon is Scorer:
-            daemons.append(Scorer(
+                learner=learner, tenant=tenant, journal=journal,
+                initial_version=initial_version,
+                checkpointing=checkpointing, pools=wire, stop=stop,
+                fit_client=fit_client))
+        elif need.runner is Scorer:
+            runners.append(Scorer(
                 signals, arbiter, run,
                 spec=spec, plan=plans[need.plan], refs=RefReader(store, run),
                 residents=residents,
-                routes_at=routes_at, initial_bundle=initial_bundle))
+                routes_at=partial(routes_at, pools=need.pools),
+                initial_bundle=initial_bundle))
         else:
-            daemons.append(Generator(
+            runners.append(Generator(
                 signals, arbiter, run,
                 spec=spec, plan=plans[need.plan],
                 due_at=due_at, tasks=tasks, buffer=need.buffer,
-                engine=engine_map["main"], routes_at=routes_at,
+                engine=engine_map["main"],
+                routes_at=partial(routes_at, pools=need.pools),
                 initial_bundle=initial_bundle, max_inflight=max_inflight,
                 refs=RefReader(store, run)))
-    return daemons
+    return runners
+
+
+def fit_client_of(spec: ExperimentSpec, resolved: Mapping[str, tuple],
+                  learner: Learner, arbiter: Arbiter, *, tenant: str,
+                  refs: RefReader, journal: HostJournal | None = None) -> FitClient | None:
+    """THE FIT CLIENT, for a run whose inline pipeline holds a `fits`
+    processor (ADR 0019) — None for every other run, which is every run there
+    was. Its forks are lanes of a second tenant on the run's OWN learner, at
+    the rank and the resolved sites of the run's `dream_bank` entry (the gate
+    has refused a fitting pipeline without one), seeded off the master."""
+    if spec.algo is None or not any(
+            name in POST and POST.get(name).fits for name in spec.algo.post):
+        return None
+    entry = fit_entry(spec)
+    return FitClient(
+        learner, arbiter, tenant=tenant, refs=refs, base=spec.policy.base,
+        sites=tuple(resolved[entry]), r=int(spec.policy.bank[entry].init["r"]),
+        seed=init_seed(spec.seeds.master, f"{entry}:forks"),
+        microbatch_tokens=spec.algo.schedule.microbatch_tokens, journal=journal)
 
 
 def pipeline_pools(pipeline) -> tuple[str, ...]:
     """The pools a post pipeline's processors declare (PostDef.pools) — what
-    its judges address, so what the daemon running it must admit."""
+    its judges address, so what the runner running it must admit."""
     return tuple(sorted({name for proc in pipeline if proc in POST
                          for name in POST.get(proc).pools}))
 

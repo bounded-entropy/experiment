@@ -22,6 +22,7 @@ its floor.
 from __future__ import annotations
 
 from collections.abc import Mapping
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -32,7 +33,9 @@ from rlstack.data.flatten import TokenBatch
 from rlstack.policy.adapters.replay import ReplayRows, row_plan
 from rlstack.policy.siteschema import SiteMeta
 from rlstack.registry import ADAPTER_TYPES, LOSSES
-from rlstack.runner.interfaces import Emitted, Parameterization, TrainStats
+from rlstack.runner.interfaces import (
+    Emitted, Parameterization, TrainStats, check_lr_scales, lr_scale_of,
+)
 from rlstack.training.losses import PolicyOutputs
 
 
@@ -60,6 +63,8 @@ def chosen_logprobs(logits: torch.Tensor, targets: torch.Tensor,
     values, chunk boundaries cut across positions and never across a vocab.
     """
     rows, width, _ = logits.shape
+    if width == 0:          # every document is ONE token long: nothing has a prefix to be scored from
+        return logits.new_zeros((rows, 0), dtype=torch.float32)
     out = []
     for row in range(rows):
         for start in range(0, width, chunk):
@@ -87,6 +92,10 @@ class _Tenant:
     adapter_types: dict[str, object] = field(default_factory=dict)
     sites: dict[str, tuple[SiteMeta, ...]] = field(default_factory=dict)
     optimizers: dict[str, torch.optim.Optimizer] = field(default_factory=dict)
+    # entry -> its optimizer's groups IN ORDER, each (name, base lr): what
+    # `optim_step(lr_scales=...)` scales from, fixed at optimizer build so a
+    # scaled step can never compound into the next one
+    base_lrs: dict[str, tuple[tuple[str, float], ...]] = field(default_factory=dict)
     slot: dict[str, Any] = field(default_factory=dict)
 
 
@@ -111,11 +120,24 @@ class TorchLearner:
         self._asleep = False
         self.checkpoint_activations = checkpoint_activations
         self.fsdp = 1               # build fact: this build is unsharded
+        self._tokenizer = None
         self._base: str | None = None
         self._model: torch.nn.Module | None = None
         self._tenants: dict[str, _Tenant] = {}
 
     # ---- Learner protocol ---------------------------------------------------
+
+    def tokenize(self, tenant: str, text: str) -> tuple[int, ...]:
+        """The same base tokenizer and encoding convention as VllmEngine.
+
+        Loaded lazily on CPU, including on the lead FSDP rank; tokenization
+        needs no model forward or collective operation.
+        """
+        self._tenants[tenant]  # only installed tenants have a bound base
+        if self._tokenizer is None:
+            from transformers import AutoTokenizer
+            self._tokenizer = AutoTokenizer.from_pretrained(self._base)
+        return tuple(self._tokenizer.encode(text, add_special_tokens=False))
 
     def install(self, tenant: str, parameterization: Parameterization) -> None:
         """The record is everything this learner may know of the experiment:
@@ -145,6 +167,8 @@ class TorchLearner:
             self._claim_slot(state, entry.sites, params)
             if entry.name in state.trainable:
                 state.optimizers[entry.name] = self._optimizer_for(
+                    entry.name, params, adapter_type, parameterization.optim)
+                state.base_lrs[entry.name] = self._base_lrs(
                     entry.name, params, adapter_type, parameterization.optim)
         self._tenants[tenant] = state
 
@@ -205,13 +229,30 @@ class TorchLearner:
     @staticmethod
     def _group_settings(optim, entry: str, group: str) -> dict:
         """This group's optimizer settings: the spec's defaults, then the
-        entry-wide override, then the group's own. The default group (name "")
-        is the whole entry, so only the entry-wide form addresses it."""
+        entry-wide override, then the group's FAMILY's, then the group's own.
+        The default group (name "") is the whole entry, so only the entry-wide
+        form addresses it.
+
+        A group named `family:member` (dream_bank's `memory:03`) belongs to
+        the family before the colon, so `"pi.memory"` reaches every memory
+        group the way it reached the one `memory` group before the groups
+        became one per route (ADR 0019) — general before specific, again."""
         settings: dict = {"lr": optim.lr, "weight_decay": optim.weight_decay}
         settings.update(optim.overrides.get(entry, {}))
         if group:
+            family = group.partition(":")[0]
+            if family != group:
+                settings.update(optim.overrides.get(f"{entry}.{family}", {}))
             settings.update(optim.overrides.get(f"{entry}.{group}", {}))
         return settings
+
+    def _base_lrs(self, entry: str, params: object, adapter_type: object,
+                  optim) -> tuple[tuple[str, float], ...]:
+        """Each group's name and BASE learning rate, in the optimizer's own
+        group order (`_optimizer_for` sorts by name; so does this)."""
+        return tuple(
+            (name, float(self._group_settings(optim, entry, name)["lr"]))
+            for name in sorted(adapter_type.param_groups(params)))
 
     def forward_backward(self, tenant: str, batch: TokenBatch) -> TrainStats:
         state = self._tenant(tenant)
@@ -226,11 +267,16 @@ class TorchLearner:
             provided = self._provided(state)
             result = state.loss_fn(
                 PolicyOutputs(logprobs=logprobs, provided=provided), batch)
-            result.loss.backward()
+            # a microbatch may hold NO target at all — one-token documents,
+            # which a dream cut at blank lines produces (a `---` line is one
+            # token) and a fork at batch 1 steps alone: its loss is a constant
+            # 0 with no graph, and it accumulates nothing
+            if result.loss.requires_grad:
+                result.loss.backward()
         return TrainStats(loss=float(result.loss), mean_ratio=result.mean_ratio,
                           logprob_gap=result.logprob_gap,
                           grad_norm=self._grad_norm(state), tokens=len(batch),
-                          provided=_summarize(provided))
+                          provided=_summarize(provided), components=result.components)
 
     def _provided(self, state: _Tenant) -> dict[str, Any]:
         """The bank's PROVIDED tensors for this forward, merged under their
@@ -253,16 +299,86 @@ class TorchLearner:
                 provided[name] = value
         return provided
 
-    def optim_step(self, tenant: str) -> None:
+    def optim_step(self, tenant: str,
+                   lr_scales: Mapping[str, float] | None = None) -> None:
+        """One step of every trainable entry. `lr_scales` multiplies the named
+        groups' BASE learning rates for THIS step (see `scaled_lrs`); with
+        none given no group's lr is touched at all."""
         state = self._tenant(tenant)
-        parameters = [p for entry in state.trainable
-                      for p in state.params[entry].parameters()]
-        torch.nn.utils.clip_grad_norm_(parameters, self.grad_clip)
-        for optimizer in state.optimizers.values():
-            optimizer.step()
+        if lr_scales:
+            check_lr_scales(lr_scales, {entry: [name for name, _ in groups]
+                                        for entry, groups in state.base_lrs.items()})
+        # ONE NORM PER MODEL: entries clipped together as before, except an
+        # entry whose groups are independent fits (AdapterType.clips_by_group),
+        # each of which is clipped by itself so lanes never touch (ADR 0019).
+        together = [p for entry in state.trainable
+                    if not state.adapter_types[entry].clips_by_group
+                    for p in state.params[entry].parameters()]
+        if together:
+            torch.nn.utils.clip_grad_norm_(together, self.grad_clip)
+        for entry in state.trainable:
+            if state.adapter_types[entry].clips_by_group:
+                for group in state.optimizers[entry].param_groups:
+                    held = [p for p in group["params"] if p.grad is not None]
+                    if held:
+                        torch.nn.utils.clip_grad_norm_(held, self.grad_clip)
+        for entry, optimizer in state.optimizers.items():
+            with scaled_lrs(optimizer, entry, state.base_lrs[entry], lr_scales):
+                optimizer.step()
             optimizer.zero_grad()
         for entry in state.trainable:
             state.adapter_types[entry].after_step(state.params[entry])
+
+    def forward(self, tenant: str, batch: TokenBatch) -> tuple[float, ...]:
+        """Per-document mean NLL over the document's loss_mask tokens, with no
+        gradient: the SAME routed padded forward `forward_backward` scores
+        with (`_batched_logprobs`, rows routed by their own facts, the base in
+        the eval mode it always is in), so a probe reads exactly the numbers
+        the loss would have. A document with no masked token scores 0.0.
+        No gradient accumulates and no provided tensor is computed; what a
+        routed forward does at a site it still does (a `calibrate` dream_bank
+        counts these activations too)."""
+        state = self._tenant(tenant)
+        self.forwards += 1
+        spans = _doc_spans(batch)
+        with torch.no_grad():
+            with row_plan(self._model).route(self._rows_of(state, batch, len(spans))):
+                logprobs = self._batched_logprobs(batch, spans)
+        mask = torch.tensor(batch.loss_mask, dtype=logprobs.dtype,
+                            device=logprobs.device)
+        return tuple(
+            float(-(logprobs[start:stop] * mask[start:stop]).sum()
+                  / mask[start:stop].sum().clamp(min=1.0))
+            for start, stop in spans)
+
+    # ---- named sets (ADR 0019): one route of one entry at a time ------------
+
+    def load_set(self, tenant: str, entry: str, route: str,
+                 payload: bytes | None) -> None:
+        """Start one set over — from a named payload, or from its init when
+        None — and reset its moments in that entry's optimizer. A `lib:<name>`
+        route installs a frozen library set outside every optimizer group.
+        The adapter type owns what a set IS; this picks the entry."""
+        state = self._tenant(tenant)
+        self._adapter_type(state, entry).load_set(
+            state.params[entry], route, payload, state.optimizers.get(entry))
+
+    def drop_set(self, tenant: str, entry: str, route: str) -> None:
+        """Forget one library set of `entry` (library sets only)."""
+        state = self._tenant(tenant)
+        self._adapter_type(state, entry).drop_set(state.params[entry], route)
+
+    def emit_set(self, tenant: str, entry: str, route: str) -> bytes:
+        """One set of `entry` as a named payload."""
+        state = self._tenant(tenant)
+        return self._adapter_type(state, entry).emit_set(state.params[entry], route)
+
+    @staticmethod
+    def _adapter_type(state: _Tenant, entry: str):
+        if entry not in state.adapter_types:
+            raise KeyError(f"this tenant has no bank entry {entry!r} "
+                           f"(entries: {state.entries})")
+        return state.adapter_types[entry]
 
     def emit(self, tenant: str) -> Emitted:
         state = self._tenant(tenant)
@@ -516,6 +632,29 @@ class TorchLearner:
                 if p.grad is not None:
                     total += float(p.grad.detach().pow(2).sum())
         return total ** 0.5
+
+
+@contextmanager
+def scaled_lrs(optimizer: torch.optim.Optimizer, entry: str,
+               base_lrs: tuple[tuple[str, float], ...],
+               lr_scales: Mapping[str, float] | None):
+    """For the span of ONE step, each named group's lr is its BASE lr times
+    its scale; afterwards every group has the lr it had before. Scaling from
+    the base recorded at optimizer build — never from the lr a previous step
+    left — is what makes a schedule a pure function of the step, and restoring
+    in `finally` is what keeps a failed step from leaking a scaled rate. With
+    no scales this touches nothing."""
+    if not lr_scales:
+        yield
+        return
+    before = [group["lr"] for group in optimizer.param_groups]
+    try:
+        for group, (name, base) in zip(optimizer.param_groups, base_lrs, strict=True):
+            group["lr"] = base * lr_scale_of(lr_scales, entry, name)
+        yield
+    finally:
+        for group, lr in zip(optimizer.param_groups, before):
+            group["lr"] = lr
 
 
 def _summarize(provided: Mapping[str, Any]) -> dict[str, float]:

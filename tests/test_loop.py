@@ -8,6 +8,7 @@ import unittest
 from dataclasses import replace
 
 from common import arith_spec, arith_store, cas_uri, generation_spec
+from rlstack.runner.checkpointing import EVERY_UPDATE
 from rlstack import (
     Topology, GroupPlan, HostSpec, Plans, Replay, RunPlan, WavePlan,
     encode, learner, pool, run_experiment,
@@ -30,7 +31,7 @@ class LoopTest(unittest.TestCase):
     def run_spec(self, spec, engine=None, learner=None):
         engine = engine or FakeEngine()
         report = run_experiment(spec, SCHEMA, self.store, engine,
-                                learner or FakeLearner())
+                                learner or FakeLearner(), checkpointing=EVERY_UPDATE)
         return report, engine
 
     def test_slow_run_attachment_keeps_the_event_loop_responsive(self):
@@ -49,7 +50,7 @@ class LoopTest(unittest.TestCase):
 
         async def drive():
             task = asyncio.create_task(run_experiment_async(
-                arith_spec(self.train), SCHEMA, self.store, FakeEngine(), FakeLearner()))
+                arith_spec(self.train), SCHEMA, self.store, FakeEngine(), FakeLearner(), checkpointing=EVERY_UPDATE))
             while not entered.is_set():
                 await asyncio.sleep(0)
             responsive = not release.is_set()
@@ -123,7 +124,10 @@ class LoopTest(unittest.TestCase):
             with self.assertRaises(FileNotFoundError):
                 run.read_blob("optim", "pi", k)
 
-        # phase-1 bundle + one per update, all distinct, ledger agrees
+        # THE WIRE (ADR 0014, Part B): the initial bundle, installed by the
+        # first route, then every committed version PUSHED before its ledger
+        # line — the last one included, consumer or no consumer, because the
+        # push is what makes a commit pinnable the moment it lands
         self.assertEqual(len(engine.bundle_log), 5)
         self.assertEqual(len(set(engine.bundle_log)), 5)
         self.assertEqual([e["bundle_id"] for e in entries], engine.bundle_log[1:])
@@ -156,7 +160,8 @@ class LoopTest(unittest.TestCase):
         """Repeated sealed rows reuse tokens, while a fresh trainer asks anew."""
         from unittest.mock import patch
         from common import sealed
-        from rlstack import Host, HostService, LocalTransport, RemotePool, trajectory_to_row
+        from rlstack import LocalTransport, trajectory_to_row
+        from rlstack.runner.remote import LearnerService, RemoteLearner
 
         rows = [trajectory_to_row(sealed("fact", content)) for content in ("4", "5")]
         data = self.store.cas_put("".join(json.dumps(row) + "\n" for row in rows).encode())
@@ -164,23 +169,23 @@ class LoopTest(unittest.TestCase):
             Replay(data + "#0"), Replay(data + "#1"))),)) for _ in range(4)))
         spec = arith_spec(self.train, gen=None,
                           plans=Plans(train=self.store.cas_put(encode(plan))))
-        serving = FakeEngine()
-        host = Host("tokenizer", engines=(serving,), learner=None, store=self.store)
-        remote = RemotePool(LocalTransport(HostService(host)))
+        spec = replace(spec, topology=Topology((HostSpec((learner(),)),)))
+        serving = FakeLearner()
+        remote = RemoteLearner(LocalTransport(LearnerService(serving)))
         with patch.object(serving, "tokenize", wraps=serving.tokenize) as tokenize:
-            report = run_experiment(spec, SCHEMA, self.store, remote, FakeLearner())
+            report = run_experiment(spec, SCHEMA, self.store, {}, remote, checkpointing=EVERY_UPDATE)
         self.assertEqual(report.completed, 4)
-        tokenize.assert_called_once_with("What is 2+2?")
+        tokenize.assert_called_once_with(report.run_id, "What is 2+2?")
 
-        # No cached result is shared with another trainer or engine.
+        # No cached result is shared with another trainer or learner.
         with tempfile.TemporaryDirectory() as root:
             other, _, _ = arith_store(root)
             other.cas_put(self.store.cas_get(data))
             other.cas_put(encode(plan))
-            engine = FakeEngine()
-            with patch.object(engine, "tokenize", wraps=engine.tokenize) as fresh:
-                again = run_experiment(spec, SCHEMA, other, engine, FakeLearner())
-            fresh.assert_called_once_with("What is 2+2?")
+            training = FakeLearner()
+            with patch.object(training, "tokenize", wraps=training.tokenize) as fresh:
+                again = run_experiment(spec, SCHEMA, other, {}, training, checkpointing=EVERY_UPDATE)
+            fresh.assert_called_once_with(again.run_id, "What is 2+2?")
             self.assertEqual(report.run_id, again.run_id)
             from test_resume import snapshot
             self.assertEqual(snapshot(self.store, report.run_id),
@@ -247,7 +252,7 @@ class LoopTest(unittest.TestCase):
                              (arith_spec(other_train, seeds=Seeds(master=99)),
                               report_b)):
             private = run_experiment(spec, SCHEMA, other_store,
-                                     FakeEngine(), FakeLearner())
+                                     FakeEngine(), FakeLearner(), checkpointing=EVERY_UPDATE)
             self.assertEqual(
                 self.store.path_of(
                     f"runs/{report.run_id}/ledger.jsonl").read_bytes(),
@@ -264,7 +269,8 @@ class LoopTest(unittest.TestCase):
         report_a, _ = self.run_spec(spec_a, engine=shared)
         report_b, _ = self.run_spec(spec_b, engine=shared)
         self.assertNotEqual(report_a.run_id, report_b.run_id)
-        self.assertEqual(len(shared.bundle_log), 10)   # (init + 4 updates) × 2
+        # (the initial bundle + four pushed versions) × two runs (ADR 0014)
+        self.assertEqual(len(shared.bundle_log), 10)
         self.assertEqual(len(set(shared.bundle_log)), 10)
 
         # identical results on a private engine: the tenants never interfered
@@ -278,7 +284,7 @@ class LoopTest(unittest.TestCase):
                              (arith_spec(other_train, seeds=Seeds(master=99)),
                               report_b)):
             private = run_experiment(spec, SCHEMA, other_store,
-                                     FakeEngine(), FakeLearner())
+                                     FakeEngine(), FakeLearner(), checkpointing=EVERY_UPDATE)
             shared_ledger = self.store.path_of(
                 f"runs/{report.run_id}/ledger.jsonl").read_bytes()
             private_ledger = other_store.path_of(
@@ -381,7 +387,7 @@ class JudgePoolTest(unittest.TestCase):
     def run_spec(self, spec, engine=None, learner=None):
         engine = engine or FakeEngine()
         report = run_experiment(spec, SCHEMA, self.store, engine,
-                                learner or FakeLearner())
+                                learner or FakeLearner(), checkpointing=EVERY_UPDATE)
         return report, engine
 
     def judge_spec(self):
@@ -401,7 +407,7 @@ class JudgePoolTest(unittest.TestCase):
     def test_judge_pool_end_to_end(self) -> None:
         engines_map = {"main": FakeEngine(), "judge": FakeEngine(p_correct=1.0)}
         report = run_experiment(self.judge_spec(), SCHEMA, self.store,
-                                engines_map, FakeLearner())
+                                engines_map, FakeLearner(), checkpointing=EVERY_UPDATE)
         run = self.store.open_run(report.run_id)
         entries = run.read_ledger()
         self.assertEqual([e["update"] for e in entries], [1, 2, 3, 4])
@@ -427,18 +433,18 @@ class BaseBindingTest(unittest.TestCase):
         from rlstack.spec.validate import SpecError
         with self.assertRaises(SpecError) as caught:
             run_experiment(arith_spec(self.train), SCHEMA, self.store,
-                           FakeEngine(base="some/other-model"), FakeLearner())
+                           FakeEngine(base="some/other-model"), FakeLearner(), checkpointing=EVERY_UPDATE)
         self.assertIn("pool-base-mismatch", str(caught.exception))
 
     def test_matching_and_wildcard_bases_pass(self) -> None:
         report = run_experiment(
             arith_spec(self.train), SCHEMA, self.store,
-            FakeEngine(base="Qwen/Qwen3-0.6B"), FakeLearner())
+            FakeEngine(base="Qwen/Qwen3-0.6B"), FakeLearner(), checkpointing=EVERY_UPDATE)
         self.assertEqual((report.completed, report.extent), (4, "train"))
 
 
 class GenerationOnlyTest(unittest.TestCase):
-    """ADR 0006 Part B: a run is daemons with resources, and the smallest run
+    """ADR 0006 Part B: a run is runners with resources, and the smallest run
     is a Generator alone — no algo, no learner, no Trainer, no ledger."""
 
     def setUp(self) -> None:
@@ -450,7 +456,7 @@ class GenerationOnlyTest(unittest.TestCase):
         """The teacher run: seals one rollout per planned wave, with no
         learner handed to it at all."""
         spec = generation_spec(self.train, **overrides)
-        return run_experiment(spec, SCHEMA, self.store, FakeEngine(), None), spec
+        return run_experiment(spec, SCHEMA, self.store, FakeEngine(), None, checkpointing=EVERY_UPDATE), spec
 
     def test_it_runs_and_seals_a_rollout_per_planned_wave(self) -> None:
         report, spec = self.generate()
@@ -481,7 +487,7 @@ class GenerationOnlyTest(unittest.TestCase):
     def test_it_needs_a_generator_and_nothing_else(self) -> None:
         _, spec = self.generate()
         needs = needs_of(spec)
-        self.assertEqual([need.daemon.__name__ for need in needs], ["Generator"])
+        self.assertEqual([need.runner.__name__ for need in needs], ["Generator"])
         self.assertEqual((needs[0].plan, needs[0].pools), ("rollout", ("main",)))
         self.assertFalse(needs[0].learner)
         self.assertIsNone(needs[0].buffer)      # unpaced: nothing consumes it
@@ -490,7 +496,7 @@ class GenerationOnlyTest(unittest.TestCase):
         """The other half of the same promise: needs_of over a training spec
         is the Trainer + Generator it has always been, paced by the lag."""
         needs = needs_of(arith_spec(self.train))
-        self.assertEqual([need.daemon.__name__ for need in needs],
+        self.assertEqual([need.runner.__name__ for need in needs],
                          ["Trainer", "Generator"])
         self.assertTrue(needs[0].learner)
         self.assertEqual(needs[1].buffer, 0)
@@ -498,7 +504,7 @@ class GenerationOnlyTest(unittest.TestCase):
     def test_a_spec_that_needs_a_trainer_refuses_a_missing_learner(self) -> None:
         with self.assertRaises(ValueError) as caught:
             run_experiment(arith_spec(self.train), SCHEMA, self.store,
-                           FakeEngine(), None)
+                           FakeEngine(), None, checkpointing=EVERY_UPDATE)
         self.assertIn("learner", str(caught.exception))
 
     def test_a_student_trains_by_replaying_the_teachers_rollouts(self) -> None:
@@ -519,7 +525,7 @@ class GenerationOnlyTest(unittest.TestCase):
             plans=Plans(train=cas_uri(encode(sft_plan))))
 
         report = run_experiment(student, SCHEMA, self.store, FakeEngine(),
-                                FakeLearner())
+                                FakeLearner(), checkpointing=EVERY_UPDATE)
         self.assertEqual((report.completed, report.extent), (4, "train"))
         run = self.store.open_run(report.run_id)
         self.assertEqual([e["update"] for e in run.read_ledger()], [1, 2, 3, 4])

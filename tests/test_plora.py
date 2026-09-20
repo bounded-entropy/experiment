@@ -33,6 +33,7 @@ import tempfile
 import unittest
 
 from common import arith_spec, arith_store, char_tokenize, make_turn, sealed
+from rlstack.runner.checkpointing import EVERY_UPDATE
 from rlstack import (
     AdapterSpec, AlgoSpec, FakeEngine, FakeLearner, OptimSpec, PolicySpec,
     Rollout, Message, Role, Task, Schedule, fake_qwen_schema, flatten, pack,
@@ -43,7 +44,7 @@ from rlstack.policy.adapters.plora import (
 )
 from rlstack.policy.adapters.rollout import Levers, Request, ServingBuild
 from rlstack.registry import ADAPTER_TYPES
-from rlstack.runner.daemons.trainer import _train_summary
+from rlstack.runner.roles.trainer import _train_summary
 from rlstack.runner.interfaces import TrainStats
 from rlstack.spec.flow import flow_graph
 
@@ -415,7 +416,7 @@ class EmissionTest(unittest.TestCase):
         """End to end on fakes: a bank declaring two provided tensors puts both
         in every update's train block — including the one no loss requires."""
         report = run_experiment(plora_spec(self.train), SCHEMA, self.store,
-                                FakeEngine(), FakeLearner())
+                                FakeEngine(), FakeLearner(), checkpointing=EVERY_UPDATE)
         run = self.store.open_run(report.run_id)
         for entry in run.read_ledger():
             self.assertIn(KL_PROVIDED, entry["train"])
@@ -426,7 +427,7 @@ class EmissionTest(unittest.TestCase):
         """dictionary.json is how a UI renders a run without a registry (I11),
         so the stat twin has to be in it."""
         report = run_experiment(plora_spec(self.train), SCHEMA, self.store,
-                                FakeEngine(), FakeLearner())
+                                FakeEngine(), FakeLearner(), checkpointing=EVERY_UPDATE)
         dictionary = json.loads(self.store.path_of(
             f"runs/{report.run_id}/dictionary.json").read_text())
         twins = [c for c in dictionary["columns"]
@@ -440,7 +441,7 @@ class EmissionTest(unittest.TestCase):
         """The old ledger shape is untouched where no adapter type declares a
         provide — the emission is declaration-driven, not unconditional."""
         report = run_experiment(arith_spec(self.train), SCHEMA, self.store,
-                                FakeEngine(), FakeLearner())
+                                FakeEngine(), FakeLearner(), checkpointing=EVERY_UPDATE)
         run = self.store.open_run(report.run_id)
         entry = run.read_ledger()[0]
         self.assertEqual(sorted(entry["train"]), sorted(

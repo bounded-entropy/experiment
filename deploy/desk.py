@@ -9,7 +9,7 @@
     modal run deploy/desk.py::release --metal steer-l4 --force
     modal run deploy/desk.py::sweep                   # release every metal it holds
     modal run deploy/desk.py::reap                    # probe the listings, reap the dead
-                                                      #   (the `reaper` cron does this every 15 min)
+                                                      #   (DeskRuntime does this every 15 min)
 
 WHY ONE (ADR 0007, Q2). Every desk-shaped venue used to stand up its own Desk
 container and its own fleet journal, so three fleets shared one volume without
@@ -39,8 +39,10 @@ import os
 
 import modal
 
+from rlstack.runner.venues.modal.desk import desk_class
+
 from modal_venue import (
-    DESK_APP, a_store, boot_by_spawn, cpu_image_for, desk, smoke_function, store_volume,
+    DESK_APP, a_store, cpu_image_for, desk, smoke_function, store_volume,
 )
 
 app = modal.App(DESK_APP)
@@ -56,167 +58,28 @@ Unset uses the desk's inventory; an empty value disables automatic boots.
 Allocation choices belong to deployment configuration, not the framework.
 """
 
-RECOVERY_GENERATION = os.environ.get("RLSTACK_RECOVERY_GENERATION", "")
-"""Optional recovery generation, held stable across service restarts.
-When set, only explicit submissions in this generation recover automatically.
-An empty value retains the library's recovery behavior.
-"""
-
 IDLE_S = 90.0
 """THE FLEET'S CLOCK (ADR 0003): metal nothing has been busy on for this long
-is released. A metal may declare its own at registration, and None there pins
-it forever. NINETY SECONDS since 2026-09-05 (Samarth: "if no process is
+is released. A metal may declare its own finite limit at registration. NINETY SECONDS since 2026-09-05 (Samarth: "if no process is
 running on a metal, it literally stops after a minute or smth") — busy is
 a running tenancy, work in flight, or admitted traffic that moved
 (`listing_busy`), so a run mid-load is never idle; only truly empty metal
-is, and it goes within IDLE_TICK_S of its limit, not on the reaper's cron."""
+is, and it goes within IDLE_TICK_S of its limit, independently of recovery probes."""
 
 IDLE_TICK_S = 30.0
 """How often the standing desk reads its own idle clock — inside the
 container, on its loop, because a ninety-second limit read every fifteen
-minutes by the reaper cron would still leave metal standing a quarter hour."""
+minutes by recovery probes would still leave metal standing a quarter hour."""
 
 
-async def terminate_container(container_id: str) -> bool:
-    """THE HAND THAT ENDS A METAL'S CONTAINER: what `modal container stop`
-    does, from inside the desk. A released metal stops taking inputs, but a
-    container that takes no inputs still stands (billed) until the venue's
-    scaledown, and one whose residents wedged never heard the release at all
-    — so the desk terminates it by the id the metal registered with. Already
-    finished is success."""
-    from modal.client import _Client
-    from modal_proto import api_pb2
-
-    client = await _Client.from_env()
-    info = await client.stub.TaskGetInfo(
-        api_pb2.TaskGetInfoRequest(task_id=container_id))
-    if info.info.finished_at:
-        return True
-    await client.stub.ContainerStop(
-        api_pb2.ContainerStopRequest(task_id=container_id, graceful=False))
-    print(f"[desk] terminated container {container_id}", flush=True)
-    return True
+Desk = desk_class(
+    app, cpu_image, module=__name__, store_for=lambda: a_store(),
+    volumes={"/store": store_volume}, bootable_metals=BOOTABLE_METALS,
+    idle_s=IDLE_S,
+    idle_tick_s=IDLE_TICK_S)
 
 
-@app.cls(image=cpu_image, volumes={"/store": store_volume},
-         timeout=3600, min_containers=1, max_containers=1,
-         scaledown_window=1200)
-@modal.concurrent(max_inputs=32)
-class Desk:
-    """The one container. `min_containers=1` because the desk is a STANDING
-    service — a metal announcing itself must find someone home — and
-    `max_containers=1` because two desks replaying one journal would each
-    believe they own the fleet."""
-
-    @modal.enter()
-    def bring_up(self) -> None:
-        from rlstack.runner.campaign import Campaigns
-        from rlstack.runner.desk import Desk as TheDesk
-        from rlstack.runner.remote import (
-            RemoteHost, RemoteMetal, transport_for,
-        )
-
-        self.desk = TheDesk.from_journal(
-            a_store(),
-            host_for=lambda address: RemoteHost(transport_for(address)),
-            metal_for=lambda address: RemoteMetal(transport_for(address)),
-            boot_for=self.boot,
-            bootable_metals=BOOTABLE_METALS,
-            recovery_generation=RECOVERY_GENERATION,
-            idle_s=IDLE_S,
-            # Busy hosts can answer slowly. Keep probes bounded, concurrent,
-            # and outside placement locks; an expired read remains unknown.
-            probe_deadline_s=90.0,
-            residual_deadline_s=30.0,
-            terminate_for=terminate_container)
-        # This deployment never pins GPUs: restore finite automatic shutdown
-        # even when its historical journal contains a manual infinite limit.
-        # Changing the existing policy here does not register metal or retry
-        # parked work, and finite venue-specific limits stay unchanged.
-        for name in self.desk.metal:
-            if self.desk.idle_limit(name) is None:
-                self.desk.declare_idle(name, 300.0)
-        self.desk.require_finite_idle = True
-        self.campaigns = Campaigns(self.desk)
-        self.idle_ticker = None      # started by the first async door: enter runs with no loop
-        print(f"[desk] rebuilt from journal: {sorted(self.desk.listings)} "
-              f"/ metal plane: {sorted(self.desk.metal_remotes)} "
-              f"/ released: {sorted(self.desk.released)} "
-              f"/ recipes: {sorted(self.desk.metal_builds)}", flush=True)
-
-    def ensure_idle_ticker(self) -> None:
-        """The idle ticker starts on the first ASYNC door call, because
-        `bring_up` is a synchronous enter with no running loop (found on the
-        venue: a create_task there crashed every desk container)."""
-        import asyncio
-
-        if self.idle_ticker is None or self.idle_ticker.done():
-            self.idle_ticker = asyncio.create_task(self.tick_idle())
-
-    async def tick_idle(self) -> None:
-        """The idle clock, read every IDLE_TICK_S: observe every metal's
-        listings, then release what has sat past its limit. The reaper cron
-        still does the same on its own tick (and reaps the dead); this is
-        what makes a ninety-second limit mean ninety seconds."""
-        import asyncio
-        import time
-
-        while True:
-            await asyncio.sleep(IDLE_TICK_S)
-            try:
-                now = time.time()
-                await self.desk.observe_idle(now)
-                released = await self.desk.release_idle(now)
-                if released:
-                    print(f"[desk] idle: released {released}", flush=True)
-            except Exception as refused:
-                print(f"[desk] idle tick: {refused}", flush=True)
-
-    def boot(self, name: str):
-        """THE KNOCK (ADR 0007, Q5): the metal's OWN app is in the address
-        this desk journaled, so the desk can spawn that app's keepalive
-        without knowing the venue — which is what makes the knock explicit
-        instead of an accident of Modal's lazy boot."""
-        from rlstack.runner.remote import parse_address
-
-        parsed = parse_address(self.desk.metal_addresses.get(name) or "")
-        return boot_by_spawn(parsed.app, parsed.cls)(name)
-
-    @modal.method()
-    async def door(self, host: str, verb: str, payload: dict) -> dict:
-        """The admitted verbs, through the spec-aware sidecar. `host` is
-        ignored — a desk IS its own plane — and present because every rlstack
-        Modal container wears the SAME two doors, which is why one transport
-        class reaches all of them (ADR 0007, Q1)."""
-        self.ensure_idle_ticker()
-        return await self.campaigns.serve(verb, payload)
-
-    @modal.method()
-    async def door_ask(self, host: str, verb: str, payload: dict) -> dict:
-        """The admission-free verbs (status, placements) — ASYNC like its
-        twin since ADR 0008 (Q4): a cancelled input of a synchronous method
-        on THIS container, which is `@modal.concurrent(max_inputs=32)` on one
-        process, shuts the whole desk down. That happened three times on
-        2026-09-04. The answer itself reads memory and a journal, so it runs
-        on a thread and this container's loop keeps turning."""
-        import asyncio
-
-        return await asyncio.to_thread(self.campaigns.answer, verb, payload)
-
-
-@app.function(image=cpu_image, schedule=modal.Period(minutes=15),
-              timeout=3600)
-async def reaper() -> None:
-    """THE SUPERVISION TICK, on a clock (ADR 0001 Q5, ADR 0003): probe every
-    listing, reap the ones that no longer answer, knock their metal back,
-    retry the parked queue — and release the metal nothing has been busy on
-    for its idle limit. `reap` is idempotent, so a tick that finds nothing to
-    do does nothing, and `::reap` below is the same pass by hand.
-
-    ONE clock for one fleet: this lives with the desk and not with any venue,
-    because the campaign venues used to carry a reaper cron each, and under
-    one desk that would tick the whole plane once per venue."""
-    print(json.dumps(await desk().reap(probes=3, wait=30.0)), flush=True)
+# Recovery and idle clocks are owned by the shared DeskRuntime.
 
 
 # ---------------------------------------------------------------------------
@@ -343,6 +206,37 @@ def sweep(reason: str = "sweep", force: bool = False) -> None:
         told = asyncio.run(desk().release(name, reason=reason, force=force))
         print(f"[sweep] {name}: {json.dumps(told)}")
     print(json.dumps(asyncio.run(desk().status())["metal"], indent=1))
+
+
+@doors.local_entrypoint()
+def stop(run: str = "", subdir: str = "", reason: str = "stopped by hand",
+         no_drain: bool = False) -> None:
+    """A DELIBERATE STOP (ADR 0014, Part C): one run by id, or every
+    unfinished run filed under a subdir. Drained by default — the Trainer
+    checkpoints its last commit before the run ends — and journaled
+    `stopped`, which nothing automatic revives; resubmit to move it again.
+
+        modal run deploy/desk.py::stop --run <run_id>
+        modal run deploy/desk.py::stop --subdir six-family/composition --reason "scope cut"
+    """
+    import asyncio
+
+    if bool(run) == bool(subdir):
+        raise SystemExit("say exactly one of --run <run_id> or --subdir <subdir>")
+    if run:
+        reply = asyncio.run(desk().stop(run, reason, drain=not no_drain))
+    else:
+        reply = asyncio.run(desk().stop_subdir(subdir, reason, drain=not no_drain))
+    print(json.dumps(reply, indent=2, default=str), flush=True)
+
+
+@doors.local_entrypoint()
+def dispositions() -> None:
+    """What is parked, what was stopped by hand, what failed of its own —
+    the desk's standing disposition per run, with reasons and errors."""
+    import asyncio
+
+    print(json.dumps(asyncio.run(desk().dispositions()), indent=2, default=str), flush=True)
 
 
 @doors.local_entrypoint()

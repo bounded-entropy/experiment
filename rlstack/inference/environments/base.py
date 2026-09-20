@@ -23,6 +23,7 @@ from rlstack.client import PoolClient
 from rlstack.data.trajectory import Task
 from rlstack.inference.rollout import Rollout
 from rlstack.registry import ENVS, source_hash
+from rlstack.spec.specs import SamplingSpec
 
 
 class Environment(ABC):
@@ -30,7 +31,15 @@ class Environment(ABC):
 
     Subclasses must construct with no arguments — the decorator instantiates
     one shared instance.
+
+    `sampling` overrides the run's generation sampling for this environment's
+    episodes (an answering environment wants greedy, short completions while
+    the run's dreams sample at temperature); None inherits the run's. It lives
+    in the class source, so it hashes into run identity through code_hashes
+    like the rest of the declaration — the same rule as PostProcessor.sampling.
     """
+
+    sampling: "SamplingSpec | None" = None
 
     @abstractmethod
     async def run(self, client: PoolClient, task: Task) -> Rollout:

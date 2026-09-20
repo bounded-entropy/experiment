@@ -1,19 +1,19 @@
-"""The runner: the substrate that drives both worlds as daemons on a blackboard.
+"""The runner: the substrate that drives both worlds as runners on a blackboard.
 
 The map, by responsibility — read top to bottom:
 
     interfaces.py   the seams: Engine / Learner protocols + what crosses them
                     (TokenEvent, FinishEvent, TrainStats, Emitted)
     loop.py         run_experiment(_async): Phase 0 identity, Phase 1 setup,
-                    needs_of + plan_daemons — the only orchestration. A run is
-                    a set of daemon NEEDS with the resources each admits; the
+                    needs_of + plan_runners — the only orchestration. A run is
+                    a set of runner NEEDS with the resources each admits; the
                     experiment is the set read off a spec (ADR 0006 Part B)
-    daemons/        one file per GPU responsibility (generator / trainer /
+    roles/          one file per GPU responsibility (generator / trainer /
                     scorer), all the same four beats: await condition,
                     admit residents, work, write + notify — each present
                     exactly where its need is
     signals.py      the LOGICAL half of the blackboard: awaitable predicates
-                    over the store — daemons never call each other
+                    over the store — runners never call each other
     arbiter.py      the PHYSICAL half: the Arbiter owns admission to the
                     metal — object-keyed residents, exclusive groups from
                     a multi-member HostSpec, sticky drain-until-blocked
@@ -65,5 +65,5 @@ This is the one package allowed to import both worlds.
 
 from rlstack.runner import (  # noqa: F401
     meters, interfaces, seeds, traffic, signals, arbiter, post,
-    daemons, loop, host, fakes,
+    roles, loop, host, fakes,
 )

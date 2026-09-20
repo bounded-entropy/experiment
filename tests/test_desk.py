@@ -23,6 +23,7 @@ import unittest
 import json
 
 from common import arith_spec, arith_store, generation_spec
+from rlstack.runner.checkpointing import EVERY_UPDATE
 from rlstack import (
     Bundle, FakeEngine, FakeLearner, Topology, Host, HostSpec, Message, Metal,
     PolicySpec, Regime, RemotePool, Role, SamplingSpec, Seeds,
@@ -255,7 +256,7 @@ class DeskTest(DeskFixture):
         desk.list_host("train-b", trainer.regimes, "fleet://b")
 
         async def drive():
-            reply = await Campaigns(desk).submit(self.split_spec())
+            reply = await Campaigns(desk).submit(self.split_spec(), checkpointing=EVERY_UPDATE)
             await trainer._adoptions[reply["run_id"]]
             return reply
         reply = go(drive())
@@ -282,7 +283,7 @@ class DeskTest(DeskFixture):
         remote = RemoteDesk(LocalTransport(Campaigns(desk)))
 
         async def drive():
-            reply = await remote.submit(self.split_spec())
+            reply = await remote.submit(self.split_spec(), checkpointing=EVERY_UPDATE)
             await trainer._adoptions[reply["run_id"]]
             return reply
         reply = go(drive())
@@ -294,7 +295,7 @@ class DeskTest(DeskFixture):
                      learner=FakeLearner(), store=other_store)
         spec = arith_spec(other_train, topology=Topology(hosts=(
             HostSpec((pool("main"),)), HostSpec((learner(),)))))
-        report = go(plain.submit(spec, SCHEMA))
+        report = go(plain.submit(spec, SCHEMA, checkpointing=EVERY_UPDATE))
         self.assertEqual(reply["run_id"], report.run_id)
         self.assertEqual(
             self.store.path_of(f"runs/{reply['run_id']}/ledger.jsonl").read_bytes(),
@@ -304,7 +305,7 @@ class DeskTest(DeskFixture):
         """The standing carve is a venue action: the refusal SAYS what to
         boot instead of placing wrong."""
         desk = self.desk()
-        reply = go(Campaigns(desk).submit(self.split_spec()))
+        reply = go(Campaigns(desk).submit(self.split_spec(), checkpointing=EVERY_UPDATE))
         self.assertFalse(reply["accepted"])
         self.assertEqual(len(reply["boot"]), 2)
         self.assertEqual(reply["boot"][0]["base"], BASE)
@@ -318,10 +319,10 @@ class DeskTest(DeskFixture):
         desk.list_host("busy", busy.regimes, "fleet://busy", solo=True)
 
         async def drive():
-            first = await Campaigns(desk).submit(arith_spec(self.train))
+            first = await Campaigns(desk).submit(arith_spec(self.train), checkpointing=EVERY_UPDATE)
             # while the first is still running, the desk must not offer busy
             second = await Campaigns(desk).submit(
-                arith_spec(self.train, seeds=Seeds(master=99)))
+                arith_spec(self.train, seeds=Seeds(master=99)), checkpointing=EVERY_UPDATE)
             await busy._adoptions[first["run_id"]]
             return first, second
         first, second = go(drive())
@@ -438,9 +439,9 @@ class BalancedJoinTest(DeskFixture):
                                      serves_pool=False, trains=True)
                 desk.list_host(name, host.regimes, f"fleet://{name}")
                 trainers[name] = host
-            first = await Campaigns(desk).submit(self.split_spec())
+            first = await Campaigns(desk).submit(self.split_spec(), checkpointing=EVERY_UPDATE)
             second = await Campaigns(desk).submit(
-                dataclasses.replace(self.split_spec(), seeds=Seeds(master=99)))
+                dataclasses.replace(self.split_spec(), seeds=Seeds(master=99)), checkpointing=EVERY_UPDATE)
             gate.set()
             await asyncio.gather(trainers[first["host"]]._adoptions[first["run_id"]],
                                  trainers[second["host"]]._adoptions[second["run_id"]])
@@ -460,7 +461,7 @@ class CodeSkewTest(DeskFixture):
         spec = arith_spec(self.train)
 
         async def drive(code):
-            return await host.adopt(_row(spec), None, code)
+            return await host.adopt(_row(spec), None, code, checkpointing=EVERY_UPDATE.row())
         refusal = go(drive({"loss:grpo": "0000000000000000"}))
         self.assertFalse(refusal["accepted"])
         self.assertIn("loss:grpo", refusal["error"])
@@ -470,7 +471,7 @@ class CodeSkewTest(DeskFixture):
         agreed = go(drive(code_hashes(spec)))
         self.assertTrue(agreed["accepted"], agreed)
         unclaimed = go(host.adopt(_row(arith_spec(self.train,
-                                                  seeds=Seeds(master=31)))))
+                                                  seeds=Seeds(master=31))), checkpointing=EVERY_UPDATE.row()))
         self.assertTrue(unclaimed["accepted"])
 
     def test_the_desk_relays_the_clients_claim(self) -> None:
@@ -481,7 +482,7 @@ class CodeSkewTest(DeskFixture):
         reply = go(desk.submit(          # a TAMPERED frame, relayed unread
             demand_rows(demands_of(spec)),
             {"spec": _row(spec), "code": {"loss:grpo": "not-the-real-hash"},
-             "subdir": None}))
+             "subdir": None, "checkpointing": EVERY_UPDATE.row()}))
         self.assertFalse(reply["accepted"])
         self.assertIn("loss:grpo", reply["error"])
 
@@ -496,7 +497,7 @@ class ProvisionTest(DeskFixture):
         desk = self.desk_with_metal("fake-metal")
 
         async def drive():
-            reply = await Campaigns(desk).submit(self.split_spec())
+            reply = await Campaigns(desk).submit(self.split_spec(), checkpointing=EVERY_UPDATE)
             trainer = service.hosts[reply["host"]]
             await trainer._adoptions[reply["run_id"]]
             return reply
@@ -518,14 +519,14 @@ class ProvisionTest(DeskFixture):
         stays listed for the next submit's join rung."""
         self.metal_service(devices=1)
         desk = self.desk_with_metal("fake-metal")
-        reply = go(Campaigns(desk).submit(self.split_spec()))
+        reply = go(Campaigns(desk).submit(self.split_spec(), checkpointing=EVERY_UPDATE))
         self.assertFalse(reply["accepted"])
         self.assertEqual(len(reply["boot"]), 1)
         self.assertEqual(len(desk.listings), 1)
 
     def test_without_metal_the_boot_instructions_stand(self) -> None:
         desk = self.desk()
-        reply = go(Campaigns(desk).submit(self.split_spec()))
+        reply = go(Campaigns(desk).submit(self.split_spec(), checkpointing=EVERY_UPDATE))
         self.assertFalse(reply["accepted"])
         self.assertEqual(len(reply["boot"]), 2)
 
@@ -569,9 +570,9 @@ class MigrateTest(DeskFixture):
         spec = arith_spec(self.train)
 
         async def drive():
-            first = await remote.submit(spec)
+            first = await remote.submit(spec, checkpointing=EVERY_UPDATE)
             await host._adoptions[first["run_id"]]
-            forked = await remote.migrate([first["run_id"]])
+            forked = await remote.migrate([first["run_id"]], checkpointing=EVERY_UPDATE)
             child = forked[first["run_id"]]
             if child.get("run_id") in host._adoptions:
                 await host._adoptions[child["run_id"]]
@@ -619,7 +620,7 @@ class MigrateTest(DeskFixture):
         self.fabricate_parent("aaaa11112222", spec, committed=2)
 
         async def drive():
-            forked = await Campaigns(desk).migrate(["aaaa11112222"], remaining_only=True)
+            forked = await Campaigns(desk).migrate(["aaaa11112222"], remaining_only=True, checkpointing=EVERY_UPDATE)
             child = forked["aaaa11112222"]
             if child.get("run_id") in host._adoptions:
                 await host._adoptions[child["run_id"]]
@@ -646,7 +647,7 @@ class MigrateTest(DeskFixture):
 
         async def drive():
             forked = await Campaigns(desk).migrate(["fancy1111111", "plain1111111"],
-                                        remaining_only=True)
+                                        remaining_only=True, checkpointing=EVERY_UPDATE)
             plain = forked["plain1111111"]
             if plain.get("run_id") in host._adoptions:
                 await host._adoptions[plain["run_id"]]
@@ -945,7 +946,7 @@ class ReapTest(DeskFixture):
         desk = self.desk_with_metal("fake-metal")
 
         async def drive():
-            reply = await Campaigns(desk).submit(self.split_spec())
+            reply = await Campaigns(desk).submit(self.split_spec(), checkpointing=EVERY_UPDATE)
             await service.hosts[reply["host"]]._adoptions[reply["run_id"]]
             return reply
         reply = go(drive())
@@ -976,7 +977,7 @@ class ReapTest(DeskFixture):
         desk.list_host("serve-a", serving.regimes, "fleet://a")
 
         async def drive():
-            reply = await Campaigns(desk).submit(generation_spec(self.train))
+            reply = await Campaigns(desk).submit(generation_spec(self.train), checkpointing=EVERY_UPDATE)
             await serving._adoptions[reply["run_id"]]
             return reply
         reply = go(drive())
@@ -1068,7 +1069,7 @@ class AnchorTest(DeskFixture):
 
         async def drive():
             reply = await Campaigns(desk).submit(self.split_spec(),
-                                                 anchor="main")
+                                                 anchor="main", checkpointing=EVERY_UPDATE)
             await serving._adoptions[reply["run_id"]]
             return reply
         reply = go(drive())
@@ -1107,13 +1108,13 @@ class AnchorTest(DeskFixture):
 
         async def drive():
             first = await Campaigns(desk).submit(self.split_spec(),
-                                                 anchor="main")
+                                                 anchor="main", checkpointing=EVERY_UPDATE)
             # while the first holds the solo listing, the second anchors
             # on the OTHER serving host — and joins the same learner
             second = await Campaigns(desk).submit(
                 arith_spec(self.train, seeds=Seeds(master=99),
                            topology=self.split_spec().topology),
-                anchor="main")
+                anchor="main", checkpointing=EVERY_UPDATE)
             gate.set()
             await busy._adoptions[first["run_id"]]
             await spare._adoptions[second["run_id"]]
@@ -1149,7 +1150,7 @@ class AnchorTest(DeskFixture):
         spec = generation_spec(self.train)
 
         async def drive():
-            reply = await Campaigns(desk).submit(spec)
+            reply = await Campaigns(desk).submit(spec, checkpointing=EVERY_UPDATE)
             return reply, await serving._adoptions[reply["run_id"]]
 
         reply, report = go(drive())
@@ -1174,7 +1175,7 @@ class DecommissionTest(DeskFixture):
         desk = self.desk_with_metal("fake-metal")
 
         async def drive():
-            reply = await Campaigns(desk).submit(self.split_spec())
+            reply = await Campaigns(desk).submit(self.split_spec(), checkpointing=EVERY_UPDATE)
             trainer = service.hosts[reply["host"]]
             await trainer._adoptions[reply["run_id"]]
             verdicts = {}
@@ -1182,7 +1183,7 @@ class DecommissionTest(DeskFixture):
                 verdicts[name] = await desk.decommission(name)
             reborn = await Campaigns(desk).submit(arith_spec(
                 self.train, seeds=Seeds(master=23),
-                topology=self.split_spec().topology))
+                topology=self.split_spec().topology), checkpointing=EVERY_UPDATE)
             await service.hosts[reborn["host"]]._adoptions[reborn["run_id"]]
             return verdicts, reborn
         verdicts, reborn = go(drive())
@@ -1203,7 +1204,7 @@ class DecommissionTest(DeskFixture):
         desk = self.desk_with_metal("fake-metal")
 
         async def drive():
-            reply = await Campaigns(desk).submit(self.split_spec())
+            reply = await Campaigns(desk).submit(self.split_spec(), checkpointing=EVERY_UPDATE)
             refusals = {}
             for name in sorted(desk.listings):
                 refusals[name] = await desk.decommission(name)
@@ -1222,7 +1223,7 @@ class DecommissionTest(DeskFixture):
         desk = self.desk_with_metal("fake-metal")
 
         async def drive():
-            reply = await Campaigns(desk).submit(self.split_spec())
+            reply = await Campaigns(desk).submit(self.split_spec(), checkpointing=EVERY_UPDATE)
             serve_name = next(n for n in desk.listings
                               if "learner" not in n)
             forced = await desk.decommission(serve_name, force=True)
@@ -1257,7 +1258,7 @@ class SupersededCarveTest(DeskFixture):
         desk = self.desk_with_metal("fake-metal")
 
         async def drive():
-            first = await Campaigns(desk).submit(self.split_spec())
+            first = await Campaigns(desk).submit(self.split_spec(), checkpointing=EVERY_UPDATE)
             await service.hosts[first["host"]]._adoptions[first["run_id"]]
             # the container generation turns over: books empty, counter reset,
             # every carved address dead — the same object, so the desk's plane
@@ -1268,7 +1269,7 @@ class SupersededCarveTest(DeskFixture):
             service.carves = 0
             reborn = await Campaigns(desk).submit(arith_spec(
                 self.train, seeds=Seeds(master=31),
-                topology=self.split_spec().topology))
+                topology=self.split_spec().topology), checkpointing=EVERY_UPDATE)
             await service.hosts[reborn["host"]]._adoptions[reborn["run_id"]]
             return first, reborn
         first, reborn = go(drive())
@@ -1284,7 +1285,7 @@ class StopTest(DeskFixture):
     def test_stop_cancels_journals_and_a_resume_completes(self) -> None:
         """The per-tenancy kill: a gated run is stopped mid-flight — the
         reply arrives only after the death is COMPLETE (the roster row
-        failed, the detach journaled) — and re-adopting the same run_id
+        stopped, the detach journaled) — and re-adopting the same run_id
         afterwards is a plain resume that runs to done. A second stop finds
         nothing running and says so instead of raising."""
         gate = asyncio.Event()
@@ -1297,24 +1298,24 @@ class StopTest(DeskFixture):
         door = RemoteHost(LocalTransport(HostService(host)))
 
         async def drive():
-            accepted = await door.adopt(arith_spec(self.train))
+            accepted = await door.adopt(arith_spec(self.train), checkpointing=EVERY_UPDATE.row())
             rid = accepted["run_id"]
             first = await door.stop(rid)
             again = await door.stop(rid)
             gate.set()
-            resumed = await door.adopt(arith_spec(self.train))
+            resumed = await door.adopt(arith_spec(self.train), checkpointing=EVERY_UPDATE.row())
             await host._adoptions[rid]
             return accepted, first, again, resumed, rid
         accepted, first, again, resumed, rid = go(drive())
         self.assertTrue(accepted["accepted"], accepted)
         self.assertTrue(first["stopped"], first)
-        self.assertEqual(first["state"], "failed")
+        self.assertEqual(first["state"], "stopped")   # deliberate, never `failed` (ADR 0014)
         self.assertFalse(again["stopped"])           # already dead: the goal
         self.assertTrue(resumed["accepted"], resumed)
         self.assertEqual(host.roster[rid].status, "done")
         detaches = [e["status"] for e in self.store.read_host_log("both-a")
                     if e.get("event") == "detach"]
-        self.assertEqual(detaches, ["failed", "done"])
+        self.assertEqual(detaches, ["stopped", "done"])
 
 
 class RerouteTest(DeskFixture):
@@ -1330,7 +1331,7 @@ class RerouteTest(DeskFixture):
         desk = self.desk_with_metal("fake-metal")
 
         async def drive():
-            reply = await Campaigns(desk).submit(self.split_spec())
+            reply = await Campaigns(desk).submit(self.split_spec(), checkpointing=EVERY_UPDATE)
             rid = reply["run_id"]
             verdict = await desk.decommission(reply["host"], reroute=True)
             gate.set()
@@ -1350,6 +1351,41 @@ class RerouteTest(DeskFixture):
         self.assertEqual(table[rid]["host"], landed)  # the binding moved
         self.assertIn("demands", table[rid])          # and stayed replayable
 
+    def test_a_solo_placement_is_archived_solo_and_rerouted_solo(self) -> None:
+        """The placement MODE rides the archive: a solo submission's place
+        event says so, and a reroute replays it solo — carving on a fresh
+        card instead of joining whatever stands (2026-09-17: a reaped 7B
+        arm was rerouted onto another arm's card)."""
+        gate = asyncio.Event()
+        service = self.metal_service(devices=3, sample_gate=gate)
+        other = self.metal_service("other-metal", devices=3, sample_gate=gate)
+        desk = self.desk_with_metal("fake-metal", "other-metal")
+        seen: list[bool] = []
+        real = desk.place_listings
+
+        async def spying(demands, avoid=frozenset(), solo=False):
+            seen.append(solo)
+            return await real(demands, avoid, solo)
+
+        async def drive():
+            reply = await Campaigns(desk).submit(self.split_spec(), solo=True,
+                                                 checkpointing=EVERY_UPDATE)
+            rid = reply["run_id"]
+            self.assertTrue(desk.placements()[rid]["solo"])
+            desk.place_listings = spying
+            verdict = await desk.decommission(reply["host"], reroute=True)
+            gate.set()
+            moved = verdict["rerouted"][rid]
+            if "host" in moved:
+                landed = service.hosts.get(moved["host"]) or other.hosts[moved["host"]]
+                await landed._adoptions[rid]
+            return reply, verdict
+        reply, verdict = go(drive())
+        rid = reply["run_id"]
+        self.assertTrue(verdict["rerouted"][rid].get("rerouted"), verdict)
+        self.assertEqual(seen, [True])                 # the reroute placed solo
+        self.assertTrue(desk.placements()[rid]["solo"])  # and archived solo again
+
     def test_a_reroute_with_nowhere_to_go_leaves_the_run_running(self) -> None:
         """PLACE-FIRST: without park, a reroute that would strand the run
         (nothing else covers it, no metal can hold it) refuses with the boot
@@ -1360,7 +1396,7 @@ class RerouteTest(DeskFixture):
         desk = self.desk_with_metal("fake-metal")
 
         async def drive():
-            reply = await Campaigns(desk).submit(self.split_spec())
+            reply = await Campaigns(desk).submit(self.split_spec(), checkpointing=EVERY_UPDATE)
             rid = reply["run_id"]
             refusal = await desk.reroute(rid, avoiding=reply["host"])
             still = service.hosts[reply["host"]].roster[rid].status
@@ -1388,11 +1424,11 @@ class RerouteTest(DeskFixture):
         remote = RemoteDesk(LocalTransport(Campaigns(desk)))
 
         async def drive():
-            reply = await Campaigns(desk).submit(self.split_spec())
+            reply = await Campaigns(desk).submit(self.split_spec(), checkpointing=EVERY_UPDATE)
             rid = reply["run_id"]
             verdict = await remote.decommission(reply["host"], reroute=True)
             gate.set()
-            revived = await Campaigns(desk).submit(self.split_spec())
+            revived = await Campaigns(desk).submit(self.split_spec(), checkpointing=EVERY_UPDATE)
             await service.hosts[revived["host"]]._adoptions[rid]
             return reply, verdict, revived
         reply, verdict, revived = go(drive())
@@ -1478,7 +1514,7 @@ class ReRegistrationTest(DeskFixture):
             builds=Builds.fakes(engine_sleeps=True).row()))
 
         async def drive():
-            reply = await Campaigns(desk).submit(self.split_spec())
+            reply = await Campaigns(desk).submit(self.split_spec(), checkpointing=EVERY_UPDATE)
             await service.hosts[reply["host"]]._adoptions[reply["run_id"]]
             return reply
         reply = go(drive())
@@ -1503,7 +1539,7 @@ class ReRegistrationTest(DeskFixture):
         remote = RemoteDesk(LocalTransport(Campaigns(desk)))
 
         async def drive():
-            reply = await Campaigns(desk).submit(self.split_spec())
+            reply = await Campaigns(desk).submit(self.split_spec(), checkpointing=EVERY_UPDATE)
             rid = reply["run_id"]
             again = await remote.register_metal(       # a second `up`
                 "fake-metal", "L4", 2, 24.0, "metal://fake-metal")
@@ -1544,7 +1580,7 @@ class SuperviseTest(DeskFixture):
         desk = self.desk_with_metal("fake-metal", boot_for=knocked.append)
 
         async def drive():
-            reply = await Campaigns(desk).submit(self.split_spec())
+            reply = await Campaigns(desk).submit(self.split_spec(), checkpointing=EVERY_UPDATE)
             await self.container_dies(service)
             verdicts = await desk.reap(probes=1)
             gate.set()
@@ -1579,7 +1615,7 @@ class SuperviseTest(DeskFixture):
         desk = self.desk_with_metal("fake-metal")
 
         async def drive():
-            reply = await Campaigns(desk).submit(self.split_spec())
+            reply = await Campaigns(desk).submit(self.split_spec(), checkpointing=EVERY_UPDATE)
             await self.container_dies(service)
             self.metal_transports["metal://fake-metal"] = ReapTest.Dead()
             verdicts = await desk.reap(probes=1)
@@ -1600,7 +1636,7 @@ class SuperviseTest(DeskFixture):
         remote = RemoteDesk(LocalTransport(Campaigns(desk)))
 
         async def drive():
-            reply = await Campaigns(desk).submit(self.split_spec())
+            reply = await Campaigns(desk).submit(self.split_spec(), checkpointing=EVERY_UPDATE)
             rid = reply["run_id"]
             await self.container_dies(service)
             self.metal_transports["metal://fake-metal"] = ReapTest.Dead()
@@ -1634,7 +1670,7 @@ class SuperviseTest(DeskFixture):
         desk.retry_parked = crash            # the crash, after conclude + strand
 
         async def drive():
-            reply = await Campaigns(desk).submit(self.split_spec())
+            reply = await Campaigns(desk).submit(self.split_spec(), checkpointing=EVERY_UPDATE)
             rid = reply["run_id"]
             await self.container_dies(service)
             with self.assertRaises(RuntimeError):
@@ -1671,7 +1707,7 @@ class SuperviseTest(DeskFixture):
         remote = RemoteDesk(LocalTransport(Campaigns(desk)))
 
         async def drive():
-            reply = await Campaigns(desk).submit(self.split_spec())
+            reply = await Campaigns(desk).submit(self.split_spec(), checkpointing=EVERY_UPDATE)
             rid = reply["run_id"]
             verdict = await remote.decommission(reply["host"], reroute=True)
             told = await remote.register_metal(
@@ -1698,7 +1734,7 @@ class IdleReleaseTest(DeskFixture):
         """One submit through the desk: two hosts carved on the metal and the
         run finished — the state an idle sweep meets."""
         async def drive():
-            reply = await Campaigns(desk).submit(self.split_spec())
+            reply = await Campaigns(desk).submit(self.split_spec(), checkpointing=EVERY_UPDATE)
             await service.hosts[reply["host"]]._adoptions[reply["run_id"]]
             return reply
         reply = go(drive())
@@ -2049,7 +2085,7 @@ class BareMetalTest(DeskFixture):
         placement falls through to the boot instructions it would give if no
         metal existed at all."""
         desk = self.bare_desk()
-        reply = go(Campaigns(desk).submit(self.split_spec()))
+        reply = go(Campaigns(desk).submit(self.split_spec(), checkpointing=EVERY_UPDATE))
         self.assertFalse(reply["accepted"], reply)
         refusals = [e for e in self.store.read_fleet_log()
                     if e.get("event") == "carve-refused"]
@@ -2072,6 +2108,49 @@ class BareMetalTest(DeskFixture):
         self.assertEqual(service.hosts, {})
         self.assertEqual(service.pending, [])       # the booking came back
 
+    def test_a_frozen_unit_is_carved_with_an_engine_that_serves_nothing(self) -> None:
+        """A judge pool names no adapter type, so its engine pays for none: a
+        recipe sized for rank-32 library adapters once put 13 GB of adapter
+        slots inside a 32B judge and left its KV cache negative (2026-09-19).
+        The run's own pool is still built from the metal's recipe as declared."""
+        from rlstack.runner.desk import Demand, serving_nothing
+        from rlstack.runner.residents import EngineBuild, LearnerBuild
+        recipe = Builds(engine=EngineBuild(max_rank=32, serves=("dream_bank",)),
+                        learner=LearnerBuild())
+        self.assertEqual(serving_nothing(recipe).engine.serves, ())
+        self.assertEqual(serving_nothing(recipe).engine.max_rank, 32)
+        self.assertEqual(recipe.engine.serves, ("dream_bank",))       # the metal's is untouched
+        desk = self.desk()
+        desk.register_metal(self.bare_metal().metal, address="metal://fake-metal")
+        desk.recipe("fake-metal", recipe)
+        judge = Demand(pool="judge", capability="inference", base="judge-base", shape=1,
+                       vram_gb=12.0, group=1, adapter_types=())
+        own = Demand(pool="main", capability="inference", base=BASE, shape=1,
+                     vram_gb=12.0, group=0, adapter_types=("dream_bank",))
+        self.assertEqual(desk.carve_request((judge,), "fake-metal", 12.0)["builds"]["engine"]["serves"], [])
+        self.assertEqual(desk.carve_request((own,), "fake-metal", 12.0)["builds"]["engine"]["serves"],
+                         ["dream_bank"])
+
+    def test_a_commanded_carve_that_fails_says_why_on_the_record(self) -> None:
+        """A pod that cannot build what it was told to — a base its offline
+        cache never held — once answered a submit with "no registered metal
+        can hold them" and left the reason in the pod's own log alone
+        (2026-09-18). The failure is journaled against the metal."""
+        service = self.bare_metal()
+        desk = self.desk()
+        desk.register_metal(service.metal, address="metal://fake-metal")
+        desk.recipe("fake-metal", Builds.fakes(engine_sleeps=True))
+
+        async def cannot_build(request):
+            raise OSError("Qwen/Qwen3-8B is not in the offline cache")
+        desk.metal_remotes["fake-metal"].carve = cannot_build
+        reply = go(Campaigns(desk).submit(self.split_spec(), checkpointing=EVERY_UPDATE))
+        self.assertFalse(reply["accepted"], reply)
+        reasons = [e["reason"] for e in self.store.read_fleet_log()
+                   if e.get("event") == "carve-refused"]
+        self.assertTrue(any("offline cache" in reason and "OSError" in reason
+                            for reason in reasons), reasons)
+
     def test_a_recipe_declared_at_the_desk_rides_the_next_carve(self) -> None:
         """The door's whole job: declare, and the metal that could not be
         carved on carves. The recipe reaches the container through the carve
@@ -2082,7 +2161,7 @@ class BareMetalTest(DeskFixture):
         desk.recipe("fake-metal", Builds.fakes(engine_sleeps=True))
 
         async def drive():
-            reply = await Campaigns(desk).submit(self.split_spec())
+            reply = await Campaigns(desk).submit(self.split_spec(), checkpointing=EVERY_UPDATE)
             await service.hosts[reply["host"]]._adoptions[reply["run_id"]]
             return reply
         reply = go(drive())
@@ -2104,7 +2183,7 @@ class BareMetalTest(DeskFixture):
         self.assertEqual(told, {"metal": "fake-metal",
                                 "builds": Builds.fakes().row()})
         self.assertEqual(desk.recipe_for("fake-metal"), Builds.fakes())
-        reply = go(Campaigns(desk).submit(self.split_spec()))
+        reply = go(Campaigns(desk).submit(self.split_spec(), checkpointing=EVERY_UPDATE))
         self.assertTrue(reply["accepted"], reply)
 
     def test_the_declaration_outlives_the_desk(self) -> None:
@@ -2248,7 +2327,7 @@ class GuardedReleaseTest(DeskFixture):
         desk = self.desk_with_metal("fake-metal")
 
         async def drive():
-            reply = await Campaigns(desk).submit(self.split_spec())
+            reply = await Campaigns(desk).submit(self.split_spec(), checkpointing=EVERY_UPDATE)
             refused = await desk.release("fake-metal", reason="my door")
             stood = "fake-metal" not in desk.released and dict(desk.listings)
             trainer = service.hosts[reply["host"]]
@@ -2271,7 +2350,7 @@ class GuardedReleaseTest(DeskFixture):
         desk = self.desk_with_metal("fake-metal")
 
         async def drive():
-            reply = await Campaigns(desk).submit(self.split_spec())
+            reply = await Campaigns(desk).submit(self.split_spec(), checkpointing=EVERY_UPDATE)
             holding = await desk.metal_dependents("fake-metal")
             await service.hosts[reply["host"]]._adoptions[reply["run_id"]]
             return reply, holding
@@ -2285,7 +2364,7 @@ class GuardedReleaseTest(DeskFixture):
         desk = self.desk_with_metal("fake-metal")
 
         async def drive():
-            reply = await Campaigns(desk).submit(self.split_spec())
+            reply = await Campaigns(desk).submit(self.split_spec(), checkpointing=EVERY_UPDATE)
             forced = await desk.release("fake-metal", reason="sweep",
                                         force=True)
             return reply, forced
@@ -2309,7 +2388,7 @@ class GuardedReleaseTest(DeskFixture):
         desk = self.desk_with_metal("fake-metal", idle_s=600.0)
 
         async def drive():
-            reply = await Campaigns(desk).submit(self.split_spec())
+            reply = await Campaigns(desk).submit(self.split_spec(), checkpointing=EVERY_UPDATE)
             holding = await desk.metal_dependents("fake-metal")
             desk.idle_since["fake-metal"] = 0.0        # the quiet began long ago
             due = await desk.release_idle(1000.0)
@@ -2368,10 +2447,10 @@ class SoloPlacementTest(DeskFixture):
     def test_a_solo_submit_carves_past_a_covering_listing(self) -> None:
         service = self.metal_service(devices=4)
         desk = self.desk_with_metal("fake-metal")
-        first = go(Campaigns(desk).submit(self.split_spec()))
+        first = go(Campaigns(desk).submit(self.split_spec(), checkpointing=EVERY_UPDATE))
         self.assertTrue(first["accepted"], first)
         other = dataclasses.replace(self.split_spec(), seeds=Seeds(master=99))
-        second = go(Campaigns(desk).submit(other, solo=True))
+        second = go(Campaigns(desk).submit(other, solo=True, checkpointing=EVERY_UPDATE))
         self.assertTrue(second["accepted"], second)
         self.assertNotEqual(second["host"], first["host"])   # carved, not joined
         self.assertEqual(len(desk.listings), 4)
@@ -2381,9 +2460,59 @@ class SoloPlacementTest(DeskFixture):
         self.assertEqual(len(requests), 4)
         # a plain submit afterwards JOINS (the join rung's first covering listing)
         third = go(Campaigns(desk).submit(
-            dataclasses.replace(self.split_spec(), seeds=Seeds(master=7))))
+            dataclasses.replace(self.split_spec(), seeds=Seeds(master=7)), checkpointing=EVERY_UPDATE))
         self.assertTrue(third["accepted"], third)
         self.assertEqual(len(desk.listings), 4)
+
+    def test_a_solo_submit_s_frozen_pool_joins_the_standing_judge(self) -> None:
+        """A pool on ANOTHER base names no adapter type (campaign.demands_of)
+        and is a FROZEN unit: two solo arms carve their own main and learner
+        but dial ONE judge — the second joins the listing the first carved."""
+        from rlstack.runner.campaign import demands_of
+        from rlstack.runner.desk import frozen_unit
+        self.metal_service(devices=6)
+        desk = self.desk_with_metal("fake-metal")
+        judged = arith_spec(self.train, topology=Topology(hosts=(
+            HostSpec((pool("main"),)), HostSpec((learner(),)),
+            HostSpec((pool("judge", base="fake/judge-32b"),)))))
+        demands = demands_of(judged)
+        by_pool = {d.pool: d for d in demands}
+        self.assertEqual(by_pool["judge"].adapter_types, ())
+        self.assertEqual(by_pool["main"].adapter_types, demands_of(self.split_spec())[0].adapter_types)
+        self.assertTrue(frozen_unit((by_pool["judge"],)))
+        self.assertFalse(frozen_unit((by_pool["main"],)))
+        first = go(Campaigns(desk).submit(judged, solo=True, checkpointing=EVERY_UPDATE))
+        self.assertTrue(first["accepted"], first)
+        self.assertEqual(len(desk.listings), 3)
+        second = go(Campaigns(desk).submit(
+            dataclasses.replace(judged, seeds=Seeds(master=99)), solo=True, checkpointing=EVERY_UPDATE))
+        self.assertTrue(second["accepted"], second)
+        self.assertEqual(len(desk.listings), 5)                 # main and learner carved, the judge joined
+        self.assertEqual(second["pools"]["judge"], first["pools"]["judge"])
+        self.assertNotEqual(second["pools"]["main"], first["pools"]["main"])
+
+    def test_a_frozen_pool_stays_on_its_own_arm_s_metal(self) -> None:
+        """Two metals, two solo arms: each arm's judge is carved BESIDE its
+        main and learner (dialed in-process there), not joined across metals
+        through the desk's relay — unless its own metal has no room."""
+        from rlstack.runner.campaign import demands_of
+        self.metal_service(devices=3)
+        self.metal_service("spare", devices=3)
+        desk = self.desk_with_metal("fake-metal", "spare")
+        judged = arith_spec(self.train, topology=Topology(hosts=(
+            HostSpec((pool("main"),)), HostSpec((learner(),)),
+            HostSpec((pool("judge", base="fake/judge-32b"),)))))
+        first = go(Campaigns(desk).submit(judged, solo=True, checkpointing=EVERY_UPDATE))
+        self.assertTrue(first["accepted"], first)
+        second = go(Campaigns(desk).submit(
+            dataclasses.replace(judged, seeds=Seeds(master=99)), solo=True, checkpointing=EVERY_UPDATE))
+        self.assertTrue(second["accepted"], second)
+        metal_of = lambda host: desk.listings[host].metal
+        for reply in (first, second):
+            self.assertEqual(metal_of(reply["pools"]["judge"]), metal_of(reply["pools"]["main"]))
+        self.assertNotEqual(metal_of(first["pools"]["main"]), metal_of(second["pools"]["main"]))
+        self.assertNotEqual(first["pools"]["judge"], second["pools"]["judge"])     # a judge per metal
+        self.assertEqual(len(desk.listings), 6)
 
     def test_a_solo_submit_never_knocks_released_metal(self) -> None:
         """No live metal has room: a plain submit knocks a released metal
@@ -2392,12 +2521,12 @@ class SoloPlacementTest(DeskFixture):
         self.metal_service(devices=2)
         self.metal_service("spare", devices=2)
         desk = self.desk_with_metal("fake-metal", "spare")
-        first = go(Campaigns(desk).submit(self.split_spec()))
+        first = go(Campaigns(desk).submit(self.split_spec(), checkpointing=EVERY_UPDATE))
         self.assertTrue(first["accepted"], first)             # fills fake-metal
         self.assertTrue(all(l.metal == "fake-metal" for l in desk.listings.values()))
         go(desk.release("spare"))                             # released, knockable
         solo = go(Campaigns(desk).submit(
-            dataclasses.replace(self.split_spec(), seeds=Seeds(master=99)), solo=True))
+            dataclasses.replace(self.split_spec(), seeds=Seeds(master=99)), solo=True, checkpointing=EVERY_UPDATE))
         self.assertFalse(solo["accepted"])
         self.assertEqual(len(solo["boot"]), 2)
         self.assertIn("spare", desk.released)                 # not knocked
@@ -2407,10 +2536,10 @@ class SoloPlacementTest(DeskFixture):
         self.metal_service("a-metal", devices=4)
         self.metal_service("b-metal", devices=2)
         desk = self.desk_with_metal("a-metal", "b-metal")
-        first = go(Campaigns(desk).submit(self.split_spec()))
+        first = go(Campaigns(desk).submit(self.split_spec(), checkpointing=EVERY_UPDATE))
         self.assertEqual(desk.listings[first["host"]].metal, "a-metal")
         solo = go(Campaigns(desk).submit(
-            dataclasses.replace(self.split_spec(), seeds=Seeds(master=99)), solo=True))
+            dataclasses.replace(self.split_spec(), seeds=Seeds(master=99)), solo=True, checkpointing=EVERY_UPDATE))
         self.assertTrue(solo["accepted"], solo)
         self.assertEqual(desk.listings[solo["host"]].metal, "b-metal")
 class FakeClock:
@@ -2473,14 +2602,14 @@ class LeaseTest(DeskFixture):
         desk = self.leased_desk("fake-metal", clock=clock)
         clock.tick(61.0)
         self.assertFalse(desk.leased("fake-metal"))
-        placed = go(Campaigns(desk).submit(self.split_spec()))
+        placed = go(Campaigns(desk).submit(self.split_spec(), checkpointing=EVERY_UPDATE))
         self.assertFalse(placed["accepted"], placed)
         self.assertTrue(placed["boot"])
 
         go(desk.heartbeat("fake-metal",
                           self.metal_services["fake-metal"].epoch))
         self.assertTrue(desk.leased("fake-metal"))
-        again = go(Campaigns(desk).submit(self.split_spec()))
+        again = go(Campaigns(desk).submit(self.split_spec(), checkpointing=EVERY_UPDATE))
         self.assertTrue(again["accepted"], again)
 
     def test_a_lapsed_host_is_off_every_listing_within_one_lease(self) -> None:
@@ -2494,7 +2623,7 @@ class LeaseTest(DeskFixture):
         desk = self.leased_desk("fake-metal", clock=clock)
         desk.boot_for = knocked.append
 
-        reply = go(Campaigns(desk).submit(self.split_spec()))
+        reply = go(Campaigns(desk).submit(self.split_spec(), checkpointing=EVERY_UPDATE))
         self.assertTrue(reply["accepted"], reply)
         self.assertEqual(len(desk.listings), 2)
 
@@ -2564,7 +2693,7 @@ class LeaseTest(DeskFixture):
         self.metal_service(devices=2)
         clock = FakeClock()
         desk = self.leased_desk("fake-metal", clock=clock)
-        go(Campaigns(desk).submit(self.split_spec()))
+        go(Campaigns(desk).submit(self.split_spec(), checkpointing=EVERY_UPDATE))
         told = desk.status()
         metal = told["metal"]["fake-metal"]
         self.assertEqual(metal["epoch"],
@@ -2602,7 +2731,7 @@ class EpochTest(DeskFixture):
         a rebirth fails by name instead of reaching the newborn."""
         service = self.metal_service(devices=2)
         desk = self.desk_with_metal("fake-metal")
-        go(Campaigns(desk).submit(self.split_spec()))
+        go(Campaigns(desk).submit(self.split_spec(), checkpointing=EVERY_UPDATE))
         host = next(iter(service.hosts.values()))
         self.assertEqual(host.epoch, service.epoch)
         with self.assertRaises(WrongEpoch):
@@ -2722,7 +2851,7 @@ class BoundedWireTest(DeskFixture):
         desk = self.quick_desk("living", "deaf")
         self.metal_transports["metal://deaf"] = SilentTransport()
 
-        reply = go(Campaigns(desk).submit(self.split_spec()))
+        reply = go(Campaigns(desk).submit(self.split_spec(), checkpointing=EVERY_UPDATE))
         self.assertTrue(reply["accepted"], reply)
         self.assertTrue(all(host.startswith("living")
                             for host in reply["pools"].values()), reply)
@@ -2743,7 +2872,7 @@ class BoundedWireTest(DeskFixture):
             self.metal_transports[f"metal://{name}"] = SilentTransport()
 
         started = time.monotonic()
-        reply = go(Campaigns(desk).submit(self.split_spec()))
+        reply = go(Campaigns(desk).submit(self.split_spec(), checkpointing=EVERY_UPDATE))
         waited = time.monotonic() - started
         self.assertFalse(reply["accepted"], reply)      # nowhere to go: boot
         self.assertLess(waited, 0.75, f"the reads serialized: {waited:.2f}s")
@@ -2767,7 +2896,7 @@ class BoundedWireTest(DeskFixture):
             slow = asyncio.create_task(desk.read_fleet())
             await asyncio.sleep(0.05)               # the read is in flight
             started = time.monotonic()
-            reply = await Campaigns(desk).submit(self.split_spec())
+            reply = await Campaigns(desk).submit(self.split_spec(), checkpointing=EVERY_UPDATE)
             return reply, time.monotonic() - started, slow
         reply, waited, slow = go(self._finish(race()))
         self.assertTrue(reply["accepted"], reply)
@@ -2811,7 +2940,7 @@ class IdempotentSubmitTest(DeskFixture):
         self.metal_service(devices=2, sample_gate=gate)
         desk = self.desk_with_metal("fake-metal")
         rows = demand_rows(demands_of(self.split_spec()))
-        frame = frame_for(self.split_spec())
+        frame = frame_for(self.split_spec(), checkpointing=EVERY_UPDATE)
 
         async def overlap():
             first = await desk.submit(rows, frame)
@@ -2856,7 +2985,7 @@ class IdempotentSubmitTest(DeskFixture):
         self.metal_service(devices=2, sample_gate=gate)
         desk = self.desk_with_metal("fake-metal")
         rows = demand_rows(demands_of(self.split_spec()))
-        frame = frame_for(self.split_spec())
+        frame = frame_for(self.split_spec(), checkpointing=EVERY_UPDATE)
 
         async def cancel_move():
             first = await desk.submit(rows, frame)
@@ -2890,7 +3019,7 @@ class IdempotentSubmitTest(DeskFixture):
         self.metal_service(devices=2, sample_gate=gate)
         desk = self.desk_with_metal("fake-metal")
         spec = self.split_spec()
-        rows, frame = demand_rows(demands_of(spec)), frame_for(spec)
+        rows, frame = demand_rows(demands_of(spec)), frame_for(spec, checkpointing=EVERY_UPDATE)
         other = dataclasses.replace(spec, seeds=Seeds(master=99))
 
         async def overlap():
@@ -2915,7 +3044,7 @@ class IdempotentSubmitTest(DeskFixture):
                 await asyncio.wait_for(checked.wait(), 2)
                 duplicate = await desk.submit(rows, dict(frame))
                 independent = await desk.submit(demand_rows(demands_of(other)),
-                                                frame_for(other))
+                                                frame_for(other, checkpointing=EVERY_UPDATE))
             finally:
                 release.set()
                 resumed = await pending
@@ -2935,7 +3064,7 @@ class IdempotentSubmitTest(DeskFixture):
         the delivery leaves the attempt on the record."""
         self.metal_service(devices=2)
         desk = self.desk_with_metal("fake-metal")
-        go(Campaigns(desk).submit(self.split_spec()))
+        go(Campaigns(desk).submit(self.split_spec(), checkpointing=EVERY_UPDATE))
         kinds = [e["event"] for e in self.store.read_fleet_log()
                  if e["event"] in ("submit-intent", "place")]
         self.assertEqual(kinds[0], "submit-intent")
@@ -2955,7 +3084,7 @@ class IdempotentSubmitTest(DeskFixture):
         service = self.metal_service(devices=2, sample_gate=gate)
         desk = self.desk_with_metal("fake-metal")
         rows = demand_rows(demands_of(self.split_spec()))
-        frame = frame_for(self.split_spec())
+        frame = frame_for(self.split_spec(), checkpointing=EVERY_UPDATE)
 
         async def twice():
             first = await desk.submit(rows, frame)
@@ -2987,7 +3116,7 @@ class IdempotentSubmitTest(DeskFixture):
         service = self.metal_service(devices=2)
         desk = self.desk_with_metal("fake-metal")
         rows = demand_rows(demands_of(self.split_spec()))
-        frame = frame_for(self.split_spec())
+        frame = frame_for(self.split_spec(), checkpointing=EVERY_UPDATE)
 
         async def twice():
             first = await desk.submit(rows, frame)
@@ -3008,7 +3137,7 @@ class IdempotentSubmitTest(DeskFixture):
         second time or blocking on the first."""
         self.metal_service(devices=2)
         desk = self.desk_with_metal("fake-metal")
-        frame = frame_for(self.split_spec())
+        frame = frame_for(self.split_spec(), checkpointing=EVERY_UPDATE)
         key = submit_key(frame)
         desk.journal_intent(key, frame)             # the first, mid-flight
 
@@ -3026,7 +3155,7 @@ class IdempotentSubmitTest(DeskFixture):
         never happened."""
         desk = self.desk()                           # no metal at all
         rows = demand_rows(demands_of(self.split_spec()))
-        frame = frame_for(self.split_spec())
+        frame = frame_for(self.split_spec(), checkpointing=EVERY_UPDATE)
         self.assertFalse(go(desk.submit(rows, frame))["accepted"])
         missed = [e for e in self.store.read_fleet_log()
                   if e["event"] == "submit-missed"]
@@ -3079,7 +3208,7 @@ class CloseAtHandTest(DeskFixture):
                                               meta={})])
 
         async def drive():
-            reply = await Campaigns(desk).submit(self.split_spec())
+            reply = await Campaigns(desk).submit(self.split_spec(), checkpointing=EVERY_UPDATE)
             await service.hosts[reply["host"]]._adoptions[reply["run_id"]]
             told = await RemoteMetal(
                 self.LazyPlane(self, "metal://fake-metal")).measure(

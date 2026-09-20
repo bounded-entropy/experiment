@@ -20,6 +20,7 @@ import unittest
 
 from common import arith_spec, arith_store
 from test_resume import CrashingStore, SimulatedCrash, snapshot
+from rlstack.runner.checkpointing import EVERY_UPDATE
 from rlstack import (
     Bundle, EnginePoolClient, FakeEngine, FakeLearner, LocalStore, Mechanism,
     Message, PolicySpec, Role, SamplingSpec, SteerWindow, fake_qwen_schema,
@@ -229,7 +230,7 @@ class SteerResumeTest(unittest.TestCase):
         _, train, _ = arith_store(root)
         report = run_experiment(arith_spec(train, policy=steer_policy()), SCHEMA,
                                 store, FakeEngine(plugins=RESIDUAL),
-                                FakeLearner())
+                                FakeLearner(), checkpointing=EVERY_UPDATE)
         return report.run_id
 
     def test_crash_then_resume_is_byte_identical(self) -> None:

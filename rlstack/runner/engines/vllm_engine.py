@@ -9,6 +9,9 @@ all. What it knows is the shape of the work:
   add_bundle   each of the bundle's adapter types attach()es its own payloads,
                additively and idempotently — a bundle this engine cannot
                express is refused HERE, while it is still just an id.
+  add_library  one NAMED payload into the build's Library (ADR 0019), bytes a
+               role read from the store; what a route under that name is
+               served as is the adapter type's business, at apply().
   a request    every attached adapter type's apply(), merged into ONE unit of
                work. Requests pinning different bundles batch together in vLLM's
                own scheduler: the multi-tenancy invariant, held by construction.
@@ -27,6 +30,7 @@ tokenized exactly as flatten will re-tokenize it — no chat template.
 
 from __future__ import annotations
 
+import contextlib
 import os
 import tempfile
 import time
@@ -36,7 +40,7 @@ from pathlib import Path
 from rlstack.data.trajectory import Message
 from rlstack.policy.adapters.base import Directive, Mechanism
 from rlstack.policy.adapters.rollout import (
-    Levers, Request, RolloutLowering, ServingBuild, check_demand_fits,
+    Levers, Library, Request, RolloutLowering, ServingBuild, check_demand_fits,
     check_levers_compose,
 )
 from rlstack.policy.compile import Bundle, group_by_adapter_type
@@ -51,7 +55,7 @@ class VllmEngine:
     def __init__(self, base: str, *, gpu_memory_utilization: float = 0.45,
                  max_model_len: int = 1024, max_bundles: int = 8,
                  max_rank: int = 32, max_members: int = 0,
-                 cas_get=None, enforce_eager: bool = True,
+                 max_library: int = 32, cas_get=None, enforce_eager: bool = True,
                  tp: int = 1, serves: Sequence[str] = ("lora",),
                  enable_sleep_mode: bool = False) -> None:
         from transformers import AutoConfig, AutoTokenizer
@@ -75,10 +79,16 @@ class VllmEngine:
         # so no mechanism-flavored word survives in this file. `cas_get` is the
         # same kind of build fact: how a lowering resolves an address its
         # payload carried, handed in by the deploy that owns the store.
+        # THE LIBRARY (ADR 0019): named payloads `add_library` holds, at most
+        # `max_library` of them, least-recently-used out first. The lowerings
+        # read it through the build at request time, and are told what it
+        # evicted so they release what they materialized from it.
+        self._library = Library(max_library, self._forget_library)
         self._build = ServingBuild(base=base, config=self._config,
                                    workdir=self._workdir,
                                    max_bundles=max_bundles, max_rank=max_rank,
-                                   max_members=max_members, cas=cas_get)
+                                   max_members=max_members, cas=cas_get,
+                                   library=self._library)
         self._lowerings = self._serving_adapter_types()
         self._engine_args = dict(
             model=base, max_model_len=max_model_len,
@@ -179,6 +189,20 @@ class VllmEngine:
                 bundle.bundle_id, payloads[lowering.adapter_type])
             for lowering in lowerings})       # no payloads: serve the bare base
 
+    def add_library(self, name: str, payload: bytes) -> None:
+        """Hold one named payload for routes to read (ADR 0019): idempotent,
+        bounded by `max_library`, and nothing but a dict write — so it is safe
+        under traffic. A name a request is reading is pinned against eviction
+        (`Library.pinned`); what a lowering built from an evicted name goes
+        with it (`_forget_library`)."""
+        self._library.add(name, payload)
+
+    def _forget_library(self, name: str) -> None:
+        """The Library's eviction callback: every lowering releases what it
+        materialized from `name`."""
+        for lowering in self._lowerings.values():
+            lowering.forget_library(name)
+
     def knows_bundle(self, bundle_id: str) -> bool:
         """Is this bundle resident HERE, right now?
 
@@ -272,8 +296,7 @@ class VllmEngine:
         prompt_ids = [tid for m in messages for tid in self.tokenize(m.content)]
         self._request_count += 1
         request_id = f"rlstack-{self._request_count}-{seed}"
-        with self._residency.pinned(bundle_id):
-            levers = self._levers_for(prompt_ids, bundle_id, seed, directives)
+        with self._held_for(prompt_ids, bundle_id, seed, directives) as levers:
             params = SamplingParams(
                 temperature=sampling.temperature, top_p=sampling.top_p,
                 max_tokens=sampling.max_tokens, stop=list(stop), seed=seed,
@@ -332,11 +355,10 @@ class VllmEngine:
         full_ids = context_ids + [int(t) for t in token_ids]
         self._request_count += 1
         request_id = f"rlstack-score-{self._request_count}"
-        with self._residency.pinned(bundle_id):
-            # score traffic is SEEDLESS by contract — it draws nothing and must
-            # be deterministic, so an adapter type that chooses per request is
-            # told there is no seed rather than handed one
-            levers = self._levers_for(full_ids, bundle_id, None, directives)
+        # score traffic is SEEDLESS by contract — it draws nothing and must be
+        # deterministic, so an adapter type that chooses per request is told
+        # there is no seed rather than handed one
+        with self._held_for(full_ids, bundle_id, None, directives) as levers:
             params = SamplingParams(max_tokens=1, temperature=0.0,
                                     prompt_logprobs=0,
                                     extra_args=dict(levers.extra_args) or None)
@@ -416,6 +438,19 @@ class VllmEngine:
                 f"VllmEngine(..., enable_sleep_mode=True)")
 
     # ---- one unit of work ---------------------------------------------------
+
+    @contextlib.contextmanager
+    def _held_for(self, prompt_ids: list[int], bundle_id: str,
+                  seed: int | None, directives: Sequence[Directive]):
+        """ONE REQUEST'S HOLDS, around its levers: the bundle it pins, and the
+        library names its levers read (ADR 0019) — both immune from eviction
+        until the last token is out. Nothing awaits between a lowering reading
+        a name and the pin taken here; a name evicted in that gap all the same
+        is refused by the pin, loudly, and never served."""
+        with self._residency.pinned(bundle_id):
+            levers = self._levers_for(prompt_ids, bundle_id, seed, directives)
+            with self._library.pinned(levers.library):
+                yield levers
 
     def _levers_for(self, prompt_ids: list[int], bundle_id: str,
                     seed: int | None,

@@ -17,6 +17,7 @@ import unittest
 from io import BytesIO
 
 from common import arith_spec, arith_store, generation_spec
+from rlstack.runner.checkpointing import EVERY_UPDATE
 from rlstack import (
     FakeEngine, FakeLearner, LocalStore, fake_qwen_schema, run_experiment,
 )
@@ -75,7 +76,7 @@ class UiTest(unittest.TestCase):
         self.store, train, heldout = arith_store(tmp.name)
         self.train_uri = train
         self.report = run_experiment(arith_spec(train, heldout), SCHEMA,
-                                     self.store, FakeEngine(), FakeLearner())
+                                     self.store, FakeEngine(), FakeLearner(), checkpointing=EVERY_UPDATE)
         fabricate_heldout(self.store, self.report.run_id)
 
     def test_unhosted_run_page_has_the_same_row_as_the_index(self) -> None:
@@ -154,7 +155,7 @@ class UiTest(unittest.TestCase):
         its rollout plan and says which — its update panels are legitimately
         empty rather than a stalled training run's."""
         report = run_experiment(generation_spec(self.train_uri), SCHEMA,
-                                self.store, FakeEngine(), None)
+                                self.store, FakeEngine(), None, checkpointing=EVERY_UPDATE)
         series = run_series(self.store, report.run_id)
         self.assertEqual((series["extent"], series["committed"],
                           series["target"]), ("rollout", 4, 4))
@@ -335,7 +336,7 @@ class DerivedSeriesTest(unittest.TestCase):
         self.store, train, heldout = arith_store(tmp.name)
         self.train_uri = train
         self.report = run_experiment(arith_spec(train, heldout), SCHEMA,
-                                     self.store, FakeEngine(), FakeLearner())
+                                     self.store, FakeEngine(), FakeLearner(), checkpointing=EVERY_UPDATE)
         fabricate_heldout(self.store, self.report.run_id)
 
     def test_derived_panels_compute_with_eval_overlay(self) -> None:
@@ -578,7 +579,7 @@ class PageRoutesTest(unittest.TestCase):
         self.addCleanup(tmp.cleanup)
         self.store, train, heldout = arith_store(tmp.name)
         self.report = run_experiment(arith_spec(train, heldout), SCHEMA,
-                                     self.store, FakeEngine(), FakeLearner())
+                                     self.store, FakeEngine(), FakeLearner(), checkpointing=EVERY_UPDATE)
         self.run_id = self.report.run_id
         # the index speaks of a run its HOST JOURNALS mention: one attach
         self.store.append_host_event("l4-a", {

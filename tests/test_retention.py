@@ -17,6 +17,7 @@ import unittest
 from typing import Any
 
 from common import arith_spec, arith_store
+from rlstack.runner.checkpointing import EVERY_UPDATE
 from rlstack import (
     FakeEngine, FakeLearner, KeepRestorable, LocalStore, ModalVolumeStore,
     RetentionPolicy, StoreError, fake_qwen_schema, run_experiment,
@@ -112,6 +113,7 @@ class SweepTest(unittest.TestCase):
             self.run.write_blob("adapters", "pi", update, b"delta" * update)
             self.run.write_blob("optim", "pi", update, b"moments" * update)
             self.run.append_ledger({"update": update, "versions": {"pi": update}})
+            self.run.append_checkpoint(update, {"pi": update})
 
     def optim_versions(self) -> list[int]:
         return [int(key.rsplit("@", 1)[1][: -len(".bin")])
@@ -203,6 +205,7 @@ class VolumeSweepTest(unittest.TestCase):
         for update in (1, 2):
             self.run.write_blob("optim", "pi", update, b"moments")
             self.run.append_ledger({"update": update, "versions": {"pi": update}})
+            self.run.append_checkpoint(update, {"pi": update})
 
     def test_a_sweep_that_freed_bytes_commits_them(self) -> None:
         before = self.volume.commits
@@ -257,7 +260,7 @@ class SweptRunTest(unittest.TestCase):
         """The trainer swept as it went: four updates, four deltas, one set
         of moments."""
         report = run_experiment(self.spec, SCHEMA, self.store, FakeEngine(),
-                                FakeLearner())
+                                FakeLearner(), checkpointing=EVERY_UPDATE)
         run = self.store.open_run(report.run_id)
         for version in range(1, 5):
             run.read_blob("adapters", "pi", version)     # raises if missing
@@ -268,12 +271,12 @@ class SweptRunTest(unittest.TestCase):
         back from the tail's blobs alone, and `steps` proves the OPTIM blob
         was read (a FakeLearner recovers its step count from nowhere else)."""
         report = run_experiment(self.spec, SCHEMA, self.store, FakeEngine(),
-                                FakeLearner())
+                                FakeLearner(), checkpointing=EVERY_UPDATE)
         self.store.open_run(report.run_id).sweep(KeepRestorable())
 
         learner = FakeLearner()
         again = run_experiment(self.spec, SCHEMA, self.store, FakeEngine(),
-                               learner)
+                               learner, checkpointing=EVERY_UPDATE)
         self.assertEqual(again.run_id, report.run_id)
         self.assertEqual(again.resumed_from, 4)
         self.assertEqual(learner._tenant(report.run_id).steps, 4)
@@ -284,7 +287,7 @@ class SweptRunTest(unittest.TestCase):
         third update trained from were the tail's."""
         with self.assertRaises(Interrupted):
             run_experiment(self.spec, SCHEMA, self.store, FakeEngine(),
-                           StopsAtUpdate(3))
+                           StopsAtUpdate(3), checkpointing=EVERY_UPDATE)
         run_id = experiment_identity(self.spec, SCHEMA)
         run = self.store.open_run(run_id)
         self.assertEqual(int(run.ledger_tail()["update"]), 2)
@@ -295,7 +298,7 @@ class SweptRunTest(unittest.TestCase):
 
         learner = FakeLearner()
         report = run_experiment(self.spec, SCHEMA, self.store, FakeEngine(),
-                                learner)
+                                learner, checkpointing=EVERY_UPDATE)
         self.assertEqual(report.resumed_from, 2)
         self.assertEqual([e["update"] for e in run.read_ledger()], [1, 2, 3, 4])
         self.assertEqual(learner._tenant(run_id).steps, 4)
@@ -305,7 +308,7 @@ class SweptRunTest(unittest.TestCase):
         """Retention changes what is RECOVERABLE, never what was COMPUTED: the
         run_id is a function of (spec, code, data) and none of them is here."""
         report = run_experiment(self.spec, SCHEMA, self.store, FakeEngine(),
-                                FakeLearner())
+                                FakeLearner(), checkpointing=EVERY_UPDATE)
         manifest = self.store._read(f"runs/{report.run_id}/manifest.json")
 
         self.store.open_run(report.run_id).sweep(KeepRestorable())

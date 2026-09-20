@@ -40,7 +40,15 @@ class PostProcessor(ABC):
     `sampling` overrides the run's generation sampling for this processor's
     calls (a judge wants its own temperature and budget, not the policy's);
     None inherits. Both live in the class source, so they hash into run
-    identity through code_hashes like the rest of the declaration."""
+    identity through code_hashes like the rest of the declaration.
+
+    `fits` declares that this processor FITS (ADR 0019): it runs INLINE, in
+    the Trainer, whatever else it declares, and its `client` is a
+    FittingPoolClient (rlstack/client.py) — the pools plus `client.fit`
+    (small LoRA fits on the run's own learner, under a throwaway tenant) and
+    `client.names` (named adapters, read-only). Phase 0 refuses it in a run
+    with no learner, and with `pools`: the Trainer's post phase admits no
+    engine."""
 
     produces: tuple[str, ...] = ()
     consumes: tuple[str, ...] = ()
@@ -49,6 +57,7 @@ class PostProcessor(ABC):
                                         # trajectory, in sealed order
     pools: tuple[str, ...] = ()
     sampling: "SamplingSpec | None" = None
+    fits: bool = False
 
     @abstractmethod
     async def process(self, group: Group, data: Mapping[str, Sequence[float]],
@@ -68,6 +77,7 @@ class PostDef:
     token_level: tuple[str, ...]
     pools: tuple[str, ...]
     source_hash: str
+    fits: bool = False
 
 
 def postprocessor(name: str):
@@ -75,6 +85,7 @@ def postprocessor(name: str):
         instance = cls()
         POST.add(PostDef(name, cls, instance, tuple(instance.produces),
                          tuple(instance.consumes), tuple(instance.token_level),
-                         tuple(instance.pools), source_hash(cls)))
+                         tuple(instance.pools), source_hash(cls),
+                         fits=bool(instance.fits)))
         return cls
     return register

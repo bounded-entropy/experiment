@@ -1,4 +1,5 @@
 <!-- Copy to knowledge/NNNN-kebab-title.md, fill every field, delete this line. -->
+<!-- ADR formatting: keep each prose paragraph and list item on one source line. Do not hard-wrap prose at a fixed column width. Preserve intentional line breaks in fenced code, tables, and diagrams. Apply this convention to all future ADRs. -->
 
 # ADR NNNN — <title: the decision, not the topic>
 

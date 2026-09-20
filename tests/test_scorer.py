@@ -1,4 +1,4 @@
-"""The Scorer daemon (#65): the split, the parts, the pin, and the equivalence.
+"""The Scorer runner (#65): the split, the parts, the pin, and the equivalence.
 
 Four claims, one class each.
 
@@ -14,15 +14,14 @@ THE VERSION-PINNING RULE is what running beside the Trainer costs: the Scorer
 holds no current bundle, so policy-pool traffic is scored under the version the
 wave's own turns recorded.
 
-THE EQUIVALENCE OBLIGATION is the whole point of the other three. The same spec
-run with the daemon and run with everything inline must produce the same run
-directory — the part file aside. Nothing about WHERE a column was computed may
-reach a byte of it.
+THE EQUIVALENCE OBLIGATION: split scoring must produce the same columns as
+running the whole pipeline over the recorded wave and exact version. The
+reference pipeline runs outside training; the Trainer has no inference door.
 """
 
 from __future__ import annotations
 
-import contextlib
+import asyncio
 import hashlib
 import tempfile
 import unittest
@@ -31,6 +30,7 @@ from typing import Any
 
 from common import arith_spec, arith_store, sealed
 from test_resume import CrashingStore, SimulatedCrash
+from rlstack.runner.checkpointing import EVERY_UPDATE
 from rlstack import (
     Bundle, FakeEngine, FakeLearner, Arbiter, Topology, HostSpec, Group,
     LocalStore, Message, PostProcessor, Role, Rollout, RunSignals, Scorer, Task,
@@ -39,9 +39,7 @@ from rlstack import (
 )
 from rlstack.data.plan import RunPlan
 from rlstack.data.stores.base import StoreError, postdata_part_key
-from rlstack.runner.daemons import SCORER
-from rlstack.runner.daemons import trainer as trainer_module
-from rlstack.runner import loop as loop_module
+from rlstack.runner.roles import SCORER
 from rlstack.runner.refs import RefReader
 from rlstack.spec.flow import PipelineSplit, split_pipeline
 
@@ -93,29 +91,6 @@ def judge_metal():
     proving that the two worlds draw from the same seed path."""
     return {"main": FakeEngine(), "judge": FakeEngine(p_correct=0.5)}
 
-
-@contextlib.contextmanager
-def scoring_inline():
-    """The pre-#65 world, for the A/B: every processor runs in the Trainer.
-
-    The split is the ONLY difference between the two worlds — same spec, same
-    seeds, same run_id — so replacing it with "everything is inline" is exactly
-    the comparison the equivalence obligation names. Patched in both modules
-    that read it: `plan_daemons` (which then plans no Scorer) and the Trainer
-    (which then runs the whole pipeline itself).
-    """
-    def all_inline(pipeline):
-        return PipelineSplit((), tuple(pipeline))
-
-    modules = (loop_module, trainer_module)
-    saved = [module.split_pipeline for module in modules]
-    for module in modules:
-        module.split_pipeline = all_inline
-    try:
-        yield
-    finally:
-        for module, original in zip(modules, saved):
-            module.split_pipeline = original
 
 
 def snapshot(store: LocalStore, run_id: str) -> dict[str, str]:
@@ -275,6 +250,7 @@ class PostdataPartTest(unittest.TestCase):
 
     def test_attach_sweeps_parts_the_ledger_never_committed(self) -> None:
         self.run.append_ledger({"update": 1, "versions": {"pi": 1}})
+        self.run.append_checkpoint(1, {"pi": 1})
         self.run.write_postdata_part(2, SCORER, {"x": [0.0]})
         self.run.write_postdata_part(3, SCORER, {"x": [0.0]})
         reattached = LocalStore(self.root).open_run("rid")
@@ -284,6 +260,7 @@ class PostdataPartTest(unittest.TestCase):
     def test_attach_keeps_a_committed_updates_part(self) -> None:
         self.run.write_postdata_part(1, SCORER, {"x": [0.5]})
         self.run.append_ledger({"update": 1, "versions": {"pi": 1}})
+        self.run.append_checkpoint(1, {"pi": 1})
         reattached = LocalStore(self.root).open_run("rid")
         self.assertEqual(reattached.read_postdata_part(1, SCORER), {"x": [0.5]})
 
@@ -321,13 +298,33 @@ class VersionPinningTest(unittest.TestCase):
         self.assertEqual(pinned.bundle_id, "bundle:old")
         self.assertEqual(pinned.policy_version, {"pi": 1})
 
-    def test_a_wave_pinning_two_bundles_is_refused(self) -> None:
+    def test_a_wave_pinning_two_bundles_is_scored_as_of_the_previous_update(self) -> None:
+        """ADR 0018: turns that disagree (dreams replayed beside an
+        arrival's supervised text) pin the ledger's bundle at u-1 — the
+        policy just before this update — and the runner waits for it."""
         wave = Wave([Group("g", [sealed_at("t0", "bundle:a", {"pi": 1}),
                                  sealed_at("t0", "bundle:b", {"pi": 2})])])
         scorer = self.scorer_for(selfscored_spec(self.train))
-        with self.assertRaises(ValueError) as caught:
+        self.assertTrue(scorer.needs_previous_commit(wave))
+        with self.assertRaises(RuntimeError):          # update 3 not committed: wait, never guess
             scorer.pinned_bundle(4, wave)
-        self.assertIn("bundle:a", str(caught.exception))
+        for update in (1, 2, 3):
+            self.run.append_ledger({"update": update, "versions": {"pi": update},
+                                    "bundle_id": f"bundle:v{update}"})
+        pinned = scorer.pinned_bundle(4, wave)
+        self.assertEqual(pinned.bundle_id, "bundle:v3")
+        self.assertEqual(pinned.policy_version, {"pi": 3})
+
+    def test_a_wave_of_supervised_rows_alone_is_scored_as_of_the_previous_update(self) -> None:
+        wave = Wave([Group("g", [sealed_at("t0", "supervised:targets", {})])])
+        scorer = self.scorer_for(selfscored_spec(self.train))
+        self.assertTrue(scorer.needs_previous_commit(wave))
+        self.assertIs(scorer.pinned_bundle(1, wave), self.initial)     # u-1 = 0: the initial bundle
+
+    def test_a_unanimous_wave_never_touches_the_ledger(self) -> None:
+        scorer = self.scorer_for(selfscored_spec(self.train))
+        wave = self.wave_at("bundle:old", {"pi": 1})
+        self.assertFalse(scorer.needs_previous_commit(wave))
 
     def test_a_pipeline_that_never_asks_the_policy_needs_no_pin(self) -> None:
         """A teacher scores its own base, so demanding a policy version would
@@ -358,43 +355,53 @@ class VersionPinningTest(unittest.TestCase):
 # ---------------------------------------------------------------------------
 
 class TwoWorldsTest(unittest.TestCase):
-    """THE test: a run scored by the daemon and the same run scored inline are
-    the same run directory, the part aside."""
+    """The split preserves the columns of a complete reference pipeline."""
 
     def one_run(self, spec, engines) -> tuple[LocalStore, str]:
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
         store, train, heldout = arith_store(tmp.name)
         report = run_experiment(spec(train, heldout), SCHEMA, store,
-                                engines(), FakeLearner())
+                                engines(), FakeLearner(), checkpointing=EVERY_UPDATE)
         return store, report.run_id
 
-    def both_worlds(self, spec, engines):
-        by_daemon = self.one_run(spec, engines)
-        with scoring_inline():
-            by_trainer = self.one_run(spec, engines)
-        return (snapshot(*by_daemon), snapshot(*by_trainer))
+    def assert_unsplit_columns(self, make_spec, make_engines):
+        from rlstack.data.trajectory import wave_from_rows
+        from rlstack.policy.compile import restore_bundle
+        from rlstack.runner.post import run_pipeline
 
-    def test_a_judged_run_is_the_same_bytes_either_way(self) -> None:
-        """A judge that SAMPLES, so the two worlds must draw the same seeds —
-        the seed path is `derive(master, "post", update, group, processor)` in
-        both, and the phase word is part of it."""
-        daemon, inline = self.both_worlds(
-            lambda train, _: judged_spec(train),
-            judge_metal)
-        parts = [path for path in daemon if path.endswith(f".{SCORER}.json")]
-        self.assertEqual(len(parts), 4, "the daemon must actually have scored")
-        self.assertEqual(without_parts(inline), inline)   # no parts inline
-        self.assertEqual(without_parts(daemon), inline)
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        store, train, _ = arith_store(tmp.name)
+        spec = make_spec(train)
+        metal = make_engines()
+        engines = metal if isinstance(metal, dict) else {"main": metal}
+        report = run_experiment(spec, SCHEMA, store, engines, FakeLearner(), checkpointing=EVERY_UPDATE)
+        run = store.open_run(report.run_id)
+        for update in range(1, 5):
+            wave = wave_from_rows(run.read_wave(update))
+            turn = wave.trajectories[0].turns[0]
+            bundle = restore_bundle(turn.policy_version, turn.bundle_id,
+                                    run.read_blob, ("pi",), {"pi": "lora"})
+            engines["main"].add_bundle(bundle)
+            routes = {"main": (engines["main"], bundle)}
+            for name, engine in engines.items():
+                if name != "main":
+                    base = Bundle(f"bundle:base:{name}", {}, {})
+                    engine.add_bundle(base)
+                    routes[name] = (engine, base)
+            columns = asyncio.run(run_pipeline(spec.algo.post, wave, routes,
+                spec.gen.sampling, spec.seeds.master, update))
+            self.assertEqual(columns, run.read_postdata(update))
+            self.assertIsNotNone(run.read_postdata_part(update, SCORER))
 
-    def test_a_policy_pool_scorer_is_the_same_bytes_either_way(self) -> None:
-        """The self-scoring shape, where the pin is load-bearing: at lag 0 the
-        version the wave recorded IS the trainer's current one, so the two
-        worlds agree exactly."""
-        daemon, inline = self.both_worlds(
-            lambda train, _: selfscored_spec(train), FakeEngine)
-        self.assertTrue(any(p.endswith(f".{SCORER}.json") for p in daemon))
-        self.assertEqual(without_parts(daemon), inline)
+    def test_a_judged_run_matches_unsplit_scoring(self) -> None:
+        """A stochastic judge must keep the same per-processor seed path."""
+        self.assert_unsplit_columns(judged_spec, judge_metal)
+
+    def test_a_policy_pool_scorer_matches_unsplit_scoring(self) -> None:
+        """Re-score exact historical pins after training has reached its tail."""
+        self.assert_unsplit_columns(selfscored_spec, FakeEngine)
 
     def test_the_merged_postdata_holds_both_halves(self) -> None:
         store, run_id = self.one_run(
@@ -436,7 +443,7 @@ class TwoWorldsTest(unittest.TestCase):
 
 class ScorerResumeTest(unittest.TestCase):
     """Kill the run across the scorer boundary: the part is unsealed work, so
-    attach discards it and the daemon regenerates the same bytes."""
+    attach discards it and the runner regenerates the same bytes."""
 
     CRASH_POINTS = [
         ("write_postdata_part", 2, True),   # update 3 scored, nothing merged
@@ -452,7 +459,7 @@ class ScorerResumeTest(unittest.TestCase):
         self.addCleanup(tmp.cleanup)
         store, train, _ = arith_store(tmp.name)
         report = run_experiment(judged_spec(train), SCHEMA, store,
-                                self.engines(), FakeLearner())
+                                self.engines(), FakeLearner(), checkpointing=EVERY_UPDATE)
         self.run_id = report.run_id
         return snapshot(store, report.run_id)
 
@@ -468,11 +475,11 @@ class ScorerResumeTest(unittest.TestCase):
 
                 with self.assertRaises(SimulatedCrash):
                     run_experiment(judged_spec(train), SCHEMA, crashing,
-                                   self.engines(), FakeLearner())
+                                   self.engines(), FakeLearner(), checkpointing=EVERY_UPDATE)
 
                 resumed = run_experiment(judged_spec(train), SCHEMA,
                                          LocalStore(tmp.name), self.engines(),
-                                         FakeLearner())
+                                         FakeLearner(), checkpointing=EVERY_UPDATE)
                 self.assertEqual(resumed.run_id, self.run_id)
                 self.assertIsNotNone(resumed.resumed_from)
                 self.assertEqual(snapshot(LocalStore(tmp.name), self.run_id),
@@ -480,7 +487,7 @@ class ScorerResumeTest(unittest.TestCase):
 
 
 class ScorerConditionTest(unittest.TestCase):
-    """The daemon's two named conditions, which is where an alternation policy
+    """The runner's two named conditions, which is where an alternation policy
     would be overridden."""
 
     def setUp(self) -> None:

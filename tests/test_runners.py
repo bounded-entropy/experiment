@@ -1,6 +1,6 @@
-"""The blackboard runner: signals, the arbiter, and the daemons' conditions.
+"""The blackboard runner: signals, the arbiter, and the runners' conditions.
 
-The properties under test are the ones the design claims: daemons synchronize
+The properties under test are the ones the design claims: runners synchronize
 ONLY through the store; the lag buffer bounds how far generation runs ahead;
 sleep colocation is an exclusive GROUP on the arbiter whose wake/evict hooks
 fire only on actual residency switches — while same-resident work overlaps
@@ -15,6 +15,7 @@ import unittest
 from dataclasses import replace
 
 from common import arith_spec, arith_store
+from rlstack.runner.checkpointing import EVERY_UPDATE
 from rlstack import (
     FakeEngine, FakeLearner, Arbiter, Topology, HostSpec, RunSignals,
     Schedule, fake_qwen_schema, learner, pool, run_experiment,
@@ -257,7 +258,7 @@ def _note(log: list[str], entry: str):
 
 
 class BlackboardRunTest(unittest.TestCase):
-    """Integration: the daemon runner on fake metal, beyond the default knobs
+    """Integration: the runner runner on fake metal, beyond the default knobs
     (the default-knob behavior is pinned byte-for-byte by test_loop and
     test_resume, which this refactor kept green unchanged)."""
 
@@ -268,7 +269,7 @@ class BlackboardRunTest(unittest.TestCase):
 
     def run_spec(self, spec):
         report = run_experiment(spec, SCHEMA, self.store, FakeEngine(),
-                                FakeLearner())
+                                FakeLearner(), checkpointing=EVERY_UPDATE)
         return report, self.store.open_run(report.run_id)
 
     def spec_with_lag(self, lag: int):

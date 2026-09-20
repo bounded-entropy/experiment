@@ -7,6 +7,7 @@ import unittest
 from typing import Any
 
 from common import char_tokenize, make_turn, sealed
+from rlstack.runner.checkpointing import EVERY_UPDATE
 from rlstack import (
     POST, Bundle, FakeEngine, Group, Message, PostProcessor, Role, Rollout,
     SamplingSpec, Task, Wave, postprocessor, run_pipeline, zscore,
@@ -284,7 +285,7 @@ class ScoringAndHintedTest(unittest.TestCase):
             base.algo, loss="opsd", post=("verifier", "hinted_logprobs")))
 
         report = run_experiment(spec, fake_qwen_schema(4, base="Qwen/Qwen3-0.6B"),
-                                store, FakeEngine(), FakeLearner())
+                                store, FakeEngine(), FakeLearner(), checkpointing=EVERY_UPDATE)
         run = store.open_run(report.run_id)
         self.assertEqual(len(run.read_ledger()), 4)
 
@@ -428,7 +429,7 @@ class TeacherDistillationTest(unittest.TestCase):
         report = run_experiment(
             spec, fake_qwen_schema(4, base="Qwen/Qwen3-0.6B"), store,
             {"main": FakeEngine(), "teacher": FakeEngine(base=TEACHER_BASE)},
-            FakeLearner())
+            FakeLearner(), checkpointing=EVERY_UPDATE)
         run = store.open_run(report.run_id)
         self.assertEqual(len(run.read_ledger()), 4)
 

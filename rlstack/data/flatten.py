@@ -204,7 +204,16 @@ Doc = tuple[Flat, Mapping[str, tuple[float, ...]]]
 
 
 def pack(items: Sequence[Doc], microbatch_tokens: int) -> list[TokenBatch]:
-    """Greedy fill preserving order; a document is never split across microbatches.
+    """Greedy fill preserving order, budgeted by the PADDED footprint; a
+    document is never split across microbatches.
+
+    THE FOOTPRINT RULE: the learner's forward pads every row of a microbatch
+    to its longest document (torch_learner: one padded forward per
+    microbatch), so `microbatch_tokens` bounds rows × longest — the positions
+    the learner allocates — not the sum of real tokens. Under the sum rule,
+    24 dream rows of ~330 real tokens beside one 712-token dream asked a 7B
+    learner for 10.7 GiB of fp32 logits in one allocation (2026-09-17).
+    Documents of equal length pack exactly as before.
 
     A single document longer than microbatch_tokens gets its own oversized batch.
     Injected tokens arrive with zeroed postdata columns (broadcast) and behavior
@@ -219,7 +228,7 @@ def pack(items: Sequence[Doc], microbatch_tokens: int) -> list[TokenBatch]:
         raise DataError(f"microbatch_tokens must be positive, got {microbatch_tokens}")
     batches: list[TokenBatch] = []
     current: list[Doc] = []
-    used = 0
+    longest = 0
     for doc in items:
         flat, postdata = doc
         for name, column in postdata.items():
@@ -227,11 +236,12 @@ def pack(items: Sequence[Doc], microbatch_tokens: int) -> list[TokenBatch]:
                 raise DataError(
                     f"postdata column {name!r} disagrees with doc_len={flat.doc_len}: "
                     f"{len(column)}")
-        if current and used + flat.doc_len > microbatch_tokens:
+        widest = max(longest, flat.doc_len)
+        if current and (len(current) + 1) * widest > microbatch_tokens:
             batches.append(_concatenate(current))
-            current, used = [], 0
+            current, widest = [], flat.doc_len
         current.append(doc)
-        used += flat.doc_len
+        longest = widest
     if current:
         batches.append(_concatenate(current))
     documents = sum(len(batch.doc_starts) for batch in batches)

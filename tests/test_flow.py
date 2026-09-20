@@ -14,6 +14,7 @@ import unittest
 from dataclasses import replace
 
 from common import arith_spec, arith_store
+from rlstack.runner.checkpointing import EVERY_UPDATE
 from rlstack import (
     AlgoSpec, FakeEngine, FakeLearner, OptimSpec, PostProcessor, Schedule,
     fake_qwen_schema, postprocessor, run_experiment,
@@ -91,7 +92,7 @@ class FlowGraphTest(unittest.TestCase):
         self.addCleanup(tmp.cleanup)
         store, train, heldout = arith_store(tmp.name)
         spec = arith_spec(train, heldout)
-        report = run_experiment(spec, SCHEMA, store, FakeEngine(), FakeLearner())
+        report = run_experiment(spec, SCHEMA, store, FakeEngine(), FakeLearner(), checkpointing=EVERY_UPDATE)
 
         dictionary = store.peek_dictionary(report.run_id)
         self.assertEqual(dictionary, flow_graph(spec).to_json())
@@ -107,7 +108,7 @@ class FlowGraphTest(unittest.TestCase):
         # attach again: same bytes (derived and deterministic, never identity)
         before = store.path_of(
             f"runs/{report.run_id}/dictionary.json").read_bytes()
-        run_experiment(spec, SCHEMA, store, FakeEngine(), FakeLearner())
+        run_experiment(spec, SCHEMA, store, FakeEngine(), FakeLearner(), checkpointing=EVERY_UPDATE)
         after = store.path_of(
             f"runs/{report.run_id}/dictionary.json").read_bytes()
         self.assertEqual(before, after)

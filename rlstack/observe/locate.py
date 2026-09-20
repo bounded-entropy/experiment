@@ -5,6 +5,7 @@ somewhere that locator resolves.
 
     /path, file:///path   LocalStore — wherever that filesystem is mounted
                           (a Modal volume IS one, inside a container)
+    strangeloop://volume/prefix  Scratch API reader, wherever credentials resolve
     s3://bucket/prefix    an S3Store subclass, when it lands — resolves
                           anywhere
     modal://volume        does NOT resolve locally, on purpose: run the reader
@@ -28,6 +29,7 @@ from pathlib import Path
 
 from rlstack.data.stores.base import Store
 from rlstack.data.stores.local import LocalStore
+from rlstack.data.stores.strangeloop import ScratchClient, StrangeLoopStore
 
 # What makes a directory a store root: any part of the store's key tree.
 ROOT_MARKS = ("runs", "hosts", "fleet", "annotations.jsonl")
@@ -48,6 +50,8 @@ class Root:
 
 
 def store_for(locator: str) -> Store:
+    if locator.startswith("strangeloop://"):
+        return StrangeLoopStore(ScratchClient.from_locator(locator), read_only=True)
     if locator.startswith("file://"):
         return LocalStore(locator[len("file://"):])
     if locator.startswith("s3://"):

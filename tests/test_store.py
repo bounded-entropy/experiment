@@ -260,6 +260,33 @@ class CasTest(StoreTestCase):
         self.assertEqual(self.store.cas_get(uri), data)
         self.assert_no_tmp_files()
 
+    def test_corrupt_cas_bytes_are_refused(self) -> None:
+        uri = self.store.cas_put(b"original")
+        key = "cas/" + uri.removeprefix("cas://") + "/blob"
+        self.store.path_of(key).write_bytes(b"modified")
+        with self.assertRaisesRegex(StoreError, "hash mismatch"):
+            self.store.cas_get(uri)
+
+    def test_named_payload_and_in_process_cache_are_verified(self) -> None:
+        self.store.write_named("family", "m", b"original", {})
+        key = "runs/family/names/m.bin"
+        digest = self.store.fingerprint(b"original")
+        self.store._named_payloads()[key] = (digest, b"corrupt cache")
+        self.assertEqual(self.store.read_named("family", "m"), b"original")
+        self.store._named_payloads().clear()
+        self.store.path_of(key).write_bytes(b"modified")
+        with self.assertRaisesRegex(StoreError, "hash mismatch"):
+            self.store.read_named("family", "m")
+        self.store.path_of(key).unlink()
+        with self.assertRaisesRegex(StoreError, "sealed.*no payload"):
+            self.store.read_named("family", "m")
+
+    def test_invalid_named_hash_seal_is_an_error(self) -> None:
+        self.store.write_named("family", "m", b"original", {})
+        self.store.path_of("runs/family/names/m.json").write_text('{"sha256": "bad"}')
+        with self.assertRaisesRegex(StoreError, "invalid sha256 seal"):
+            self.store.read_named("family", "m")
+
     def test_dedup(self) -> None:
         data = b"same bytes"
         first = self.store.cas_put(data)
@@ -288,6 +315,7 @@ class CrashRecoveryTest(StoreTestCase):
         run.write_blob("adapters", "attn", version, b"delta")
         run.write_blob("optim", "attn", version, b"moments")
         run.append_ledger({"update": update, "versions": {"attn": version}})
+        run.append_checkpoint(update, {"attn": version})   # sealed (ADR 0014)
 
     def test_waves_without_ledger_are_dropped(self) -> None:
         run = self.open()
@@ -323,6 +351,7 @@ class CrashRecoveryTest(StoreTestCase):
         run.write_blob("adapters", "attn", 4, b"a")
         run.write_blob("adapters", "head", 1, b"h")
         run.append_ledger({"update": 0, "versions": {"attn": 4, "head": 1}})
+        run.append_checkpoint(0, {"attn": 4, "head": 1})
         run.write_blob("adapters", "head", 2, b"uncommitted")  # crash mid optim_step
 
         reopened = self.open()

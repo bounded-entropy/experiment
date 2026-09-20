@@ -30,6 +30,7 @@ def store_with(journal: list[dict], committed: int = 0) -> LocalStore:
         run.write_plan("train", arith_plan_blobs()["train"])
         for update in range(1, committed + 1):
             run.append_ledger({"update": update})
+            run.append_checkpoint(update, {})
     return store
 
 
@@ -92,6 +93,7 @@ class StatusTruthTest(unittest.TestCase):
                 run = store.open_run("r1", manifest={"run_id": "r1"})
                 run.write_plan("train", arith_plan_blobs()["train"])
                 run.append_ledger({"update": 1})
+                run.append_checkpoint(1, {})
                 (row,) = runs_data([store])
                 self.assertEqual(row["status"], "running")
                 self.assertEqual(sorted(row["hosts"]),

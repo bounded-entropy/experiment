@@ -23,6 +23,15 @@ JSONValue = Any
 
 _TYPE_KEY = "__type__"
 
+# A dataclass field declared with `metadata={IDENTITY: WHEN_SET}` enters the
+# canonical form only when it is not None. This is how a spec GROWS a field
+# without moving anyone's identity (I3): every spec written before the field
+# existed canonicalizes to exactly the bytes it always did, and a spec that
+# sets it is a different experiment, as it should be. The wire's decoder
+# (runner/remote.py) reads an absent key as the field's default.
+IDENTITY = "identity"
+WHEN_SET = "when_set"
+
 
 def _canonicalize(obj: object) -> JSONValue:
     """Lower one object onto the plain JSON tree. Recursive; raises on anything unsupported."""
@@ -56,7 +65,10 @@ def _canonicalize(obj: object) -> JSONValue:
     if dataclasses.is_dataclass(obj) and not isinstance(obj, type):
         out: dict[str, JSONValue] = {_TYPE_KEY: type(obj).__name__}
         for f in sorted(dataclasses.fields(obj), key=lambda f: f.name):
-            out[f.name] = _canonicalize(getattr(obj, f.name))
+            value = getattr(obj, f.name)
+            if value is None and f.metadata.get(IDENTITY) == WHEN_SET:
+                continue
+            out[f.name] = _canonicalize(value)
         return out
 
     # Any Mapping, MappingProxyType included; keys sorted at dumps time, str-only.

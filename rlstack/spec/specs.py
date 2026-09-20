@@ -84,10 +84,12 @@ class Plans:
     `train` is what the Trainer consumes, one wave per update; None means
     nothing trains (a generation-only run — ADR 0006 Part B). `rollout` is
     what the Generator makes, one wave per rollout index; None means the run
-    samples nothing (every train leaf is already sealed elsewhere). At least
-    one of them exists, or the run has no work and no length — the gate says
-    so (check_plans_declare_an_extent). Measurement has no plan here: it is
-    not part of the run (a Measurement follows the ledger from outside,
+    samples nothing (every train leaf is already sealed elsewhere). `fit` is
+    what the Fitter consumes, one FIT JOB per line (ADR 0019): a run that
+    declares it is a fit run, and declares neither of the other two. At least
+    one of the three exists, or the run has no work and no length — the gate
+    says so (check_plans_declare_an_extent). Measurement has no plan here: it
+    is not part of the run (a Measurement follows the ledger from outside,
     observe-side).
 
     Each uri's sha IS the plan's content hash, so a plan hashes into run_id
@@ -96,19 +98,26 @@ class Plans:
 
     train: str | None = None      # "cas://<sha>"
     rollout: str | None = None
+    # "cas://<sha>" of a jsonl of fit-job rows (runner/fit.py: decode_jobs).
+    # In identity only WHEN SET (spec/canonical.py), so every spec written
+    # before fit runs existed hashes to the run_id it always had.
+    fit: str | None = field(default=None, metadata={"identity": "when_set"})
 
     @property
     def extent(self) -> str:
         """WHICH PLAN IS THE RUN'S LENGTH: the train plan when one exists —
         one wave is one gradient update, so a run is done when its updates
-        are — else the rollout plan, whose last sealed wave ends a run that
-        only generates.
+        are — else the fit plan, whose last committed job ends a fit run,
+        else the rollout plan, whose last sealed wave ends a run that only
+        generates.
 
         A derived property and never a field: the extent is readable off the
-        two uris, so no hashed record gains anything and every existing run's
+        uris, so no hashed record gains anything and every existing run's
         identity is exactly what it was (ADR 0006 Part B, Q4).
         """
-        return "train" if self.train is not None else "rollout"
+        if self.train is not None:
+            return "train"
+        return "fit" if self.fit is not None else "rollout"
 
 
 @dataclass(frozen=True)
@@ -392,3 +401,20 @@ def attn_bias(site: str, **init: object) -> AdapterSpec:
     native one. Its replay half is proven; its rollout half is not, on the
     pinned engine build."""
     return AdapterSpec(adapter_type="attn_bias", site=site, init=init)
+
+
+def dream_bank(site: str, r: int, memories: int, lam: float = 0.0,
+               anchor_rank: int = 128, mode: str = "stream") -> AdapterSpec:
+    """A dreamer and `memories` memory LoRA sets in ONE entry, routed per row
+    and per request (ADR 0018). `lam` prices the memories' deltas against the
+    covariance anchor a calibrate run produced (0 = no penalty);
+    `anchor_rank` is that anchor's factor count; `mode` is "stream" or
+    "calibrate" (the run whose checkpoint IS the anchor)."""
+    if r < 1 or memories < 0 or lam < 0 or anchor_rank < 1:
+        raise ValueError("dream_bank needs r >= 1, memories >= 0, lam >= 0, "
+                         "anchor_rank >= 1")
+    if mode not in ("stream", "calibrate"):
+        raise ValueError(f"dream_bank mode is 'stream' or 'calibrate', got {mode!r}")
+    return AdapterSpec(adapter_type="dream_bank", site=site, init={
+        "r": r, "memories": memories, "lam": lam, "anchor_rank": anchor_rank,
+        "mode": mode})

@@ -52,8 +52,7 @@ class VenueReadinessTest(unittest.IsolatedAsyncioTestCase):
                         await asyncio.wait_for(heartbeat_seen.wait(), 1)
                         self.assertFalse(release_registration.is_set())
                     finally:
-                        metal.duties.cancel()
-                        with self.assertRaises(asyncio.CancelledError):
-                            await metal.duties
+                        await metal.bring_down()
+                        self.assertTrue(metal.runtime.service.released.is_set())
             finally:
                 sys.modules.pop(spec.name, None)

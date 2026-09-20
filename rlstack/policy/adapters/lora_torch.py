@@ -15,6 +15,7 @@ import hashlib
 import io
 import json
 from dataclasses import dataclass
+from pathlib import Path
 
 import torch
 from safetensors.torch import load as st_load
@@ -183,6 +184,43 @@ def peft_config(base: str, r: int, target_modules: list[str]) -> str:
         "r": r, "lora_alpha": r, "lora_dropout": 0.0, "bias": "none",
         "target_modules": sorted(set(target_modules)),
     }, indent=2)
+
+
+def stack_fragments(first: bytes, second: bytes) -> bytes:
+    """TWO LoRA sets served as ONE adapter (ADR 0019): at every site both
+    cover, A concatenated on rows and B on columns, so
+
+        x [A1; A2]^T [B1 B2]^T  =  x A1^T B1^T + x A2^T B2^T
+
+    — exactly the sum of the two deltas, BECAUSE every set here is scaling 1
+    (emitted alpha == r); two sets with their own alpha/r could not share one
+    adapter's single scale. A site only one part covers carries that part
+    alone, at its own rank. The answer is itself a named payload, of rank
+    r1 + r2 wherever both parts stand."""
+    one, two = st_load(first), st_load(second)
+    stacked: dict[str, torch.Tensor] = {}
+    for key in sorted(one.keys() | two.keys()):
+        if key not in one or key not in two:
+            stacked[key] = one[key] if key in one else two[key]
+            continue
+        if not key.endswith((".lora_A.weight", ".lora_B.weight")):
+            raise ValueError(f"not a LoRA set's tensor: {key!r}")
+        rows_or_columns = 0 if key.endswith(".lora_A.weight") else 1
+        stacked[key] = torch.cat(
+            [one[key], two[key].to(one[key].dtype)], dim=rows_or_columns).contiguous()
+    return st_save(stacked)
+
+
+def write_adapter_dir(adapter_dir: Path, base: str,
+                      payloads: dict[str, bytes]) -> int:
+    """One peft adapter dir punica can load: the fragments merged into
+    adapter_model.safetensors beside the scaling-1 config whose r is the
+    widest rank in the file. Returns that rank."""
+    merged, leaves, rank = merge_fragments(payloads)
+    adapter_dir.mkdir(parents=True, exist_ok=True)
+    (adapter_dir / "adapter_model.safetensors").write_bytes(merged)
+    (adapter_dir / "adapter_config.json").write_text(peft_config(base, rank, leaves))
+    return rank
 
 
 def merge_fragments(payloads: dict[str, bytes]) -> tuple[bytes, list[str], int]:

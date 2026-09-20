@@ -31,6 +31,20 @@ from rlstack.registry import (
 )
 from rlstack.spec.specs import PoolMember, ExperimentSpec, LearnerMember
 
+FIT_LOSSES = ("sequence_sft", "sft")
+"""What a fit run may declare as its loss (ADR 0019): behavior cloning on the
+sealed record. `sequence_sft` weighs each document by its own lane's batch, so
+many lanes fit side by side without touching each other's gradient; `sft`
+takes one token mean per microbatch and is honest for a single lane only."""
+
+FIT_ADAPTER_TYPE = "dream_bank"
+"""The adapter type whose memory sets are a fit's lanes — named by its
+registered string, so the gate never imports its compute half."""
+
+MAIN_POOL = "main"
+"""The pool name a rollout plan samples the policy through — the one pool
+name the runtime knows by convention (campaign.anchor_demand, the Generator)."""
+
 # The base records set lives with the flow graph (spec/flow.py), the one
 # canonical walk over the data declarations; re-exported here because it is
 # part of the validation vocabulary.
@@ -530,9 +544,7 @@ def check_members_match_their_shape(spec: ExperimentSpec, engine_map,
 
 def check_post_pools_are_declared(spec: ExperimentSpec, schema: SiteSchema) -> list[ValidationIssue]:
     """Every pool a pipeline processor addresses (PostDef.pools) must be a
-    declared pool — a judge's traffic is vetted at submit, never discovered as
-    a KeyError mid-update. "main" needs no declaring here: the runner requires
-    it unconditionally."""
+    declared pool, including main — missing traffic routes fail at submit."""
     pools = _declared_pools(spec)
     pipelines = []
     if spec.algo is not None:
@@ -543,7 +555,7 @@ def check_post_pools_are_declared(spec: ExperimentSpec, schema: SiteSchema) -> l
             if name not in POST:
                 continue                    # unknown-post already reported
             for pool in POST.get(name).pools:
-                if pool != "main" and pool not in pools:
+                if pool not in pools:
                     issues.append(_issue(
                         "post-pool-missing", f"{field}[{i}]",
                         f"postprocessor {name!r} samples from pool {pool!r}, "
@@ -553,15 +565,49 @@ def check_post_pools_are_declared(spec: ExperimentSpec, schema: SiteSchema) -> l
 
 
 def traffic_pools(spec: ExperimentSpec) -> set[str]:
-    """Every pool this spec's traffic can address at run time: "main" (gen and
-    the pipelines' default client) and each pipeline processor's declared
-    pools. The loop holds the engine map it was handed against this set
-    before any daemon starts."""
-    pools = {"main"}
+    """Pools actually used by generation or declared postprocessor traffic.
+
+    Replay training without pooled scoring needs no inference engine.
+    """
+    pools = {"main"} if spec.plans.rollout is not None else set()
     if spec.algo is not None:
         pools.update(p for name in spec.algo.post if name in POST
                      for p in POST.get(name).pools)
     return pools
+
+
+def declared_pools(spec: ExperimentSpec) -> dict[str, PoolMember]:
+    """Every PoolMember the topology declares, by name."""
+    return {member.name: member for host in spec.topology.hosts
+            for member in host.members if isinstance(member, PoolMember)}
+
+
+def serving_pools(spec: ExperimentSpec) -> tuple[str, ...]:
+    """THE POOLS THAT SERVE THIS RUN'S POLICY — the wire's whole extent (ADR
+    0014, Part B): `main`, when the topology declares it on the policy base
+    (`base=None`). Only `main`: a judge or a teacher sharing the policy's base
+    serves that base, never the policy, and a PoolMember cannot say otherwise
+    without a field that would move every pinned spec row. Empty is a
+    complete run: a learner alone, no engine anywhere."""
+    declared = declared_pools(spec)
+    main = declared.get(MAIN_POOL)
+    return (MAIN_POOL,) if main is not None and main.base is None else ()
+
+
+def check_rollout_pool_serves_the_policy(spec: ExperimentSpec, schema: SiteSchema) -> list[ValidationIssue]:
+    """A rollout plan samples the POLICY through `main`, so a declared `main`
+    must serve the policy base — a teacher named `main` would sample a
+    trajectory the training world could never replay. A missing `main` is
+    `check_traffic_routes_to_declared_pools`'s finding, not this one's."""
+    if spec.plans.rollout is None or MAIN_POOL not in declared_pools(spec):
+        return []
+    if MAIN_POOL not in serving_pools(spec):
+        return [_issue(
+            "rollout-pool-does-not-serve-policy", "topology",
+            f"a rollout plan samples the policy through {MAIN_POOL!r}, but no "
+            f"declared pool of that name serves the policy base "
+            f"(serving pools: {list(serving_pools(spec))})")]
+    return []
 
 
 def check_post_pools_can_coreside(spec: ExperimentSpec, schema: SiteSchema) -> list[ValidationIssue]:
@@ -603,11 +649,12 @@ def check_post_pools_can_coreside(spec: ExperimentSpec, schema: SiteSchema) -> l
 
 
 def check_plans_declare_an_extent(spec: ExperimentSpec, schema: SiteSchema) -> list[ValidationIssue]:
-    """A run has a LENGTH: either a train plan (one wave per update) or a
-    rollout plan (one wave per rollout). A spec declaring neither describes a
-    run with no work and nothing to be done, which nothing could ever call
-    finished (ADR 0006 Part B)."""
-    if spec.plans.train is not None or spec.plans.rollout is not None:
+    """A run has a LENGTH: a train plan (one wave per update), a fit plan (one
+    job per line — ADR 0019) or a rollout plan (one wave per rollout). A spec
+    declaring none describes a run with no work and nothing to be done, which
+    nothing could ever call finished (ADR 0006 Part B)."""
+    plans = spec.plans
+    if plans.train is not None or plans.rollout is not None or plans.fit is not None:
         return []
     return [_issue(
         "no-extent", "plans",
@@ -641,12 +688,16 @@ def check_train_plan_and_algo_agree(spec: ExperimentSpec, schema: SiteSchema) ->
     """A TRAIN PLAN AND AN ALGO ARE ONE DECLARATION, read from two ends: the
     plan is what the Trainer consumes, one wave per update, and the Trainer is
     what an algo brings. Either without the other is a run half-described —
-    a plan no daemon would consume (and a length nothing could reach), or a
+    a plan no runner would consume (and a length nothing could reach), or a
     Trainer with nothing to train on.
 
-    The mirror of check_a_rollout_plan_has_gen: what a daemon needs, the spec
-    must declare (ADR 0006 Part B).
+    The mirror of check_a_rollout_plan_has_gen: what a runner needs, the spec
+    must declare (ADR 0006 Part B). A FIT run is the one exception, and it is
+    check_a_fit_run_is_a_learner_and_lanes' to hold: its algo is consumed by
+    the Fitter, whose plan is the fit plan.
     """
+    if spec.plans.fit is not None:
+        return []
     if spec.plans.train is not None and spec.algo is None:
         return [_issue(
             "train-without-algo", "plans.train",
@@ -661,6 +712,119 @@ def check_train_plan_and_algo_agree(spec: ExperimentSpec, schema: SiteSchema) ->
             "consume: a run's updates are its train plan's waves, so a "
             "training run without one has no work and no length")]
     return []
+
+
+def _declares_a_learner(spec: ExperimentSpec) -> bool:
+    return any(isinstance(member, LearnerMember)
+               for host in spec.topology.hosts for member in host.members)
+
+
+def _fit_entries(spec: ExperimentSpec) -> list[str]:
+    """The bank entries whose memory sets can be a fit's lanes."""
+    return sorted(name for name, adapter in spec.policy.bank.items()
+                  if adapter.adapter_type == FIT_ADAPTER_TYPE)
+
+
+def check_a_fit_run_is_a_learner_and_lanes(spec: ExperimentSpec, schema: SiteSchema) -> list[ValidationIssue]:
+    """A FIT RUN (ADR 0019) is a Fitter on a learner and nothing else, so its
+    spec says exactly that: a fit plan by cas uri and no other plan (it takes
+    no waves and samples none); a declared learner; ONE trainable stream-mode
+    `dream_bank` entry with at least one memory, whose memory sets are the
+    lanes; and an algo that is the fit's loss (FIT_LOSSES), its optimizer at a
+    positive lr with no per-group lr override — each step's lr is a job's own,
+    scaled against that one base — and an empty pipeline, since no runner of
+    a fit run would run one. The JOBS' own legality is a property of the plan
+    file, checked where it is decoded (runner/fit.py: decode_jobs), as a wave
+    plan's leaves are."""
+    if spec.plans.fit is None:
+        return []
+    issues = []
+
+    def refuse(path: str, message: str) -> None:
+        issues.append(_issue("fit-run-shape", path, message))
+
+    if not spec.plans.fit.startswith("cas://"):
+        refuse("plans.fit", f"a fit plan is a content-addressed jsonl of fit "
+                            f"jobs ('cas://<sha>'), got {spec.plans.fit!r}")
+    for kind in ("train", "rollout"):
+        if getattr(spec.plans, kind) is not None:
+            refuse(f"plans.{kind}",
+                   f"a fit run's only plan is its fit plan: its Fitter takes "
+                   f"jobs, so a {kind} plan would have no runner")
+    if not _declares_a_learner(spec):
+        refuse("topology", "a fit run fits on a learner, and the topology "
+                           "declares none")
+    entries = _fit_entries(spec)
+    if len(entries) != 1:
+        refuse("policy.bank",
+               f"a fit run's lanes are the memory sets of ONE "
+               f"{FIT_ADAPTER_TYPE!r} entry; the bank holds {len(entries)}")
+    for name in entries:
+        adapter = spec.policy.bank[name]
+        memories = adapter.init.get("memories", 0)
+        if not adapter.trainable or adapter.init.get("mode", "stream") != "stream" \
+                or not isinstance(memories, int) or memories < 1:
+            refuse(f"policy.bank.{name}",
+                   f"a fit run's {FIT_ADAPTER_TYPE!r} entry is trainable, in "
+                   f"stream mode, with memories >= 1 (one lane per memory); "
+                   f"got trainable={adapter.trainable}, "
+                   f"mode={adapter.init.get('mode', 'stream')!r}, "
+                   f"memories={memories!r}")
+    if spec.algo is None:
+        refuse("algo", "a fit run declares an algo: the loss its fits "
+                       f"minimize (one of {FIT_LOSSES}), the optimizer and "
+                       "the microbatch budget")
+        return issues
+    if spec.algo.loss not in FIT_LOSSES:
+        refuse("algo.loss", f"a fit is behavior cloning on its rows: the loss "
+                            f"is one of {FIT_LOSSES}, got {spec.algo.loss!r}")
+    if spec.algo.post:
+        refuse("algo.post", f"a fit run has no Trainer and no Scorer, so "
+                            f"nothing would run its pipeline {tuple(spec.algo.post)}")
+    if not spec.algo.optim.lr > 0:
+        refuse("algo.optim.lr",
+               f"each step's lr is a job's own, reached by scaling the "
+               f"optimizer's base lr, which must therefore be positive; got "
+               f"{spec.algo.optim.lr!r}")
+    for group, override in sorted(spec.algo.optim.overrides.items()):
+        if "lr" in override:
+            refuse(f"algo.optim.overrides.{group}",
+                   "a fit run's lanes are scaled against ONE base lr; an lr "
+                   "override would move a lane's schedule silently")
+    return issues
+
+
+def check_fitting_post_has_a_learner_and_lanes(spec: ExperimentSpec, schema: SiteSchema) -> list[ValidationIssue]:
+    """A processor that FITS (PostDef.fits — ADR 0019) trains forks on the
+    run's OWN learner, as lanes of a second tenant shaped like the run's
+    `dream_bank` entry: so the run declares a learner and holds exactly one
+    such entry. It also addresses no pool — it runs inline in the Trainer,
+    whose post phase admits no engine."""
+    if spec.algo is None:
+        return []
+    issues = []
+    for index, name in enumerate(spec.algo.post):
+        if name not in POST or not POST.get(name).fits:
+            continue
+        path = f"algo.post[{index}]"
+        if not _declares_a_learner(spec):
+            issues.append(_issue(
+                "fits-without-learner", path,
+                f"postprocessor {name!r} fits on the run's own learner, and "
+                f"the topology declares none"))
+        if len(_fit_entries(spec)) != 1:
+            issues.append(_issue(
+                "fits-without-lanes", path,
+                f"postprocessor {name!r} forks a {FIT_ADAPTER_TYPE!r} set; the "
+                f"bank must hold exactly one such entry to take its rank and "
+                f"sites from, and holds {len(_fit_entries(spec))}"))
+        if POST.get(name).pools:
+            issues.append(_issue(
+                "fits-with-pools", path,
+                f"postprocessor {name!r} declares fits AND pools "
+                f"{POST.get(name).pools}: a fitting processor runs inline in "
+                f"the Trainer, which admits no engine"))
+    return issues
 
 
 def check_a_rollout_plan_has_gen(spec: ExperimentSpec, schema: SiteSchema) -> list[ValidationIssue]:
@@ -728,7 +892,10 @@ CHECKS = (
     check_learnerless_bank_is_frozen,
     check_plans_declare_an_extent,
     check_train_plan_and_algo_agree,
+    check_a_fit_run_is_a_learner_and_lanes,
+    check_fitting_post_has_a_learner_and_lanes,
     check_a_rollout_plan_has_gen,
+    check_rollout_pool_serves_the_policy,
     check_schedule_is_sane,
     check_warm_start_map_targets_this_bank,
 )

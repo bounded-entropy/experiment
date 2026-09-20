@@ -114,7 +114,7 @@ sessions read. Cross-reference each in the other, fold into
 ## Quick commands
 
 ```
-python3.13 -m unittest discover -s tests        # fakes suite (~8s; torch-gated cases skip)
+python3.13 -m unittest discover -s tests        # fakes suite (~60s; torch-gated cases skip)
 PYTHONUNBUFFERED=1 modal run deploy/steer_l4.py::run_tests   # the same suite inside the image
 modal run deploy/steer_l4.py::probe             # the steer's parity exam on one L4 (~4m)
 modal deploy deploy/desk.py                     # THE desk — once, for every venue (ADR 0007)
@@ -122,6 +122,10 @@ modal run deploy/desk.py::status                # every listing and every metal,
 modal run deploy/desk.py::recipe --metal steer-l4 --engine ... --learner ...
                                                 #   what that metal builds (a metal boots bare)
 modal run deploy/desk.py::sweep                 # release every metal the desk holds (guarded)
+modal run deploy/desk.py::stop --run <id>       # a deliberate stop: drained, journaled, never revived
+modal run deploy/desk.py::stop --subdir <s>     #   (or every unfinished run under a subdir)
+modal run deploy/desk.py::dispositions          # parked / stopped / failed, with reasons
+python3.13 -m rlstack fleet --desk <address> stop --run <id>   # the same, on any venue
 modal deploy deploy/steer_l4.py && \
 PYTHONUNBUFFERED=1 modal run deploy/steer_l4.py::check       # two tenants through the desk,
                                                 #   released by the desk (~10m; ADR 0004)

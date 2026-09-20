@@ -8,14 +8,18 @@
     local.py        — LocalStore: the verbs on a local filesystem (fsync)
     modal_volume.py — ModalVolumeStore: LocalStore over a mounted Modal Volume,
                       volume.commit() at the ledger line (the commit point)
+    strangeloop.py  — StrangeLoopStore / StrangeLoopLocalStore: Strange Loop
+                      scratch — authoritative API reads, API writes or checked
+                      mounted sync (ADR 0015)
     address.py      — open_store(StoreAddress): the backends by name, so a
                       child process can reopen the store its parent holds
     (s3.py          — the same verbs over objects; designed, not built)
 """
 
 from rlstack.data.stores.base import (  # noqa: F401
-    BLOB_SECTIONS, LedgerError, ManifestMismatch, RunHandle, RunProgress,
-    Store, StoreAddress, StoreError, bump, run_done, run_progress,
+    BLOB_SECTIONS, LedgerError, ManifestMismatch, NamedAdapterConflict,
+    RunHandle, RunProgress, Store, StoreAddress, StoreError, bump, check_name,
+    run_done, run_ended, run_progress,
 )
 from rlstack.data.stores.retention import (  # noqa: F401
     DEFAULT_RETENTION, KeepRestorable, RetentionPolicy, Swept,
@@ -23,3 +27,6 @@ from rlstack.data.stores.retention import (  # noqa: F401
 from rlstack.data.stores.local import LocalStore  # noqa: F401
 from rlstack.data.stores.modal_volume import ModalVolumeStore  # noqa: F401
 from rlstack.data.stores.address import open_store  # noqa: F401
+from rlstack.data.stores.strangeloop import (  # noqa: F401
+    ScratchClient, StrangeLoopLocalStore, StrangeLoopStore,
+)

@@ -10,7 +10,7 @@ every transport implements against:
     call (async)   sample_tokens / score_tokens, and at a HOST door every
                    learner verb — they occupy the metal, so the service wraps
                    each in the owning host's arbiter.admit.
-    ask  (sync)    add_bundle / reachability / tokenize — additive
+    ask  (sync)    add_bundle / add_library / reachability / tokenize — additive
                    registration and build facts, which by the tenancy
                    invariant never disturb traffic, so they need no admission
                    and may run from sync call sites — and, at a RESIDENT's
@@ -26,7 +26,9 @@ the HOST door: `HostService.serve` admits `install` / `uninstall` /
 `forward_backward` / `optim_step` / `emit` / `load` at the serving host's own
 arbiter and executes them through that host's learner, so a run anchored
 anywhere may join a standing learner and the learner's alternation is honored
-where the learner lives. The two hops are unchanged: admission at the host,
+where the learner lives. ADR 0019's verbs (`forward`, `load_set`, `drop_set`,
+`emit_set`, and `optim_step`'s `lr_scales`) cross the same two doors the same
+way: a batch as `forward_backward`'s does, a named payload as base64. The two hops are unchanged: admission at the host,
 then the resident.
 
 ADDRESSES ARE READ HERE AND NOWHERE ELSE (ADR 0007). `parse_address` is the
@@ -39,9 +41,9 @@ LocalTransport stays here because it is the contract's enforcement, not a
 substrate.
 
 Costs, stated: sample replies are non-streamed (one reply carries the whole
-event list), add_bundle ships payload bytes as base64, and a routed learner
-puts one frame on the wire per microbatch and per update (the TokenBatch out,
-the emitted payloads back). LocalTransport round-trips every frame through
+event list), add_bundle and add_library ship payload bytes as base64, and a
+routed learner puts one frame on the wire per microbatch and per update (the
+TokenBatch out, the emitted payloads back). LocalTransport round-trips every frame through
 json in both directions, so anything that works over it works over a real
 transport.
 """
@@ -235,6 +237,8 @@ def _decode_dataclass(tree: dict) -> object:
     hints = typing.get_type_hints(cls)
     kwargs = {}
     for spec_field in dataclasses.fields(cls):
+        if spec_field.name not in tree:
+            continue        # in identity only when set (canonical.WHEN_SET): its default
         value = from_canonical(tree[spec_field.name])
         if isinstance(value, list) and _wants_tuple(hints[spec_field.name]):
             value = tuple(value)
@@ -297,13 +301,15 @@ def decode_token_batch(row: Mapping) -> TokenBatch:
 def encode_train_stats(stats: TrainStats) -> dict:
     return {"loss": stats.loss, "mean_ratio": stats.mean_ratio,
             "logprob_gap": stats.logprob_gap, "grad_norm": stats.grad_norm,
-            "tokens": stats.tokens, "provided": dict(stats.provided)}
+            "tokens": stats.tokens, "provided": dict(stats.provided),
+            "components": dict(stats.components)}
 
 
 def decode_train_stats(row: Mapping) -> TrainStats:
     return TrainStats(loss=row["loss"], mean_ratio=row["mean_ratio"],
                       logprob_gap=row["logprob_gap"], grad_norm=row["grad_norm"],
-                      tokens=int(row["tokens"]), provided=dict(row["provided"]))
+                      tokens=int(row["tokens"]), provided=dict(row["provided"]),
+                      components=dict(row.get("components", {})))
 
 
 def encode_emitted(emitted: Emitted) -> dict:
@@ -325,6 +331,16 @@ def encode_payloads(payloads: Mapping[str, bytes] | None) -> dict | None:
 
 def decode_payloads(row: Mapping | None) -> dict[str, bytes] | None:
     return None if row is None else {k: _unb64(v) for k, v in row.items()}
+
+
+def encode_named_payload(payload: bytes | None) -> str | None:
+    """One named payload (ADR 0019) as base64 — the codec every other payload
+    crosses in. None stays None: `load_set`'s "start from init"."""
+    return None if payload is None else _b64(payload)
+
+
+def decode_named_payload(text: str | None) -> bytes | None:
+    return None if text is None else _unb64(text)
 
 
 def encode_parameterization(p: Parameterization) -> dict:
@@ -449,7 +465,7 @@ class Blocking:
     protocols this library owns are synchronous by contract and stay that
     way: an Engine's registration and build facts (`add_bundle`,
     `reachability`, `tokenize`), and every Learner verb (ADR 0002, Q6). Those
-    call sites run one coroutine on THIS loop — one loop, on one daemon
+    call sites run one coroutine on THIS loop — one loop, on one runner
     thread, for the process's life — and block for the reply, which is
     exactly what they did before, one thread hop later.
 
@@ -559,7 +575,8 @@ def check_epoch(payload: Mapping, mine: str, who: str) -> None:
 
 
 LEARNER_VERBS = ("install", "uninstall", "forward_backward", "optim_step",
-                 "emit", "load")
+                 "emit", "load", "learner_tokenize",
+                 "forward", "load_set", "drop_set", "emit_set")
 """The Learner protocol as frames — the whole of what crosses a host door to
 a learner. Host-addressed: a host wears at most one learner, so unlike an
 engine verb a learner verb carries no capability address, only its tenant."""
@@ -577,6 +594,45 @@ class HostService:
 
     def __init__(self, host: Host) -> None:
         self.host = host
+        self._learner_lock = asyncio.Lock()
+        self._learner_calls: set[asyncio.Task] = set()
+        self._engine_calls: set[asyncio.Task] = set()
+        self._closing = False
+        self._binding = threading.Lock()
+        try:
+            self._owner_loop = asyncio.get_running_loop()
+        except RuntimeError:
+            self._owner_loop = None
+
+    def owning_loop(self) -> asyncio.AbstractEventLoop:
+        """One host's admission and learner queue live on one event loop.
+
+        HTTP already delivers there. In-process RemoteLearners have separate
+        caller loops, so their LocalTransports must hand work to this owner
+        too. A service constructed without a running loop binds on first use;
+        a completed test loop can be replaced only when no learner call is
+        still owned by it.
+        """
+        current = asyncio.get_running_loop()
+        with self._binding:
+            if self._owner_loop is None or not self._owner_loop.is_running():
+                if self._learner_calls:
+                    raise RuntimeError(
+                        f"host {self.host.name!r}'s owning loop stopped "
+                        "with learner work still outstanding")
+                self._owner_loop = current
+                self._learner_lock = asyncio.Lock()
+            return self._owner_loop
+
+    def close_admission(self) -> None:
+        """Close this host's door: nothing new is admitted, and
+        `drain_learner_calls` may then wait for what was."""
+        self._closing = True
+
+    def check_open(self) -> None:
+        """A retained in-process handle cannot revive a closed door."""
+        if self._closing:
+            raise RuntimeError(f"host {self.host.name!r} is retiring")
 
     def describe(self) -> dict:
         """What this host serves — the advertisement the fleet matches on."""
@@ -602,7 +658,7 @@ class HostService:
         joiner never re-counts a size the partition already owns.
 
         `adopt` and `stop` ride this async path but are NOT admitted: adopt
-        registers a tenancy whose daemons admit their own work, stop cancels
+        registers a tenancy whose runners admit their own work, stop cancels
         one, so neither door occupies anything — and both are host-addressed,
         so they resolve no engine. The learner verbs ride it BECAUSE they are
         admitted (serve_learner): they occupy this host's training metal, so
@@ -612,15 +668,29 @@ class HostService:
         with its container is refused before anything is admitted, because a
         carve name recycles and the successor must not serve its corpse's
         mail."""
+        self.check_open()
+        owner = self.owning_loop()
+        if owner is not asyncio.get_running_loop():
+            # Cancelling this wait also cancels the owner-side request. Its
+            # queued/started rule below decides whether work may be cancelled;
+            # a synchronous operation already running retains admission.
+            return await asyncio.wrap_future(asyncio.run_coroutine_threadsafe(
+                self.serve(verb, payload), owner))
         check_epoch(payload, self.host.epoch, f"host {self.host.name!r}")
         if verb == "adopt":
             return await self.host.adopt(payload["spec"],
                                          payload.get("routes", {}),
                                          payload.get("code"),
                                          payload.get("subdir"),
-                                         resume=bool(payload.get("resume", False)))
+                                         resume=bool(payload.get("resume", False)),
+                                         checkpointing=payload.get("checkpointing"))
         if verb == "stop":
-            return await self.host.stop(payload["run_id"])
+            # the host's wait for a drain must end before the wire's deadline
+            # does, so the reply — not a timeout — says what happened
+            return await self.host.stop(
+                payload["run_id"], drain=bool(payload.get("drain", True)),
+                reason=str(payload.get("reason", "")),
+                deadline_s=max(1.0, float(payload.get("deadline_s", BUILD_DEADLINE_S)) - 5.0))
         if verb in LEARNER_VERBS:
             return await self.serve_learner(verb, payload)
         engine = self._engine(payload["base"], payload["tp"])
@@ -629,7 +699,17 @@ class HostService:
                 engine, label=f"{self.host.name}:{payload['base'] or '*'}")
         if verb not in ("sample_tokens", "score_tokens"):
             raise ValueError(f"unknown admitted verb {verb!r}")
+        call = asyncio.create_task(self.answer_engine(engine, verb, payload))
+        self._engine_calls.add(call)
+        try:
+            return await call
+        finally:
+            self._engine_calls.discard(call)
+
+    async def answer_engine(self, engine: Engine, verb: str, payload: dict) -> dict:
+        """Own asynchronous engine work so a closing door can stop and await it."""
         async with self.host.arbiter.admit(engine):
+            self.check_open()
             return await EngineService(engine).serve(verb, payload)
 
     async def serve_learner(self, verb: str, payload: dict) -> dict:
@@ -642,14 +722,72 @@ class HostService:
         attaches on first remote use, at zero footprint, exactly as its
         engines do. The verb itself is synchronous — a Learner's protocol is —
         so the admitted frame executes through the learner's own service, and
-        a frame that raises is a refusal to the caller, never a state here."""
+        a frame that raises is a refusal to the caller, never a state here.
+
+        THE CALL OUTLIVES ITS CALLER (ADR 0016): an HTTP client that times
+        out has not ended the synchronous GPU work it started, so the call is
+        a task this service owns — queued work is cancelled with its caller,
+        started work keeps its admission until it really finishes."""
         learner = self._learner()
         if not self.host.arbiter.is_attached(learner):
             self.host.arbiter.attach(learner, label=f"{self.host.name}:learner")
-        async with self.host.arbiter.admit(learner):
-            reply = LearnerService(learner).answer(verb, payload)
-        self.journal_custody(verb, payload["tenant"])
-        return reply
+        started = asyncio.Event()
+        call = asyncio.create_task(
+            self.answer_learner(learner, verb, payload, started))
+        self._learner_calls.add(call)
+        call.add_done_callback(self.learner_call_finished)
+        try:
+            return await asyncio.shield(call)
+        except asyncio.CancelledError:
+            # Queued work has not touched the learner. Once started, the call
+            # owns admission until its synchronous operation really finishes.
+            if not started.is_set():
+                call.cancel()
+            raise
+
+    async def answer_learner(self, learner: Learner, verb: str, payload: dict,
+                             started: asyncio.Event) -> dict:
+        """Serialize learner mutations off-loop, with admission held to completion.
+
+        A resident proxy blocks waiting for its child. A direct learner also
+        has synchronous operations and shared model state. Neither can run on
+        the service loop, and moving them onto threads must not make formerly
+        sequential operations overlap. The request may leave; this call keeps
+        the learner resident until its answer and custody record are complete.
+        """
+        async with self._learner_lock:
+            self.check_open()
+            async with self.host.arbiter.admit(learner):
+                self.check_open()
+                started.set()
+                reply = await asyncio.to_thread(
+                    LearnerService(learner).answer, verb, payload)
+                await asyncio.to_thread(
+                    self.journal_custody, verb, payload["tenant"])
+                return reply
+
+    def learner_call_finished(self, call: asyncio.Task) -> None:
+        """Retain in-flight custody and report failures after a caller leaves."""
+        self._learner_calls.discard(call)
+        if not call.cancelled() and (error := call.exception()) is not None:
+            print(f"[host {self.host.name}] learner call failed: "
+                  f"{type(error).__name__}: {error}", flush=True)
+
+    async def drain_learner_calls(self) -> None:
+        """After closing admission to new requests, await outstanding learner work.
+
+        An interrupted caller cannot end synchronous GPU work. A runtime that
+        cannot wait must stop the resident first; cancelling this wait does not
+        make that resident safe to replace.
+        """
+        owner = self.owning_loop()
+        if owner is not asyncio.get_running_loop():
+            await asyncio.wrap_future(asyncio.run_coroutine_threadsafe(
+                self.drain_learner_calls(), owner))
+            return
+        if self._learner_calls:
+            await asyncio.shield(asyncio.gather(
+                *tuple(self._learner_calls), return_exceptions=True))
 
     def _learner(self) -> Learner:
         """Resolution's learner half — the wire's only addition to Host's own
@@ -683,6 +821,7 @@ class HostService:
         and resolves no engine. The epoch is checked here too (F2): a probe
         is a frame like any other, and a corpse's address answering `status`
         is exactly the deaf-metal hazard."""
+        self.check_open()
         check_epoch(payload, self.host.epoch, f"host {self.host.name!r}")
         if verb == "status":
             return self.host.status()
@@ -722,6 +861,9 @@ class EngineService:
     def answer(self, verb: str, payload: dict) -> dict:
         if verb == "add_bundle":
             self.engine.add_bundle(decode_bundle(payload["bundle"]))
+            return {}
+        if verb == "add_library":
+            self.engine.add_library(payload["name"], _unb64(payload["payload"]))
             return {}
         if verb == "knows_bundle":
             return {"known": self.engine.knows_bundle(payload["bundle_id"])}
@@ -767,6 +909,8 @@ class LearnerService:
 
     def answer(self, verb: str, payload: dict) -> dict:
         tenant = payload["tenant"]
+        if verb == "learner_tokenize":
+            return {"token_ids": list(self.learner.tokenize(tenant, payload["text"]))}
         if verb == "install":
             self.learner.install(
                 tenant, decode_parameterization(payload["parameterization"]))
@@ -778,7 +922,8 @@ class LearnerService:
             return encode_train_stats(self.learner.forward_backward(
                 tenant, decode_token_batch(payload["batch"])))
         if verb == "optim_step":
-            self.learner.optim_step(tenant)
+            # a frame from before lr_scales existed carries none: a plain step
+            self.learner.optim_step(tenant, payload.get("lr_scales"))
             return {}
         if verb == "emit":
             return encode_emitted(self.learner.emit(tenant))
@@ -786,6 +931,19 @@ class LearnerService:
             self.learner.load(tenant, decode_payloads(payload["adapters"]) or {},
                               decode_payloads(payload["optim"]))
             return {}
+        if verb == "forward":
+            return {"nll": list(self.learner.forward(
+                tenant, decode_token_batch(payload["batch"])))}
+        if verb == "load_set":
+            self.learner.load_set(tenant, payload["entry"], payload["route"],
+                                  decode_named_payload(payload["payload"]))
+            return {}
+        if verb == "drop_set":
+            self.learner.drop_set(tenant, payload["entry"], payload["route"])
+            return {}
+        if verb == "emit_set":
+            return {"payload": encode_named_payload(self.learner.emit_set(
+                tenant, payload["entry"], payload["route"]))}
         raise ValueError(f"unknown learner verb {verb!r}")
 
 
@@ -865,6 +1023,8 @@ class Address:
         modal://<app>/<cls>#<host>   one host's door inside a Modal class
         modal://<app>/<cls>          that container's own plane (a desk, a
                                      metal)
+        http://<host>:<port>#<host>  one service behind an HTTP runner
+                                     (runner/transports/http.py); https too
         local://<host>               the IN-PROCESS wire: a service standing
                                      in this very process under that name
         ...@<epoch>                  any of the above, addressed to ONE
@@ -887,6 +1047,9 @@ class Address:
     cls: str = ""
     host: str = ""
     epoch: str = ""
+    endpoint: str = ""
+    """`http://<host>:<port>` for an HTTP address (ADR 0016): the runner's
+    origin, with the `#<host>` fragment and `@<epoch>` read off it."""
 
 
 def parse_address(address: str) -> Address:
@@ -907,6 +1070,18 @@ def parse_address(address: str) -> Address:
     rest, at, epoch = rest.rpartition("@")
     if not at:
         rest, epoch = epoch, ""
+    if scheme in ("http", "https"):
+        from urllib.parse import urlsplit
+
+        endpoint, _, host = rest.partition("#")
+        url = urlsplit(f"{scheme}://{endpoint}")
+        if (not url.hostname or url.username or url.password or url.query
+                or url.path not in ("", "/")):
+            raise ValueError(f"invalid HTTP service address {address!r}")
+        # Accessing port also validates its numeric range.
+        url.port
+        return Address(scheme=scheme, host=host, epoch=epoch,
+                       endpoint=f"{scheme}://{endpoint}".rstrip("/"))
     if scheme != "modal":
         return Address(scheme=scheme, host=rest, epoch=epoch)
     path, _, host = rest.partition("#")
@@ -979,6 +1154,13 @@ def transport_for(address: str) -> Transport:
     standing = IN_PROCESS.get(address) or IN_PROCESS.get(without_epoch(address))
     if standing is not None:
         return LocalTransport(standing, parsed.epoch)
+    if parsed.scheme in ("http", "https"):
+        import os
+
+        from rlstack.runner.transports.http import HttpTransport
+
+        return HttpTransport(parsed.endpoint, parsed.host, parsed.epoch,
+                             token=os.environ.get("RLSTACK_HTTP_TOKEN", ""))
     if parsed.scheme == "modal":
         from rlstack.runner.transports.modal_cls import ModalClsTransport
 
@@ -1061,6 +1243,13 @@ class RemotePool:
     def add_bundle(self, bundle: Bundle) -> None:
         self._asked("add_bundle", {
             **self._address(), "bundle": encode_bundle(bundle)})
+
+    def add_library(self, name: str, payload: bytes) -> None:
+        """Admission-free and additive, as add_bundle is, and the bytes cross
+        the same way (base64): the role read the store, the engine never
+        does (ADR 0019, Q2)."""
+        self._asked("add_library", {
+            **self._address(), "name": name, "payload": _b64(payload)})
 
     def knows_bundle(self, bundle_id: str) -> bool:
         """Admission-free, like the registration it guards: asking what a pool
@@ -1190,12 +1379,20 @@ class RemoteLearner:
     def uninstall(self, tenant: str) -> None:
         self.frame("uninstall", {"tenant": tenant})
 
+    def tokenize(self, tenant: str, text: str) -> tuple[int, ...]:
+        reply = self.frame("learner_tokenize", {"tenant": tenant, "text": text})
+        return tuple(reply["token_ids"])
+
     def forward_backward(self, tenant: str, batch: TokenBatch) -> TrainStats:
         return decode_train_stats(self.frame("forward_backward", {
             "tenant": tenant, "batch": encode_token_batch(batch)}))
 
-    def optim_step(self, tenant: str) -> None:
-        self.frame("optim_step", {"tenant": tenant})
+    def optim_step(self, tenant: str,
+                   lr_scales: Mapping[str, float] | None = None) -> None:
+        self.frame("optim_step", {
+            "tenant": tenant,
+            "lr_scales": None if lr_scales is None else
+                         {key: float(value) for key, value in lr_scales.items()}})
 
     def emit(self, tenant: str) -> Emitted:
         return decode_emitted(self.frame("emit", {"tenant": tenant}))
@@ -1205,6 +1402,28 @@ class RemoteLearner:
         self.frame("load", {
             "tenant": tenant, "adapters": encode_payloads(adapters),
             "optim": encode_payloads(optim)})
+
+    # the named-set verbs and the no-grad forward (ADR 0019): bytes cross as
+    # `load`'s do, a batch as `forward_backward`'s does
+
+    def forward(self, tenant: str, batch: TokenBatch) -> tuple[float, ...]:
+        reply = self.frame("forward", {
+            "tenant": tenant, "batch": encode_token_batch(batch)})
+        return tuple(float(nll) for nll in reply["nll"])
+
+    def load_set(self, tenant: str, entry: str, route: str,
+                 payload: bytes | None) -> None:
+        self.frame("load_set", {
+            "tenant": tenant, "entry": entry, "route": route,
+            "payload": encode_named_payload(payload)})
+
+    def drop_set(self, tenant: str, entry: str, route: str) -> None:
+        self.frame("drop_set", {"tenant": tenant, "entry": entry, "route": route})
+
+    def emit_set(self, tenant: str, entry: str, route: str) -> bytes:
+        reply = self.frame("emit_set", {
+            "tenant": tenant, "entry": entry, "route": route})
+        return _unb64(reply["payload"])
 
 
 class RemoteHost:
@@ -1224,10 +1443,13 @@ class RemoteHost:
                     code: Mapping[str, str] | None = None,
                     subdir: str | None = None,
                     deadline_s: float = BUILD_DEADLINE_S,
-                    resume: bool = False) -> dict:
+                    resume: bool = False,
+                    checkpointing: Mapping | None = None) -> dict:
         """`spec` may be a live ExperimentSpec (encoded here, hashes computed
         here) or an already-canonical row (forwarded as-is — the DESK's case,
-        relaying a client's frame with the CLIENT's claimed hashes)."""
+        relaying a client's frame with the CLIENT's claimed hashes).
+        `checkpointing` is the frame's row (ADR 0014), relayed blind; the host
+        refuses an adoption that carries none."""
         from rlstack.spec.canonical import canonical_json
 
         if isinstance(spec, Mapping):
@@ -1239,15 +1461,21 @@ class RemoteHost:
                 code = code_hashes(spec)
         return await self._transport.call("adopt", {
             "spec": row, "routes": dict(routes or {}),
-            "code": dict(code or {}), "subdir": subdir, "resume": resume},
+            "code": dict(code or {}), "subdir": subdir, "resume": resume,
+            "checkpointing": dict(checkpointing) if checkpointing else None},
             deadline_s=deadline_s)
 
-    async def stop(self, run_id: str, deadline_s: float = DEADLINE_S) -> dict:
-        """Tell the host to stop a tenancy — cancellation awaited host-side,
-        so the reply means the death is complete and the run_id is free to
-        adopt again, here or elsewhere (a reroute's first half)."""
-        return await self._transport.call("stop", {"run_id": run_id},
-                                          deadline_s=deadline_s)
+    async def stop(self, run_id: str, deadline_s: float = DEADLINE_S, *,
+                   drain: bool = True, reason: str = "") -> dict:
+        """Tell the host to end a tenancy — drained by default (ADR 0014,
+        Q6: the Trainer checkpoints its last commit first), cancelled past
+        the deadline or with `drain=False`; awaited host-side either way, so
+        the reply means the end is complete and the run_id is free to adopt
+        again, here or elsewhere (a reroute's first half)."""
+        return await self._transport.call(
+            "stop", {"run_id": run_id, "drain": drain, "reason": reason,
+                     "deadline_s": deadline_s},
+            deadline_s=deadline_s)
 
     async def status(self, deadline_s: float = DEADLINE_S) -> dict:
         """The roster over the wire, BOUNDED (ADR 0008, F3): a probe that
@@ -1333,7 +1561,8 @@ class RemoteDesk:
     async def submit(self, spec: object, subdir: str | None = None,
                      anchor: str | None = None, solo: bool = False,
                      deadline_s: float = BUILD_DEADLINE_S,
-                     resume: bool = False) -> dict:
+                     resume: bool = False, *,
+                     checkpointing: "Checkpointing") -> dict:
         """`anchor` names the member the frame lands on — and therefore where
         the run's Trainer sits (campaign.anchor_demand's rule): unasked, the
         learner's host when the spec declares one, `main` otherwise.
@@ -1346,7 +1575,8 @@ class RemoteDesk:
 
         return await self._transport.call("submit", {
             "demands": demand_rows(demands_of(spec, anchor)),
-            "frame": frame_for(spec, subdir, resume), "solo": solo},
+            "frame": frame_for(spec, subdir, resume, checkpointing=checkpointing),
+            "solo": solo},
             deadline_s=deadline_s)
 
     async def resolve(self, demands: Sequence) -> dict:
@@ -1435,6 +1665,30 @@ class RemoteDesk:
         return await self._transport.call("reroute", {
             "run_id": run_id, "avoiding": avoiding, "park": park},
             deadline_s=deadline_s)
+
+    async def stop(self, run_id: str, reason: str = "stopped by hand", *,
+                   drain: bool = True, deadline_s: float = BUILD_DEADLINE_S) -> dict:
+        """A DELIBERATE STOP (ADR 0014, Part C): the run ended wherever it
+        runs, drained so its last commit is checkpointed, and journaled
+        `stopped` — the disposition nothing automatic revives. Resubmit to
+        move it again."""
+        return await self._transport.call(
+            "stop", {"run_id": run_id, "reason": reason, "drain": drain},
+            deadline_s=deadline_s)
+
+    async def stop_subdir(self, subdir: str, reason: str = "stopped by hand", *,
+                          drain: bool = True, deadline_s: float = BUILD_DEADLINE_S) -> dict:
+        """Every unfinished run filed under `subdir`, stopped — one campaign,
+        one verb, one `stopped` row per run."""
+        return await self._transport.call(
+            "stop_subdir", {"subdir": subdir, "reason": reason, "drain": drain},
+            deadline_s=deadline_s)
+
+    async def dispositions(self, deadline_s: float = DEADLINE_S) -> dict:
+        """{parked, stopped, failed}: the standing disposition per run, off
+        the desk's journal — what is waiting, what was stopped by hand, and
+        what died of its own accord (with the error)."""
+        return await self._transport.ask("dispositions", {}, deadline_s=deadline_s)
 
     async def placements(self) -> dict:
         """The desk's current-binding table: the latest delivered placement
@@ -1555,13 +1809,17 @@ class RemoteDesk:
                                           deadline_s=deadline_s)
 
     async def migrate(self, run_ids: Sequence[str], *, optim: str = "load",
-                      remaining_only: bool = False) -> dict:
+                      remaining_only: bool = False,
+                      checkpointing: "Checkpointing | None" = None) -> dict:
         """Warm-fork each run onto the current code from its ledger tail —
         the code-refresh pass, one frame. The desk does everything; the reply
-        maps parent run_id -> its child's acceptance (or refusal)."""
+        maps parent run_id -> its child's acceptance (or refusal). The child
+        keeps its parent's declared cadence unless `checkpointing` says
+        otherwise (ADR 0014)."""
         return await self._transport.call("migrate", {
             "run_ids": list(run_ids), "optim": optim,
-            "remaining_only": remaining_only})
+            "remaining_only": remaining_only,
+            "checkpointing": checkpointing.row() if checkpointing else None})
 
     async def pulse(self, deadline_s: float = DEADLINE_S) -> dict:
         """{host: {"alive": bool, "running": [run_id, ...]}} for every
