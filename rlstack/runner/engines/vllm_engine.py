@@ -18,6 +18,13 @@ all. What it knows is the shape of the work:
   an answer    every attached adapter type's align(), SUMMED, because a scored
                suffix sits after everything the bundle put in front of it.
 
+CUDA GRAPHS BY DEFAULT. `enforce_eager=None` (the default) is AUTO: eager only
+where a served adapter type DEMANDS it (steer's residual add cannot ride a
+captured graph), CUDA graphs otherwise — decode on a hybrid (Gated DeltaNet)
+base in eager mode is launch-bound, and graphs are compatible with sleep mode
+and LoRA. If the graphed build fails, the AUTO engine is rebuilt eager, once,
+and says so; an explicit True or False is a build fact and is never changed.
+
 Two build facts off to the side. enable_sleep_mode buys the sleep()/wake() pair
 an alternating host's arbiter hooks call to make a partition really hand the
 device back — deliberately NOT on the Engine protocol, since a fake or a remote
@@ -30,6 +37,7 @@ tokenized exactly as flatten will re-tokenize it — no chat template.
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import os
 import tempfile
@@ -55,9 +63,9 @@ class VllmEngine:
     def __init__(self, base: str, *, gpu_memory_utilization: float = 0.45,
                  max_model_len: int = 1024, max_bundles: int = 8,
                  max_rank: int = 32, max_members: int = 0,
-                 max_library: int = 32, cas_get=None, enforce_eager: bool = True,
+                 max_library: int = 32, cas_get=None, enforce_eager: bool | None = None,
                  tp: int = 1, serves: Sequence[str] = ("lora",),
-                 enable_sleep_mode: bool = False) -> None:
+                 enable_sleep_mode: bool = False, log_stats: bool = False) -> None:
         from transformers import AutoConfig, AutoTokenizer
 
         self.base = base
@@ -94,12 +102,25 @@ class VllmEngine:
             model=base, max_model_len=max_model_len,
             gpu_memory_utilization=gpu_memory_utilization,
             tensor_parallel_size=tp, enable_sleep_mode=enable_sleep_mode,
-            enforce_eager=enforce_eager, disable_log_stats=True)
+            disable_log_stats=not log_stats)
+        self.log_stats = log_stats
+        self._stats_task: asyncio.Task | None = None
+        if enforce_eager is not None:
+            self._engine_args["enforce_eager"] = enforce_eager
+        if getattr(self._config, "vision_config", None) is not None:
+            # a vision-language checkpoint (Qwen3.5) served for text alone:
+            # no image or video per prompt, so vLLM neither profiles nor
+            # reserves its encoder cache (post 0010)
+            self._engine_args["limit_mm_per_prompt"] = {"image": 0, "video": 0}
         # the environment the engine's process must carry when it is built —
         # paid demands, applied in _ensure_llm before the core is spawned
         self._engine_env: dict[str, str] = {}
         for lowering in self._lowerings.values():
             self._engine_args.update(self._pay_demands(lowering))
+        # AUTO: no build fact and no demand chose eager, so graphs
+        self.eager_auto = "enforce_eager" not in self._engine_args
+        self._engine_args.setdefault("enforce_eager", False)
+        self.eager_fallback: str | None = None   # why an AUTO build fell back
         self._llm = None                       # built inside the running loop
         self._asleep = False                   # the sleep seam's own state
         # traffic is counted HERE, at our own seam — never inside vLLM, whose
@@ -145,9 +166,32 @@ class VllmEngine:
             # the paid environment demands, in THIS process: the engine core
             # and its workers are spawned from here and inherit them
             os.environ.update(self._engine_env)
-            self._llm = AsyncLLMEngine.from_engine_args(
-                AsyncEngineArgs(**self._engine_args))
+            try:
+                self._llm = AsyncLLMEngine.from_engine_args(
+                    AsyncEngineArgs(**self._engine_args))
+            except Exception as failure:
+                if not (self.eager_auto and not self._engine_args["enforce_eager"]):
+                    raise
+                # the AUTO build's safe fallback: the same engine, eager
+                self.eager_fallback = f"{type(failure).__name__}: {failure}"
+                print(f"[vllm_engine] CUDA-graph build of {self.base!r} failed "
+                      f"({self.eager_fallback}); rebuilding eager", flush=True)
+                self._engine_args["enforce_eager"] = True
+                self._llm = AsyncLLMEngine.from_engine_args(
+                    AsyncEngineArgs(**self._engine_args))
+            if self.log_stats:
+                self._stats_task = asyncio.get_running_loop().create_task(
+                    self._log_stats_forever())
         return self._llm
+
+    async def _log_stats_forever(self, every_s: float = 10.0) -> None:
+        """vLLM's own stats line (running / waiting requests, KV-cache use,
+        throughput), asked every `every_s` — an AsyncLLM logs only when its
+        owner asks, as vLLM's server does. Diagnosis only."""
+        while self._llm is not None:
+            await asyncio.sleep(every_s)
+            if self._llm is not None and not self._asleep:
+                await self._llm.do_log_stats()
 
     # ---- Engine protocol ----------------------------------------------------
 
@@ -196,6 +240,9 @@ class VllmEngine:
         (`Library.pinned`); what a lowering built from an evicted name goes
         with it (`_forget_library`)."""
         self._library.add(name, payload)
+
+    def holds_library(self, name: str, digest: str) -> bool:
+        return self._library.holds(name, digest)
 
     def _forget_library(self, name: str) -> None:
         """The Library's eviction callback: every lowering releases what it
@@ -258,7 +305,9 @@ class VllmEngine:
         report: dict = {"requests": self._request_count,
                         "gpu_memory_utilization":
                             self._engine_args["gpu_memory_utilization"],
-                        "max_model_len": self._engine_args["max_model_len"]}
+                        "max_model_len": self._engine_args["max_model_len"],
+                        "enforce_eager": self._engine_args["enforce_eager"],
+                        "eager_fallback": self.eager_fallback}
         try:
             config = self._llm.engine.vllm_config
             report["weights_gb"] = round(
@@ -290,6 +339,7 @@ class VllmEngine:
                 f" caller restores a committed version before pinning it"
                 f" (runner/restore.py)")
         from vllm import SamplingParams
+        from vllm.sampling_params import RequestOutputKind
 
         # Each message tokenized separately, then concatenated — the EXACT
         # ids flatten reproduces for injected spans (no template drift).
@@ -297,36 +347,42 @@ class VllmEngine:
         self._request_count += 1
         request_id = f"rlstack-{self._request_count}-{seed}"
         with self._held_for(prompt_ids, bundle_id, seed, directives) as levers:
+            # DELTA outputs: each step hands over only its new tokens, log-
+            # probs and text, so a long completion costs O(n) here, not the
+            # O(n^2) of re-reading the cumulative output every step
             params = SamplingParams(
                 temperature=sampling.temperature, top_p=sampling.top_p,
                 max_tokens=sampling.max_tokens, stop=list(stop), seed=seed,
-                logprobs=0, extra_args=dict(levers.extra_args) or None)
+                logprobs=0, extra_args=dict(levers.extra_args) or None,
+                output_kind=RequestOutputKind.DELTA)
             # the prefill is known BEFORE the request leaves, and the clock for
             # time-to-first-token starts on the same line
             self.meter.opened_request(len(prompt_ids))
             submitted = time.time()
 
             emitted = 0
-            text_len = 0
             final = None
+            cached = False
             async for output in self._ensure_llm().generate(
                     _salted(levers), params, request_id, **levers.kwargs):
+                if not cached:
+                    # what the prefix cache already held of this prompt,
+                    # reported with the first output (ADR 0022)
+                    self.meter.cached(int(getattr(output, "num_cached_tokens", 0) or 0))
+                    cached = True
                 completion = output.outputs[0]
-                new_ids = list(completion.token_ids)[emitted:]
+                new_ids = completion.token_ids
                 if new_ids and not emitted:
                     self.meter.first_token_after(time.time() - submitted)
                 self.meter.decoded(len(new_ids))
                 for offset, token_id in enumerate(new_ids):
-                    position = emitted + offset
-                    logprob = completion.logprobs[position][token_id].logprob
+                    logprob = completion.logprobs[offset][token_id].logprob
                     # attribute the whole text delta to the last new token: the
                     # concatenation (the Message content) stays exact either way
                     last = offset == len(new_ids) - 1
-                    delta = completion.text[text_len:] if last else ""
                     yield TokenEvent(token_id=int(token_id), logprob=float(logprob),
-                                     text_delta=delta)
+                                     text_delta=completion.text if last else "")
                 emitted += len(new_ids)
-                text_len = len(completion.text)
                 final = completion
             # the merged levers' recorded facts leave with the stream's last
             # event: what the bundle's adapter types DREW for this request is
@@ -371,6 +427,7 @@ class VllmEngine:
                     _salted(levers), params, request_id, **levers.kwargs):
                 final = output
             assert final is not None and final.prompt_logprobs is not None
+            self.meter.cached(int(getattr(final, "num_cached_tokens", 0) or 0))
             # the scored suffix sits after the context — and after everything the
             # bundle's adapter types put in front of it
             start = self._occupied(bundle_id) + len(context_ids)
@@ -422,6 +479,8 @@ class VllmEngine:
         """
         if self._llm is None:
             return
+        if self._stats_task is not None:
+            self._stats_task.cancel()
         self._llm.shutdown()
         self._llm = None
 

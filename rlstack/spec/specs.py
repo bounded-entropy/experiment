@@ -186,16 +186,34 @@ class PoolMember:
     base: str | None = None       # None → the policy base
     tp: int = 1
     vram_gb: float | None = None  # TOTAL across shards; None = a whole device per shard
+    # HOW MANY HOSTS SERVE THIS NAME (ADR 0022): the desk places `replicas`
+    # hosts for it, each sized as above, and the run's Pool routes every
+    # request among them by its affinity key. A resource, not science: never
+    # in run_id, carried on the wire only when not 1.
+    replicas: int = field(default=1, metadata={"identity": "resource"})
 
 
 @dataclass(frozen=True)
 class LearnerMember:
     """The differentiable fwd/bwd workload; `fsdp` is likewise a build width
     the handed learner must already have, and `vram_gb` is total across the
-    fsdp shards, None a whole device per shard."""
+    fsdp shards, None a whole device per shard.
+
+    `dp` (ADR 0022) is the data-parallel axis that COMPOSES with fsdp: the
+    learner's width is dp × fsdp ranks on one metal, the frozen base sharded
+    within each fsdp group and each dp group taking its own share of an
+    update's microbatches, their LoRA gradients summed in microbatch order.
+    A resource, not science: never in run_id. `vram_gb` stays the total of
+    ONE fsdp group, so the per-device need is vram_gb / fsdp at any dp."""
 
     fsdp: int = 1
     vram_gb: float | None = None
+    dp: int = field(default=1, metadata={"identity": "resource"})
+
+    @property
+    def width(self) -> int:
+        """Ranks this learner occupies: dp groups of fsdp ranks each."""
+        return self.dp * self.fsdp
 
 
 Member = PoolMember | LearnerMember
@@ -220,8 +238,9 @@ class HostSpec:
 
 @dataclass(frozen=True)
 class Topology:
-    """All hosts. Each pool name appears once; feasibility is checked at
-    submit, and what fits WHERE is placement's question, answered against a
+    """All hosts. Each pool name appears once — a pool served by several
+    hosts says so with `replicas`, never by being declared twice (ADR 0022);
+    feasibility is checked at submit, and what fits WHERE is placement's question, answered against a
     real residual — never here."""
 
     hosts: tuple[HostSpec, ...]
@@ -309,14 +328,16 @@ class BackendProfile:
 # ---------------------------------------------------------------------------
 
 def pool(name: str, base: str | None = None, tp: int = 1,
-         vram_gb: float | None = None) -> PoolMember:
-    """One declared pool, served by its host's metal."""
-    return PoolMember(name=name, base=base, tp=tp, vram_gb=vram_gb)
+         vram_gb: float | None = None, replicas: int = 1) -> PoolMember:
+    """One declared pool, served by `replicas` hosts' metal."""
+    return PoolMember(name=name, base=base, tp=tp, vram_gb=vram_gb,
+                      replicas=replicas)
 
 
-def learner(fsdp: int = 1, vram_gb: float | None = None) -> LearnerMember:
-    """The differentiable member."""
-    return LearnerMember(fsdp=fsdp, vram_gb=vram_gb)
+def learner(fsdp: int = 1, vram_gb: float | None = None,
+            dp: int = 1) -> LearnerMember:
+    """The differentiable member, dp × fsdp ranks wide."""
+    return LearnerMember(fsdp=fsdp, vram_gb=vram_gb, dp=dp)
 
 
 def lora(site: str, r: int, tie: bool = False) -> AdapterSpec:

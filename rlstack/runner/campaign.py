@@ -43,7 +43,9 @@ def demands_of(spec: ExperimentSpec,
     where the card is known (ADR 0001) — never here.
 
     `anchor` names the member the frame lands on ("main", any declared pool,
-    or "learner"). Unasked, `anchor_demand` chooses.
+    or "learner"). Unasked, `anchor_demand` chooses. A pool declaring
+    `replicas: N` is N demands (ADR 0022), replica 0 under the pool's own
+    name — so anchoring on a pool anchors on its first replica.
 
     Every INFERENCE demand also carries the adapter types this spec's bank
     names (ADR 0007, Q4a) — the projection that lets the join rule check a
@@ -58,15 +60,18 @@ def demands_of(spec: ExperimentSpec,
         for member in host.members:
             if isinstance(member, PoolMember):
                 own_base = member.base is None or member.base == spec.policy.base
-                out.append(Demand(
+                # one demand PER REPLICA (ADR 0022), each its own placement
+                out.extend(Demand(
                     pool=member.name, capability="inference",
                     base=member.base or spec.policy.base, shape=member.tp,
                     vram_gb=member.vram_gb, group=hi,
-                    adapter_types=serves if own_base else ()))
+                    adapter_types=serves if own_base else (), replica=k)
+                    for k in range(member.replicas))
             else:
                 out.append(Demand(
                     pool=None, capability="training", base=spec.policy.base,
-                    shape=member.fsdp, vram_gb=member.vram_gb, group=hi))
+                    shape=member.fsdp, vram_gb=member.vram_gb, group=hi,
+                    dp=member.dp))
     chosen = anchor_demand(tuple(out), anchor)
     return tuple(dataclasses.replace(d, anchor=True) if d is chosen else d
                  for d in out)
@@ -123,9 +128,11 @@ def frame_for(spec: ExperimentSpec, subdir: str | None = None,
     submission's CHECKPOINTING — its deliberate cadence and delivery (ADR
     0014), required here because there is no default anywhere."""
     from rlstack.registry import code_hashes
-    from rlstack.spec.canonical import canonical_json
+    from rlstack.spec.canonical import wire_json
 
-    frame = {"spec": json.loads(canonical_json(spec)),
+    # the WIRE form: the experiment plus how wide to run it (ADR 0022) —
+    # the anchor host computes identity from it, which drops the width again
+    frame = {"spec": json.loads(wire_json(spec)),
              "code": code_hashes(spec), "subdir": subdir,
              "checkpointing": checkpointing.row()}
     if resume:

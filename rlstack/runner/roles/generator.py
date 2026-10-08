@@ -21,8 +21,8 @@ the policy never moves.
 
 from __future__ import annotations
 
-import asyncio
-from collections.abc import Callable, Mapping
+import time
+from collections.abc import Awaitable, Callable, Mapping
 
 from rlstack.data.plan import RunPlan, WavePlan
 from rlstack.data.stores.base import RunHandle
@@ -31,11 +31,11 @@ from rlstack.policy.compile import Bundle
 from rlstack.runner.arbiter import Arbiter
 from rlstack.runner.assemble import sample_wave
 from rlstack.runner.roles.base import Runner
-from rlstack.runner.interfaces import Engine
 from rlstack.runner.meters import HostJournal
 from rlstack.runner.names import (
     check_plan_names, names_ready, names_subdir, wave_lib_names,
 )
+from rlstack.runner.pool import Pool, admitted
 from rlstack.runner.signals import RunSignals, store_work
 from rlstack.runner.traffic import Routes
 from rlstack.spec.specs import ExperimentSpec
@@ -44,8 +44,8 @@ from rlstack.spec.specs import ExperimentSpec
 class Generator(Runner):
     def __init__(self, signals: RunSignals, arbiter: Arbiter, run: RunHandle, *,
                  spec: ExperimentSpec, plan: RunPlan, due_at: Mapping[int, int],
-                 tasks: Mapping[str, Task], engine: Engine,
-                 routes_at: Callable[[Bundle], Routes],
+                 tasks: Mapping[str, Task], pool: Pool,
+                 routes_at: Callable[[Bundle], Awaitable[Routes]],
                  initial_bundle: Bundle, max_inflight: int,
                  buffer: int | None,
                  refs=None, journal: HostJournal | None = None) -> None:
@@ -53,7 +53,9 @@ class Generator(Runner):
         check_plan_names(plan)
         # where a names wait says it is waiting, beside the log (ADR 0019)
         self.journal = journal
-        self.engine = engine
+        # the policy pool — every replica of `main` (ADR 0022): what a wave
+        # is admitted onto, and whose window each rollout row journals
+        self.pool = pool
         self.gen = spec.gen
         self.master = spec.seeds.master
         self.buffer = buffer
@@ -118,20 +120,39 @@ class Generator(Runner):
             if libraries:
                 await names_ready(self.run.store, names_subdir(self.run),
                                   libraries, self.signals, journal=self.journal)
-            async with self.arbiter.admit(self.engine):
-                # routes_at restores the bundle on the pool by ASKING it —
-                # sync wire verbs — so it runs off the loop (check_off_loop)
-                routes = await asyncio.to_thread(self.routes_at,
-                                                 self.newest_bundle())
+            asked = time.time()
+            trace: list[dict] | None = [] if self.journal is not None else None
+            async with admitted(self.arbiter, [self.pool]):
+                was_admitted = time.time()
+                # routes_at restores the bundle on every live replica by
+                # ASKING it — sync wire verbs, each from a thread
+                routes = await self.routes_at(self.newest_bundle())
                 if libraries:
                     await self.hand_libraries(routes, libraries)
+                routed = time.time()
                 wave = await sample_wave(
                     entry, index=index, tasks=self.tasks,
                     sampling=self.gen.sampling, routes=routes,
-                    master=self.master, max_inflight=self.max_inflight,
-                    reader=self.refs)
+                    master=self.master, max_inflight=self.inflight_bound(),
+                    reader=self.refs, trace=trace)
+            sampled = time.time()
             self.run.write_rollout(index, wave_to_rows(wave))
+            if trace is not None:
+                await store_work(self.journal.append, rollout_row(
+                    self.run.run_id, index, trace, asked=asked,
+                    admitted=was_admitted, routed=routed, sampled=sampled,
+                    sealed=time.time(), max_inflight=self.inflight_bound(),
+                    pools={name: pool.window() for name, (pool, _)
+                           in sorted(routes.items()) if isinstance(pool, Pool)}))
             await self.signals.notify()
+
+    def inflight_bound(self) -> int:
+        """EPISODES IN FLIGHT, PER REPLICA (ADR 0022): `max_inflight` bounds
+        what one engine is asked to batch, so a pool of N replicas runs N
+        times as many episodes at once — a bound that stayed per run would
+        leave every added replica idle. Scheduling, outside identity (I5):
+        completion order never reaches the bytes (#53)."""
+        return self.max_inflight * len(self.pool.replicas)
 
     async def hand_libraries(self, routes: Routes, names: tuple[str, ...]) -> None:
         """THE WAVE'S LIBRARY SETS, ON EVERY POOL IT ROUTES TO, as bytes (ADR
@@ -139,15 +160,15 @@ class Generator(Runner):
         payload, exactly as a bundle arrives. Once per wave and not once per
         run, for the reason `routes_at` states — residency is not durable (the
         engine's library is LRU-bounded, a restarted container starts empty)
-        and `add_library` is idempotent, so restating is the restore. Asked
-        from a thread: the pool may be another container."""
+        and `add_library` is idempotent, so restating is the restore. Every
+        LIVE REPLICA of each pool gets them, and a replica revived during the
+        wave is handed them before it is readmitted (ADR 0022)."""
         subdir = names_subdir(self.run)
-        engines = {id(engine): engine
-                   for _, (engine, _) in sorted(routes.items())}
-        for name in names:
-            payload = await store_work(self.run.store.read_named, subdir, name)
-            for engine in engines.values():
-                await asyncio.to_thread(engine.add_library, name, payload)
+        payloads = {name: await store_work(self.run.store.read_named, subdir, name)
+                    for name in names}
+        pools = {id(pool): pool for _, (pool, _) in sorted(routes.items())}
+        for pool in pools.values():
+            await pool.hand_libraries(payloads)
 
     def newest_bundle(self) -> Bundle:
         """The freshest committed policy, as the store tells it — a pinning
@@ -156,3 +177,25 @@ class Generator(Runner):
         if tail is None:
             return self.initial_bundle
         return Bundle.pin(tail["bundle_id"], tail["versions"])
+
+
+def rollout_row(run_id: str, index: int, episodes: list[dict], *, asked: float,
+                admitted: float, routed: float, sampled: float, sealed: float,
+                max_inflight: int, pools: Mapping[str, dict] | None = None) -> dict:
+    """One rollout wave as its journal event: the wall clock of its phases —
+    waiting for the engine (`admit`: the arbiter's switch, a wake included),
+    restoring its bundle and libraries (`route`), sampling (`sample`) and
+    sealing (`seal`) — and, per episode in plan order, when it ran and every
+    sample call it made (pool, route, start, seconds, tokens, finish).
+    Achieved concurrency and the tail are read off these intervals; the
+    cadence is every wave, the size bounded by the wave's calls. `pools` is
+    each routed pool's window over the wave (ADR 0022): per replica its
+    requests, tokens/s, affinity hits and keys, and the key table's moves."""
+    return {"event": "rollout", "t": sealed, "run_id": run_id, "rollout": index,
+            "seconds": sealed - asked, "cadence": "every rollout wave",
+            "max_inflight": max_inflight,
+            "phases": {"admit": admitted - asked, "route": routed - admitted,
+                       "sample": sampled - routed, "seal": sealed - sampled},
+            "tokens": sum(call["tokens"] for row in episodes for call in row["calls"]),
+            "pools": dict(pools or {}),
+            "episodes": episodes}

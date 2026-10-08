@@ -16,14 +16,15 @@ from unittest.mock import AsyncMock, patch, Mock
 from rlstack.runner.remote import WrongEpoch, check_epoch, transport_for
 from rlstack.runner.venues.strangeloop.provider import (
     DeskConfig, Gateway, LeaseState, MetalConfig, StrangeLoopCLI, StrangeLoopVenue,
-    own_local_desk, source_bundle, ssh_command_argv, ssh_forward_argv, reverse_forwarding_config,
+    source_bundle, ssh_command_argv, ssh_forward_argv, reverse_forwarding_config,
 )
 from rlstack.runner.transports.http import HttpServer
+from rlstack.runner.venues.serving import own_local_desk
 
 
 class RuntimeTokenTest(unittest.TestCase):
     def test_first_start_creates_private_token_and_restart_reuses_it(self):
-        from rlstack.runner.venues.strangeloop.desk import runtime_token
+        from rlstack.runner.venues.serving import runtime_token
 
         with tempfile.TemporaryDirectory() as root:
             state = Path(root) / "new-state"
@@ -162,6 +163,32 @@ class AllocationTests(unittest.TestCase):
         self.assertNotEqual(state.label, "label")
         self.assertFalse(state.boot_started)
         self.assertEqual(state.lease_id, "lease-new")
+
+    def test_done_old_lease_is_replaced_and_does_not_consume_capacity(self):
+        self.venue.save("alpha", LeaseState("closed-label", "lease-old", True))
+        self.provider.rows["lease-old"] = {"status": "done"}
+        self.provider.inventory = [{"id": "lease-old", "status": "done", "gpu_count": 1}]
+        state, row = self.venue.allocate(self.metal)
+        self.assertEqual(state.lease_id, "lease-new")
+        self.assertNotEqual(state.label, "closed-label")
+        self.assertFalse(state.boot_started)
+
+    def test_down_confirms_done_after_delete_without_replaying_mutation(self):
+        cli = StrangeLoopCLI("strangeloop")
+        with patch.object(cli, "run", side_effect=[{"status": "ready"},
+                                                   {"released": True},
+                                                   {"status": "done"}]) as call:
+            self.assertTrue(cli.down("lease-old"))
+        self.assertEqual([item.args for item in call.call_args_list],
+                         [("gpu", "status", "lease-old"),
+                          ("gpu", "down", "lease-old"),
+                          ("gpu", "status", "lease-old")])
+
+    def test_down_keeps_unknown_status_unconfirmed(self):
+        cli = StrangeLoopCLI("strangeloop")
+        with patch.object(cli, "run", return_value={"status": "unknown"}), \
+                patch("rlstack.runner.venues.strangeloop.provider.time.sleep"):
+            self.assertFalse(cli.down("lease-old"))
 
     def test_gpu_ceiling_counts_allocations_outside_this_desk(self):
         self.provider.inventory = [{"status": "ready", "gpu_count": 1}]

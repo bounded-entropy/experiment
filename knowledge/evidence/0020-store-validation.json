@@ -1,0 +1,99 @@
+{
+  "date": "2026-09-19",
+  "adr": "0020",
+  "base_commit": "0cdffdf",
+  "local_suite": {
+    "command": "python3.13 -m unittest discover -s tests",
+    "tests": 1918,
+    "skipped": 255,
+    "seconds": 69.507,
+    "failures": 0,
+    "errors": 0
+  },
+  "cpu_initial": {
+    "lease_id": "00000000-0000-0000-0000-LEASE0000002",
+    "source_zip_sha256": "6cdc4fb4d394f1976b7a0a86323f419a6fc1979cbccacbd064ff8c391740864e",
+    "started_at": 1789848182.3767655,
+    "seconds": 38.57728576660156,
+    "python": "3.12.14 (main, Sep  1 2026, 14:16:52) [Clang 22.1.3 ]",
+    "tests": 126,
+    "failures": 2,
+    "errors": 0,
+    "skipped": 0,
+    "scope": "CPU storage implementation validation; synthetic bytes only; no reload or training"
+  },
+  "cpu_final": {
+    "lease_id": "00000000-0000-0000-0000-LEASE0000002",
+    "source_zip_sha256": "4f6b3a0dd83c6f8b021b1b5a60683e2358b5ff84575146ca78e31d732db8222a",
+    "started_at": 1789848365.6464844,
+    "seconds": 41.07092595100403,
+    "python": "3.12.14 (main, Sep  1 2026, 14:16:52) [Clang 22.1.3 ]",
+    "tests": 127,
+    "failures": 0,
+    "errors": 0,
+    "skipped": 0,
+    "scope": "CPU storage implementation validation; synthetic bytes only; no reload or training"
+  },
+  "initial_failure": "Two cache-location rejection subtests failed because provider mount paths resolve through symlinks. Resolved both the candidate cache directory and the mount roots; added a regression test. Initial summary and failure log are retained.",
+  "live_tests": [
+    {
+      "test": "test_strangeloop_store_live.LiveScratch.test_api_same_size_refresh_and_journal_append",
+      "status": "passed",
+      "timestamp": 1789848365.6470811,
+      "seconds": 8.298093318939209,
+      "lease_id": "00000000-0000-0000-0000-LEASE0000002"
+    },
+    {
+      "test": "test_strangeloop_store_live.LiveScratch.test_hashed_api_publication_and_shared_cache",
+      "status": "passed",
+      "timestamp": 1789848373.9459674,
+      "seconds": 8.019449472427368,
+      "lease_id": "00000000-0000-0000-0000-LEASE0000002"
+    },
+    {
+      "test": "test_strangeloop_store_live.LiveScratch.test_hashed_mounted_publication_and_http_fallback_without_refresh",
+      "status": "passed",
+      "timestamp": 1789848381.9659219,
+      "seconds": 9.901546716690063,
+      "lease_id": "00000000-0000-0000-0000-LEASE0000002"
+    },
+    {
+      "test": "test_strangeloop_store_live.LiveScratch.test_host_journals_preserve_logical_names",
+      "status": "passed",
+      "timestamp": 1789848391.8679788,
+      "seconds": 6.5690758228302,
+      "lease_id": "00000000-0000-0000-0000-LEASE0000002"
+    },
+    {
+      "test": "test_strangeloop_store_live.LiveScratch.test_mounted_publication_then_authoritative_refresh",
+      "status": "passed",
+      "timestamp": 1789848398.4375885,
+      "seconds": 6.615278244018555,
+      "lease_id": "00000000-0000-0000-0000-LEASE0000002"
+    }
+  ],
+  "source_sha256": {
+    "rlstack/data/stores/base.py": "9e55ae21a63d738edb6a6d96e4223783d74c35f43e25a17097551aa1f9969b52",
+    "rlstack/data/stores/strangeloop.py": "f8ca4f8d9ba800059ff068745a4f56d1031003860677ea3713c95e96cb6f830d",
+    "rlstack/data/stores/address.py": "07b2b52ff8b05a7829e8e13fec4198c9b01e16cf7346e36e9657b1c2648b5ea0",
+    "rlstack/runner/venues/strangeloop/provider.py": "c1104f51ee0af9c49f26a95aa260dc556cf0db9da84746d88cc11f4c544627a1",
+    "tests/test_strangeloop_store_live.py": "12d3c9a8686302c8fe6d09b1e9c4d9720d747defedc7ac6f26ae65ef81992f03"
+  },
+  "scope": "Five live provider storage tests plus 122 local/fake storage tests on one 2-CPU, 8-GiB Strange Loop lease; no GPUs, training, mount refresh, or production deployment.",
+  "not_proven": [
+    "end-to-end GPU throughput",
+    "provider crash atomicity",
+    "live simultaneous writers on a shared volume"
+  ],
+  "artifacts": {
+    "cpu_final_cases": "0020-store-validation-cases.jsonl",
+    "cpu_initial_log": "0020-store-validation-initial.log",
+    "cpu_final_log": "0020-store-validation-final.log"
+  },
+  "cleanup": "API verified no remaining synthetic payload files; staging archives and temporary credential copies removed; CPU list empty after release.",
+  "lease_release": {
+    "id": "00000000-0000-0000-0000-LEASE0000002",
+    "status": "released",
+    "recorded_at": "2026-09-19T20:08:55.422678+00:00"
+  }
+}

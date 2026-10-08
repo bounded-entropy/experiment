@@ -83,10 +83,14 @@ class FitPlanError(ValueError):
 
 @dataclass
 class FitTimings:
-    """Wall seconds at the existing fit boundaries, outside deterministic results."""
+    """Wall seconds at the existing fit boundaries, outside deterministic
+    results. `prepare` is the whole of a job's first breath; `flatten` (rows
+    read and tokenized) and `load` (the set loaded) are its two parts."""
     prepare: float = 0.0
     train: float = 0.0
     probe: float = 0.0
+    flatten: float = 0.0
+    load: float = 0.0
 
 
 @dataclass
@@ -361,6 +365,15 @@ class _Lane:
         self.batches = deque()
 
 
+def before_key(lane: _Lane) -> tuple[str, str] | None:
+    """What makes two lanes' BEFORE probes one: a named start (the same
+    bytes) and the same probe rows, at the point before any step. None for
+    a fresh start, or any later point."""
+    if lane.probes or lane.steps or lane.job is None or lane.job.start is None:
+        return None
+    return (lane.job.start, lane.job.probe)
+
+
 async def run_fits(learner: Learner, tenant: str, entry: str,
                    jobs: Sequence[FitJob], rows_of: RowsOf, payload_of: PayloadOf,
                    lanes: int, *, arbiter: Arbiter, microbatch_tokens: int,
@@ -400,6 +413,7 @@ async def run_fits(learner: Learner, tenant: str, entry: str,
     if trace is not None and trace.every < 1:
         raise ValueError("fit trace cadence must be positive")
     doc_ids: dict[int, str] = {}
+    token_cache: dict[str, tuple[int, ...]] = {}
     optimizer_steps = 0
 
     async def ask(verb, *args, **kwargs):
@@ -413,7 +427,12 @@ async def run_fits(learner: Learner, tenant: str, entry: str,
         trajectories = [trajectory_from_row(stamped(dict(row), route)) for row in rows]
 
         def tokenize(text: str) -> tuple[int, ...]:
-            return learner.tokenize(tenant, text)
+            # a learner verb per message, so the same text (a probe prompt:
+            # four options a question, and every lane's copy of the probe) is
+            # asked once per call — tokenization is a function of the text
+            if text not in token_cache:
+                token_cache[text] = tuple(learner.tokenize(tenant, text))
+            return token_cache[text]
 
         flats = await ask(lambda: [flatten(t, tokenize) for t in trajectories])
         if trace is not None:
@@ -422,23 +441,43 @@ async def run_fits(learner: Learner, tenant: str, entry: str,
 
     async def probe(group: Sequence[_Lane]) -> None:
         """One probe point for every lane of `group` that has a probe: their
-        probe rows share the forwards, each under its own lane's route."""
+        probe rows share the forwards, each under its own lane's route.
+
+        At the point BEFORE any training, lanes loaded from one named start
+        and probed on one probe hold the same weights and read the same rows,
+        so the first of them is probed and the rest are handed its vector
+        (`before_key`): the fit client's K forks of one memory cost one
+        before-probe, not K. A fresh start is its lane's own init, never
+        shared."""
         probed = [lane for lane in group if lane.probe_docs]
         if not probed:
             return
         started = time.monotonic()
-        docs = [doc for lane in probed for doc in lane.probe_docs]
+        first_of: dict[tuple, _Lane] = {}
+        asked: list[_Lane] = []
+        for lane in probed:
+            key = before_key(lane)
+            if key is not None and key in first_of:
+                continue
+            if key is not None:
+                first_of[key] = lane
+            asked.append(lane)
+        docs = [doc for lane in asked for doc in lane.probe_docs]
         nll: list[float] = []
         for batch in pack(docs, microbatch_tokens):
             nll.extend(await ask(learner.forward, tenant, batch))
         if len(nll) != len(docs):
             raise RuntimeError(
                 f"learner.forward answered {len(nll)} NLLs for {len(docs)} probe documents")
-        cursor = 0
-        for lane in probed:
+        cursor, vectors = 0, {}
+        for lane in asked:
             width = len(lane.probe_docs)
-            lane.probes.append(tuple(float(v) for v in nll[cursor:cursor + width]))
+            vectors[id(lane)] = tuple(float(v) for v in nll[cursor:cursor + width])
             cursor += width
+        for lane in probed:
+            key = before_key(lane)
+            source = first_of[key] if key is not None else lane
+            lane.probes.append(vectors[id(source)])
         if timings is not None:
             timings.probe += time.monotonic() - started
 
@@ -456,10 +495,13 @@ async def run_fits(learner: Learner, tenant: str, entry: str,
                     f"fit job {lane.index} ({job.out!r}): stage {number}'s rows "
                     f"{job.stages[number].rows!r} hold no trajectory")
         lane.probe_docs = await docs_of(job.probe, lane.route) if job.probe else []
+        flattened = time.monotonic()
         await ask(learner.load_set, tenant, entry, lane.route, payload)
         began.append(lane)
         if timings is not None:
             timings.prepare += time.monotonic() - started
+            timings.flatten += flattened - started
+            timings.load += time.monotonic() - flattened
 
     async def step(active: Sequence[_Lane]) -> None:
         """ONE OPTIMIZER STEP: every fitting lane's next batch through
@@ -636,12 +678,15 @@ class FitClient:
     async def forks(self, start_payload: bytes | None,
                     fork_rows: Sequence[Sequence[Mapping[str, Any]]],
                     probe_rows: Sequence[Mapping[str, Any]],
-                    stage: Stage) -> list[tuple[float, ...]]:
+                    stage: Stage, *, every_probe: bool = False) -> list:
         """Fork `start_payload` (None = a fresh set) once per entry of
         `fork_rows`, train fork k on `fork_rows[k]` under `stage`'s epochs,
         batch, lr and decay (its `rows` field is ignored — the rows are
         handed in), and return each fork's probe vector AFTER training: the
-        per-document mean NLL of `probe_rows`."""
+        per-document mean NLL of `probe_rows`. With `every_probe`, each
+        fork's EVERY probe point instead — before its first step, then after
+        its stage — which is how a caller reads the start's own numbers
+        (post 0010: accuracy after minus before) from the same forward."""
         if not fork_rows:
             return []
         files = {f"fork://{k}": rows for k, rows in enumerate(fork_rows)}
@@ -663,6 +708,7 @@ class FitClient:
         async with self.lock:
             admitted = time.monotonic()
             await self.ensure_lanes(len(jobs))
+            began = time.monotonic()
             results = await run_fits(
                 self.learner, self.tenant, FORK_ENTRY, jobs, rows_of, payload_of,
                 lanes=len(jobs), arbiter=self.arbiter,
@@ -675,8 +721,10 @@ class FitClient:
                 "event": "forks", "t": time.time(), "run_id": self.run_tenant,
                 "update": self.update, "cadence": "every fork group",
                 "seconds": time.monotonic() - requested,
-                "phases": {"queue": admitted - requested, "prepare": timings.prepare,
-                           "train": timings.train, "probe": timings.probe},
+                "phases": {"queue": admitted - requested, "lanes": began - admitted,
+                           "prepare": timings.prepare, "train": timings.train,
+                           "probe": timings.probe},
+                "prepare": {"flatten": timings.flatten, "load": timings.load},
                 "stage": stage_row(stage),
                 "fit_step_cadence": "stage first/last and every 10 shared optimizer steps",
                 "fit_steps": trace.samples,
@@ -688,6 +736,8 @@ class FitClient:
                           for rows, result in zip(fork_rows, results)],
                 "reduction": "probe: mean scored-token NLL per document; "
                              "training: mean document NLL within each lane"})
+        if every_probe:
+            return [result.probes for result in results]
         return [result.probes[-1] for result in results]
 
     async def tokenize(self, text: str) -> tuple[int, ...]:

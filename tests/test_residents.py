@@ -44,7 +44,9 @@ from rlstack.runner.remote import (
     decode_token_batch, encode_emitted, encode_parameterization,
     encode_token_batch, json_roundtrip,
 )
-from rlstack.runner.residents import Teardown, check_devices_seen, escalate
+from rlstack.runner.residents import (
+    ResidentError, Teardown, check_devices_seen, escalate, pin_devices, visible_device,
+)
 
 BASE = "Qwen/Qwen3-0.6B"
 SCHEMA = fake_qwen_schema(4, base=BASE)
@@ -426,6 +428,23 @@ class ProcessResidentTest(ProcessFixture):
         self.assertEqual(service.residual(), [24.0])
         self.assertEqual(service.hosts, {})
         self.assertFalse(multiprocessing.active_children())
+
+
+class PinTest(unittest.TestCase):
+    def test_a_partition_pins_through_the_metals_own_mask(self):
+        self.assertEqual(visible_device(0, None), "0")
+        self.assertEqual(visible_device(1, ""), "1")
+        self.assertEqual(visible_device(0, "3,5"), "3")
+        self.assertEqual(visible_device(1, " 3, 5 "), "5")
+        with self.assertRaises(ResidentError):
+            visible_device(2, "3,5")
+        with patch.dict(os.environ, {"CUDA_VISIBLE_DEVICES": "2,6"}):
+            pin_devices((1, 0))
+            self.assertEqual(os.environ["CUDA_VISIBLE_DEVICES"], "6,2")
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("CUDA_VISIBLE_DEVICES", None)
+            pin_devices((0, 1))
+            self.assertEqual(os.environ["CUDA_VISIBLE_DEVICES"], "0,1")
 
 
 class LadderTest(unittest.TestCase):

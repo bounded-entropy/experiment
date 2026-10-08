@@ -23,6 +23,17 @@ stand in the collectives and their answers are discarded, which is safe only
 while every verb stays a deterministic function of its arguments — a verb
 consulting rank-local state the ranks do not share would desynchronize them.
 
+DATA PARALLELISM COMPOSES WITH IT (ADR 0022). The chorus is dp groups of
+`fsdp` ranks: each group shards its own copy of the base over its fsdp
+sub-mesh, and `accumulate` hands an update's microbatches out round-robin —
+microbatch i to group i % dp. After each round every rank all-gathers the
+round's per-microbatch LoRA gradients over its dp sub-group and adds them to
+the running sum IN MICROBATCH ORDER (`OrderedGradientSum`), so the gradient
+the optimizer steps on is bit-for-bit the one dp = 1 accumulates: the same
+tensors, added in the same order. An all-reduce would be cheaper and would
+not be: float addition does not reassociate. Every rank then holds the same
+sum and steps its own copy, as the fsdp chorus always did.
+
 ALTERNATION IS IN SCOPE SINCE #82, and the rule that lets it be is the one
 below: never swap a sharded parameter's storage without re-aliasing FSDP's
 view onto it. A sleep swings the whole chorus — `sleep`/`wake` are announced
@@ -34,7 +45,9 @@ footprint (`probe_sharded_sleep`, the certified-substrate rule I7).
 
 from __future__ import annotations
 
+import dataclasses
 import functools
+import json
 import traceback
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -104,6 +117,70 @@ def sleep_probe_of(fsdp_module: type, fsdp_param: type) -> SleepProbe:
     return SleepProbe(True, "")
 
 
+class OrderedGradientSum:
+    """THE REDUCTION RULE OF THE DP AXIS (ADR 0022): per-microbatch gradients
+    added into a running sum in MICROBATCH ORDER, one parameter at a time —
+    exactly what autograd's accumulation does at dp = 1, where the first
+    backward sets `.grad` and every later one adds into it. A parameter no
+    microbatch reached keeps no gradient at all (None, never zeros: AdamW
+    steps a zero gradient and skips a missing one), and a microbatch that
+    did not reach a parameter adds nothing to it. Pure and device-free, so
+    the rule is a CPU float64 test and not a hypothesis."""
+
+    def __init__(self, count: int) -> None:
+        self.sums: list[torch.Tensor | None] = [None] * count
+
+    def add(self, grads: list[torch.Tensor | None]) -> None:
+        """One microbatch's gradients, next in microbatch order."""
+        for index, grad in enumerate(grads):
+            if grad is None:
+                continue
+            if self.sums[index] is None:
+                self.sums[index] = grad.clone()
+            else:
+                self.sums[index].add_(grad)
+
+    def norm(self) -> float:
+        """The running sum's L2 norm, by `TorchLearner._grad_norm`'s own
+        arithmetic and order — what dp = 1 reports after this microbatch."""
+        total = 0.0
+        for grad in self.sums:
+            if grad is not None:
+                total += float(grad.detach().pow(2).sum())
+        return total ** 0.5
+
+
+def packed(grads: list[torch.Tensor | None], like: list[torch.Tensor],
+           ) -> tuple[torch.Tensor, torch.Tensor]:
+    """One microbatch's gradients as ONE flat vector (zeros where a
+    parameter got none) and a presence mask — the frame a dp all-gather
+    carries. Every trainable parameter of a tenant shares a dtype; a mixed
+    one is refused rather than silently cast."""
+    dtypes = {param.dtype for param in like}
+    if len(dtypes) != 1:
+        raise RuntimeError(f"dp accumulation needs one gradient dtype, the "
+                           f"tenant's trainable params carry {sorted(map(str, dtypes))}")
+    flat = torch.cat([(grad if grad is not None else torch.zeros_like(param)).reshape(-1)
+                      for grad, param in zip(grads, like)]) if like else torch.zeros(0)
+    present = torch.tensor([grad is not None for grad in grads], dtype=torch.uint8,
+                           device=flat.device)
+    return flat, present
+
+
+def unpacked(flat: torch.Tensor, present: torch.Tensor,
+             like: list[torch.Tensor]) -> list[torch.Tensor | None]:
+    """`packed`'s inverse: views into the gathered vector, None where the
+    sender's parameter had no gradient."""
+    out: list[torch.Tensor | None] = []
+    offset = 0
+    for index, param in enumerate(like):
+        size = param.numel()
+        out.append(flat[offset:offset + size].view_as(param)
+                   if bool(present[index]) else None)
+        offset += size
+    return out
+
+
 def fsdp_params_of(module: torch.nn.Module) -> list:
     """One wrapped module's FSDPParams — FSDP's own record of each sharded
     parameter, including the private flat view an all-gather reads.
@@ -126,8 +203,12 @@ class FsdpTorchLearner(TorchLearner):
         super().__init__(device=ranks.device_str, dtype=dtype,
                          grad_clip=grad_clip,
                          checkpoint_activations=checkpoint_activations)
-        self.fsdp = ranks.width      # build fact: the attested width
+        self.fsdp = ranks.fsdp       # build fact: ranks per dp group
+        self.dp = ranks.dp           # build fact: data-parallel groups (ADR 0022)
         self.ranks = ranks
+        # the last update's dp timings, rank 0's: how long the groups computed
+        # and how long the ordered gathers took (observability, ADR 0022)
+        self.dp_timings: dict = {}
         # a sharded base offloads like any other (#82) — what it needs is the
         # substrate's relabel, so the build fact is PROBED rather than derived
         # from the width. Width 1 asks the same question as width 8: this
@@ -156,9 +237,77 @@ class FsdpTorchLearner(TorchLearner):
 
     def forward_backward(self, tenant: str, batch: TokenBatch) -> TrainStats:
         """Announced: the forward all-gathers the base and the backward
-        re-gathers it. Rank 0's stats are the run's stats."""
+        re-gathers it. Rank 0's stats are the run's stats. At dp > 1 it is
+        one microbatch of `accumulate` — group 0 computes, the rest gather."""
+        if self.dp > 1:
+            return self.accumulate(tenant, [batch])[0]
         self.announce("forward_backward", (tenant, batch))
         return super().forward_backward(tenant, batch)
+
+    def accumulate(self, tenant: str, batches) -> tuple[TrainStats, ...]:
+        """Announced at dp > 1: every rank runs its group's share of the
+        update (`accumulate_share`). At dp = 1 it is the per-microbatch loop
+        it always was, each forward_backward announced on its own."""
+        if self.dp == 1:
+            return tuple(self.forward_backward(tenant, batch) for batch in batches)
+        batches = list(batches)
+        self.announce("accumulate", (tenant, batches))
+        return self.accumulate_share(tenant, batches)
+
+    def accumulate_share(self, tenant: str, batches: list) -> tuple[TrainStats, ...]:
+        """THIS RANK'S PART OF ONE UPDATE AT dp > 1 (ADR 0022). Round by
+        round: microbatch `start + g` runs on group g (its gradients alone —
+        `.grad` is cleared first), the round's gradients are all-gathered
+        over this rank's dp sub-group, and they are added to the running
+        sum in microbatch order. The sum becomes `.grad` at the end, so
+        `optim_step` steps exactly what dp = 1 would; each microbatch's stats
+        carry the running sum's norm, as dp = 1's do."""
+        import time
+
+        import torch.distributed as dist
+
+        state = self._tenant(tenant)
+        params = [p for entry in state.trainable
+                  for p in state.params[entry].parameters()]
+        group = self.ranks.dp_group()
+        mine, dp = self.ranks.dp_index, self.dp
+        total = OrderedGradientSum(len(params))
+        stats: list[TrainStats] = []
+        computing = gathering = 0.0
+        for start in range(0, len(batches), dp):
+            began = time.time()
+            for param in params:
+                param.grad = None
+            index = start + mine
+            own = (TorchLearner.forward_backward(self, tenant, batches[index])
+                   if index < len(batches) else None)
+            flat, present = packed([p.grad for p in params], params)
+            computing += time.time() - began
+            began = time.time()
+            flats = [torch.empty_like(flat) for _ in range(dp)]
+            masks = [torch.empty_like(present) for _ in range(dp)]
+            dist.all_gather(flats, flat, group=group)
+            dist.all_gather(masks, present, group=group)
+            told: list = [None] * dp
+            dist.all_gather_object(told, own, group=group)
+            gathering += time.time() - began
+            for k in range(dp):
+                if start + k >= len(batches):
+                    break
+                total.add(unpacked(flats[k], masks[k], params))
+                stats.append(dataclasses.replace(told[k], grad_norm=total.norm()))
+        for param, grad in zip(params, total.sums):
+            param.grad = grad
+        self.dp_timings = {"microbatches": len(batches), "dp": dp,
+                           "compute_s": round(computing, 4),
+                           "gather_s": round(gathering, 4),
+                           "gathered_mb": round(flat.numel() * flat.element_size()
+                                                * dp * -(-len(batches) // dp) / 2 ** 20, 2)}
+        if self.ranks.rank == 0:
+            # one line per update, to the resident's log: what the ordered
+            # gather cost beside the compute it waited on (ADR 0022)
+            print(f"[dp] {json.dumps(self.dp_timings)}", flush=True)
+        return tuple(stats)
 
     def optim_step(self, tenant: str,
                    lr_scales: Mapping[str, float] | None = None) -> None:
@@ -518,6 +667,8 @@ class FsdpTorchLearner(TorchLearner):
             super().uninstall(*command.args)
         elif command.verb == "forward_backward":
             super().forward_backward(*command.args)
+        elif command.verb == "accumulate":
+            self.accumulate_share(*command.args)
         elif command.verb == "optim_step":
             super().optim_step(*command.args)
         elif command.verb == "load":
@@ -604,7 +755,8 @@ class FsdpTorchLearner(TorchLearner):
 def lead_fsdp_learner(width: int, *, dtype: torch.dtype = torch.bfloat16,
                       grad_clip: float = 1.0,
                       checkpoint_activations: bool = True,
-                      memory_fraction: float | None = None) -> FsdpTorchLearner:
+                      memory_fraction: float | None = None,
+                      dp: int = 1) -> FsdpTorchLearner:
     """Rank 0's constructor: start the chorus, then the learner in front of it.
 
     What a learner resident builds when its regime is sharded (residents.py,
@@ -615,15 +767,15 @@ def lead_fsdp_learner(width: int, *, dtype: torch.dtype = torch.bfloat16,
     runs, and every follower caps ITS device to the same number here."""
     follower = functools.partial(_follow_rank, dtype=dtype, grad_clip=grad_clip,
                                  checkpoint_activations=checkpoint_activations,
-                                 memory_fraction=memory_fraction)
-    ranks = RankGroup.lead(width, follower)
+                                 memory_fraction=memory_fraction, dp=dp)
+    ranks = RankGroup.lead(width * dp, follower, dp=dp)
     return FsdpTorchLearner(ranks, dtype=dtype, grad_clip=grad_clip,
                             checkpoint_activations=checkpoint_activations)
 
 
 def _follow_rank(rank: int, width: int, port: int, *, dtype: torch.dtype,
                  grad_clip: float, checkpoint_activations: bool = True,
-                 memory_fraction: float | None = None) -> None:
+                 memory_fraction: float | None = None, dp: int = 1) -> None:
     """A non-zero rank's whole life, and the entry point of its process.
 
     Spawned (so this module is imported fresh here): join the group, cap this
@@ -631,7 +783,7 @@ def _follow_rank(rank: int, width: int, port: int, *, dtype: torch.dtype,
     it, run what rank 0 announces, exit when it says stop. A failure is
     printed and ends the process — rank 0 then fails at its next collective
     rather than waiting out the rendezvous timeout in silence."""
-    group = RankGroup.join(rank, width, port)
+    group = RankGroup.join(rank, width, port, dp=dp)
     if memory_fraction is not None:
         cap_memory(memory_fraction, devices=(rank,))
     try:

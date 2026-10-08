@@ -54,13 +54,15 @@ from dataclasses import dataclass, replace
 from rlstack.data.stores.base import Store, run_done, run_reference
 from rlstack.policy.siteschema import SiteSchema
 from rlstack.runner.host import LEARNER_ROUTE, Host, Partition, Regime
+from rlstack.runner.pool import replica_key, split_replica_key
 from rlstack.runner.residents import (
     GRACE_S, SIGNAL_GRACE_S, Builds, EngineBuild, Resident, ResidentBirth,
     Teardown,
 )
 from rlstack.runner.remote import (
     BUILD_DEADLINE_S, DESK_DEFAULT, RemoteLearner, RemotePool,
-    HostService, LocalTransport, RemoteHost, RemotePool, Transport, Undeclared,
+    HostGone, HostService, LocalTransport, RemoteHost, RemotePool, Transport,
+    Undeclared,
     Unreachable, check_epoch, serve_in_process, stop_serving_in_process,
     with_epoch, without_epoch,
 )
@@ -202,27 +204,52 @@ class Demand:
     # them: it is the join rung's second half, not knowledge of a workload
     # (#69). Empty is "nothing named", which refuses nothing.
     adapter_types: tuple[str, ...] = ()
+    # WHICH HOST OF ITS POOL this is (ADR 0022): a pool declaring
+    # `replicas: N` is N demands, 0..N-1, each its own placement unit — and
+    # never placed on a listing another replica of the same pool took
+    replica: int = 0
+    # a TRAINING demand's data-parallel axis (ADR 0022): dp groups of `shape`
+    # fsdp ranks, dp × shape devices on one metal
+    dp: int = 1
 
     def name(self) -> str:
         """The key this demand's ADDRESS rides under — in a placement reply
-        and in a delivery's routes. A pool is its own name; the learner
-        member has none of its own, so it is LEARNER_ROUTE, the one name the
-        whole plane calls it by (host.py owns the constant, because the door
-        that resolves the route is the one that must agree)."""
-        return self.pool or LEARNER_ROUTE
+        and in a delivery's routes. A pool is its own name, and replica k > 0
+        of it `name#k` (pool.replica_key); the learner member has none of its
+        own, so it is LEARNER_ROUTE, the one name the whole plane calls it by
+        (host.py owns the constant, because the door that resolves the route
+        is the one that must agree)."""
+        if self.pool is None:
+            return LEARNER_ROUTE
+        return replica_key(self.pool, self.replica)
+
+    def devices(self) -> int:
+        """How many devices this demand's host spans: its shards, times its
+        data-parallel groups."""
+        return self.shape * self.dp
 
     def per_device_gb(self) -> float | None:
         """The memory this demand needs on EACH device it spans: the total
-        divided across its shards. None stays None — a whole device."""
+        divided across its shards. None stays None — a whole device. A dp
+        group is a whole copy of the sharded base, so dp does not divide."""
         return None if self.vram_gb is None else self.vram_gb / self.shape
 
 
 def demand_rows(demands: Sequence[Demand]) -> list[dict]:
-    """Demands as wire rows — the desk's whole input vocabulary."""
-    return [{"pool": d.pool, "capability": d.capability, "base": d.base,
-             "shape": d.shape, "vram_gb": d.vram_gb, "group": d.group,
-             "anchor": d.anchor, "adapter_types": list(d.adapter_types)}
-            for d in demands]
+    """Demands as wire rows — the desk's whole input vocabulary. `replica`
+    and `dp` ride only when not at their default, so every row from before
+    ADR 0022 is the row it was."""
+    rows = []
+    for d in demands:
+        row = {"pool": d.pool, "capability": d.capability, "base": d.base,
+               "shape": d.shape, "vram_gb": d.vram_gb, "group": d.group,
+               "anchor": d.anchor, "adapter_types": list(d.adapter_types)}
+        if d.replica:
+            row["replica"] = d.replica
+        if d.dp != 1:
+            row["dp"] = d.dp
+        rows.append(row)
+    return rows
 
 
 def demands_from(rows: Sequence[Mapping]) -> tuple[Demand, ...]:
@@ -233,7 +260,9 @@ def demands_from(rows: Sequence[Mapping]) -> tuple[Demand, ...]:
         vram_gb=None if row.get("vram_gb") is None else float(row["vram_gb"]),
         group=int(row["group"]),
         anchor=bool(row.get("anchor", False)),
-        adapter_types=tuple(row.get("adapter_types", ()))) for row in rows)
+        adapter_types=tuple(row.get("adapter_types", ())),
+        replica=int(row.get("replica", 0)),
+        dp=int(row.get("dp", 1))) for row in rows)
 
 
 def builds_proposed(payload: Mapping) -> Builds | None:
@@ -260,15 +289,44 @@ def placement_units(demands: Sequence[Demand]) -> tuple[tuple[Demand, ...], ...]
     """ONE HOSTSPEC IS ONE HOST, so its members place as ONE unit: a single
     member is a dedicated host, several alternate on one partition (one host
     wearing masks, never two hosts coordinating). Separate HostSpecs place
-    one by one onto per-capability hosts (ADR 0001)."""
+    one by one onto per-capability hosts (ADR 0001). Each REPLICA of a pool
+    is a unit of its own (ADR 0022): the gate let a replicated pool be its
+    HostSpec's only member, so a unit is (group, replica)."""
     units: list[tuple[Demand, ...]] = []
-    seen: set[int] = set()
+    seen: set[tuple[int, int]] = set()
     for demand in demands:
-        if demand.group in seen:
+        unit = (demand.group, demand.replica)
+        if unit in seen:
             continue
-        seen.add(demand.group)
-        units.append(tuple(d for d in demands if d.group == demand.group))
+        seen.add(unit)
+        units.append(tuple(d for d in demands
+                           if (d.group, d.replica) == unit))
     return tuple(units)
+
+
+def sibling_listings(unit: Sequence[Demand],
+                     placement: Mapping[str, "Listing"]) -> frozenset[str]:
+    """The listings already holding another replica of a pool this unit
+    serves — what that unit may not land on (ADR 0022)."""
+    pools = {d.pool for d in unit if d.pool is not None}
+    return frozenset(listing.name for key, listing in placement.items()
+                     if split_replica_key(key)[0] in pools
+                     and key not in {d.name() for d in unit})
+
+
+def pools_revive_it(placed: Mapping, lost: Sequence[str]) -> bool:
+    """IS EVERY LOST HOST ONE OF A REPLICATED POOL'S REPLICAS, the anchor
+    standing? Then the run is not stranded: its Pool notices the death,
+    serves the dead replica's keys from the survivors and revives it
+    (ADR 0022, Q3). A run whose anchor, learner or one-replica pool was lost
+    is stranded exactly as before."""
+    if placed.get("host") in lost:
+        return False
+    rows = placed.get("demands") or []
+    replicated = {row["pool"] for row in rows if row.get("replica")}
+    lost_keys = [key for key, host in placed["pools"].items() if host in lost]
+    return bool(lost_keys) and all(split_replica_key(key)[0] in replicated
+                                   for key in lost_keys)
 
 
 def unit_gb(unit: Sequence[Demand], metal: Metal) -> float:
@@ -288,8 +346,9 @@ def regime_of(demand: Demand) -> Regime:
         return Regime(name=f"{demand.pool}-tp{demand.shape}",
                       capability="inference",
                       base=demand.base, shape=demand.shape)
-    return Regime(name=f"learner-fsdp{demand.shape}", capability="training",
-                  base=demand.base, shape=demand.shape)
+    width = f"dp{demand.dp}-" if demand.dp != 1 else ""
+    return Regime(name=f"learner-{width}fsdp{demand.shape}", capability="training",
+                  base=demand.base, shape=demand.shape, dp=demand.dp)
 
 
 # ---------------------------------------------------------------------------
@@ -371,7 +430,7 @@ def wants_of_unit(unit: Sequence[Demand]) -> dict:
     return {"regimes": [regime_of(d).name for d in unit],
             "capabilities": sorted({d.capability for d in unit}),
             "base": unit[0].base,
-            "devices": max(d.shape for d in unit),
+            "devices": max(d.devices() for d in unit),
             "vram_gb": max((d.per_device_gb() for d in unit
                             if d.per_device_gb() is not None), default=None)}
 
@@ -977,8 +1036,7 @@ class Desk:
             "epoch": epoch, "lease_s": self.lease_s,
             "partition": dict(partition) if partition else None,
             "metal": metal,
-            "regimes": [{"name": r.name, "capability": r.capability,
-                         "base": r.base, "shape": r.shape} for r in regimes]})
+            "regimes": [r.row() for r in regimes]})
 
     def delist(self, name: str, reason: str = "") -> None:
         """A host leaves the standing fleet — its container is gone, the
@@ -1098,11 +1156,16 @@ class Desk:
         against that reading — a carve reserving what it took, so two units
         of one submit cannot both be promised the same device."""
         snapshot = await self.read_fleet()
-        placement: dict[str | None, Listing] = {}
+        placement: dict[str, Listing] = {}
         boot: list[dict] = []
         standing = frozenset(self.listings)      # what stood before this placement
         beside: str | None = None                # the metal the unit before landed on
         for unit in placement_units(demands):
+            # REPLICAS NEVER SHARE A HOST (ADR 0022): a replica placed on a
+            # listing another replica of its pool already took would be the
+            # same engine twice — so those listings are off this unit's
+            # table. They may still share a metal, or a card (Q5).
+            siblings = sibling_listings(unit, placement)
             # SOLO (2026-09-05): nothing that stood before this placement is
             # joined — every unit CARVES, on a metal with nothing standing
             # where one is registered live, never by knocking released metal
@@ -1115,7 +1178,7 @@ class Desk:
             # another base — so it JOINS the standing one the first arm
             # carved, and twelve arms dial one judge instead of twelve.
             frozen = frozen_unit(unit)
-            shunned = avoid | standing if solo and not frozen else avoid
+            shunned = (avoid | standing if solo and not frozen else avoid) | siblings
             # ...and it prefers the metal its own arm landed on: a pool on
             # the same metal is dialed in-process, one on another metal
             # through the desk's relay, which is what a desk restart cuts.
@@ -1127,7 +1190,7 @@ class Desk:
             if not frozen:
                 beside = listing.metal
             for demand in unit:
-                placement[demand.pool] = listing
+                placement[demand.name()] = listing
         return placement, boot
 
     async def settle(self, unit: tuple[Demand, ...], avoid: frozenset[str],
@@ -1251,7 +1314,7 @@ class Desk:
         placement's own carves keep its units together) come first, then the
         usual name order."""
         refusals: list[tuple[str, str]] = []
-        need_devices = max(demand.shape for demand in unit)
+        need_devices = max(demand.devices() for demand in unit)
         occupied = {self.listings[host].metal for host in standing
                     if host in self.listings}
         for metal_name in sorted(self.metal_remotes,
@@ -1345,8 +1408,7 @@ class Desk:
             "partition": born.get("partition")})
         self.list_host(
             born["host"],
-            tuple(Regime(r["name"], r["capability"], r["base"], r["shape"])
-                  for r in born["regimes"]),
+            tuple(Regime.from_row(r) for r in born["regimes"]),
             born["address"], solo=bool(born.get("solo", False)),
             partition=born.get("partition"), metal=metal_name,
             # a carved host IS its metal's container (F2): one process,
@@ -1361,7 +1423,7 @@ class Desk:
         container answers no residual. A deduction from the registration,
         which the metal itself refuses if it comes back and cannot in fact
         hold it."""
-        return (metal.devices >= max(demand.shape for demand in unit)
+        return (metal.devices >= max(demand.devices() for demand in unit)
                 and metal.vram_gb >= unit_gb(unit, metal) - 1e-9)
 
     async def knock_released(self, unit: tuple[Demand, ...]) -> bool:
@@ -1398,9 +1460,7 @@ class Desk:
         if recipe is not None and frozen_unit(unit):
             recipe = serving_nothing(recipe)
         return {
-            "regimes": [{"name": regime_of(d).name,
-                         "capability": d.capability,
-                         "base": d.base, "shape": d.shape} for d in unit],
+            "regimes": [regime_of(d).row() for d in unit],
             "base": unit[0].base,
             "vram_gb": need_gb,
             "solo": False,              # carved FOR a campaign, joinable by the next submit
@@ -1418,13 +1478,35 @@ class Desk:
         placement, boot = await self.place_listings(demands)
         if boot:
             return {"placed": False, "boot": boot}
-        pools = {demand.name(): placement[demand.pool].address
+        pools = {demand.name(): placement[demand.name()].address
                  for demand in demands}
         self.store.append_fleet_event({
             "event": "place", "t": time.time(), "delivered": False,
-            "pools": {pool or LEARNER_ROUTE: listing.name
-                      for pool, listing in placement.items()}})
+            "pools": {key: listing.name for key, listing in placement.items()}})
         return {"placed": True, "pools": pools}
+
+    async def place_replica(self, run_id: str, row: Mapping) -> dict:
+        """ONE REPLICA RE-PLACED FOR A RUNNING POOL (ADR 0022, Q3): the pool's
+        reviver asks, from the run's anchor host, for a fresh host for the
+        replica its demand row names. The same ladder as any placement —
+        join, carve, knock — with every listing the run's OTHER replicas of
+        that pool stand on, and the dead one, off the table. The run's
+        placement is AMENDED on the journal (`replica-placed`), so dependents,
+        a strand and a release see the host the run now routes through."""
+        demand = demands_from([row])[0]
+        placed = self.placements().get(run_id, {}).get("pools", {})
+        avoid = frozenset(listing for key, listing in placed.items()
+                          if split_replica_key(key)[0] == demand.pool)
+        placement, boot = await self.place_listings([demand], avoid=avoid)
+        if boot:
+            return {"placed": False, "boot": boot}
+        listing = placement[demand.name()]
+        self.store.append_fleet_event({
+            "event": "replica-placed", "t": self.now(), "run_id": run_id,
+            "key": demand.name(), "host": listing.name,
+            "avoided": sorted(avoid)})
+        return {"placed": True, "address": listing.address,
+                "host": listing.name}
 
     async def submit(self, rows: Sequence[Mapping], frame: Mapping,
                      solo: bool = False) -> dict:
@@ -1577,10 +1659,10 @@ class Desk:
         threaded like a pool's whenever it did not land on the anchor's own
         listing, and the desk still never learns what a learner is for."""
         anchor = next(d for d in demands if d.anchor)
-        anchor_listing = placement[anchor.pool]
-        routes = {d.name(): placement[d.pool].address for d in demands
+        anchor_listing = placement[anchor.name()]
+        routes = {d.name(): placement[d.name()].address for d in demands
                   if not d.anchor
-                  and placement[d.pool] is not anchor_listing}
+                  and placement[d.name()] is not anchor_listing}
         try:
             reply = await anchor_listing.host.adopt(
                 frame.get("spec"), routes, frame.get("code"),
@@ -1597,8 +1679,7 @@ class Desk:
             return {"accepted": False, "host": anchor_listing.name,
                     "error": f"host {anchor_listing.name!r} did not answer "
                              f"the delivery: {down}"}
-        pools = {pool or LEARNER_ROUTE: listing.name
-                 for pool, listing in placement.items()}
+        pools = {key: listing.name for key, listing in placement.items()}
         self.store.append_fleet_event({
             "event": "place", "t": self.now(), "delivered": True,
             "run_id": reply.get("run_id"),
@@ -1623,6 +1704,12 @@ class Desk:
         may render it. The frame stays as unread here as it was in flight."""
         table: dict[str, dict] = {}
         for event in self.store.read_fleet_log():
+            if event.get("event") == "replica-placed" and event.get("run_id") in table:
+                # a pool revived a replica onto a new host (ADR 0022): the
+                # run now routes through it
+                table[event["run_id"]]["pools"] = {
+                    **table[event["run_id"]]["pools"], event["key"]: event["host"]}
+                continue
             if event.get("event") == "place" and event.get("run_id"):
                 row = {"pools": event.get("pools", {}),
                        "host": event.get("host"),
@@ -2118,6 +2205,8 @@ class Desk:
             lost = [host for host in hosts if host in row["pools"].values()]
             if not lost or self.finished(run_id):
                 continue
+            if pools_revive_it(row, lost):
+                continue                # the run's own pool revives those replicas
             if any(run_id in settled[table] for table in ("parked", "stopped", "failed")):
                 continue                # queued already, or deliberately down
             self.park(run_id, f"host {lost[0]!r} reaped", avoiding=lost[0])
@@ -2555,14 +2644,15 @@ class Desk:
                                      solo=bool(payload.get("solo", False)))
         if verb == "place":
             return await self.place(demands_from(payload["demands"]))
+        if verb == "place-replica":
+            return await self.place_replica(payload["run_id"], payload["demand"])
         if verb == "list":
             # the phone-home half of the deploy contract: when the desk is its
             # own container, the deploy that booted a host reaches list_host
             # over the wire — same rows the journal speaks
             self.list_host(
                 payload["host"],
-                tuple(Regime(r["name"], r["capability"], r["base"], r["shape"])
-                      for r in payload["regimes"]),
+                tuple(Regime.from_row(r) for r in payload["regimes"]),
                 payload["address"], solo=bool(payload.get("solo", False)),
                 partition=payload.get("partition"),
                 metal=payload.get("metal", ""),
@@ -2718,6 +2808,7 @@ def matches_capability(regimes: Sequence[Regime], demand: Demand) -> bool:
     return any(regime.capability == demand.capability
                and regime.base == demand.base
                and regime.shape == demand.shape
+               and regime.dp == demand.dp
                for regime in regimes)
 
 
@@ -2765,8 +2856,7 @@ def _listing_from(event: Mapping,
     """A journal `list` event back as a Listing — from_journal's one row."""
     return Listing(
         name=event["host"],
-        regimes=tuple(Regime(r["name"], r["capability"], r["base"], r["shape"])
-                      for r in event["regimes"]),
+        regimes=tuple(Regime.from_row(r) for r in event["regimes"]),
         address=event["address"], solo=bool(event.get("solo", False)),
         host=host_for(event["address"]),
         partition=event.get("partition"), metal=event.get("metal", ""))
@@ -2817,8 +2907,13 @@ class MetalService:
                  transport_for: Callable[[str], Transport] | None = None,
                  spawn: Callable[[ResidentBirth], Resident] = Resident.spawn,
                  epoch: str | None = None,
+                 desk=None,
                  ) -> None:
         self.metal = metal
+        # the door every host born here is handed to ITS desk (ADR 0022):
+        # how a replicated pool anchored on one of them re-places a dead
+        # replica. None: such pools serve on from their survivors
+        self.desk = desk
         # THE EPOCH, MINTED AT BRING-UP (ADR 0008, F2): this container's boot
         # identity, worn by every host it carves and every resident under
         # them, said at registration, and refused at this door when a frame
@@ -2956,12 +3051,9 @@ class MetalService:
                              f"was declared for it at the desk and this carve "
                              f"carries none — declare one (desk.recipe) and "
                              f"the next carve will carry it"}
-        regimes = tuple(
-            Regime(r["name"], r["capability"], r["base"],
-                   int(r.get("shape", 1)))
-            for r in request["regimes"])
+        regimes = tuple(Regime.from_row(r) for r in request["regimes"])
         gb = self.per_device_gb(request)
-        count = max(regime.shape for regime in regimes)
+        count = max(regime.devices for regime in regimes)
         devices = self.choose_devices(count, gb)
         if devices is None:
             return {"carved": False, "residual": self.residual(),
@@ -2998,9 +3090,7 @@ class MetalService:
         return {"carved": True, "host": name, "address": address,
                 "solo": host.solo, "epoch": self.epoch,
                 "partition": host.partition.row(),
-                "regimes": [{"name": r.name, "capability": r.capability,
-                             "base": r.base, "shape": r.shape}
-                            for r in regimes]}
+                "regimes": [r.row() for r in regimes]}
 
     async def measure_the_run(self, payload: Mapping) -> dict:
         """ONE MEASURING PASS, RUN WHERE THE POOL IS (ADR 0008, F6).
@@ -3093,14 +3183,15 @@ class MetalService:
             engines = [RemotePool(r.transport, base=r.hello["base"],
                                   tp=int(r.hello["tp"]))
                        for r in residents if r.regime.capability == "inference"]
-            learners = [RemoteLearner(r.transport, fsdp=int(r.hello["fsdp"]))
+            learners = [RemoteLearner(r.transport, fsdp=int(r.hello["fsdp"]),
+                                      dp=int(r.hello.get("dp", 1)))
                         for r in residents if r.regime.capability == "training"]
             return Host(name, engines=tuple(engines),
                         learner=learners[0] if learners else None,
                         store=self.store, partition=partition, regimes=regimes,
                         solo=solo, schema_for=self.schema_for,
                         transport_for=self.transport_for, residents=residents,
-                        epoch=self.epoch)
+                        epoch=self.epoch, desk=self.desk)
         except BaseException:
             for resident in residents:
                 resident.stop(grace_s=SIGNAL_GRACE_S,
@@ -3236,7 +3327,7 @@ class MetalService:
         of KeyError-ing inside a frame handler."""
         service = self.services.get(address)
         if service is None:
-            raise DeskError(
+            raise HostGone(
                 f"no host answers at {address!r} on metal "
                 f"{self.metal.name!r} (decarved, or never carved); serving "
                 f"{sorted(self.services)}")
@@ -3253,7 +3344,7 @@ class MetalService:
         turned over from reconstructing an address that no longer exists."""
         address = self.addresses.get(name)
         if address is None:
-            raise DeskError(
+            raise HostGone(
                 f"no host named {name!r} on metal {self.metal.name!r} "
                 f"(decarved, or never carved); carrying "
                 f"{sorted(self.addresses)}")

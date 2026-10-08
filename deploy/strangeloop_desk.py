@@ -68,7 +68,7 @@ ROOT = SOURCE_ROOT if not modal.is_local() else Path(__file__).resolve().parents
 """The repo tree: the checkout on the laptop at deploy time, /root in the
 container (the two package trees and the config are copied there)."""
 
-CLI_WHEEL = "https://cli.strangeloopresearch.com/strangeloop_cli-0.8.1-py3-none-any.whl"
+CLI_WHEEL = "https://cli.strangeloopresearch.com/strangeloop_cli-0.8.12-py3-none-any.whl"
 GATEWAY_LABEL = "rlstack-sl-desk-gateway"
 OBSERVER_LABEL = "rlstack-sl-desk-observer"
 STARTUP_TIMEOUT_S = 900.0
@@ -84,7 +84,7 @@ BYTECODE = ["**/__pycache__", "*.pyc"]
 
 image = (
     modal.Image.debian_slim(python_version="3.12")
-    .apt_install("openssh-client")
+    .apt_install("openssh-client", "curl")
     .pip_install("safetensors", "numpy", CLI_WHEEL)
     .env({"STRANGELOOP_CONFIG_DIR": str(CLI_CONFIG_DIR), "HOME": "/root",
           "RLSTACK_DESK_CONFIG": CONFIG})

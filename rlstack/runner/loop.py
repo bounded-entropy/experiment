@@ -40,6 +40,7 @@ from rlstack.runner.interfaces import (
 )
 from rlstack.runner.arbiter import Arbiter
 from rlstack.runner.meters import HostJournal
+from rlstack.runner.pool import Handed, Pool, add_if_missing, replica_key
 from rlstack.data.plan import RunPlan, decode
 from rlstack.runner.assemble import rollouts_needed
 from rlstack.runner.fit import FitClient, FitJob, decode_jobs
@@ -52,7 +53,8 @@ from rlstack.spec.flow import flow_graph, split_pipeline
 from rlstack.spec.specs import ExperimentSpec, Plans, PoolMember, WarmStart
 from rlstack.runner.remote import RemoteLearner, RemotePool
 from rlstack.spec.validate import (
-    SpecError, check_members_match_their_shape, check_pools_serve_their_base,
+    SpecError, check_learner_matches_its_shape, check_pools_match_their_shape,
+    check_pools_serve_their_base,
     check_sites_reachable_on, serving_pools, site_space, traffic_pools,
     validate_or_raise,
 )
@@ -94,7 +96,7 @@ class RunnerNeed:
 
 
 def run_experiment(spec: ExperimentSpec, schema: SiteSchema, store: Store,
-                   engines: Engine | Mapping[str, Engine],
+                   engines: Engine | Mapping[str, Handed],
                    learner: Learner | None,
                    max_inflight: int = 64,
                    arbiter: Arbiter | None = None,
@@ -103,8 +105,9 @@ def run_experiment(spec: ExperimentSpec, schema: SiteSchema, store: Store,
     """Submit and drive one experiment to completion. Safe to call again on the
     same spec: identical identity attaches and continues (or no-ops if done).
 
-    `engines` is one Engine (used as the "main" policy pool) or {pool: Engine}
-    — `{}` for a run that declares no pool at all. `checkpointing` is the
+    `engines` is one Engine (used as the "main" policy pool) or {pool: Engine
+    | Replicas | Pool} — a pool's several hosts as Replicas (ADR 0022) — or
+    `{}` for a run that declares no pool at all. `checkpointing` is the
     submission's deliberate cadence and delivery (ADR 0014); it has no default.
     """
     return asyncio.run(
@@ -144,7 +147,7 @@ def experiment_identity(spec: ExperimentSpec, schema: SiteSchema) -> str:
 
 async def run_experiment_async(
         spec: ExperimentSpec, schema: SiteSchema, store: Store,
-        engines: Engine | Mapping[str, Engine], learner: Learner | None,
+        engines: Engine | Mapping[str, Handed], learner: Learner | None,
         max_inflight: int = 64,
         arbiter: Arbiter | None = None,
         journal: HostJournal | None = None,
@@ -179,28 +182,35 @@ async def run_experiment_async(
             "(a fit plan), and both work on a learner, but none was handed to the run: "
             "either hand one, or drop the algo — a spec with no algo is a "
             "generation-only run, which needs no learner and writes no ledger")
-    engine_map: dict[str, Engine] = (
+    handed: dict[str, Handed] = (
         dict(engines) if isinstance(engines, Mapping) else {"main": engines})
+    # EVERY POOL NAME IS A POOL (ADR 0022): its replicas, routed by affinity.
+    # A bare engine is the one-replica pool every run had before; the run's
+    # restore rule and journal are wired in once identity is known (below).
+    pools: dict[str, Pool] = {name: Pool.of(name, value)
+                              for name, value in handed.items()}
 
     # ---- Phase 0: identity — computed, never typed (I3) ----------------------
     validate_or_raise(spec, schema)
     # the engine map must cover every pool the spec's traffic can route to
     # (gen, and each pipeline processor's declared judge/teacher pools)
-    unmapped = sorted(traffic_pools(spec) - set(engine_map))
+    unmapped = sorted(traffic_pools(spec) - set(pools))
     if unmapped:
         raise ValueError(
             f"spec routes traffic to pools {unmapped} but the engine map "
-            f"provides only {sorted(engine_map)}")
+            f"provides only {sorted(pools)}")
     # reachability is a build fact, not a spec fact: ask the serving pool's
     # engine for its inventory and hold every served adapter against it
     space = site_space(spec, schema)
     # a build fact asked over the wire — from a thread, so this loop keeps
     # dispatching while the serving pool answers (check_off_loop)
-    binding_issues = (
-        check_pools_serve_their_base(spec, engine_map)
-        + check_members_match_their_shape(spec, engine_map, learner))
+    binding_issues = check_learner_matches_its_shape(spec, learner)
+    for replicas in replica_maps(pools):
+        binding_issues += (check_pools_serve_their_base(spec, replicas)
+                           + check_pools_match_their_shape(spec, replicas))
     if "main" in traffic_pools(spec):
-        inventory = await asyncio.to_thread(engine_map["main"].reachability, space)
+        inventory = await asyncio.to_thread(pools["main"].engines()[0].reachability,
+                                            space)
         binding_issues += check_sites_reachable_on(spec, schema, "main", inventory)
     if binding_issues:
         raise SpecError(binding_issues)
@@ -244,7 +254,7 @@ async def run_experiment_async(
                                 parameterization_of(spec, resolved))
     if arbiter is None:
         arbiter = Arbiter()
-    attach_residents(spec, engine_map, learner if trains else None, arbiter)
+    attach_residents(spec, pools, learner if trains else None, arbiter)
 
     policy_version = {name: 0 for name in bank}
     resumed_from: int | None = None
@@ -294,28 +304,36 @@ async def run_experiment_async(
     # bundle; every other pool serves its own base, installed on demand.
     serving = serving_pools(spec)
     base_bundles = {name: Bundle(f"bundle:base:{name}", {}, {})
-                    for name in engine_map if name not in serving}
+                    for name in pools if name not in serving}
 
-    def routes_at(current: Bundle, *, pools: tuple[str, ...]) -> Routes:
+    def restore_policy(engine: Engine, pin: Bundle) -> None:
+        """A serving pool's rule for one replica: ask, rebuild from the
+        store's blobs on a miss (runner/restore.py)."""
+        restore_bundle_on(engine, pin, run.read_blob, servable, adapter_types)
+
+    # the run's own rules on its pools, now that it has an identity: how one
+    # replica is restored, and where its deaths and revivals are journaled
+    for name, pool in pools.items():
+        pool.restore = restore_policy if name in serving else add_if_missing
+        pool.journal, pool.run_id = journal, rid
+
+    run_pools = pools
+
+    async def routes_at(current: Bundle, *, pools: tuple[str, ...]) -> Routes:
         """Where this wave's traffic goes — and the one place that makes sure
-        the policy pool can still serve the version it is about to pin.
+        every live replica of each pool can still serve the version it is
+        about to pin.
 
         Residency is not durable (a bounded pool evicts, a restarted container
         starts empty), so the route is established by ASKING and restoring on a
-        miss. It runs once per wave, never per request.
+        miss — on every live replica (ADR 0022). It runs once per wave, never
+        per request.
         """
-        routes: dict[str, tuple[Engine, Bundle]] = {}
+        routes: dict[str, tuple[Pool, Bundle]] = {}
         for name in pools:
-            engine = engine_map[name]
-            if name in serving:
-                restore_bundle_on(engine, current, run.read_blob,
-                                  servable, adapter_types)
-                routes[name] = (engine, current)
-            else:
-                base_bundle = base_bundles[name]
-                if not engine.knows_bundle(base_bundle.bundle_id):
-                    engine.add_bundle(base_bundle)
-                routes[name] = (engine, base_bundle)
+            pin = current if name in serving else base_bundles[name]
+            await run_pools[name].restore_pin(pin)
+            routes[name] = (run_pools[name], pin)
         return routes
 
     # ---- Phase 2: the blackboard --------------------------------------------
@@ -324,7 +342,7 @@ async def run_experiment_async(
                   if trains else None)
     runners = plan_runners(spec, needs=needs, run=run, store=store,
                            fit_client=fit_client,
-                           engine_map=engine_map,
+                           pools=pools,
                            learner=learner, routes_at=routes_at, plans=plans,
                            initial_bundle=bundle,
                            initial_version=policy_version,
@@ -549,7 +567,7 @@ def needs_of(spec: ExperimentSpec) -> tuple[RunnerNeed, ...]:
     return tuple(needs)
 
 
-def plan_runners(spec: ExperimentSpec, *, run, store, engine_map, learner,
+def plan_runners(spec: ExperimentSpec, *, run, store, pools, learner,
                  routes_at, plans, initial_bundle, initial_version,
                  max_inflight, arbiter, tenant, checkpointing: Checkpointing,
                  needs: Sequence[RunnerNeed] | None = None,
@@ -565,8 +583,10 @@ def plan_runners(spec: ExperimentSpec, *, run, store, engine_map, learner,
     stated rather than hidden: a scorer standing on its own host is placement
     work that belongs with host adoption, not here.
 
-    Only the Trainer takes the host journal: an update is the unit of progress
-    the other runners orbit, so its phase timings are the run's own clock.
+    The Trainer journals its update's phase timings (an update is the unit of
+    progress the other runners orbit, so they are the run's own clock); the
+    Generator journals each rollout wave's episode and call timings, and the
+    Fitter its fits.
     Only the Trainer takes the wire (ADR 0014): under `wire` delivery it is
     handed the engine behind every pool that serves the policy, and pushes
     each committed bundle there; under `store` delivery, none.
@@ -581,7 +601,7 @@ def plan_runners(spec: ExperimentSpec, *, run, store, engine_map, learner,
     # built with what only it takes (the Trainer its learner and journal, the
     # Generator its tasks and pacing, the Fitter its jobs)
     for need in (needs_of(spec) if needs is None else needs):
-        residents = pool_residents(need.pools, engine_map)
+        residents = tuple(pools[name] for name in need.pools)
         if need.runner is Fitter:
             runners.append(Fitter(
                 signals, arbiter, run,
@@ -590,8 +610,8 @@ def plan_runners(spec: ExperimentSpec, *, run, store, engine_map, learner,
                 initial_version=initial_version,
                 checkpointing=checkpointing, stop=stop, journal=journal))
         elif need.runner is Trainer:
-            wire = ({name: engine_map[name] for name in serving_pools(spec)
-                     if name in engine_map}
+            wire = ({name: pools[name] for name in serving_pools(spec)
+                     if name in pools}
                     if checkpointing.delivery == "wire" else {})
             runners.append(Trainer(
                 signals, arbiter, run,
@@ -612,10 +632,10 @@ def plan_runners(spec: ExperimentSpec, *, run, store, engine_map, learner,
                 signals, arbiter, run,
                 spec=spec, plan=plans[need.plan],
                 due_at=due_at, tasks=tasks, buffer=need.buffer,
-                engine=engine_map["main"],
+                pool=pools["main"],
                 routes_at=partial(routes_at, pools=need.pools),
                 initial_bundle=initial_bundle, max_inflight=max_inflight,
-                refs=RefReader(store, run)))
+                refs=RefReader(store, run), journal=journal))
     return runners
 
 
@@ -645,14 +665,17 @@ def pipeline_pools(pipeline) -> tuple[str, ...]:
                          for name in POST.get(proc).pools}))
 
 
-def pool_residents(pools: Sequence[str], engine_map) -> tuple[Engine, ...]:
-    """The distinct engine objects behind a need's pool names: two names over
-    one engine are ONE resident, and that is what gets admitted."""
-    distinct = {id(engine_map[name]): engine_map[name] for name in pools}
-    return tuple(distinct.values())
+def replica_maps(pools: Mapping[str, Pool]) -> list[dict[str, Engine]]:
+    """The pools as one {name: engine} map per REPLICA INDEX — what the
+    binding checks read, since each replica is an engine of its own and
+    every one of them must serve its pool's base at its pool's shape."""
+    widest = max((len(pool.replicas) for pool in pools.values()), default=1)
+    return [{name: pool.replicas[k].engine for name, pool in pools.items()
+             if k < len(pool.replicas)} for k in range(widest)]
 
 
-def attach_residents(spec: ExperimentSpec, engine_map, learner: Learner | None,
+def attach_residents(spec: ExperimentSpec, pools: Mapping[str, Handed],
+                     learner: Learner | None,
                      arbiter: Arbiter) -> None:
     """Register this experiment's metal with the (possibly shared) arbiter —
     the residents its needs admit, and nothing else: a run with no Trainer
@@ -702,15 +725,23 @@ def attach_residents(spec: ExperimentSpec, engine_map, learner: Learner | None,
     # local path below; one nobody attached is served by ANOTHER host.
     # Decided for every pool BEFORE any attach, so two names over one remote
     # do not read the first's attachment as the metal's own.
-    remote_pools = {name for name, engine in engine_map.items()
+    #
+    # EACH REPLICA IS ITS OWN RESIDENT (ADR 0022), labelled by its route key
+    # (`main`, `main#1`, ...) — a replicated pool never alternates (the gate
+    # refuses it), so its replicas attach free.
+    replicas = {replica_key(name, replica.index): replica.engine
+                for name, handed in pools.items()
+                for replica in Pool.of(name, handed).replicas}
+    groups = {replica_key(name, 0): group for name, group in pool_group.items()}
+    remote_pools = {key for key, engine in replicas.items()
                     if isinstance(engine, RemotePool)
                     and not arbiter.is_attached(engine)}
-    for name in sorted(engine_map):
-        if name in remote_pools:
-            arbiter.attach(engine_map[name], label=f"remote:{name}")
+    for key in sorted(replicas):
+        if key in remote_pools:
+            arbiter.attach(replicas[key], label=f"remote:{key}")
             continue
-        arbiter.attach(engine_map[name], label=f"engine:{name}",
-                       group=deferred(engine_map[name], pool_group.get(name)))
+        arbiter.attach(replicas[key], label=f"engine:{key}",
+                       group=deferred(replicas[key], groups.get(key)))
     if learner is None:
         return
     if isinstance(learner, RemoteLearner) and learner.admitted:

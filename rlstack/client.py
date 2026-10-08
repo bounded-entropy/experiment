@@ -33,15 +33,29 @@ class PoolClient(Protocol):
     declares, at most one per adapter type per request. What they made the
     rollout do is recorded at the seal, so passing one never asks replay to
     remember anything.
+
+    `max_tokens` on `sample` is a per-call CEILING under the run's sampling
+    budget (the call gets the smaller of the two): an environment bounding
+    one kind of call — a tool's answer — without changing the run's sampling.
+
+    `affinity` on either verb is the call's ROUTING KEY among the pool's
+    replicas (ADR 0022) — OpenAI's `prompt_cache_key`, in this repo's words:
+    calls sharing a key go to the replica that already holds their prefix.
+    None is the episode's id, so an environment that never names one keeps
+    one episode on one replica; an environment branching a conversation may
+    name a key per branch. Routing never reaches the sealed bytes.
     """
 
     async def sample(self, messages: Sequence[Message],
                      stop: tuple[str, ...] = (), *,
-                     directives: Sequence[Directive] = ()) -> Turn: ...
+                     directives: Sequence[Directive] = (),
+                     max_tokens: int | None = None,
+                     affinity: str | None = None) -> Turn: ...
 
     async def score(self, messages: Sequence[Message],
                     token_ids: Sequence[int], *,
-                    directives: Sequence[Directive] = ()) -> tuple[float, ...]:
+                    directives: Sequence[Directive] = (),
+                    affinity: str | None = None) -> tuple[float, ...]:
         """Logprobs of ALREADY-CHOSEN tokens continuing `messages`, under this
         pool's serving stack: one prefill pass, no decode, no randomness.
         The teacher/hinted channel (I9) — a postprocessor scores sealed tokens
@@ -78,12 +92,13 @@ class Fits(Protocol):
     async def forks(self, start_payload: bytes | None,
                     fork_rows: Sequence[Sequence[Mapping[str, Any]]],
                     probe_rows: Sequence[Mapping[str, Any]],
-                    stage: Stage) -> list[tuple[float, ...]]:
+                    stage: Stage, *, every_probe: bool = False) -> list:
         """Fork `start_payload` (None = a fresh set) once per entry of
         `fork_rows`, train fork k on `fork_rows[k]` (trajectory rows) under
         `stage`'s epochs, batch, lr and decay — its `rows` is ignored — and
         answer each fork's per-document mean NLL over `probe_rows` AFTER
-        training, in fork order."""
+        training, in fork order. With `every_probe`, each fork's every probe
+        point instead (before its first step, then after its stage)."""
         ...
 
     async def tokenize(self, text: str) -> tuple[int, ...]:

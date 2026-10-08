@@ -22,7 +22,9 @@ def open_store(address: StoreAddress) -> Store:
     persist) — which is exactly a resident's relation to the store: it reads
     cas blobs and journals nothing. Scratch residents refuse writes and use
     authoritative HTTP for mutable keys. Inherited deploy settings permit a
-    shared local cache and already-visible hashed mounted bytes (ADR 0020)."""
+    shared local cache and already-visible hashed mounted bytes (ADR 0020).
+    A RunPod network volume is a POSIX mount at one path on every pod, so its
+    store is `local` and reopens as itself (ADR 0021)."""
     if address.backend == "strangeloop":
         return StrangeLoopStore(ScratchClient.from_locator(address.locator), read_only=True,
                                 mount_root=address.root or None)

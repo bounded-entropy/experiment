@@ -194,6 +194,19 @@ class HostTest(unittest.TestCase):
         self.assertEqual(statuses, ["done", "failed"])
         self.assertEqual(self.store.list_hosts(), ["test-host"])
 
+    def test_every_rollout_wave_is_journaled_with_its_episodes_and_calls(self) -> None:
+        host = self.host()
+        go(host.submit(arith_spec(self.train), SCHEMA, checkpointing=EVERY_UPDATE))
+        waves = [e for e in self.store.read_host_log("test-host") if e["event"] == "rollout"]
+        self.assertTrue(waves)
+        self.assertEqual([e["rollout"] for e in waves], list(range(1, len(waves) + 1)))
+        for event in waves:
+            self.assertEqual(set(event["phases"]), {"admit", "route", "sample", "seal"})
+            self.assertAlmostEqual(sum(event["phases"].values()), event["seconds"], places=6)
+            self.assertTrue(event["episodes"])
+            self.assertEqual(event["tokens"], sum(call["tokens"] for row in event["episodes"]
+                                                  for call in row["calls"]))
+
     def test_cli_views_render_from_the_store_alone(self) -> None:
         """The three views are pure functions of store bytes — operational
         facts only (identity, placement, status, progress), no experiment

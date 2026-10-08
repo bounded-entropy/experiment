@@ -8,6 +8,9 @@ replay. Bind to loopback/SSH or terminate authenticated TLS at ingress.
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
+import contextvars
+import os
 from collections.abc import Callable, Iterator
 from concurrent.futures import TimeoutError as FutureTimeout
 from contextvars import ContextVar
@@ -25,7 +28,7 @@ from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_ope
 
 from rlstack.runner.remote import (
     BUILD_DEADLINE_S, DEADLINE_S, LocalTransport, Service, Unreachable,
-    WrongEpoch, bounded, stamped,
+    HostGone, WrongEpoch, bounded, stamped,
 )
 from rlstack.runner.transports.http_blobs import (
     BlobRef, BlobStore, CHUNK_BYTES, ClientFile, HttpLimits, JsonFile,
@@ -95,6 +98,26 @@ def transient(error: Unreachable) -> Unreachable:
     return error
 
 
+FRAME_THREADS = int(os.environ.get("RLSTACK_HTTP_CLIENT_THREADS", 512))
+"""How many frames this process may have open at once over HTTP. A frame is a
+blocking urllib round trip on a thread, and a sample call holds its thread for
+the whole generation: on the loop's default executor (32 threads) every
+remote replica of a pool shared 32 requests between them while the in-process
+replica took 64 (measured on the B300, ADR 0022). Its own pool, so remote
+traffic never queues behind store work either."""
+
+_FRAMES: concurrent.futures.ThreadPoolExecutor | None = None
+
+
+def frame_threads() -> concurrent.futures.ThreadPoolExecutor:
+    """The process's one executor for HTTP frames, built on first use."""
+    global _FRAMES
+    if _FRAMES is None:
+        _FRAMES = concurrent.futures.ThreadPoolExecutor(
+            max_workers=FRAME_THREADS, thread_name_prefix="http-frame")
+    return _FRAMES
+
+
 class HttpTransport:
     """One logical RPC, with independent authenticated byte transfers when needed."""
     def __init__(self, endpoint: str, host: str = "", epoch: str = "", *,
@@ -137,8 +160,10 @@ class HttpTransport:
         cancelled = threading.Event()
         budget = Budget(deadline_s, cancelled)
         try:
-            return await bounded(asyncio.to_thread(
-                self.request, door, verb, stamped(payload, self.epoch), budget),
+            context = contextvars.copy_context()
+            return await bounded(asyncio.get_running_loop().run_in_executor(
+                frame_threads(), context.run, self.request, door, verb,
+                stamped(payload, self.epoch), budget),
                 deadline_s, f"{self.endpoint}#{self.host}::{verb}")
         finally:
             cancelled.set()  # an abandoned upload must not dispatch a later RPC
@@ -262,6 +287,7 @@ class HttpTransport:
             if "error" in envelope:
                 error = envelope["error"]
                 kinds = {"WrongEpoch": WrongEpoch, "Unreachable": Unreachable,
+                         "HostGone": HostGone,
                          "ValueError": ValueError, "KeyError": KeyError, "RuntimeError": RuntimeError}
                 raise kinds.get(error["type"], RemoteError)(error["message"])
             result = envelope["result"]
@@ -276,10 +302,17 @@ class HttpTransport:
 
 
 class BoundedServer(ThreadingHTTPServer):
-    """Connection pressure is refused before allocating another handler thread."""
+    """Connection pressure is refused before allocating another handler thread.
+
+    The listen BACKLOG is the same bound: socketserver's default of 5 resets
+    every connect past the fifth that arrives in one burst, and a wave's
+    first breath is a burst — on the B300 (ADR 0022) 192 episodes opening at
+    once reset connections to a healthy replica, which the pool rightly read
+    as a death. A connect the slots will refuse anyway costs nothing queued."""
     daemon_threads = True
     def __init__(self, address, handler, maximum: int):
         self.slots = threading.BoundedSemaphore(maximum)
+        self.request_queue_size = maximum
         super().__init__(address, handler)
 
     def process_request(self, request, client_address):

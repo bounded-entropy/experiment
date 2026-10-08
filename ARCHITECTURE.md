@@ -611,10 +611,26 @@ mount-only view — a resident reads cas blobs and writes nothing.
 `rlstack/data/stores/base.py`, `rlstack/data/stores/address.py`
 
 **Pool** — a NAME traffic routes to, with two lives: declared capacity
-(`PoolMember` in a `Topology`) and a runtime routing entry (`Routes`: pool name
-→ engine + pinned bundle). The name↔metal relation is many-to-many — one engine
-may back many pool names, one pool may fan over several engines.
-`rlstack/spec/specs.py` (`PoolMember`), `rlstack/runner/traffic.py`
+(`PoolMember` in a `Topology`, `replicas` hosts of it) and, at run time, the
+`Pool` record (ADR 0022): that name's REPLICAS, its key table, their health
+and their revival (`Routes`: pool name → Pool + pinned bundle). The
+name↔metal relation is many-to-many — one engine may back many pool names,
+one pool fans over its replicas' engines.
+`rlstack/spec/specs.py` (`PoolMember`), `rlstack/runner/pool.py`, `rlstack/runner/traffic.py`
+
+**Replica** — one host serving a pool name (ADR 0022). Its route key is the
+pool's name for replica 0 and `name#k` for the others; replicas of one pool
+never share a listing (they may share a metal). A replica found dead on
+contact is revived by its Pool through the desk (`place-replica`) and brought
+up to every bundle the pool serves before it takes a request.
+`rlstack/runner/pool.py` (`Replica`, `Replicas`, `DeskReviver`)
+
+**Affinity key** — the routing key a sample or score call carries
+(`affinity=`), the episode's id unless the environment names one: a seen key
+returns to the replica that holds its prefix cache, a new one goes to the
+least-loaded replica, and a key moves only when its replica dies. Never in
+the sealed bytes.
+`rlstack/client.py`, `rlstack/runner/pool.py` (`Pool.route`)
 
 **Engine** — inference metal: an object satisfying the Engine protocol
 (`VllmEngine`, `FakeEngine`, `RemotePool`). It carries `base` and `tp` as BUILD
@@ -1204,7 +1220,15 @@ submit, status and reap behind it for an hour.
 ### Pool traffic (`rlstack/runner/traffic.py`, `rlstack/runner/remote.py`)
 
 - **sample** — drive one pool for one episode, assembling `TokenEvent`s into a
-  Turn; admitted, because it occupies the metal.
+  Turn; admitted, because it occupies the metal. Routed among the pool's
+  replicas by the call's affinity key, the whole stream retried on a
+  survivor if its replica dies (ADR 0022).
+- **deliver** — a committed bundle on every live replica of a pool, before
+  the ledger line (`Pool.deliver`); a replica revived later is brought up to
+  it before readmission.
+- **accumulate** — every microbatch of one update on a learner, gradients
+  summed in microbatch order: the verb a dp × fsdp learner splits across its
+  dp groups (ADR 0022).
 - **score** — logprobs of GIVEN tokens: one prefill pass, no decode,
   deterministic and seedless. Judges sample; teachers score.
 - **collect** — schedule one wave of episodes deterministically given `(master,

@@ -56,7 +56,7 @@ from rlstack.data.stores.base import Store, StoreAddress
 from rlstack.runner.host import Partition, Regime
 from rlstack.runner.interfaces import Engine, Learner
 from rlstack.runner.remote import (
-    DEADLINE_S, Blocking, EngineService, LearnerService, Transport,
+    DEADLINE_S, Blocking, HostGone, EngineService, LearnerService, Transport,
     Unreachable, bounded, check_epoch, json_roundtrip,
 )
 
@@ -87,7 +87,12 @@ class EngineBuild:
     max_library: int = 32
     serves: tuple[str, ...] = ("lora",)
     enable_sleep_mode: bool = False
-    enforce_eager: bool = True
+    # None = AUTO: CUDA graphs unless a served adapter type demands eager,
+    # with an eager rebuild if the graphed build fails (vllm_engine.py)
+    enforce_eager: bool | None = None
+    # vLLM's own periodic stats line (running / waiting requests, KV-cache
+    # use, throughput) in the resident's log: an operator's diagnosis knob
+    log_stats: bool = False
 
 
 @dataclass(frozen=True)
@@ -203,10 +208,7 @@ class ResidentBirth:
 
     def row(self) -> dict:
         return {"label": self.label, "partition": self.partition.row(),
-                "regime": {"name": self.regime.name,
-                           "capability": self.regime.capability,
-                           "base": self.regime.base,
-                           "shape": self.regime.shape},
+                "regime": self.regime.row(),
                 "build": encode_build(self.build), "store": self.store.row(),
                 "vram_gb": self.vram_gb, "epoch": self.epoch}
 
@@ -217,7 +219,7 @@ class ResidentBirth:
             label=row["label"],
             partition=Partition(p["metal"], tuple(p["devices"]), p["memory"],
                                 p.get("gpu", "")),
-            regime=Regime(r["name"], r["capability"], r["base"], int(r["shape"])),
+            regime=Regime.from_row(r),
             build=decode_build(row["build"]),
             store=StoreAddress.from_row(row["store"]),
             vram_gb=float(row.get("vram_gb", 0.0)),
@@ -251,26 +253,27 @@ def build_engine(regime: Regime, partition: Partition, build: Build,
             max_rank=build.max_rank, max_members=build.max_members,
             max_library=build.max_library, cas_get=store.cas_get, serves=build.serves,
             enable_sleep_mode=build.enable_sleep_mode,
-            enforce_eager=build.enforce_eager)
+            enforce_eager=build.enforce_eager, log_stats=build.log_stats)
     raise ResidentError(
         f"{type(build).__name__} is not an engine build; regime "
         f"{regime.name!r} is inference")
 
 
 def build_learner(regime: Regime, partition: Partition, build: Build) -> Learner:
-    """THE learner builder: shape 1 is a TorchLearner on cuda:0 — which IS the
-    partition's first device once CUDA_VISIBLE_DEVICES is pinned — and shape
-    n leads a chorus of n, every follower capped at the partition's fraction
-    on its own device."""
+    """THE learner builder: one device (shape 1, dp 1) is a TorchLearner on
+    cuda:0 — which IS the partition's first device once CUDA_VISIBLE_DEVICES
+    is pinned — and dp × shape devices lead a chorus of that many ranks, dp
+    groups of `shape` fsdp ranks each (ADR 0022), every follower capped at
+    the partition's fraction on its own device."""
     if isinstance(build, FakeLearnerBuild):
         from rlstack.runner.fakes import FakeLearner
 
-        return FakeLearner(fsdp=regime.shape, sleeps=build.sleeps)
+        return FakeLearner(fsdp=regime.shape, sleeps=build.sleeps, dp=regime.dp)
     if isinstance(build, LearnerBuild):
         import torch
 
         dtype = getattr(torch, build.dtype)
-        if regime.shape == 1:
+        if regime.devices == 1:
             from rlstack.runner.learners.torch_learner import TorchLearner
 
             return TorchLearner(device="cuda:0", dtype=dtype,
@@ -279,7 +282,7 @@ def build_learner(regime: Regime, partition: Partition, build: Build) -> Learner
         from rlstack.runner.learners.fsdp_torch import lead_fsdp_learner
 
         return lead_fsdp_learner(
-            regime.shape, dtype=dtype, grad_clip=build.grad_clip,
+            regime.shape, dp=regime.dp, dtype=dtype, grad_clip=build.grad_clip,
             checkpoint_activations=build.checkpoint_activations,
             memory_fraction=partition.memory)
     raise ResidentError(
@@ -301,8 +304,29 @@ def is_real(build: Build) -> bool:
 def pin_devices(devices: Sequence[int]) -> None:
     """CUDA_VISIBLE_DEVICES = the partition's devices, in order. Read once at
     CUDA init and global to the process — which is the whole reason a
-    resident is a process. Must run before torch is imported."""
-    os.environ["CUDA_VISIBLE_DEVICES"] = ",".join(str(d) for d in devices)
+    resident is a process. Must run before torch is imported, and runs once
+    per resident (its child's first act).
+
+    A partition's devices are indices into what the METAL sees (`measure`
+    counts them under the metal's own visibility), so a metal started with
+    CUDA_VISIBLE_DEVICES already set — one slice of a shared node — pins its
+    residents through that mask, never past it to the node's device 0."""
+    os.environ["CUDA_VISIBLE_DEVICES"] = ",".join(
+        visible_device(d, os.environ.get("CUDA_VISIBLE_DEVICES")) for d in devices)
+
+
+def visible_device(index: int, mask: str | None) -> str:
+    """The device the metal calls `index`, named as the node knows it: the
+    mask's index-th entry, or the index itself where no mask is set. An index
+    the mask does not hold is refused, never wrapped onto another card."""
+    if mask is None or not mask.strip():
+        return str(index)
+    entries = [entry.strip() for entry in mask.split(",") if entry.strip()]
+    if not 0 <= index < len(entries):
+        raise ResidentError(
+            f"partition device {index} is not among the {len(entries)} devices "
+            f"this metal sees (CUDA_VISIBLE_DEVICES={mask!r})")
+    return entries[index]
 
 
 def cap_memory(fraction: float, devices: Sequence[int] | None = None) -> None:
@@ -354,6 +378,7 @@ def hello_of(birth: ResidentBirth, obj: Engine | Learner,
         row["tp"] = obj.tp
     else:
         row["fsdp"] = obj.fsdp
+        row["dp"] = obj.dp
         # why a learner will not sleep, when it will not: at fsdp > 1 that is
         # a fact about the pinned torch, not about the width (#82), and the
         # only place it is ever visible is this frame.
@@ -541,7 +566,9 @@ class PipeTransport:
 
     def _send(self, frame: dict) -> None:
         if self.closed:
-            raise ResidentError("the resident's door is closed")
+            # the process is gone, so its host is (ADR 0022): a pool reads
+            # this as a replica death and retries elsewhere
+            raise HostGone("the resident's door is closed: its process exited")
         _send_frame(self._conn, self._send_lock, frame)
 
     def hello(self, timeout_s: float) -> dict:
@@ -591,6 +618,8 @@ class PipeTransport:
 def _unwrap(frame: dict) -> dict:
     if frame.get("ok"):
         return frame["reply"]
+    if frame.get("type") == "ResidentGone":
+        raise HostGone(f"ResidentGone: {frame.get('error')}")
     raise ResidentError(f"{frame.get('type', 'error')}: {frame.get('error')}")
 
 

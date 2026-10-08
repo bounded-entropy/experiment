@@ -12,6 +12,7 @@ from rlstack import (
 )
 from rlstack.runner.traffic import EnginePoolClient
 from rlstack.runner.traffic import run_episode
+from rlstack.data.trajectory import wave_to_rows
 
 BUNDLE = Bundle(bundle_id="bundle:test0000", policy_version={"pi": 0})
 HINT_BUNDLE = Bundle(bundle_id="bundle:base:hints", policy_version={})
@@ -47,6 +48,21 @@ class EngineSampleClientTest(unittest.TestCase):
         self.assertEqual(turn.finish, "eos")
         self.assertEqual(turn.bundle_id, BUNDLE.bundle_id)
         self.assertEqual(dict(turn.policy_version), {"pi": 0})
+
+    def test_a_per_call_ceiling_bounds_the_call_and_never_raises_the_run_budget(self) -> None:
+        from dataclasses import replace
+
+        from rlstack.runner.traffic import ceiled
+        messages = [Message(Role.USER, "What is 12+34?")]
+        free = go(self.client().sample(messages))
+        capped = go(self.client().sample(messages, max_tokens=1))
+        self.assertEqual(capped.token_ids, free.token_ids[:1])
+        self.assertEqual(capped.finish, "length")
+        self.assertEqual(ceiled(SAMPLING, 10 ** 9), SAMPLING)
+        self.assertEqual(ceiled(SAMPLING, 3), replace(SAMPLING, max_tokens=3))
+        self.assertIs(ceiled(SAMPLING, None), SAMPLING)
+        with self.assertRaises(ValueError):
+            ceiled(SAMPLING, 0)
 
     def test_deterministic_given_seed(self) -> None:
         self.assertEqual(self.sample(), self.sample())
@@ -128,6 +144,20 @@ class SampleWaveTest(unittest.TestCase):
         seeds_1 = [t.turns[0].seed for t in self.collect(index=1).trajectories]
         seeds_2 = [t.turns[0].seed for t in self.collect(index=2).trajectories]
         self.assertNotEqual(seeds_1, seeds_2)
+
+    def test_a_trace_times_every_episode_and_call_and_never_reaches_the_wave(self) -> None:
+        trace: list[dict] = []
+        traced = go(sample_wave(self.PLAN, index=1, tasks=self.TASKS, sampling=SAMPLING,
+                                routes=make_pools(), master=17, trace=trace))
+        self.assertEqual(wave_to_rows(traced), wave_to_rows(self.collect()))
+        self.assertEqual([(row["group"], row["position"]) for row in trace],
+                         [(f"t{i}", k) for i in range(4) for k in range(4)])
+        for row, trajectory in zip(trace, traced.trajectories):
+            self.assertLessEqual(row["start"], row["end"])
+            self.assertEqual([call["tokens"] for call in row["calls"]],
+                             [len(turn.token_ids) for turn in trajectory.turns])
+            self.assertEqual({call["pool"] for call in row["calls"]}, {"main"})
+            self.assertTrue(all(call["seconds"] >= 0 for call in row["calls"]))
 
     def test_a_leaf_naming_no_declared_task_is_refused(self) -> None:
         plan = WavePlan((GroupPlan("gone", (Sample("gone", "math_single_turn"),)),))

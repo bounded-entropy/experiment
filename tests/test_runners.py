@@ -80,6 +80,21 @@ class ArbiterTest(unittest.TestCase):
                          ["learner:evict", "engine:wake",
                           "engine:evict", "learner:wake"])
 
+    def test_every_switch_is_timed_until_the_host_takes_it(self) -> None:
+        async def scenario():
+            arbiter, engine, trainer, _ = self.two_residents()
+            async with arbiter.admit(engine):
+                pass
+            async with arbiter.admit(trainer):
+                pass
+            return arbiter.take_switches(), arbiter.take_switches()
+
+        taken, again = go(scenario())
+        self.assertEqual([row["to"] for row in taken], ["engine:main", "learner"])
+        self.assertEqual([sorted(row["evict"]) for row in taken], [["learner"], ["engine:main"]])
+        self.assertTrue(all(row["seconds"] >= row["wake"] >= 0 for row in taken))
+        self.assertEqual(again, [])
+
     def test_first_switch_evicts_the_member_never_admitted(self) -> None:
         """A learner that loaded its base at install was never the group's
         resident, and the old rule evicted only the resident: the engine's

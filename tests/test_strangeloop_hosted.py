@@ -25,13 +25,12 @@ from unittest.mock import patch
 
 from venue_stub import modal_stubbed
 
-from rlstack.runner.venues.strangeloop import provider
-from rlstack.runner.venues.strangeloop.desk import (
-    OBSERVER_COOKIE, observer_guard, operator_token, runtime_token,
+from rlstack.runner.venues import serving
+from rlstack.runner.venues.serving import (
+    OBSERVER_COOKIE, LockHolder, lock_holder, observer_guard, own_local_desk, runtime_token,
 )
-from rlstack.runner.venues.strangeloop.provider import (
-    DeskConfig, LockHolder, MetalConfig, lock_holder, own_local_desk,
-)
+from rlstack.runner.venues.strangeloop.desk import operator_token
+from rlstack.runner.venues.strangeloop.provider import DeskConfig, MetalConfig
 
 REPO = Path(__file__).resolve().parent.parent
 STORE = "strangeloop://sl-scratch-account/rlstack"
@@ -129,7 +128,7 @@ class StaleLockTests(unittest.TestCase):
         a dead container's record is taken, a live desk's on this host is not."""
         refused = OSError(errno.ENOTSUP, "no locks on this filesystem")
         self.lock.write_text("a-container-that-died 4242\n")
-        with patch.object(provider.fcntl, "flock", side_effect=refused):
+        with patch.object(serving.fcntl, "flock", side_effect=refused):
             with own_local_desk(self.lock):
                 self.assertEqual(lock_holder(self.lock), LockHolder.mine())
             self.assertIsNone(lock_holder(self.lock))

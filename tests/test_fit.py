@@ -353,6 +353,23 @@ class ProbeTest(unittest.TestCase):
         self.assertEqual(verbs[:2], ["load_set", "forward"])
         self.assertEqual(verbs[-2:], ["forward", "emit_set"])
 
+    def test_each_distinct_text_is_tokenized_once_per_call(self) -> None:
+        learner = installed(LaneLearner())
+        asked: list[str] = []
+        tokenize = learner.tokenize
+
+        def counted(tenant, text):
+            asked.append(text)
+            return tokenize(tenant, text)
+
+        learner.tokenize = counted
+        fits = Fits({"cas://seven": SEVEN, "cas://probe": PROBE + PROBE}, lanes=3, learner=learner)
+        jobs = [FitJob(None, None, (Stage("cas://seven", 1, 7, 1e-4),), "cas://probe")
+                for _ in range(3)]
+        results = fits.run(jobs)
+        self.assertEqual(len(asked), len(set(asked)))
+        self.assertEqual([len(r.probes[0]) for r in results], [6, 6, 6])
+
     def test_no_probe_no_vectors_and_no_forward(self) -> None:
         fits = Fits({"cas://seven": SEVEN}, lanes=1)
         (result,) = fits.run([FitJob("m/0", None, (Stage("cas://seven", 1, 7, 1e-4),))])
@@ -373,6 +390,19 @@ class StartTest(unittest.TestCase):
         fits = Fits(self.FILES, lanes=1, names={"lib/a": b"parent-bytes"})
         fits.run([FitJob("m/0", "lib/a", (Stage("cas://seven", 1, 7, 1e-4),))])
         self.assertEqual(fits.learner.loads(), [(memory_route(0), b"parent-bytes")])
+
+    def test_lanes_from_one_named_start_share_one_before_probe(self) -> None:
+        names = {"lib/a": installed(LaneLearner()).emit_set(TENANT, ENTRY, memory_route(3))}
+        fits = Fits({**self.FILES, "cas://probe": PROBE}, lanes=3, names=names)
+        jobs = [FitJob(None, "lib/a", (Stage("cas://seven", 1, 7, 1e-4),), "cas://probe")
+                for _ in range(3)]
+        results = fits.run(jobs)
+        forwards = [call[1] for call in fits.learner.calls if call[0] == "forward"]
+        self.assertEqual(len(forwards[0].doc_starts), len(PROBE))      # one lane's before
+        self.assertEqual(sum(len(b.doc_starts) for b in forwards[1:]), 3 * len(PROBE))
+        self.assertEqual(len({r.probes[0] for r in results}), 1)
+        alone = Fits({**self.FILES, "cas://probe": PROBE}, lanes=1, names=names).run(jobs[:1])
+        self.assertEqual(alone[0].probes[0], results[0].probes[0])
 
     def test_a_job_may_start_from_an_earlier_job_of_the_same_call(self) -> None:
         """The chain: job 1 waits for job 0's name on its own lane while

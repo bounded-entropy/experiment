@@ -2,46 +2,18 @@
 from __future__ import annotations
 
 import asyncio
-from contextlib import contextmanager
-import hmac
-from http.cookies import SimpleCookie
 import os
 from pathlib import Path
-import secrets
 import signal
-from socketserver import ThreadingMixIn
 import subprocess
-import threading
-from typing import Callable, Iterator
-from urllib.parse import parse_qs, urlencode
-from wsgiref.simple_server import WSGIServer, make_server
 
 from rlstack.data.stores.strangeloop import ScratchClient, StrangeLoopStore
-from rlstack.observe.ui import ui_app
 from rlstack.runner.remote import RemoteDesk, transport_for
 from rlstack.runner.venues.runtime import DeskRuntime
-from rlstack.runner.venues.strangeloop.provider import (
-    DeskConfig, Gateway, StrangeLoopVenue, own_local_desk,
+from rlstack.runner.venues.serving import (
+    EVERY_INTERFACE, LOOPBACK, observer, own_local_desk, runtime_token,
 )
-
-LOOPBACK = "127.0.0.1"
-EVERY_INTERFACE = "0.0.0.0"
-"""A hosted desk's servers bind every interface: the container's ingress
-proxies to the port from outside loopback (Modal refuses a server bound to
-localhost), and TLS plus the bearer token are what stand between the
-internet and the gateway."""
-
-OBSERVER_COOKIE = "rlstack_observer"
-
-
-def runtime_token(state_dir: Path) -> str:
-    """A local secret survives gateway restarts without entering store addresses."""
-    path = state_dir / "http-token"
-    if not path.exists():
-        state_dir.mkdir(parents=True, exist_ok=True)
-        with open(path, "x", opener=lambda file, flags: os.open(file, flags, 0o600)) as output:
-            output.write(secrets.token_urlsafe(32))
-    return path.read_text().strip()
+from rlstack.runner.venues.strangeloop.provider import DeskConfig, Gateway, StrangeLoopVenue
 
 
 def operator_token(config: DeskConfig) -> str:
@@ -58,58 +30,6 @@ def operator_token(config: DeskConfig) -> str:
                            "RLSTACK_HTTP_TOKEN from `modal volume get "
                            "rlstack-strangeloop-desk-state desk/http-token`")
     return runtime_token(config.state_dir)
-
-
-class ObserverServer(ThreadingMixIn, WSGIServer):
-    """An idle browser connection cannot block other reads or shutdown."""
-    daemon_threads = True
-
-
-def observer_guard(app: Callable, token: str) -> Callable:
-    """An exposed observer answers the runtime token only: as the bearer
-    header the gateway takes, or once as `?token=` — which sets the cookie a
-    browser then carries — and nothing else, since a read-only page behind a
-    public URL still shows every run."""
-    def guarded(environ, start_response):
-        cookies = SimpleCookie(environ.get("HTTP_COOKIE", ""))
-        carried = cookies[OBSERVER_COOKIE].value if OBSERVER_COOKIE in cookies else ""
-        bearer = environ.get("HTTP_AUTHORIZATION", "")
-        if (hmac.compare_digest(bearer, "Bearer " + token)
-                or hmac.compare_digest(carried, token)):
-            return app(environ, start_response)
-        query = parse_qs(environ.get("QUERY_STRING", ""))
-        offered = query.pop("token", [""])[0]
-        if hmac.compare_digest(offered, token):
-            rest = urlencode(query, doseq=True)
-            location = environ.get("PATH_INFO", "/") + ("?" + rest if rest else "")
-            start_response("303 See Other", [
-                ("Location", location),
-                ("Set-Cookie", f"{OBSERVER_COOKIE}={token}; Path=/; HttpOnly; SameSite=Strict"),
-                ("Content-Length", "0")])
-            return [b""]
-        start_response("401 Unauthorized", [("Content-Type", "text/plain"),
-                                            ("Content-Length", "0")])
-        return [b""]
-    return guarded
-
-
-@contextmanager
-def observer(store: StrangeLoopStore, port: int, *, host: str = LOOPBACK,
-             token: str = "") -> Iterator[None]:
-    """Serve the existing read-only observer against fresh scratch reads;
-    off loopback it is guarded by the runtime token."""
-    if host != LOOPBACK and not token:
-        raise ValueError("an observer off loopback requires the runtime token")
-    app = observer_guard(ui_app([store]), token) if token else ui_app([store])
-    server = make_server(host, port, app, server_class=ObserverServer)
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
-    try:
-        yield
-    finally:
-        server.shutdown()
-        server.server_close()
-        thread.join(timeout=5)
 
 
 async def serve(config: DeskConfig, source_root: Path, *, exposed: bool = False,

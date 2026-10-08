@@ -479,8 +479,9 @@ def load_set(state: DreamBankState, route: str, payload: bytes | None,
             lora.a[path].data.copy_(fresh.a[path].data)
             lora.b[path].data.copy_(fresh.b[path].data)
     else:
-        check_named_payload(state, route, st_load(payload))
-        lora_torch.load(lora, payload)
+        tensors = st_load(payload)
+        check_named_payload(state, route, tensors)
+        lora_torch.load_tensors(lora, tensors)
     reset_moments(lora, optimizer)
 
 

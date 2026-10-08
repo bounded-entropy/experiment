@@ -1,0 +1,338 @@
+{
+  "purpose": "Infrastructure-only investigation; no model training or dataset download",
+  "local_date": "2026-09-12",
+  "utc_date": "2026-09-13",
+  "lease_id": "00000000-0000-0000-0000-LEASE0000001",
+  "label": "rlstack-storage-20260912t235948z",
+  "gpu": "A100-80GB",
+  "platform": "modal",
+  "scratch_prefix": "artifacts/rlstack-storage-probe-20260912T235948Z",
+  "environment": {
+    "python": "3.10.12",
+    "modal_module_installed": false,
+    "wandb_module_installed": true,
+    "modal_tokens_present": false,
+    "strangeloop_token_automatically_present": false,
+    "scratch_filesystem": "9p",
+    "volume_version_explicitly_reported": false
+  },
+  "publication_protocol": "Alternate file write+flush+fsync+os.replace with and without subprocess sync /scratch; issue the first external raw API GET immediately after gpu exec returns. Synced writes published earlier unsynced control files too.",
+  "publication": [
+    {
+      "i": 0,
+      "mode": "write",
+      "remote": {
+        "mode": "write",
+        "path": "/scratch/artifacts/rlstack-storage-probe-20260912T235948Z/publication-0.txt",
+        "value": "probe-0-1789257893661314000\n",
+        "elapsed_s": 0.0033
+      },
+      "exec_wall_s": 1.5545,
+      "first_read_matches": false,
+      "first_read_status": 404,
+      "first_read_error": "not_found",
+      "read_s": 0.4016
+    },
+    {
+      "i": 1,
+      "mode": "write_sync",
+      "remote": {
+        "mode": "write_sync",
+        "path": "/scratch/artifacts/rlstack-storage-probe-20260912T235948Z/publication-1.txt",
+        "value": "probe-1-1789257895617614000\n",
+        "sync_returncode": 0,
+        "sync_s": 0.7774636170000235,
+        "sync_stderr": "",
+        "elapsed_s": 0.7809
+      },
+      "exec_wall_s": 1.9568,
+      "first_read_matches": true,
+      "read_s": 0.5459
+    },
+    {
+      "i": 2,
+      "mode": "write",
+      "remote": {
+        "mode": "write",
+        "path": "/scratch/artifacts/rlstack-storage-probe-20260912T235948Z/publication-2.txt",
+        "value": "probe-2-1789257898120481000\n",
+        "elapsed_s": 0.0034
+      },
+      "exec_wall_s": 1.1512,
+      "first_read_matches": false,
+      "first_read_status": 404,
+      "first_read_error": "not_found",
+      "read_s": 0.2187
+    },
+    {
+      "i": 3,
+      "mode": "write_sync",
+      "remote": {
+        "mode": "write_sync",
+        "path": "/scratch/artifacts/rlstack-storage-probe-20260912T235948Z/publication-3.txt",
+        "value": "probe-3-1789257899490526000\n",
+        "sync_returncode": 0,
+        "sync_s": 2.3170173620000014,
+        "sync_stderr": "",
+        "elapsed_s": 2.3206
+      },
+      "exec_wall_s": 3.4376,
+      "first_read_matches": true,
+      "read_s": 1.4175
+    },
+    {
+      "i": 4,
+      "mode": "write",
+      "remote": {
+        "mode": "write",
+        "path": "/scratch/artifacts/rlstack-storage-probe-20260912T235948Z/publication-4.txt",
+        "value": "probe-4-1789257904345822000\n",
+        "elapsed_s": 0.0036
+      },
+      "exec_wall_s": 1.4629,
+      "first_read_matches": false,
+      "first_read_status": 404,
+      "first_read_error": "not_found",
+      "read_s": 0.3534
+    },
+    {
+      "i": 5,
+      "mode": "write_sync",
+      "remote": {
+        "mode": "write_sync",
+        "path": "/scratch/artifacts/rlstack-storage-probe-20260912T235948Z/publication-5.txt",
+        "value": "probe-5-1789257906162277000\n",
+        "sync_returncode": 0,
+        "sync_s": 1.3507759560000068,
+        "sync_stderr": "",
+        "elapsed_s": 1.3542
+      },
+      "exec_wall_s": 2.4914,
+      "first_read_matches": true,
+      "read_s": 0.9153
+    },
+    {
+      "i": 6,
+      "mode": "write",
+      "remote": {
+        "mode": "write",
+        "path": "/scratch/artifacts/rlstack-storage-probe-20260912T235948Z/publication-6.txt",
+        "value": "probe-6-1789257909569143000\n",
+        "elapsed_s": 0.0037
+      },
+      "exec_wall_s": 1.5182,
+      "first_read_matches": false,
+      "first_read_status": 404,
+      "first_read_error": "not_found",
+      "read_s": 0.3146
+    },
+    {
+      "i": 7,
+      "mode": "write_sync",
+      "remote": {
+        "mode": "write_sync",
+        "path": "/scratch/artifacts/rlstack-storage-probe-20260912T235948Z/publication-7.txt",
+        "value": "probe-7-1789257911402127000\n",
+        "sync_returncode": 0,
+        "sync_s": 0.6838661920000391,
+        "sync_stderr": "",
+        "elapsed_s": 0.6871
+      },
+      "exec_wall_s": 3.0138,
+      "first_read_matches": true,
+      "read_s": 0.588
+    }
+  ],
+  "worker_api": [
+    {
+      "iteration": 0,
+      "matches": true,
+      "elapsed_s": 2.0507
+    },
+    {
+      "iteration": 1,
+      "matches": true,
+      "elapsed_s": 1.5258
+    },
+    {
+      "iteration": 2,
+      "matches": true,
+      "elapsed_s": 1.5488
+    },
+    {
+      "api_seed": "api-seed-v2\n",
+      "mounted_seed": "api-seed-v1\n"
+    }
+  ],
+  "after_normal_teardown": [
+    {
+      "key": "artifacts/rlstack-storage-probe-20260912T235948Z/publication-0.txt",
+      "matches": true
+    },
+    {
+      "key": "artifacts/rlstack-storage-probe-20260912T235948Z/publication-1.txt",
+      "matches": true
+    },
+    {
+      "key": "artifacts/rlstack-storage-probe-20260912T235948Z/publication-2.txt",
+      "matches": true
+    },
+    {
+      "key": "artifacts/rlstack-storage-probe-20260912T235948Z/publication-3.txt",
+      "matches": true
+    },
+    {
+      "key": "artifacts/rlstack-storage-probe-20260912T235948Z/publication-4.txt",
+      "matches": true
+    },
+    {
+      "key": "artifacts/rlstack-storage-probe-20260912T235948Z/publication-5.txt",
+      "matches": true
+    },
+    {
+      "key": "artifacts/rlstack-storage-probe-20260912T235948Z/publication-6.txt",
+      "matches": true
+    },
+    {
+      "key": "artifacts/rlstack-storage-probe-20260912T235948Z/publication-7.txt",
+      "matches": true
+    },
+    {
+      "key": "artifacts/rlstack-storage-probe-20260912T235948Z/seed.txt",
+      "matches": true
+    },
+    {
+      "key": "artifacts/rlstack-storage-probe-20260912T235948Z/api-loop.txt",
+      "matches": true
+    }
+  ],
+  "api_replacement": {
+    "file_bytes": 262144,
+    "writes": [
+      {
+        "i": 0,
+        "put_s": 1.1722,
+        "readback_matches": true
+      },
+      {
+        "i": 1,
+        "put_s": 0.6005,
+        "readback_matches": true
+      },
+      {
+        "i": 2,
+        "put_s": 0.5594,
+        "readback_matches": true
+      },
+      {
+        "i": 3,
+        "put_s": 1.0023,
+        "readback_matches": true
+      },
+      {
+        "i": 4,
+        "put_s": 0.565,
+        "readback_matches": true
+      },
+      {
+        "i": 5,
+        "put_s": 0.7487,
+        "readback_matches": true
+      },
+      {
+        "i": 6,
+        "put_s": 0.5806,
+        "readback_matches": true
+      },
+      {
+        "i": 7,
+        "put_s": 0.6006,
+        "readback_matches": true
+      }
+    ],
+    "reads": [
+      {
+        "length": 262144,
+        "complete_version": true,
+        "read_s": 0.7902
+      },
+      {
+        "length": 262144,
+        "complete_version": true,
+        "read_s": 0.8204
+      },
+      {
+        "length": 262144,
+        "complete_version": true,
+        "read_s": 0.6919
+      },
+      {
+        "length": 262144,
+        "complete_version": true,
+        "read_s": 0.5909
+      },
+      {
+        "length": 262144,
+        "complete_version": true,
+        "read_s": 0.9856
+      },
+      {
+        "length": 262144,
+        "complete_version": true,
+        "read_s": 1.0688
+      },
+      {
+        "length": 262144,
+        "complete_version": true,
+        "read_s": 1.0374
+      },
+      {
+        "length": 262144,
+        "complete_version": true,
+        "read_s": 1.0666
+      },
+      {
+        "length": 262144,
+        "complete_version": true,
+        "read_s": 0.7988
+      },
+      {
+        "length": 262144,
+        "complete_version": true,
+        "read_s": 0.9352
+      },
+      {
+        "length": 262144,
+        "complete_version": true,
+        "read_s": 1.1613
+      },
+      {
+        "length": 262144,
+        "complete_version": true,
+        "read_s": 0.6639
+      },
+      {
+        "length": 262144,
+        "complete_version": true,
+        "read_s": 1.0316
+      },
+      {
+        "length": 262144,
+        "complete_version": true,
+        "read_s": 1.0587
+      }
+    ],
+    "delete_then_get_not_found": true,
+    "scope": "one API writer and one API reader; no interrupted requests or crash injection"
+  },
+  "declared_run": "scratch-storage-probe-20260912",
+  "wandb_offline_directory": "/persist/session-XXXXXXXX/data/runs/00000000-0000-0000-0000-LEASE0000001/wandb/offline-run-20260913_001028-c4zdbaf3",
+  "lease_finish": "accepted, outcome state validated, lease status released",
+  "active_gpus_after_finish": 0,
+  "limits": [
+    "Only one GPU mount was used, plus independent API clients.",
+    "No abrupt crash, interrupted upload, delayed retry, or ownership handoff was injected.",
+    "A successful readback is not a formal provider atomicity or durability guarantee.",
+    "Replacement overlap checks used one API writer and one API reader; multiple mounted writers remain untested."
+  ]
+}

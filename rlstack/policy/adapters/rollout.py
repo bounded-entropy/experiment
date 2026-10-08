@@ -90,6 +90,11 @@ class Library:
         with self._lock:
             return name in self._held
 
+    def holds(self, name: str, digest: str) -> bool:
+        """`name` is held with exactly the bytes whose sha256 is `digest`."""
+        with self._lock:
+            return name in self._held and self._digest[name] == digest
+
     def names(self) -> tuple[str, ...]:
         """What is held right now, least recently used first."""
         with self._lock:
@@ -193,6 +198,19 @@ class ServingBuild:
         tenant from receiving another type's weights.
         """
         return next(self.lora_ids)
+
+    def decoder_prefix(self) -> str:
+        """Where the SERVED model keeps the decoder whose module paths a
+        payload's keys name. The trainer loads every base as a text causal LM
+        (`model.layers.<n>`); a checkpoint shipped as a vision-language
+        wrapper (Qwen3.5: a `text_config` beside a `vision_config`) is served
+        whole, and its server finds the decoder under `model.language_model.`
+        — so a payload's `model.` keys are rehomed there before the server
+        reads them (post 0010). Every other base is served as it trains."""
+        if (getattr(self.config, "text_config", None) is not None
+                and getattr(self.config, "vision_config", None) is not None):
+            return "model.language_model."
+        return "model."
 
     def slots(self) -> int:
         """THE SLOT BUDGET this build carries — ONE number for every adapter

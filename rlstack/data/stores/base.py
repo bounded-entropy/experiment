@@ -22,6 +22,10 @@ the reference):
                          <name>.promise        under the experiment's subdir;
                                                the meta seals it, the promise
                                                says which run will write it
+    runs/<subdir>/banks/<bank>/v<NNNNNN>.json  BANK VERSIONS (data/banks.py): an
+                                               append-only, write-once series;
+                                               version v names the named
+                                               adapters it ADDS to version v-1
     measurements/<run_id>/<name>/manifest.json observation OUTSIDE the run
                                  points.jsonl  (#70): not identity, not
                                                resume-equivalence, deletable —
@@ -184,6 +188,15 @@ def promises_key(subdir: str, writer: str) -> str:
     """The one file in which `writer` says every name it will write."""
     digest = hashlib.sha256(writer.encode("utf-8")).hexdigest()[:16]
     return f"runs/{check_subdir(subdir)}/names/{PROMISES_FOLDER}/{digest}.json"
+
+
+def bank_version_key(subdir: str, bank: str, version: int) -> str:
+    """Where version `version` of bank `bank` lives: beside the named adapters
+    it lists (runs/<subdir>/banks/<bank>/v<NNNNNN>.json). A bank is one
+    name segment."""
+    if not re.fullmatch(r"[A-Za-z0-9._-]+", bank) or bank in (".", ".."):
+        raise StoreError(f"bank name {bank!r} is not one plain name segment")
+    return f"runs/{check_subdir(subdir)}/banks/{bank}/v{version:06d}.json"
 
 
 def run_reference(run_id: str, subdir: str | None = None) -> str:
@@ -584,6 +597,53 @@ class Store(ABC):
         if not run_ended(self, writer):
             return PROMISED
         return PRESENT if self.named_meta(subdir, name) is not None else ORPHANED
+
+    # ---- bank versions (data/banks.py) ---------------------------------------
+    #
+    # runs/<subdir>/banks/<bank>/v<NNNNNN>.json. A version is WRITTEN ONCE,
+    # like a name: the same bytes again are a no-op (a publisher retrying
+    # after a crash), different bytes raise. Versions are dense from 1, so a
+    # reader folds 1..v and the newest is the highest file present.
+
+    def write_bank_version(self, subdir: str, bank: str, version: int,
+                           row: Mapping[str, Any]) -> None:
+        """WRITE-ONCE version `version` of `bank`; refuses a gap (version v
+        needs v-1) and a rewrite with different bytes."""
+        if not isinstance(version, int) or version < 1:
+            raise StoreError(f"bank version {version!r} is not a positive integer")
+        data = _canonical(dict(row)).encode("utf-8")
+        key = bank_version_key(subdir, bank, version)
+        try:
+            held = self._read(key)
+        except FileNotFoundError:
+            held = None
+        if held is not None:
+            if held != data:
+                raise StoreError(f"bank {bank!r} version {version} under {subdir!r} is "
+                                 f"already written with different content: a version is "
+                                 f"written once — publish the next one")
+            return
+        if version > 1 and version - 1 not in self.bank_versions(subdir, bank):
+            raise StoreError(f"bank {bank!r} has no version {version - 1}: versions are dense")
+        self._write(key, data)
+        self._persist()
+
+    def read_bank_version(self, subdir: str, bank: str, version: int) -> dict[str, Any] | None:
+        """Version `version`'s row, or None while it is not written."""
+        try:
+            return json.loads(self._read(bank_version_key(subdir, bank, version)).decode("utf-8"))
+        except FileNotFoundError:
+            return None
+
+    def bank_versions(self, subdir: str, bank: str) -> list[int]:
+        """Every written version of `bank`, ascending."""
+        folder = bank_version_key(subdir, bank, 1).rsplit("/", 1)[0] + "/"
+        found = []
+        for key in self._list(folder):
+            match = re.fullmatch(r"v(\d{6,})\.json", key.rsplit("/", 1)[-1])
+            if match:
+                found.append(int(match.group(1)))
+        return sorted(found)
 
     def describe(self) -> str:
         """Where this store's data lives, for journals and CLIs — a path,

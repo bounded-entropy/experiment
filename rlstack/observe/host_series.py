@@ -38,6 +38,12 @@ CLAIMED_FIELDS = {
     "detach": ("status", "completed", "extent", "updates_completed"),
     "first-contact": ("resident", "kind", "declared_gb", "devices",
                       "measured"),
+    "booking": ("resident", "kind", "declared_gb", "measured_gb", "devices",
+                "overrun"),
+    "replica-dead": ("pool", "replica", "keys", "error"),
+    "replica-revived": ("pool", "replica", "attempts", "seconds"),
+    "replica-revive-failed": ("pool", "replica", "attempt", "error"),
+    "replica-revive-abandoned": ("pool", "replica", "seconds"),
     "stalled": ("resident", "kind", "pid", "silent_s", "bound_s"),
     "meter-silent": ("requests_served", "served_before", "window_s"),
     "stats": ("gpus",),
@@ -54,6 +60,9 @@ ALWAYS_CLAIMED = ("event", "t", "run_id")
 TRAFFIC_RATES = (("prefill_tok_s", "prefill_tokens"),
                  ("decode_tok_s", "decode_tokens"),
                  ("requests_s", "requests"))
+# `traffic.cached_tokens` (ADR 0022: prefill the prefix cache already held,
+# the cache-hit rate's numerator) is deliberately UNCLAIMED: it reaches the
+# page through the open slot, and the six channels stay the UI's contract
 TRAFFIC_LEVELS = (("ttft_ms", "ttft_ms_mean"),
                   ("admit_wait_ms", "admit_wait_ms_mean"),
                   ("inflight", "inflight"))
@@ -124,6 +133,7 @@ def host_series(roots: Sequence[Store | Root], host: str,
         "first_seen": events[0].get("t"),
         "last_seen": events[-1].get("t"),
         "tenancy": lanes_overlapping(tenancy_lanes(events), since),
+        "bookings": bookings(events),
         "gpus": gpu_channels(recent),
         "metrics": metric_series(recent),
     }
@@ -140,6 +150,25 @@ def boot_facts(events: Sequence[dict]) -> list[dict]:
              "residents": list(event.get("residents", [])),
              "store": event.get("store")}
             for event in events if event.get("event") == "host-up"]
+
+
+def bookings(events: Sequence[dict]) -> list[dict]:
+    """MEASURED NEXT TO DECLARED, per resident (ADR 0022): the latest
+    `booking` row of each — its peak GB per device beside the GB its
+    partition was declared at — with `warning` set where the peak overran
+    the booking. The page's warning is this; nothing here refuses."""
+    latest: dict[str, dict] = {}
+    for event in events:
+        if event.get("event") == "booking":
+            latest[event.get("resident", "")] = event
+    return [{"resident": label, "kind": row.get("kind"),
+             "declared_gb": row.get("declared_gb"),
+             "measured_gb": row.get("measured_gb"),
+             "devices": row.get("devices", {}), "t": row.get("t"),
+             "warning": (f"{label} measured {row.get('measured_gb')} GB on one "
+                         f"device against a booking of {row.get('declared_gb')} GB"
+                         if row.get("overrun") else None)}
+            for label, row in sorted(latest.items())]
 
 
 def tenancy_lanes(events: Sequence[dict]) -> list[dict]:

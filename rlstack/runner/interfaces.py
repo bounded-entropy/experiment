@@ -213,6 +213,11 @@ class Engine(Protocol):
         at the request."""
         ...
 
+    def holds_library(self, name: str, digest: str) -> bool:
+        """Is `name` held right now, with the bytes whose sha256 is `digest`?
+        What a proxy asks before sending a payload the engine likely holds."""
+        ...
+
     def knows_bundle(self, bundle_id: str) -> bool:
         """Is this bundle resident on this engine right now?
 
@@ -267,6 +272,12 @@ class Learner(Protocol):
     parameters shard. A build fact (#43), attested at submit against the
     LearnerMember's declared fsdp (learner-shape-mismatch); 1 = unsharded."""
 
+    dp: int
+    """Data-parallel groups of this BUILD (ADR 0022): `accumulate` splits an
+    update's microbatches across `dp` groups of `fsdp` ranks each, and sums
+    their gradients in microbatch order. A build fact attested like fsdp;
+    1 = every microbatch on one group."""
+
     def install(self, tenant: str, parameterization: Parameterization) -> None:
         """Phase 1: build `tenant`'s trainable parameterization for every bank
         entry. Additive across tenants; rebuilding a tenant resets its state.
@@ -285,6 +296,16 @@ class Learner(Protocol):
     def forward_backward(self, tenant: str, batch: TokenBatch) -> TrainStats:
         """One microbatch under `tenant`'s adapters: trainer-kernel forward,
         loss, backward. Grads accumulate on that tenant's params."""
+        ...
+
+    def accumulate(self, tenant: str,
+                   batches: Sequence[TokenBatch]) -> tuple[TrainStats, ...]:
+        """EVERY MICROBATCH OF ONE UPDATE, forward and backward (ADR 0022):
+        gradients accumulate on `tenant`'s params as if `forward_backward`
+        had run on each batch IN ORDER — the same bytes at any `dp` — and
+        one TrainStats comes back per batch, in order. The verb the Trainer
+        issues once per update, so a dp learner can split the batches across
+        its groups; at dp=1 it IS that loop."""
         ...
 
     def forward(self, tenant: str, batch: TokenBatch) -> tuple[float, ...]:

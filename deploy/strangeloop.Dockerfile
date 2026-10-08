@@ -4,7 +4,11 @@ COPY --from=ghcr.io/astral-sh/uv:0.12.13 /uv /usr/local/bin/uv
 ENV UV_NO_CACHE=1
 RUN uv python install 3.12 && uv venv --python 3.12 /opt/rlstack
 RUN uv pip install --python /opt/rlstack/bin/python vllm==0.28.0 torch==2.13.0 transformers==5.16.1 safetensors numpy wandb jinja2
-RUN /opt/rlstack/bin/python -c "import torch, transformers, safetensors, numpy, wandb, jinja2; print(torch.__version__, transformers.__version__)"
+# flash-linear-attention: the learner's Triton kernels for Qwen3.5's gated-DeltaNet layers.
+# Without it transformers falls back to a Python loop over 64-token chunks, which a
+# 65k-token dreamer prompt cannot afford (post 0010). Pure Triton, nothing compiles here.
+RUN uv pip install --python /opt/rlstack/bin/python flash-linear-attention
+RUN /opt/rlstack/bin/python -c "import torch, transformers, safetensors, numpy, wandb, jinja2, fla; print(torch.__version__, transformers.__version__, fla.__version__)"
 ENV VLLM_USE_FLASHINFER_SAMPLER=0
 ENV VLLM_WORKER_MULTIPROC_METHOD=spawn
 ENV OMP_NUM_THREADS=1

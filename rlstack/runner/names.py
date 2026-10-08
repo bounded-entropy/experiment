@@ -83,17 +83,21 @@ def wave_lib_names(entry: Waves, tasks: Mapping[str, Task] | None = None) -> tup
     """The library names ONE PLANNED WAVE mentions: every leaf's role, and —
     for a Sample leaf whose task is known — the task's `meta["route"]`, which
     is what an answering environment samples under (an `eval` answer under a
-    library set can say so nowhere else: its role is taken). A WaveRef
-    mentions none; the wave it names carries its routes in its rows."""
+    library set can say so nowhere else: its role is taken), and its
+    `meta["tool_route"]`, what an episode's tool calls sample under (post
+    0010: `ask_memory` answers under the memory the dreamer never carries).
+    A WaveRef mentions none; the wave it names carries its routes in its
+    rows."""
     if not isinstance(entry, WavePlan):
         return ()
     said: list[str] = []
     for leaf in entry.leaves():
         said.append(leaf.role)
         if isinstance(leaf, Sample) and tasks is not None and leaf.task_id in tasks:
-            route = tasks[leaf.task_id].meta.get("route")
-            if route is not None:
-                said.append(str(route))
+            for key in ("route", "tool_route"):
+                route = tasks[leaf.task_id].meta.get(key)
+                if route is not None:
+                    said.append(str(route))
     return lib_names(said)
 
 

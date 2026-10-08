@@ -173,6 +173,9 @@ class FakeEngine:
     def add_library(self, name: str, payload: bytes) -> None:
         self.library.add(name, payload)
 
+    def holds_library(self, name: str, digest: str) -> bool:
+        return self.library.holds(name, digest)
+
     def library_read(self, directives: Sequence[Directive]) -> dict[str, str]:
         """Every library adapter this request's route reads, by name, as the
         content hash of its payload — or the Library's refusal of a name
@@ -431,8 +434,11 @@ class FakeLearner:
     """
 
     def __init__(self, fsdp: int = 1, sleeps: bool = False,
-                 sleep_refusal: str = "") -> None:
+                 sleep_refusal: str = "", dp: int = 1) -> None:
         self.fsdp = fsdp            # build fact: a fake 2-shard learner is fsdp=2
+        # build fact (ADR 0022): a fake dp=2 learner splits an update's
+        # microbatches across two groups — see `accumulate`
+        self.dp = dp
         self.sleeps = sleeps        # build fact: see FakeEngine.sleeps
         # and why not, when not: the real sharded learner's is a fact about
         # its torch (fsdp_torch.probe_sharded_sleep), so a fake carries the
@@ -505,13 +511,46 @@ class FakeLearner:
     def forward_backward(self, tenant: str, batch: TokenBatch) -> TrainStats:
         state = self._tenant(tenant)
         self.forwards += 1
-        state.state = content_hash({
-            "state": state.state,
-            "ids": batch.token_ids,
-            "mask": batch.loss_mask,
-            "post": {k: batch.postdata[k] for k in sorted(batch.postdata)},
-            "blp": batch.behavior_logprobs,
-        })
+        return self.reduce_into(state, batch, self.gradient_of(batch))
+
+    def accumulate(self, tenant: str,
+                   batches: Sequence[TokenBatch]) -> tuple[TrainStats, ...]:
+        """EVERY MICROBATCH OF ONE UPDATE (ADR 0022), across `dp` groups.
+
+        At dp=1 this is `forward_backward` per microbatch, in order — exactly
+        the loop the Trainer always ran, overrides included. At dp=K the fake
+        keeps the real learner's choreography: microbatch i goes to group
+        i % K, each group computes its microbatches' "gradients" on its own
+        (a gradient is a function of the batch and of the params at the start
+        of the step, never of a neighbour microbatch), and the reduction
+        folds them into the state IN MICROBATCH ORDER — which is what makes
+        dp=K emit exactly dp=1's bytes."""
+        if self.dp == 1:
+            return tuple(self.forward_backward(tenant, batch) for batch in batches)
+        state = self._tenant(tenant)
+        groups = [[i for i in range(len(batches)) if i % self.dp == group]
+                  for group in range(self.dp)]
+        gradients: dict[int, dict] = {}
+        for members in groups:              # the dp groups, each on its own
+            for i in members:
+                self.forwards += 1
+                gradients[i] = self.gradient_of(batches[i])
+        return tuple(self.reduce_into(state, batches[i], gradients[i])
+                     for i in range(len(batches)))
+
+    @staticmethod
+    def gradient_of(batch: TokenBatch) -> dict:
+        """One microbatch's contribution, from the batch alone: the fake's
+        gradient."""
+        return {"ids": batch.token_ids, "mask": batch.loss_mask,
+                "post": {k: batch.postdata[k] for k in sorted(batch.postdata)},
+                "blp": batch.behavior_logprobs}
+
+    def reduce_into(self, state: _FakeTenant, batch: TokenBatch,
+                    gradient: dict) -> TrainStats:
+        """One microbatch's gradient folded into the tenant's digest — the
+        order of these calls IS the summation order — and its stats."""
+        state.state = content_hash({"state": state.state, **gradient})
         self.fold_documents_into_their_sets(state, batch)
         return TrainStats(
             loss=int(state.state[:8], 16) / 16 ** 8,

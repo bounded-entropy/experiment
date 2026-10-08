@@ -23,6 +23,8 @@ from rlstack.runner.venues.modal.desk import desk_class
 from rlstack.runner.venues.modal.provider import ModalProvider, terminate_container
 from rlstack.runner.venues.modal.worker import metal_class
 from rlstack.runner.venues.runtime import DeskRuntime, MetalRuntime
+from rlstack.runner.venues.runpod import worker as runpod_worker
+from rlstack.runner.venues.runpod.provider import MetalConfig as RunPodMetal
 from rlstack.runner.venues.strangeloop import worker
 from rlstack.runner.transports.http import HttpServer, HttpTransport
 from rlstack.spec.canonical import canonical_json
@@ -125,6 +127,50 @@ class ProviderParityTests(unittest.IsolatedAsyncioTestCase):
                 client = HttpTransport(servers[0].endpoint)
                 self.assertEqual((await client.ask("describe", {}))["epoch"], runtime.service.epoch)
                 self.assertTrue(self.store.verified)
+                await client.call("release", {})
+                await asyncio.wait_for(process, 3)
+                self.assertTrue(runtime.service.released.is_set())
+                self.assertTrue(all(task.done() for task in runtime.tasks))
+            finally:
+                process.cancel()
+                await asyncio.gather(process, return_exceptions=True)
+
+    async def test_runpod_worker_registers_routes_and_shuts_down_same_runtime(self):
+        runtimes, servers = [], []
+        measured = MetalRuntime.measured
+
+        def capture_runtime(*args, **kwargs):
+            runtime = measured(*args, **kwargs)
+            runtimes.append(runtime)
+            return runtime
+
+        def capture_server(*args, **kwargs):
+            server = HttpServer(*args, **kwargs)
+            servers.append(server)
+            return server
+
+        config = runpod_worker.WorkerConfig(
+            RunPodMetal("card", "http://card-pod.runpod.internal:8000", idle_s=90),
+            self.store.root, "http://desk-pod.runpod.internal:18760", 0, "allocation-1",
+            host="127.0.0.1")
+        with ExitStack() as patches:
+            patches.enter_context(patch.object(MetalService, "measure", return_value=Metal("card", "L4", 1, 24)))
+            patches.enter_context(patch.object(MetalRuntime, "measured", side_effect=capture_runtime))
+            patches.enter_context(patch.object(runpod_worker, "health", return_value=True))
+            patches.enter_context(patch.object(runpod_worker, "LocalStore", return_value=self.store))
+            patches.enter_context(patch.object(runpod_worker, "RemoteDesk", return_value=self.remote))
+            patches.enter_context(patch.object(runpod_worker, "transport_for", return_value=None))
+            patches.enter_context(patch("rlstack.runner.transports.http.HttpServer", side_effect=capture_server))
+            patches.enter_context(patch.object(asyncio.get_running_loop(), "add_signal_handler"))
+            patches.enter_context(patch.dict(os.environ))
+            process = asyncio.create_task(runpod_worker.run(config, ""))
+            try:
+                await eventually(lambda: bool(runtimes) and runtimes[0].started)
+                runtime = runtimes[0]
+                await self.assert_registered(runtime)
+                self.assertEqual(self.desk.desk.metal_addresses["card"], "http://card-pod.runpod.internal:8000")
+                client = HttpTransport(servers[0].endpoint)
+                self.assertEqual((await client.ask("describe", {}))["epoch"], runtime.service.epoch)
                 await client.call("release", {})
                 await asyncio.wait_for(process, 3)
                 self.assertTrue(runtime.service.released.is_set())

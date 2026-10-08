@@ -52,9 +52,11 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import hashlib
 import json
 import threading
 import time
+from collections import OrderedDict
 from collections.abc import AsyncIterator, Mapping, Sequence
 from dataclasses import asdict, dataclass
 from typing import TYPE_CHECKING, Protocol
@@ -249,8 +251,9 @@ def _decode_dataclass(tree: dict) -> object:
 def spec_from_json(row: Mapping | str) -> object:
     """An ExperimentSpec (or any spec value) back from its canonical form —
     what the adoption door decodes. Roundtrip law, pinned by test:
-    spec_from_json(json.loads(canonical_json(spec))) == spec, and therefore
-    the two hash to one identity."""
+    spec_from_json(json.loads(wire_json(spec))) == spec, and therefore the
+    two hash to one identity. The identity form (`canonical_json`) drops the
+    RESOURCE fields (ADR 0022), so it decodes to the spec at width 1."""
     tree = json.loads(row) if isinstance(row, str) else dict(row)
     return from_canonical(tree)
 
@@ -341,6 +344,45 @@ def encode_named_payload(payload: bytes | None) -> str | None:
 
 def decode_named_payload(text: str | None) -> bytes | None:
     return None if text is None else _unb64(text)
+
+
+PAYLOADS_HELD = 4
+"""How many recent `load_set` payloads a learner's door keeps, by digest."""
+
+
+def payload_digest(payload: bytes) -> str:
+    return hashlib.sha256(payload).hexdigest()
+
+
+class HeldPayloads:
+    """THE SAME BYTES CROSS ONCE. A learner's door keeps the last few
+    `load_set` payloads by content digest, so a caller loading one payload
+    into K sets (the fit client's K forks of one memory: 145 MB each on a
+    4B, base64 in JSON) sends it once and names it K-1 times. A miss — the
+    door evicted it, or is a new process — is answered `missing`, never
+    guessed, and the caller sends the bytes. Bounded, least recently used
+    out first; a cache of what was SENT, so correctness never reads it."""
+
+    def __init__(self, bound: int = PAYLOADS_HELD) -> None:
+        self.bound = bound
+        self._held: OrderedDict[str, bytes] = OrderedDict()
+        self._lock = threading.Lock()
+
+    def put(self, digest: str, payload: bytes) -> None:
+        if payload_digest(payload) != digest:
+            raise ValueError("load_set payload does not match its digest")
+        with self._lock:
+            self._held[digest] = payload
+            self._held.move_to_end(digest)
+            while len(self._held) > self.bound:
+                self._held.popitem(last=False)
+
+    def get(self, digest: str) -> bytes | None:
+        with self._lock:
+            payload = self._held.get(digest)
+            if payload is not None:
+                self._held.move_to_end(digest)
+            return payload
 
 
 def encode_parameterization(p: Parameterization) -> dict:
@@ -547,6 +589,14 @@ class WrongEpoch(RuntimeError):
     successor."""
 
 
+class HostGone(RuntimeError):
+    """No host answers at this address any more: it was decarved — its
+    resident died, it was reaped, or its metal released it (ADR 0022). Named
+    apart from every other refusal because a POOL treats it as a replica
+    death — the request is retried on a survivor and the replica revived —
+    where any other refusal is the request's own failure."""
+
+
 def stamped(payload: Mapping, epoch: str) -> dict:
     """`payload` addressed to one instance — what every transport built from
     an `@epoch` address sends. An epoch-free transport stamps nothing, which
@@ -574,7 +624,8 @@ def check_epoch(payload: Mapping, mine: str, who: str) -> None:
         f"on its next registration)")
 
 
-LEARNER_VERBS = ("install", "uninstall", "forward_backward", "optim_step",
+LEARNER_VERBS = ("install", "uninstall", "forward_backward", "accumulate",
+                 "optim_step",
                  "emit", "load", "learner_tokenize",
                  "forward", "load_set", "drop_set", "emit_set")
 """The Learner protocol as frames — the whole of what crosses a host door to
@@ -595,6 +646,7 @@ class HostService:
     def __init__(self, host: Host) -> None:
         self.host = host
         self._learner_lock = asyncio.Lock()
+        self._learner_service: LearnerService | None = None
         self._learner_calls: set[asyncio.Task] = set()
         self._engine_calls: set[asyncio.Task] = set()
         self._closing = False
@@ -761,10 +813,17 @@ class HostService:
                 self.check_open()
                 started.set()
                 reply = await asyncio.to_thread(
-                    LearnerService(learner).answer, verb, payload)
+                    self.learner_service(learner).answer, verb, payload)
                 await asyncio.to_thread(
                     self.journal_custody, verb, payload["tenant"])
                 return reply
+
+    def learner_service(self, learner: Learner) -> LearnerService:
+        """One LearnerService per learner this door serves, kept: it holds
+        the recent load_set payloads (HeldPayloads) between frames."""
+        if self._learner_service is None or self._learner_service.learner is not learner:
+            self._learner_service = LearnerService(learner)
+        return self._learner_service
 
     def learner_call_finished(self, call: asyncio.Task) -> None:
         """Retain in-flight custody and report failures after a caller leaves."""
@@ -863,8 +922,14 @@ class EngineService:
             self.engine.add_bundle(decode_bundle(payload["bundle"]))
             return {}
         if verb == "add_library":
+            if payload.get("payload") is None:
+                # the digest alone (RemotePool.add_library): held, or missing
+                held = self.engine.holds_library(payload["name"], payload["digest"])
+                return {} if held else {"missing": True}
             self.engine.add_library(payload["name"], _unb64(payload["payload"]))
             return {}
+        if verb == "holds_library":
+            return {"held": self.engine.holds_library(payload["name"], payload["digest"])}
         if verb == "knows_bundle":
             return {"known": self.engine.knows_bundle(payload["bundle_id"])}
         if verb == "reachability":
@@ -899,6 +964,7 @@ class LearnerService:
 
     def __init__(self, learner: Learner) -> None:
         self.learner = learner
+        self.held = HeldPayloads()
 
     async def serve(self, verb: str, payload: dict) -> dict:
         raise ValueError(
@@ -921,6 +987,11 @@ class LearnerService:
         if verb == "forward_backward":
             return encode_train_stats(self.learner.forward_backward(
                 tenant, decode_token_batch(payload["batch"])))
+        if verb == "accumulate":
+            return {"stats": [encode_train_stats(stats) for stats in
+                              self.learner.accumulate(tenant, [
+                                  decode_token_batch(batch)
+                                  for batch in payload["batches"]])]}
         if verb == "optim_step":
             # a frame from before lr_scales existed carries none: a plain step
             self.learner.optim_step(tenant, payload.get("lr_scales"))
@@ -935,8 +1006,16 @@ class LearnerService:
             return {"nll": list(self.learner.forward(
                 tenant, decode_token_batch(payload["batch"])))}
         if verb == "load_set":
-            self.learner.load_set(tenant, payload["entry"], payload["route"],
-                                  decode_named_payload(payload["payload"]))
+            named = decode_named_payload(payload["payload"])
+            digest = payload.get("digest")
+            if digest is not None:
+                if named is not None:
+                    self.held.put(digest, named)
+                else:
+                    named = self.held.get(digest)
+                    if named is None:
+                        return {"missing": True}
+            self.learner.load_set(tenant, payload["entry"], payload["route"], named)
             return {}
         if verb == "drop_set":
             self.learner.drop_set(tenant, payload["entry"], payload["route"])
@@ -1206,6 +1285,9 @@ class RemotePool:
         self.deadline_s = deadline_s
         self.meter = TrafficMeter()
         self._transport = transport
+        # (name, digest) pairs this proxy handed over: a hint, never a
+        # promise — the engine answers `missing` when it no longer holds one
+        self._libraries_sent: set[tuple[str, str]] = set()
 
     def _address(self) -> dict:
         return {"base": self.base, "tp": self.tp}
@@ -1247,9 +1329,21 @@ class RemotePool:
     def add_library(self, name: str, payload: bytes) -> None:
         """Admission-free and additive, as add_bundle is, and the bytes cross
         the same way (base64): the role read the store, the engine never
-        does (ADR 0019, Q2)."""
-        self._asked("add_library", {
-            **self._address(), "name": name, "payload": _b64(payload)})
+        does (ADR 0019, Q2). A name this proxy handed over before crosses as
+        its digest first — the generator restates every library every wave,
+        and the engine usually still holds it — and the bytes follow only
+        when the engine says `missing` (evicted, or a new process)."""
+        digest = payload_digest(payload)
+        frame = {**self._address(), "name": name, "digest": digest}
+        if (name, digest) in self._libraries_sent:
+            if not self._asked("add_library", {**frame, "payload": None}).get("missing"):
+                return
+        self._asked("add_library", {**frame, "payload": _b64(payload)})
+        self._libraries_sent.add((name, digest))
+
+    def holds_library(self, name: str, digest: str) -> bool:
+        return bool(self._asked("holds_library", {
+            **self._address(), "name": name, "digest": digest})["held"])
 
     def knows_bundle(self, bundle_id: str) -> bool:
         """Admission-free, like the registration it guards: asking what a pool
@@ -1309,8 +1403,9 @@ class RemoteLearner:
 
     def __init__(self, transport: Transport, *, fsdp: int = 1,
                  admitted: bool = False,
-                 deadline_s: float = BUILD_DEADLINE_S) -> None:
+                 deadline_s: float = BUILD_DEADLINE_S, dp: int = 1) -> None:
         self.fsdp = fsdp
+        self.dp = dp
         self.admitted = admitted
         # THE BOUND ON A LEARNER FRAME (ADR 0008, F3): a 32B's install and one
         # microbatch's forward are both minutes, so the bound is the build's
@@ -1319,6 +1414,9 @@ class RemoteLearner:
         self.deadline_s = deadline_s
         self._transport = transport
         self._frames: asyncio.AbstractEventLoop | None = None
+        # digests of load_set payloads this proxy has SENT (HeldPayloads):
+        # a hint, never a promise — the door answers `missing` when wrong
+        self._sent: OrderedDict[str, None] = OrderedDict()
 
     # ---- the two doors, one named method each -------------------------------
 
@@ -1387,6 +1485,15 @@ class RemoteLearner:
         return decode_train_stats(self.frame("forward_backward", {
             "tenant": tenant, "batch": encode_token_batch(batch)}))
 
+    def accumulate(self, tenant: str,
+                   batches: Sequence[TokenBatch]) -> tuple[TrainStats, ...]:
+        """An update's microbatches in ONE frame (ADR 0022), so a dp learner
+        on the far side can split them across its groups."""
+        reply = self.frame("accumulate", {
+            "tenant": tenant,
+            "batches": [encode_token_batch(batch) for batch in batches]})
+        return tuple(decode_train_stats(row) for row in reply["stats"])
+
     def optim_step(self, tenant: str,
                    lr_scales: Mapping[str, float] | None = None) -> None:
         self.frame("optim_step", {
@@ -1413,9 +1520,23 @@ class RemoteLearner:
 
     def load_set(self, tenant: str, entry: str, route: str,
                  payload: bytes | None) -> None:
-        self.frame("load_set", {
-            "tenant": tenant, "entry": entry, "route": route,
-            "payload": encode_named_payload(payload)})
+        """A payload this proxy sent recently crosses as its digest alone
+        (HeldPayloads); a door that no longer holds it says `missing`, and
+        the bytes follow."""
+        frame = {"tenant": tenant, "entry": entry, "route": route, "payload": None}
+        if payload is None:
+            self.frame("load_set", frame)
+            return
+        digest = payload_digest(payload)
+        if digest in self._sent:
+            self._sent.move_to_end(digest)
+            if not self.frame("load_set", {**frame, "digest": digest}).get("missing"):
+                return
+        self.frame("load_set", {**frame, "digest": digest,
+                                "payload": encode_named_payload(payload)})
+        self._sent[digest] = None
+        while len(self._sent) > PAYLOADS_HELD:
+            self._sent.popitem(last=False)
 
     def drop_set(self, tenant: str, entry: str, route: str) -> None:
         self.frame("drop_set", {"tenant": tenant, "entry": entry, "route": route})
@@ -1450,12 +1571,12 @@ class RemoteHost:
         relaying a client's frame with the CLIENT's claimed hashes).
         `checkpointing` is the frame's row (ADR 0014), relayed blind; the host
         refuses an adoption that carries none."""
-        from rlstack.spec.canonical import canonical_json
+        from rlstack.spec.canonical import wire_json
 
         if isinstance(spec, Mapping):
             row = dict(spec)
         else:
-            row = json.loads(canonical_json(spec))
+            row = json.loads(wire_json(spec))
             if code is None:
                 from rlstack.registry import code_hashes
                 code = code_hashes(spec)
@@ -1587,6 +1708,16 @@ class RemoteDesk:
         return await self._transport.call("place",
                                           {"demands": demand_rows(demands)})
 
+    async def place_replica(self, run_id: str, row: Mapping,
+                            deadline_s: float = BUILD_DEADLINE_S) -> dict:
+        """One replica of a running run's pool re-placed (ADR 0022): the
+        pool's reviver asks with the replica's demand row and gets the new
+        host's address — or the boot instructions when nothing can hold it.
+        A carve builds, so it takes the build deadline."""
+        return await self._transport.call(
+            "place-replica", {"run_id": run_id, "demand": dict(row)},
+            deadline_s=deadline_s)
+
     async def status(self, deadline_s: float = DEADLINE_S) -> dict:
         return await self._transport.ask("status", {}, deadline_s=deadline_s)
 
@@ -1627,8 +1758,7 @@ class RemoteDesk:
             "host": name, "address": address, "solo": solo,
             "partition": dict(partition) if partition else None,
             "metal": metal, "epoch": epoch,
-            "regimes": [{"name": r.name, "capability": r.capability,
-                         "base": r.base, "shape": r.shape} for r in regimes]})
+            "regimes": [r.row() for r in regimes]})
 
     async def delist(self, name: str, reason: str = "") -> dict:
         """The listing's retirement, over the same wire it entered by —

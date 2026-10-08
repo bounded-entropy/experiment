@@ -15,6 +15,7 @@ Qwen3-0.6B, a real HF forward) is deploy/batch_parity.py.
 from __future__ import annotations
 
 import unittest
+import unittest.mock
 
 from rlstack.policy.siteschema import SiteMeta
 
@@ -234,14 +235,50 @@ class _ToyLM(torch.nn.Module if torch is not None else object):
                                                 bias=False)
         self.head = torch.nn.Linear(width, vocab, bias=False)
 
-    def forward(self, input_ids, attention_mask=None, use_cache=None):
+    def forward(self, input_ids, attention_mask=None, use_cache=None,
+                logits_to_keep=0):
         h = self.embed(input_ids)
         causal = torch.triu(torch.ones(h.shape[1], h.shape[1],
                                        dtype=torch.bool), diagonal=1)
         pad = None if attention_mask is None else attention_mask == 0
         out, _ = self.attn(h, h, h, attn_mask=causal,
                            key_padding_mask=pad, need_weights=False)
-        return _Logits(self.head(h + out))
+        # HF's semantics: keep the LAST logits_to_keep positions, 0 = all
+        return _Logits(self.head((h + out)[:, -logits_to_keep:]))
+
+
+class _Hidden:
+    def __init__(self, hidden) -> None:
+        self.last_hidden_state = hidden
+
+
+class _ToyTrunk(torch.nn.Module if torch is not None else object):
+    def __init__(self, toy) -> None:
+        super().__init__()
+        self.toy = toy
+
+    def forward(self, input_ids, attention_mask=None, use_cache=None):
+        h = self.toy.embed(input_ids)
+        causal = torch.triu(torch.ones(h.shape[1], h.shape[1], dtype=torch.bool), diagonal=1)
+        pad = None if attention_mask is None else attention_mask == 0
+        out, _ = self.toy.attn(h, h, h, attn_mask=causal, key_padding_mask=pad, need_weights=False)
+        return _Hidden(h + out)
+
+
+class _ToyHF(torch.nn.Module if torch is not None else object):
+    """The toy as a Hugging Face causal LM: a `model` trunk that returns the
+    final hidden state and `get_output_embeddings()`, the projection."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.toy = _ToyLM()
+        self.model = _ToyTrunk(self.toy)
+
+    def get_output_embeddings(self):
+        return self.toy.head
+
+    def forward(self, input_ids, attention_mask=None, use_cache=None, logits_to_keep=0):
+        return self.toy(input_ids, attention_mask, use_cache, logits_to_keep)
 
 
 @needs_torch
@@ -281,6 +318,27 @@ class PaddedForwardTest(unittest.TestCase):
 
         return self.learner._batched_logprobs(batch, _doc_spans(batch))
 
+    def test_the_hidden_state_path_matches_the_logits_path_values_and_grads(self) -> None:
+        """post 0011: an HF-shaped model is projected to the vocabulary
+        chunk by chunk from its hidden state; same numbers and gradients as
+        the logits path on the same weights."""
+        from rlstack.runner.learners import torch_learner
+
+        ids = [[3, 1, 4, 1, 5, 9, 2, 6], [9, 2], [6, 5, 3, 5]]
+        hf = _ToyHF()
+        self.learner._model = hf
+        with unittest.mock.patch.object(torch_learner, "LOGPROB_CHUNK", 3):
+            through_hidden = self.batched(ids)
+        through_hidden.sum().backward()
+        hidden_grad = hf.toy.head.weight.grad.clone()
+        hf.toy.head.weight.grad = None
+        self.learner._model = hf.toy                                  # same weights, logits path
+        through_logits = self.batched(ids)
+        through_logits.sum().backward()
+        self.assertTrue(torch.allclose(through_hidden, through_logits, atol=1e-5))
+        self.assertTrue(torch.allclose(hidden_grad, hf.toy.head.weight.grad, atol=1e-5))
+        self.assertTrue(torch.allclose(through_hidden, self.per_doc(ids), atol=1e-5))
+
     def test_ragged_documents_match_the_per_doc_forward(self) -> None:
         ids = [[3, 1, 4, 1, 5], [9, 2], [6, 5, 3, 5]]
         self.assertTrue(torch.allclose(self.batched(ids), self.per_doc(ids),
@@ -290,6 +348,28 @@ class PaddedForwardTest(unittest.TestCase):
         ids = [[3, 1, 4], [9, 2, 6]]
         self.assertTrue(torch.allclose(self.batched(ids), self.per_doc(ids),
                                        atol=1e-5))
+
+    def test_an_unscored_prompt_needs_no_logits_and_moves_no_scored_number(self) -> None:
+        """post 0010: positions before every row's first scored token are not
+        projected to the vocabulary; the scored positions read the same
+        numbers as the full forward, and the skipped ones read 0.0."""
+        from rlstack.data.flatten import TokenBatch
+        from rlstack.runner.learners.torch_learner import _doc_spans, unscored_prefix
+
+        ids = [[3, 1, 4, 1, 5, 9], [2, 6, 5, 3]]
+        masks = [[0, 0, 0, 1, 1, 1], [0, 0, 1, 1]]
+        flat = [t for doc in ids for t in doc]
+        batch = TokenBatch(token_ids=tuple(flat),
+                           loss_mask=tuple(b for m in masks for b in m),
+                           behavior_logprobs=(0.0,) * len(flat),
+                           segment_ids=(0,) * len(flat), doc_starts=(0, 6))
+        spans = _doc_spans(batch)
+        self.assertEqual(unscored_prefix(batch, spans), 1)   # row 2 scores from index 2
+        got = self.learner._batched_logprobs(batch, spans).detach()
+        full = self.per_doc(ids)
+        scored = torch.tensor(batch.loss_mask, dtype=torch.bool)
+        self.assertTrue(torch.allclose(got[scored], full[scored], atol=1e-5))
+        self.assertEqual(float(got[1]), 0.0)                 # a skipped position
 
     def test_a_one_token_document_scores_zero(self) -> None:
         """Position 0 has no prefix; flatten guarantees it is never trainable."""

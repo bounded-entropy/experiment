@@ -68,7 +68,8 @@ from rlstack.data.trajectory import wave_from_rows
 from rlstack.policy.compile import compile_bundle
 from rlstack.registry import ADAPTER_TYPES
 from rlstack.runner.arbiter import Arbiter
-from rlstack.runner.interfaces import Emitted, Engine, Learner, TrainStats
+from rlstack.runner.interfaces import Emitted, Learner, TrainStats
+from rlstack.runner.pool import Pool
 from rlstack.runner.meters import HostJournal, UpdateClock
 from rlstack.runner.names import (
     LIB_PREFIX, check_plan_names, names_ready, names_subdir, row_lib_names,
@@ -90,7 +91,7 @@ class Trainer(Runner):
                  learner: Learner, tenant: str,
                  initial_version: dict[str, int],
                  checkpointing: Checkpointing,
-                 pools: Mapping[str, Engine] | None = None,
+                 pools: Mapping[str, Pool] | None = None,
                  stop: StopRequest | None = None,
                  journal: HostJournal | None = None,
                  retention: RetentionPolicy = DEFAULT_RETENTION,
@@ -253,9 +254,12 @@ class Trainer(Runner):
                 # dispatching: the pool's other tenants sample through a
                 # train step, and a learner across the wire cannot park the
                 # host that is waiting on it (check_off_loop)
-                for batch in pack(docs, self.schedule.microbatch_tokens):
-                    stats.append(await asyncio.to_thread(
-                        self.learner.forward_backward, self.tenant, batch))
+                # ONE VERB PER UPDATE (ADR 0022): a dp learner splits the
+                # microbatches across its groups and sums their gradients in
+                # microbatch order, so the step is the same bytes at any dp
+                stats.extend(await asyncio.to_thread(
+                    self.learner.accumulate, self.tenant,
+                    list(pack(docs, self.schedule.microbatch_tokens))))
                 await asyncio.to_thread(self.learner.optim_step, self.tenant)
                 emitted = await asyncio.to_thread(self.learner.emit, self.tenant)
                 if self.loaded_libraries:
@@ -334,9 +338,14 @@ class Trainer(Runner):
         at once — over whatever transport each pool's proxy speaks (local,
         pipe, Modal, HTTP). Asked from a thread: the pool may be another
         container and the attach is its wait. Under `store` delivery, or in a
-        run with no serving pool, there is nothing here to do."""
+        run with no serving pool, there is nothing here to do.
+
+        EVERY LIVE REPLICA of each pool receives it (ADR 0022); a replica
+        found dead here is revived at once and brought up to this bundle
+        before it is readmitted, so the commit below never names a version
+        a serving replica lacks."""
         for name in sorted(self.pools):
-            await asyncio.to_thread(self.pools[name].add_bundle, bundle)
+            await self.pools[name].deliver(bundle)
 
     async def commit(self, update: int, bundle, wave, postdata: dict,
                      stats: list[TrainStats]) -> None:

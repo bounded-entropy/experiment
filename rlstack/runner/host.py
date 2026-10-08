@@ -45,6 +45,7 @@ from rlstack.runner.loop import (
 from rlstack.runner.meters import (
     HostJournal, TrafficMeter, merged_traffic, meter_silent,
 )
+from rlstack.runner.pool import DeskReviver, Replicas, split_replica_key
 
 if TYPE_CHECKING:
     from rlstack.runner.residents import Resident
@@ -127,12 +128,35 @@ class Regime:
     capability: str                 # "inference" | "training"
     base: str | None
     shape: int = 1
+    # a training regime's data-parallel axis (ADR 0022): the learner is
+    # dp × shape ranks, dp groups of `shape` fsdp ranks each. 1 everywhere
+    # else, and absent from a row at 1 so every journal before it reads back
+    dp: int = 1
 
     def __post_init__(self) -> None:
         if self.capability not in ("inference", "training"):
             raise ValueError(
                 f"Regime.capability must be 'inference' or 'training', "
                 f"got {self.capability!r}")
+
+    @property
+    def devices(self) -> int:
+        """How many devices a host wearing this regime spans."""
+        return self.shape * self.dp
+
+    def row(self) -> dict:
+        """The regime as the wire and the journals speak it — ONE home."""
+        row = {"name": self.name, "capability": self.capability,
+               "base": self.base, "shape": self.shape}
+        if self.dp != 1:
+            row["dp"] = self.dp
+        return row
+
+    @classmethod
+    def from_row(cls, row: Mapping) -> "Regime":
+        """`row`'s inverse; a row with no dp is dp=1."""
+        return cls(row["name"], row["capability"], row["base"],
+                   int(row.get("shape", 1)), int(row.get("dp", 1)))
 
 
 RESIDENT_HEARTBEAT_S = 10.0
@@ -167,7 +191,9 @@ class Routed:
     locally, so nothing downstream can tell where they live; `learner` None
     means this run trains on the host's own learner, or on none at all."""
 
-    pools: dict[str, Engine] = field(default_factory=dict)
+    # pool name -> replica index -> its proxy (ADR 0022): a one-replica pool
+    # routed here is {0: proxy}, exactly the one route it always was
+    pools: dict[str, dict[int, Engine]] = field(default_factory=dict)
     learner: Learner | None = None
 
 
@@ -208,8 +234,13 @@ class Host:
                  schema_for: Callable[[str], SiteSchema] | None = None,
                  sampler=None,
                  residents: Sequence["Resident"] = (),
-                 epoch: str = "") -> None:
+                 epoch: str = "", desk=None) -> None:
         self.name = name
+        # THE DOOR TO THIS HOST'S DESK (ADR 0022), a birth fact like
+        # transport_for: what a replicated pool's reviver re-places a dead
+        # replica through. None on a hand-built host — its pools' dead
+        # replicas stay dead and the survivors serve their keys.
+        self.desk = desk
         # THE INSTANCE THIS HOST IS (ADR 0008, F2): the epoch of the container
         # that carved it, because a host is an object inside the metal's one
         # control process and dies with it. Carve names recycle when a
@@ -249,6 +280,12 @@ class Host:
         # one StopRequest per adopted run: the handle a drained stop pulls
         self._stops: dict[str, StopRequest] = {}
         self.sampler = sampler or sample_gpu
+        # MEASURED BOOKING (ADR 0022): each resident's peak GB per device, as
+        # the driver reports it for its process tree — journaled beside the
+        # GB its partition was declared at whenever it grows. `processes` is
+        # the per-process reading; a test hands its own.
+        self.processes = sample_processes
+        self.peak_gb: dict[str, float] = {}
         self.meter = TrafficMeter()
         # residents whose FIRST CONTACT is already on the journal (F5): the
         # report is taken once, the first tick after the resident has served
@@ -266,8 +303,7 @@ class Host:
             "event": "host-up", "t": time.time(), "epoch": self.epoch,
             "engines": [engine.base or "*" for engine in self.engines],
             "partition": partition.row() if partition is not None else None,
-            "regimes": [{"name": r.name, "capability": r.capability,
-                         "base": r.base, "shape": r.shape} for r in regimes],
+            "regimes": [r.row() for r in regimes],
             "solo": self.solo,
             # the processes this host was born with, label + pid: what lets
             # the hosts view show which residents are living without a probe
@@ -303,12 +339,14 @@ class Host:
                         f"({regime.base!r}, tp={regime.shape}) but no owned "
                         f"engine is built for it; engines: "
                         f"{[(e.base, e.tp) for e in self.engines]}")
-            elif self.learner is None or self.learner.fsdp != regime.shape:
-                built = None if self.learner is None else self.learner.fsdp
+            elif self.learner is None or (
+                    self.learner.fsdp, self.learner.dp) != (regime.shape, regime.dp):
+                built = (None if self.learner is None
+                         else f"dp={self.learner.dp} x fsdp={self.learner.fsdp}")
                 raise HostError(
                     f"host {self.name!r} declares training regime "
-                    f"{regime.name!r} at fsdp={regime.shape} but the learner "
-                    f"handed is built fsdp={built}")
+                    f"{regime.name!r} at dp={regime.dp} x fsdp={regime.shape} "
+                    f"but the learner handed is built {built}")
 
     def occupied(self) -> bool:
         """Is an experiment RUNNING on this host right now? THE one reading of
@@ -394,18 +432,24 @@ class Host:
     # ---- the submission steps, one named method per rule --------------------
 
     def bind_pools(self, spec: ExperimentSpec,
-                   remotes: frozenset[str] = frozenset()) -> dict[str, Engine]:
+                   remotes: Mapping[str, Mapping[int, Engine]] | frozenset[str] = frozenset(),
+                   ) -> dict[str, Engine]:
         """Each declared pool gets an owned engine serving its base at its
         declared tp (exact base preferred; base None is fake metal's
         wildcard). No match is a HostError — this host does not carry that
-        model at that shape. Pools named in `remotes` are served by ANOTHER
-        host and skip local binding."""
+        model at that shape. A pool whose every replica is served by ANOTHER
+        host (`remotes`: its routed replicas, or a set of fully routed names)
+        skips local binding; one with a replica left over binds that replica
+        here (ADR 0022)."""
         binding: dict[str, Engine] = {}
         for host in spec.topology.hosts:
             for member in host.members:
                 if not isinstance(member, PoolMember):
                     continue
-                if member.name in remotes:
+                if isinstance(remotes, frozenset):
+                    if member.name in remotes:
+                        continue
+                elif len(remotes.get(member.name, {})) >= member.replicas:
                     continue
                 wanted = member.base or spec.policy.base
                 engine = self.engine_for(wanted, member.tp)
@@ -458,20 +502,18 @@ class Host:
         own) — the run is ANCHORED here and reaches every other partition over
         the wire, so this host binds, fits and journals only what it serves."""
         run_store = store if store is not None else self.store
-        remote_pools = dict(remotes or {})
+        routed = {name: by_replica(value) for name, value in (remotes or {}).items()}
         learner = learner if learner is not None else self.learner
-        binding = self.bind_pools(spec, remotes=frozenset(remote_pools))
-        self.check_fit(spec, binding, remotes=frozenset(remote_pools),
-                       learner=learner)
-        binding |= remote_pools
+        local = self.bind_pools(spec, remotes=routed)
+        self.check_fit(spec, local, remotes=frozenset(routed), learner=learner)
         rid = experiment_identity(spec, schema)
+        binding = self.assemble_pools(spec, local, routed, rid)
         self.check_solo(rid)
-        self.roster[rid] = Tenancy(rid, pools={
-            name: (engine.base or "*") for name, engine in sorted(binding.items())},
-            store=run_store.describe(), subdir=subdir or "")
+        self.roster[rid] = Tenancy(rid, pools=pool_bases(binding),
+                                   store=run_store.describe(), subdir=subdir or "")
         await store_work(self.store.append_host_event, self.name, {
             "event": "attach", "t": time.time(), "run_id": rid,
-            "pools": sorted(binding), "remotes": sorted(remote_pools),
+            "pools": sorted(binding), "remotes": sorted(routed),
             # WHICH LIFE OF THIS HOST is carrying the run (ADR 0008, F2): a
             # carve name recycles when a container is reborn, so without the
             # epoch two tenancies of two containers read as one host's history
@@ -511,6 +553,46 @@ class Host:
         await self.end_tenancy(rid, "stopped" if report.stopped else "done",
                                completed=report.completed, extent=report.extent)
         return report
+
+    def assemble_pools(self, spec: ExperimentSpec, local: Mapping[str, Engine],
+                       routed: Mapping[str, Mapping[int, Engine]],
+                       run_id: str) -> dict[str, "Engine | Replicas"]:
+        """EVERY DECLARED POOL AS THE RUN WILL BE HANDED IT (ADR 0022): its
+        replicas in replica order — the routed ones where placement put
+        them, this host's own engine in the one slot placement left here —
+        and, for a pool of several, the reviver that re-places a dead one
+        through this host's desk. A one-replica pool is the bare engine it
+        always was."""
+        handed: dict[str, Engine | Replicas] = {}
+        for host in spec.topology.hosts:
+            for member in host.members:
+                if not isinstance(member, PoolMember):
+                    continue
+                remote = routed.get(member.name, {})
+                engines = tuple(remote[k] if k in remote else local[member.name]
+                                for k in range(member.replicas))
+                if member.replicas == 1:
+                    handed[member.name] = engines[0]
+                    continue
+                handed[member.name] = Replicas(
+                    engines, reviver=self.reviver_for(spec, member, run_id))
+        return handed
+
+    def reviver_for(self, spec: ExperimentSpec, member: PoolMember,
+                    run_id: str) -> DeskReviver | None:
+        """How this host gets a dead replica of `member` back: through its
+        desk, with each replica's own demand row — or not at all on a host
+        born without a desk door."""
+        if self.desk is None or self.transport_for is None:
+            return None
+        from rlstack.runner.campaign import demands_of
+        from rlstack.runner.desk import demand_rows
+
+        rows = {row.get("replica", 0): {**row, "anchor": False}
+                for row in demand_rows(demands_of(spec))
+                if row["pool"] == member.name}
+        return DeskReviver(self.desk, run_id, rows, self.transport_for,
+                           base=member.base or spec.policy.base, tp=member.tp)
 
     async def end_tenancy(self, run_id: str, status: str, *, error: str = "",
                           wire: bool = False, completed: int | None = None,
@@ -587,7 +669,7 @@ class Host:
             # the same loop that renews leases and answers health probes.
             schema = await asyncio.to_thread(self.derive_schema, spec)
             routed = self.resolve_routes(spec, routes or {})
-            binding = self.bind_pools(spec, remotes=frozenset(routed.pools))
+            binding = self.bind_pools(spec, remotes=routed.pools)
             self.check_fit(spec, binding, remotes=frozenset(routed.pools),
                            learner=routed.learner)
             rid = experiment_identity(spec, schema)
@@ -609,10 +691,8 @@ class Host:
         # against an empty roster, and the door's own rule races itself.
         # submit() re-writes this row (and journals it); the eager copy is
         # in-memory custody only.
-        self.roster[rid] = Tenancy(rid, pools={
-            name: (engine.base or "*")
-            for name, engine in sorted((binding | routed.pools).items())},
-            store=self.store.describe(), subdir=subdir or "")
+        self.roster[rid] = Tenancy(rid, pools=pool_bases(binding | routed.pools),
+                                   store=self.store.describe(), subdir=subdir or "")
         stop = StopRequest()
         self._stops[rid] = stop
         task = asyncio.create_task(
@@ -763,23 +843,26 @@ class Host:
                    for member in host.members
                    if isinstance(member, PoolMember)}
         self.check_learner_route_is_unambiguous(members, routes)
-        pools: dict[str, Engine] = {}
+        pools: dict[str, dict[int, Engine]] = {}
         learner: Learner | None = None
-        for name, address in sorted(routes.items()):
-            if name == LEARNER_ROUTE:      # never a pool: checked just above
+        for key, address in sorted(routes.items()):
+            if key == LEARNER_ROUTE:      # never a pool: checked just above
+                declared = self.learner_member(spec)
                 learner = RemoteLearner(self.transport_for(address),
-                                        fsdp=self.learner_member(spec).fsdp,
+                                        fsdp=declared.fsdp, dp=declared.dp,
                                         admitted=True)
                 continue
+            # `main#2` is replica 2 of pool `main` (ADR 0022)
+            name, replica = split_replica_key(key)
             member = members.get(name)
-            if member is None:
+            if member is None or replica >= member.replicas:
                 raise HostError(
-                    f"route {name!r} names no pool this spec declares "
+                    f"route {key!r} names no pool replica this spec declares "
                     f"({sorted(members)}) — routes are placement's answer to "
                     f"the spec's own demands")
-            pools[name] = RemotePool(self.transport_for(address),
-                                     base=member.base or spec.policy.base,
-                                     tp=member.tp)
+            pools.setdefault(name, {})[replica] = RemotePool(
+                self.transport_for(address),
+                base=member.base or spec.policy.base, tp=member.tp)
         return Routed(pools=pools, learner=learner)
 
     def check_learner_route_is_unambiguous(self, members: Mapping,
@@ -828,18 +911,61 @@ class Host:
         The gpu sample is skipped where no NVIDIA runtime answers; the
         traffic window never is — a host that served nothing says zeros."""
         draining: asyncio.Task | None = None
+        booking: asyncio.Task | None = None
         try:
             while True:
                 sample = await asyncio.to_thread(self.sampler)
                 if sample is not None:
                     await store_work(self.store.append_host_event, self.name, {
                         "event": "stats", "t": time.time(), **sample})
+                await self.journal_switches()
                 if draining is None or draining.done():
                     draining = asyncio.create_task(self.journal_traffic())
+                # the measured booking is its own task too: a driver query is
+                # seconds on a busy card, and the gpu sample must not wait
+                if self.residents and (booking is None or booking.done()):
+                    booking = asyncio.create_task(self.journal_bookings())
                 await asyncio.sleep(every)
         finally:
-            if draining is not None:
-                draining.cancel()
+            for task in (draining, booking):
+                if task is not None:
+                    task.cancel()
+
+    async def journal_bookings(self) -> None:
+        """MEASURED NEXT TO DECLARED (ADR 0022): every resident's memory on
+        its devices, read off the driver for its whole process tree (a
+        learner's ranks, an engine's core), journaled as a `booking` event
+        each time its per-device peak grows by BOOKING_STEP_GB — so the
+        journal holds the high-water mark beside `declared_gb`, and `overrun`
+        names a resident past its booking. A warning, never a refusal: the
+        enforcement halves are vLLM's reservation and torch's cap. Quiet
+        where no NVIDIA runtime answers."""
+        reading = await asyncio.to_thread(self.processes)
+        if not reading:
+            return
+        for resident in self.residents:
+            used = resident_gb(reading, process_tree(resident.pid()))
+            if not used:
+                continue
+            peak = max(used.values())
+            if peak < self.peak_gb.get(resident.label, 0.0) + BOOKING_STEP_GB:
+                continue
+            self.peak_gb[resident.label] = peak
+            declared = resident.birth.vram_gb
+            await store_work(self.store.append_host_event, self.name, {
+                "event": "booking", "t": time.time(),
+                "resident": resident.label, "kind": resident.regime.capability,
+                "declared_gb": declared, "measured_gb": round(peak, 3),
+                "devices": {str(k): round(v, 3) for k, v in sorted(used.items())},
+                "overrun": bool(declared) and peak > declared + BOOKING_SLACK_GB})
+
+    async def journal_switches(self) -> None:
+        """Every alternation switch since the last tick, as a `switch` event:
+        who took the device, how long each eviction (a sleep) and the wake
+        took. Bounded by the switches themselves, a few per update."""
+        for row in self.arbiter.take_switches():
+            await store_work(self.store.append_host_event, self.name,
+                             {"event": "switch", **row})
 
     async def watch_residents(self, every: float = RESIDENT_HEARTBEAT_S,
                               stall_s: float = RESIDENT_STALL_S) -> None:
@@ -1063,6 +1189,108 @@ class Host:
                               "ended_t": t.ended_t}
                         for rid, t in sorted(self.roster.items())},
         }
+
+
+BOOKING_STEP_GB = 0.5
+"""A resident's peak is journaled again only when it grew this much: the
+series is the high-water mark's steps, bounded, never a row per tick."""
+
+BOOKING_SLACK_GB = 1.0
+"""How far past its declared GB a resident may measure before the row says
+`overrun`: a CUDA context and the driver's own pages sit outside every
+allocator's books, and a booking is a carve size, not a promise to the MiB."""
+
+
+def sample_processes() -> dict[int, dict[int, float]] | None:
+    """Every compute process the driver reports: pid -> device index -> GB.
+    None where no NVIDIA runtime answers (fakes, laptops)."""
+    def query(*fields: str) -> list[list[str]] | None:
+        try:
+            out = subprocess.run(
+                ["nvidia-smi", f"--query-{fields[0]}={','.join(fields[1:])}",
+                 "--format=csv,noheader,nounits"],
+                capture_output=True, text=True, timeout=5)
+        except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+            return None
+        if out.returncode != 0:
+            return None
+        return [[part.strip() for part in line.split(",")]
+                for line in out.stdout.strip().splitlines() if line.strip()]
+    gpus = query("gpu", "index", "uuid")
+    apps = query("compute-apps", "pid", "gpu_uuid", "used_memory")
+    if gpus is None or apps is None:
+        return None
+    index_of = {uuid: int(index) for index, uuid in gpus}
+    reading: dict[int, dict[int, float]] = {}
+    for pid, uuid, used in apps:
+        try:
+            device = index_of[uuid]
+            reading.setdefault(int(pid), {})[device] = (
+                reading.get(int(pid), {}).get(device, 0.0) + float(used) / 1024.0)
+        except (KeyError, ValueError):
+            continue
+    return reading
+
+
+def process_tree(pid: int) -> set[int]:
+    """`pid` and every descendant, read off /proc — a learner's rank
+    children and an engine's core process are the resident's memory too.
+    Just `pid` where /proc is not there to read."""
+    import os
+
+    parents: dict[int, int] = {}
+    try:
+        entries = os.listdir("/proc")
+    except OSError:
+        return {pid}
+    for entry in entries:
+        if not entry.isdigit():
+            continue
+        try:
+            with open(f"/proc/{entry}/stat") as stat:
+                fields = stat.read().rsplit(")", 1)[1].split()
+            parents[int(entry)] = int(fields[1])
+        except (OSError, IndexError, ValueError):
+            continue
+    tree, frontier = {pid}, [pid]
+    while frontier:
+        parent = frontier.pop()
+        for child, ppid in parents.items():
+            if ppid == parent and child not in tree:
+                tree.add(child)
+                frontier.append(child)
+    return tree
+
+
+def resident_gb(reading: Mapping[int, Mapping[int, float]],
+                pids: set[int]) -> dict[int, float]:
+    """One resident's GB per device: the sum over its process tree."""
+    used: dict[int, float] = {}
+    for pid in pids:
+        for device, gb in reading.get(pid, {}).items():
+            used[device] = used.get(device, 0.0) + gb
+    return used
+
+
+def by_replica(handed: "Engine | Mapping[int, Engine]") -> dict[int, Engine]:
+    """A routed pool as replica index -> proxy: a bare engine (an in-process
+    caller's one remote) is replica 0."""
+    if isinstance(handed, Mapping):
+        return dict(handed)
+    return {0: handed}
+
+
+def pool_bases(pools: Mapping[str, object]) -> dict[str, str]:
+    """The roster's view of a tenancy's pools: name -> the base its engine
+    serves ("*" for fake metal) — a pool of several replicas, or routed as
+    replica index -> proxy, reads as its first replica."""
+    def first(handed) -> Engine:
+        if isinstance(handed, Replicas):
+            return handed.engines[0]
+        if isinstance(handed, Mapping):
+            return handed[min(handed)]
+        return handed
+    return {name: (first(handed).base or "*") for name, handed in sorted(pools.items())}
 
 
 def sample_gpu() -> dict | None:

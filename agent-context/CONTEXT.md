@@ -5137,6 +5137,56 @@ specs; backends (local/modal/skypilot) and GPU topology are semantics-neutral.
 
 96. **FREE-FORM DREAM FORKS AND MEASUREMENTS (research log 0009, 2026-09-20).** Samarth authorized the corrections, a matched oracle, inspection after two updates, then a full run if healthy. New menu tasks declare one document per dream, no decoys, fixed optimizer steps, the negative log-mean-exp fade score (tau and reference explicit), and invalid-dream handling. `fork_advantage` consumes validity and centers only valid dreams; invalid rows get the worst valid score or zero gradient. A group with no valid dream fails explicitly, and one valid dream has no comparison. Saved tasks missing these fields retain the old scoring behavior; the legacy stream advantage remains unchanged. No new learner verb or store layout. The fit client journals full before/after per-document probe vectors, stable row IDs, actual steps and phase timings, indexed by run and update. Optional loss components survive the learner wire and are retained per microbatch in committed ledgers; the existing objective reduction is unchanged. New preparation appends closed-book gold-answer probes as diagnostics and scores only rewrite rows. The oracle concatenates its topic text into one document under an explicit token cap and keeps its trained rewrite out of every scoring arm. Wall clocks remain in the host journal, outside deterministic run bytes. Validation: the full suite ran 1,930 tests successfully (256 environment-gated skips); 17 fork tests, 13 dream tests and eight end-to-end tests passed with torch; three local oracle/inspection tests passed. Live oracle and two-update gates are pending; offline success is not evidence of useful dreams. The shared W&B exporter also handles generation-only runs by reading each atomically sealed rollout once and exporting actual completion/token/truncation counts; it writes no ledger and supplies no invented training loss. The trained policy and store layout are unchanged.
 
+97. **A RUN SPANS METALS: POOLS OWN THEIR REPLICAS, THE LEARNER COMPOSES dp × fsdp (ADR 0022, 2026-10-08).** Samarth's ask on the 8×B300 node: one run should use several GPUs at once. Today a pool name is one engine and the FSDP learner buys memory rather than throughput. Implemented on `claude/dreams` as planned in the accepted ADR. Every answer is binding:
+    - Requests are routed one at a time by an `affinity` key.
+    - The pool owns its replicas' health and revival.
+    - The learner is dp × fsdp on one metal.
+    - Measured booking sits beside declared.
+    - There is no metal allow-list and no spread rule.
+    - **Spec.** `PoolMember.replicas` and `LearnerMember.dp` carry a new field metadata, `identity: resource` (spec/canonical.py). The canonical form drops them, so `run_id`, the manifest and every sealed byte are the same at any width. `wire_json` carries them, when not at their default, in every frame (campaign `frame_for`, `RemoteHost.adopt`, `VenueClient.canonical_row`). New gate checks:
+      - `check_widths_are_positive`;
+      - `check_replicated_pools_stand_alone`: a replicated pool is its HostSpec's only member, so it never alternates, and a run with one puts its learner on a host of its own;
+      - the learner shape check reads dp × fsdp.
+      I3 and I5 were folded into rl-stack-spec.md.
+    - **The Pool** (`runner/pool.py`) holds one pool name's `Replica`s, its key table, its pins (the last 4 bundles it served) and the current wave's libraries.
+      - `route`: a seen key returns to its live replica. A new key goes to the least-loaded replica: in-flight first, then keys held, then index. A key moves only when its replica dies, and a revived replica never takes keys back.
+      - `serve` runs one WHOLE request on the key's replica. On a death (`Unreachable`, `WrongEpoch`, or the new `HostGone`) it marks the replica dead, starts its revival at once and retries on a survivor. With every replica dead it waits for a revival, or raises the death.
+      - `deliver` remembers the bundle, then pushes it to every live replica before the Trainer's ledger line.
+      - Revival: `Reviver.recarve`, then `bring_up` (every pin plus the libraries), then a re-check, then readmission, with no await between the final check and `live = True`. So a delivery that lands mid-revival still reaches the revived replica.
+      - Deaths and revivals are journaled with their timing on the anchor host (`replica-dead`, `replica-revived`, `replica-revive-failed`, `replica-revive-abandoned`). Each rollout row carries `pools[name] = Pool.window()`: per replica, requests, tokens, tokens/s, new and seen keys (the affinity hit rate), peak in flight and keys held; plus the table's moves.
+    - **Routing.** `PoolClient.sample/score(affinity=None)`. The default key is the episode id: `rollout/<index>/<group>/<position>` (`assemble.episode_id`) and `post/<update>/<group>/<proc>`. `Routes` maps a name to `(Pool, Bundle)`, and a bare Engine in a hand-built table is a one-replica pool. `routes_at` is async and restores on every live replica. The Generator admits through `pool.admitted` and hands libraries to the whole pool. Its in-flight bound is `max_inflight × replicas`: per replica, since one engine's batch is what the knob bounds.
+    - **Desk.** `Demand.replica` and `Demand.dp`; the route key is `main`, `main#1`, ... (`pool.replica_key`). Each replica is its own placement unit, and `sibling_listings` keeps two replicas of a pool off one listing: one host is one engine. They may still share a metal or a card (Q5). The new `place-replica` verb (`RemoteDesk.place_replica`) re-places one replica, avoiding every listing the run's replicas of that pool stand on, and journals `replica-placed`, which `placements()` folds into the run's pools. `pools_revive_it` means a lost host that carried only replicas of a replicated pool does not strand the run. The anchor host gets a `desk` door, MetalService passes it to every host it carves, and `Host.assemble_pools` builds `Replicas(engines, DeskReviver)`. `Regime.dp` plus `Regime.row/from_row` are the one home of the regime row. `HostGone` names a decarved host; a closed resident door now raises it too.
+    - **Learner.** A new verb, `accumulate(tenant, batches) -> tuple[TrainStats]`, issued by the Trainer once per update. The default and dp=1 behaviour is the forward_backward loop it always was. `Learner.dp` is a build fact like fsdp. The FSDP learner at dp > 1:
+      - It runs on a (dp, fsdp) device mesh and shards the base over its fsdp sub-mesh.
+      - Microbatches go round-robin to dp groups.
+      - Each round all-gathers its per-microbatch LoRA gradients (one flat vector plus a presence mask) over the dp sub-group and adds them IN MICROBATCH ORDER (`OrderedGradientSum`), keeping None for a parameter no microbatch reached.
+      - So dp=K steps exactly dp=1's gradient, and each microbatch's grad_norm is the running sum's.
+      - It prints its compute and gather seconds once per update.
+      FakeLearner(dp) keeps the same choreography over its digest fold. Samarth chose exact identity over a cheaper all-reduce, provided the gather's share is measured on metal.
+    - **Measured booking.** On a stats tick, `Host.journal_bookings` runs as its own task: per resident, the driver-reported GB of its process tree per device. It journals a `booking` row beside `declared_gb` whenever the peak grows by 0.5 GB, and sets `overrun` past declared + 1 GB. `observe/host_series.bookings` turns overruns into warnings. `traffic.cached_tokens` is vLLM's `num_cached_tokens` and is absent when unmeasured. It reaches the page through the open slot, so the six traffic channels stay the UI contract.
+    - **Transport, from metal.** HTTP frames run on their own process-wide pool of 512 threads (`RLSTACK_HTTP_CLIENT_THREADS`). Before, they rode the loop's 32-thread default executor, so remote replicas got half the in-process replica's traffic. A runner's server holds 512 connections, with its listen backlog equal to that cap: socketserver's default of 5 reset a healthy replica under a wave's first burst, and the pool rightly called it dead. A revival retries for about 3 minutes, because the dead replica's GB is freed only once its metal has decarved it.
+    - **Validation.** The fakes suite: 2053 tests, 1 failure, the known test_strangeloop_hosted. tests/test_replicas.py (29) covers:
+      - affinity and moves;
+      - retry on death, revival with pins and libraries, and a revival under a concurrent delivery;
+      - every ledger bundle on all 3 replicas before its line;
+      - byte-identical run dirs at replicas ∈ {1,3} × dp ∈ {1,2}, and run_id and manifest blind to both;
+      - the wire round trip and the gate;
+      - 3 replicas on 3 listings, a boot rather than a double-join, and a desk drill (a replica's host dies mid-run, `place-replica` joins a spare, the run commits 4 of 4);
+      - the strand rule and the booking view.
+      tests/test_dp_torch.py (torch-gated, float64 CPU) passed on the B300: the ordered sum equals autograd's accumulation bit for bit, None preserved. test_resume.py is untouched.
+    - **Metal (B300, Qwen3.5-4B, GPUs 5–7; results kept privately).** The workload is two-turn reflect_retry GRPO with 512 episodes per wave.
+      - Sampling, replicas=1 vs 3: 4.2k vs 5.2–6.7k tokens/s.
+      - The waves are tail-latency bound at this size, and a larger-wave pair was next.
+      - Affinity kept the prefix-cache hit rate per replica at 0.30–0.34, against 0.31 for one engine.
+      - Train time per update is unchanged (~30 s). Seal rises from 2 s to 5 s: the bundle goes to 3 replicas, 2 of them over HTTP.
+      - An unplanned replica death (the backlog reset) was survived: in-flight requests retried, 61 key moves, all 6 updates committed on 2 replicas. The revival found no room and gave up, which led to the fixes above.
+      - The clean kill-and-revive drill and the dp=1 vs dp=2 runs were in progress or queued when the node went down (2026-10-08 ~21:38 UTC).
+    - **Unproven, stated:**
+      - a revival on metal end to end;
+      - dp > 1 on GPUs: NCCL on a (dp, fsdp) mesh, the gather's share of step time, and bitwise dp=1 vs dp=2 adapters in bf16 on GPU (non-promise);
+      - the throughput scaling at a wave size that is not tail-bound.
+      Also: a replica wrongly marked dead (a transient refusal) stays off the table until its revival lands, and its old host stays listed. A replicated pool's routes ride the anchor's relay like any remote pool.
+
 ## Open threads (do NOT treat as settled; flag when your answer touches them)
 
 - TODO (Samarth, settled intent — future, nothing now): BUNDLE LRU EVICTION

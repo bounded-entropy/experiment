@@ -14,6 +14,7 @@ from __future__ import annotations
 import hashlib
 import io
 import json
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -170,7 +171,11 @@ def emit(state: LoraState) -> bytes:
 
 def load(state: LoraState, payload: bytes) -> None:
     """emit's inverse: restore (A, B) in place from a peft payload."""
-    tensors = st_load(payload)
+    load_tensors(state, st_load(payload))
+
+
+def load_tensors(state: LoraState, tensors: Mapping[str, torch.Tensor]) -> None:
+    """`load` from a payload already parsed (a caller that checked it)."""
     for path in state.a:
         state.a[path].data.copy_(tensors[f"{PEFT_PREFIX}{path}.lora_A.weight"])
         state.b[path].data.copy_(tensors[f"{PEFT_PREFIX}{path}.lora_B.weight"])
@@ -211,12 +216,33 @@ def stack_fragments(first: bytes, second: bytes) -> bytes:
     return st_save(stacked)
 
 
+TRAINER_DECODER = "model."
+
+
+def rehome(payload: bytes, decoder_prefix: str) -> bytes:
+    """A payload's keys moved from the trainer's decoder path (`model.…`) to
+    the one the SERVED model uses (ServingBuild.decoder_prefix) — identity
+    when they agree, and idempotent, so a payload rehomed once (an adapter
+    dir read back to be stacked) is left alone the second time."""
+    if decoder_prefix == TRAINER_DECODER:
+        return payload
+    trainer, served = PEFT_PREFIX + TRAINER_DECODER, PEFT_PREFIX + decoder_prefix
+    tensors = st_load(payload)
+    moved = {(served + key[len(trainer):]
+              if key.startswith(trainer) and not key.startswith(served) else key): value
+             for key, value in tensors.items()}
+    return st_save(moved)
+
+
 def write_adapter_dir(adapter_dir: Path, base: str,
-                      payloads: dict[str, bytes]) -> int:
+                      payloads: dict[str, bytes],
+                      decoder_prefix: str = TRAINER_DECODER) -> int:
     """One peft adapter dir punica can load: the fragments merged into
     adapter_model.safetensors beside the scaling-1 config whose r is the
-    widest rank in the file. Returns that rank."""
-    merged, leaves, rank = merge_fragments(payloads)
+    widest rank in the file, keyed for the served model's decoder path.
+    Returns that rank."""
+    merged, leaves, rank = merge_fragments(
+        {name: rehome(payload, decoder_prefix) for name, payload in payloads.items()})
     adapter_dir.mkdir(parents=True, exist_ok=True)
     (adapter_dir / "adapter_model.safetensors").write_bytes(merged)
     (adapter_dir / "adapter_config.json").write_text(peft_config(base, rank, leaves))

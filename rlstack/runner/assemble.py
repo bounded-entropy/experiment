@@ -18,6 +18,7 @@ holding both — a fresh rollout beside its anchor — was previously inexpressi
 from __future__ import annotations
 
 import asyncio
+import time
 from collections.abc import Callable, Mapping, Sequence
 from typing import Any
 
@@ -43,7 +44,8 @@ async def sample_wave(plan: WavePlan, *, index: int, tasks: Mapping[str, Task],
                       sampling: SamplingSpec, routes: Routes, master: int,
                       phase: str = "rollout",
                       max_inflight: int = 64,
-                      reader: RefReader | None = None) -> Wave:
+                      reader: RefReader | None = None,
+                      trace: list[dict] | None = None) -> Wave:
     """Run every Sample and Derive leaf of one planned wave; return the
     sealed Wave.
 
@@ -59,6 +61,10 @@ async def sample_wave(plan: WavePlan, *, index: int, tasks: Mapping[str, Task],
     order, which is why a self source naming an EARLIER wave is always
     already sealed, and one naming a later wave is a plan error rather than
     an await.
+
+    `trace`, when handed a list, receives one row per episode in PLAN order:
+    when it was admitted and ended, and every sample call it made (the
+    generator journals it; it never reaches the wave's bytes).
     """
     limiter = asyncio.Semaphore(max_inflight)
     jobs: list[asyncio.Future] = []
@@ -78,9 +84,11 @@ async def sample_wave(plan: WavePlan, *, index: int, tasks: Mapping[str, Task],
                 f"generator makes waves in order)")
         return MAKERS.get(leaf.maker).instance.make(trajectory_from_row(row))
 
-    async def one(group_key: str, position: int,
-                  leaf: Sample | Derive) -> Trajectory:
+    async def one(group_key: str, position: int, leaf: Sample | Derive,
+                  row: dict | None) -> Trajectory:
         async with limiter:
+            if row is not None:
+                row["start"] = time.time()
             if isinstance(leaf, Derive):
                 task = minted(group_key, leaf)
             else:
@@ -93,8 +101,13 @@ async def sample_wave(plan: WavePlan, *, index: int, tasks: Mapping[str, Task],
             # an environment's own sampling wins over the run's (an answering
             # environment is greedy while the dreams sample); None inherits
             own = ENVS.get(leaf.env).instance.sampling
-            client = EnginePoolClient(routes, own or sampling, seed)
-            return await run_episode(leaf.env, task, client)
+            client = EnginePoolClient(routes, own or sampling, seed,
+                                      calls=row["calls"] if row is not None else None,
+                                      episode=episode_id(phase, index, group_key, position))
+            trajectory = await run_episode(leaf.env, task, client)
+            if row is not None:
+                row["end"] = time.time()
+            return trajectory
 
     for group in plan.groups:
         shape.append(len(group.leaves))
@@ -104,7 +117,11 @@ async def sample_wave(plan: WavePlan, *, index: int, tasks: Mapping[str, Task],
                     f"group {group.key!r}: a rollout plan MAKES trajectories, "
                     f"so its leaves are Sample or Derive; got "
                     f"{type(leaf).__name__}")
-            jobs.append(one(group.key, position, leaf))
+            row = None
+            if trace is not None:
+                row = {"group": group.key, "position": position, "calls": []}
+                trace.append(row)
+            jobs.append(one(group.key, position, leaf, row))
 
     done = await asyncio.gather(*jobs)
     groups, cursor = [], 0
@@ -112,6 +129,14 @@ async def sample_wave(plan: WavePlan, *, index: int, tasks: Mapping[str, Task],
         groups.append(Group(group.key, done[cursor:cursor + width]))
         cursor += width
     return Wave(groups)
+
+
+def episode_id(phase: str, index: int, group_key: str, position: int) -> str:
+    """AN EPISODE'S ID: where it sits in the run — the same coordinates its
+    seed is derived from, spelled readably. The default affinity key of
+    every call it makes (ADR 0022), so one episode's turns share a replica's
+    prefix cache."""
+    return f"{phase}/{index}/{group_key}/{position}"
 
 
 # ---------------------------------------------------------------------------

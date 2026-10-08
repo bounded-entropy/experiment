@@ -27,7 +27,7 @@ In another terminal, acquire a configured slot, inspect registration, and submit
 ```sh
 python3.13 -m deploy.strangeloop --config /absolute/path/strangeloop.json up sl-a100
 python3.13 -m deploy.strangeloop --config /absolute/path/strangeloop.json status
-python3.13 -m deploy.strangeloop --config /absolute/path/strangeloop.json submit /absolute/path/spec.json --subdir pilot --every 1 --delivery wire --objective train/loss
+python3.13 -m deploy.strangeloop --config /absolute/path/strangeloop.json submit /absolute/path/spec.json --subdir pilot --objective train/loss
 ```
 
 `--objective` names an actual scalar in a committed ledger row. It is required because the exporter must not invent a headline number. The submission command declares the accepted run and starts a separate offline W&B exporter on its anchor's lease. The exporter reads complete committed ledger lines; it never changes training data, the ledger or the manifest. Its ready file supplies the exact offline bundle to `gpu declare`. Missing objective values are reported, not replaced with fake values. An exporter restarted explicitly uses a new offline bundle and replays committed history; W&B offline mode does not provide reliable resume. Any other client using RemoteDesk directly must arrange the same export/declare step.

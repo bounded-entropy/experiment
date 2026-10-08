@@ -181,7 +181,10 @@ def hf_schema(base: str) -> SiteSchema:
     """
     from transformers import AutoConfig  # deferred: engine/trainer images only
 
-    return llama_family_schema(base, AutoConfig.from_pretrained(base))
+    config = AutoConfig.from_pretrained(base)
+    if is_qwen3_5(config):
+        return qwen3_5_schema(base, config.text_config)
+    return llama_family_schema(base, config)
 
 
 # The geometry this compiler reads, and the module tree it names: a decoder
@@ -230,6 +233,92 @@ def llama_family_schema(base: str, config: Any) -> SiteSchema:
             sites.append(SiteMeta(
                 name=f"layers.{n}.self_attn.{proj}",
                 path=f"model.layers.{n}.self_attn.{proj}",
+                has_weight=True, shape=shape, is_boundary=False))
+        for proj, shape in mlp_shapes.items():
+            sites.append(SiteMeta(
+                name=f"layers.{n}.mlp.{proj}",
+                path=f"model.layers.{n}.mlp.{proj}",
+                has_weight=True, shape=shape, is_boundary=False))
+        sites.append(SiteMeta(
+            name=f"resid_pre.{n}", path=f"model.layers.{n}",
+            has_weight=False, shape=None, is_boundary=True))
+    sites.extend([
+        SiteMeta(name="logits", path="lm_head",
+                 has_weight=False, shape=None, is_boundary=True),
+        SiteMeta(name="final_hidden", path="model.norm",
+                 has_weight=False, shape=None, is_boundary=True),
+    ])
+    return SiteSchema(base=base, sites=tuple(sites))
+
+
+# Qwen3.5 (post 0010): a hybrid decoder whose blocks alternate a gated-DeltaNet
+# `linear_attn` (three of every four layers) with gated full attention
+# (`self_attn`, the fourth), every block carrying the Llama-family MLP. The
+# checkpoint ships as a vision-language wrapper whose decoder settings sit
+# under `text_config`; the learner loads it through AutoModelForCausalLM as the
+# text-only `Qwen3_5ForCausalLM`, whose tree is `model.layers.<n>` — the same
+# trainer paths the Llama family uses, so only the per-layer catalog differs.
+QWEN3_5_FIELDS = ("hidden_size", "intermediate_size", "num_hidden_layers",
+                  "layer_types", "num_attention_heads", "num_key_value_heads",
+                  "head_dim", "linear_num_key_heads", "linear_num_value_heads",
+                  "linear_key_head_dim", "linear_value_head_dim")
+QWEN3_5_LINEAR_PROJ = ("in_proj_qkv", "in_proj_z", "in_proj_b", "in_proj_a", "out_proj")
+
+
+def is_qwen3_5(config: Any) -> bool:
+    """A Qwen3.5 checkpoint: its decoder (top level or under `text_config`)
+    names its layers' kinds and some are gated-DeltaNet `linear_attention`."""
+    text = getattr(config, "text_config", None) or config
+    return getattr(text, "model_type", "") in ("qwen3_5", "qwen3_5_text") or (
+        "linear_attention" in (getattr(text, "layer_types", None) or ()))
+
+
+def qwen3_5_schema(base: str, text: Any) -> SiteSchema:
+    """The pure compiler for the Qwen3.5 decoder: MLP projections on every
+    layer, `linear_attn.*` on the linear-attention layers and `self_attn.*` on
+    the full-attention ones, each at its own width.
+
+    The full-attention query projects to TWICE the head width: the second
+    half is the output gate (`attn_output_gate`), so its out-dim is
+    heads × head_dim × 2. Refuses a config missing a field the geometry needs,
+    as the Llama-family compiler does.
+    """
+    missing = [f for f in QWEN3_5_FIELDS if getattr(text, f, None) is None]
+    if missing:
+        raise ValueError(f"qwen3_5_schema: {base!r} lacks {missing} in its decoder config")
+    hidden = int(text.hidden_size)
+    mlp = int(text.intermediate_size)
+    q_out = int(text.num_attention_heads) * int(text.head_dim) * (
+        2 if getattr(text, "attn_output_gate", False) else 1)
+    kv_out = int(text.num_key_value_heads) * int(text.head_dim)
+    o_in = int(text.num_attention_heads) * int(text.head_dim)
+    key_dim = int(text.linear_num_key_heads) * int(text.linear_key_head_dim)
+    value_dim = int(text.linear_num_value_heads) * int(text.linear_value_head_dim)
+    value_heads = int(text.linear_num_value_heads)
+    shapes = {
+        "full_attention": ("self_attn", {
+            "q_proj": (hidden, q_out), "k_proj": (hidden, kv_out),
+            "v_proj": (hidden, kv_out), "o_proj": (o_in, hidden)}),
+        "linear_attention": ("linear_attn", {
+            "in_proj_qkv": (hidden, 2 * key_dim + value_dim),
+            "in_proj_z": (hidden, value_dim), "in_proj_b": (hidden, value_heads),
+            "in_proj_a": (hidden, value_heads), "out_proj": (value_dim, hidden)}),
+    }
+    mlp_shapes = {"gate_proj": (hidden, mlp), "up_proj": (hidden, mlp),
+                  "down_proj": (mlp, hidden)}
+    layer_types = tuple(text.layer_types)
+    if len(layer_types) != int(text.num_hidden_layers):
+        raise ValueError(f"qwen3_5_schema: {len(layer_types)} layer_types for "
+                         f"{text.num_hidden_layers} layers in {base!r}")
+    sites: list[SiteMeta] = []
+    for n, kind in enumerate(layer_types):
+        if kind not in shapes:
+            raise ValueError(f"qwen3_5_schema: layer {n} of {base!r} is {kind!r}")
+        mixer, mixer_shapes = shapes[kind]
+        for proj, shape in mixer_shapes.items():
+            sites.append(SiteMeta(
+                name=f"layers.{n}.{mixer}.{proj}",
+                path=f"model.layers.{n}.{mixer}.{proj}",
                 has_weight=True, shape=shape, is_boundary=False))
         for proj, shape in mlp_shapes.items():
             sites.append(SiteMeta(

@@ -439,6 +439,46 @@ def check_pool_names_are_unique(spec: ExperimentSpec, schema: SiteSchema) -> lis
     return issues
 
 
+def check_widths_are_positive(spec: ExperimentSpec, schema: SiteSchema) -> list[ValidationIssue]:
+    """Every width is a count of something that exists (ADR 0022): a pool's
+    `replicas` and `tp`, a learner's `dp` and `fsdp` are each at least 1."""
+    issues = []
+    for hi, host in enumerate(spec.topology.hosts):
+        for mi, member in enumerate(host.members):
+            path = f"topology.hosts[{hi}].members[{mi}]"
+            widths = ({"replicas": member.replicas, "tp": member.tp}
+                      if isinstance(member, PoolMember)
+                      else {"dp": member.dp, "fsdp": member.fsdp})
+            for name, value in widths.items():
+                if value < 1:
+                    issues.append(_issue(
+                        "width-not-positive", f"{path}.{name}",
+                        f"{name}={value}: a width counts hosts or ranks, "
+                        f"so it is at least 1"))
+    return issues
+
+
+def check_replicated_pools_stand_alone(spec: ExperimentSpec, schema: SiteSchema) -> list[ValidationIssue]:
+    """A POOL WITH REPLICAS IS ITS HOSTSPEC'S ONLY MEMBER (ADR 0022). A
+    HostSpec is one placement unit and its members alternate on one
+    partition; N replicas are N placements, and a learner (or another pool)
+    cannot alternate with all of them at once. So a replicated pool never
+    alternates: a run that wants one declares its learner on a host of its
+    own."""
+    issues = []
+    for hi, host in enumerate(spec.topology.hosts):
+        for mi, member in enumerate(host.members):
+            if (isinstance(member, PoolMember) and member.replicas > 1
+                    and len(host.members) > 1):
+                issues.append(_issue(
+                    "replicated-pool-alternates", f"topology.hosts[{hi}].members[{mi}]",
+                    f"pool {member.name!r} declares replicas={member.replicas} "
+                    f"on a host with {len(host.members)} members: replicas are "
+                    f"placed one host each and never alternate — give the pool "
+                    f"a HostSpec of its own"))
+    return issues
+
+
 def alternates_the_learner(host) -> bool:
     """Does this HostSpec make the learner ALTERNATE with an engine? A
     multi-member host is one partition with one resident live at a time
@@ -507,10 +547,18 @@ def check_members_match_their_shape(spec: ExperimentSpec, engine_map,
                                     learner) -> list[ValidationIssue]:
     """Sharding is a BUILD fact, not a request: each mapped pool's engine must
     be BUILT at the pool's declared tensor-parallel width, and the learner at
-    the LearnerMember's declared fsdp width. Switching shards means handing
-    different metal, never a spec that quietly runs unsharded. Like
-    check_pools_serve_their_base, this consults live metal, so the loop runs
-    it at submit."""
+    the LearnerMember's declared dp × fsdp width (ADR 0022). Switching shards
+    means handing different metal, never a spec that quietly runs unsharded.
+    Like check_pools_serve_their_base, this consults live metal, so the loop
+    runs it at submit — the pool half once per REPLICA, since each replica
+    is an engine of its own."""
+    return (check_pools_match_their_shape(spec, engine_map)
+            + check_learner_matches_its_shape(spec, learner))
+
+
+def check_pools_match_their_shape(spec: ExperimentSpec,
+                                  engine_map) -> list[ValidationIssue]:
+    """Each mapped engine is built at its pool's declared tp."""
     declared_tp: dict[str, int] = {}
     for host in spec.topology.hosts:
         for member in host.members:
@@ -524,6 +572,13 @@ def check_members_match_their_shape(spec: ExperimentSpec, engine_map,
                 "pool-shape-mismatch", f"topology({name})",
                 f"pool {name!r} declares tp={expected} but the engine handed "
                 f"for it is built tp={engine.tp}"))
+    return issues
+
+
+def check_learner_matches_its_shape(spec: ExperimentSpec,
+                                    learner) -> list[ValidationIssue]:
+    """A declared learner is handed, built at its declared dp × fsdp."""
+    issues = []
     for host in spec.topology.hosts:
         for member in host.members:
             if not isinstance(member, LearnerMember):
@@ -534,11 +589,12 @@ def check_members_match_their_shape(spec: ExperimentSpec, engine_map,
                     "the spec declares a learner but none was handed to the "
                     "run: a declared LearnerMember is training metal the run "
                     "expects to reach, locally or over the wire"))
-            elif learner.fsdp != member.fsdp:
+            elif (learner.fsdp, learner.dp) != (member.fsdp, member.dp):
                 issues.append(_issue(
                     "learner-shape-mismatch", "topology(learner)",
-                    f"the spec declares fsdp={member.fsdp} but the learner "
-                    f"handed is built fsdp={learner.fsdp}"))
+                    f"the spec declares dp={member.dp} x fsdp={member.fsdp} "
+                    f"but the learner handed is built dp={learner.dp} x "
+                    f"fsdp={learner.fsdp}"))
     return issues
 
 
@@ -885,6 +941,8 @@ CHECKS = (
     check_latent_priors_are_a_recipe,
     check_hosts_exist,
     check_pool_names_are_unique,
+    check_widths_are_positive,
+    check_replicated_pools_stand_alone,
     check_alternation_implies_zero_lag,
     check_traffic_routes_to_declared_pools,
     check_post_pools_are_declared,

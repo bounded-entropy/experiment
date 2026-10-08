@@ -1,0 +1,46 @@
+{
+  "store": "strangeloop://sl-scratch-REPLACE_WITH_ACCOUNT_UUID/rlstack",
+  "state_dir": "~/.local/state/rlstack-strangeloop-pilot",
+  "gateway_port": 18760,
+  "observer_port": 8321,
+  "worker_port": 8000,
+  "idle_s": 90,
+  "gpu_ceiling": 1,
+  "automatic_recovery": false,
+  "metals": [
+    {
+      "name": "sl-qwen4b",
+      "gpu": "A100",
+      "devices": 1,
+      "image": "rlstack-py312",
+      "local_port": 18761,
+      "hours": 4,
+      "idle_s": 90,
+      "python": "/opt/rlstack/bin/python",
+      "blob_cache_dir": "/tmp/rlstack-blobs",
+      "blob_cache_bytes": 8589934592,
+      "mount_reads": true,
+      "environment": {
+        "HF_HOME": "/scratch/cache/huggingface",
+        "HF_HUB_CACHE": "/scratch/cache/huggingface/hub",
+        "TRANSFORMERS_CACHE": "/scratch/cache/huggingface/hub"
+      },
+      "builds": {
+        "engine": {
+          "type": "EngineBuild",
+          "max_model_len": 4096,
+          "max_bundles": 4,
+          "max_rank": 16,
+          "serves": [
+            "lora"
+          ],
+          "enforce_eager": true
+        },
+        "learner": {
+          "type": "LearnerBuild",
+          "checkpoint_activations": true
+        }
+      }
+    }
+  ]
+}

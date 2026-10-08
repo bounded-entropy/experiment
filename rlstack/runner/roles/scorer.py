@@ -27,8 +27,7 @@ beside the Trainer instead of inside it changes what has to be asked.
 
 from __future__ import annotations
 
-import asyncio
-from collections.abc import Mapping
+from collections.abc import Awaitable, Mapping
 from typing import Callable
 
 from rlstack.data.plan import RunPlan
@@ -39,7 +38,7 @@ from rlstack.registry import POST
 from rlstack.runner.arbiter import Arbiter
 from rlstack.runner.assemble import realize
 from rlstack.runner.roles.base import Runner
-from rlstack.runner.interfaces import Engine
+from rlstack.runner.pool import Pool, admitted
 from rlstack.runner.post import run_pipeline
 from rlstack.runner.refs import RefReader
 from rlstack.runner.signals import RunSignals
@@ -57,8 +56,8 @@ SCORER = "scorer"
 class Scorer(Runner):
     def __init__(self, signals: RunSignals, arbiter: Arbiter, run: RunHandle,
                  *, spec: ExperimentSpec, plan: RunPlan, refs: RefReader,
-                 residents: tuple[Engine, ...],
-                 routes_at: Callable[[Bundle], Routes],
+                 residents: tuple[Pool, ...],
+                 routes_at: Callable[[Bundle], Awaitable[Routes]],
                  initial_bundle: Bundle) -> None:
         super().__init__(signals, arbiter, run)
         self.pipeline = split_pipeline(spec.algo.post).pooled
@@ -188,9 +187,8 @@ class Scorer(Runner):
             if self.needs_previous_commit(wave):
                 # the pin is the ledger's bundle at u-1 (ADR 0018): wait for it
                 await self.signals.wait_for(lambda: self.committed() >= update - 1)
-            async with self.arbiter.admit_all(self.residents):
-                routes = await asyncio.to_thread(     # sync asks, off the loop
-                    self.routes_at, self.pinned_bundle(update, wave))
+            async with admitted(self.arbiter, self.residents):
+                routes = await self.routes_at(self.pinned_bundle(update, wave))
                 columns = await run_pipeline(
                     self.pipeline, wave, routes,
                     self.sampling, self.master, update)

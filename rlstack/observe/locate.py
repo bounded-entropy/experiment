@@ -4,7 +4,9 @@ store_for(locator): a store is NAMED by a locator, and the reader must run
 somewhere that locator resolves.
 
     /path, file:///path   LocalStore — wherever that filesystem is mounted
-                          (a Modal volume IS one, inside a container)
+                          (a Modal volume IS one, inside a container; so is a
+                          RunPod network volume, on any pod that mounts it —
+                          ADR 0021)
     strangeloop://volume/prefix  Scratch API reader, wherever credentials resolve
     s3://bucket/prefix    an S3Store subclass, when it lands — resolves
                           anywhere

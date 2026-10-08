@@ -56,6 +56,11 @@ work.)*
 **I3 — Identity is computed, never typed.** `run_id = h(spec ⊕ registered-code
 hashes ⊕ data fingerprint)`. Editing a registered function's body changes
 identity; renaming a file changes nothing; humans never author identifiers.
+A spec field marked `identity: resource` (ADR 0022: `PoolMember.replicas`,
+`LearnerMember.dp`) is a RESOURCE, not science: the canonical form — run_id
+and the manifest — never holds it, so a run is the same run, byte for byte,
+at any width; the wire form (`wire_json`) carries it to the host that runs
+the experiment.
 
 **I4 — Registered things declare, then compute.** Every registry entry has a
 static declaration half (`@postprocessor` classes declare `produces / consumes /
@@ -68,8 +73,8 @@ which each run also serializes as its own `dictionary.json` (see I11).
 **I5 — GPU topology is semantics-neutral.** One HostSpec is one host (ADR
 0001): a single member is a dedicated host, several members ALTERNATE on one
 partition; the member vocabulary is closed at two workload kinds — **pools**
-(`pool(name, base, tp, vram_gb)`) and **learners** (`learner(fsdp, vram_gb)`)
-— and everything else (rollout, eval, judges, teachers) is traffic routed to
+(`pool(name, base, tp, vram_gb, replicas)`) and **learners**
+(`learner(fsdp, vram_gb, dp)`) — and everything else (rollout, eval, judges, teachers) is traffic routed to
 pool *names*. Memory is declared in GB, TOTAL across shards (never a fraction
 of a card the spec does not know), so the same experiment hashes identically
 on an L4 fleet and an H100 fleet. Any two Topologies execute the same
@@ -295,10 +300,16 @@ class AlgoSpec:
 
 # ---------- topology (semantics-neutral, I5; ADR 0001) ----------
 # member vocabulary — CLOSED at two; all else is traffic to pool NAMES:
-#   pool(name, base=POLICY, tp=1, vram_gb=None)   # serves sample traffic
-#   learner(fsdp=1, vram_gb=None)                 # differentiable fwd/bwd
+#   pool(name, base=POLICY, tp=1, vram_gb=None, replicas=1)  # serves sample traffic
+#   learner(fsdp=1, vram_gb=None, dp=1)                     # differentiable fwd/bwd
 # vram_gb: GB, TOTAL across the shards (per device = vram_gb / shape);
 #   None = a whole device per shard, resolved at the metal that knows its card
+# replicas (ADR 0022): N hosts serve the name, each sized as declared; the
+#   run's Pool routes every request by its affinity key (default: the episode
+#   id), a seen key returning to its replica; a replicated pool is its
+#   HostSpec's only member. dp: dp groups of fsdp ranks on ONE metal, an
+#   update's microbatches split across groups and their LoRA gradients summed
+#   in microbatch order. Both are `identity: resource` — outside run_id (I3).
 @dataclass(frozen=True)
 class HostSpec:                      # ONE HOST: one placement unit, one
     members: tuple[Member, ...]      #   Partition. One member = dedicated;

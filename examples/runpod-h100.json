@@ -1,0 +1,41 @@
+{
+ "store": "/workspace/rlstack",
+ "state_dir": "/workspace/rlstack-desk",
+ "desk_endpoint": "http://desk-pod-id.runpod.internal:18760",
+ "operator_endpoint": "https://desk-pod-id-18760.proxy.runpod.net",
+ "desk_port": 18760,
+ "observer_port": 8321,
+ "worker_port": 8000,
+ "idle_s": 300,
+ "metals": [
+  {
+   "name": "rp-h100-a",
+   "endpoint": "http://h100-pod-id.runpod.internal:8000",
+   "idle_s": 300,
+   "environment": {
+    "HF_HOME": "/workspace/cache/huggingface",
+    "HF_HUB_CACHE": "/workspace/cache/huggingface/hub",
+    "TRANSFORMERS_CACHE": "/workspace/cache/huggingface/hub"
+   },
+   "builds": {
+    "engine": {
+     "type": "EngineBuild",
+     "max_model_len": 98304,
+     "max_bundles": 2,
+     "max_rank": 32,
+     "max_members": 5,
+     "serves": [
+      "dream_bank"
+     ],
+     "enable_sleep_mode": true,
+     "enforce_eager": true,
+     "max_library": 32
+    },
+    "learner": {
+     "type": "LearnerBuild",
+     "checkpoint_activations": true
+    }
+   }
+  }
+ ]
+}

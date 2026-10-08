@@ -58,6 +58,11 @@ class TrafficWindow:
     # venue, unnoticed. Monotone, so a window whose tokens are zero WHILE this
     # advanced is a broken meter and says so (`meter_silent`).
     requests_served: int = 0
+    # PREFILL TOKENS THE PREFIX CACHE ALREADY HELD (ADR 0022): what affinity
+    # routing buys, measured where it is bought — `cached_tokens /
+    # prefill_tokens` is the window's cache-hit rate. None — and absent from
+    # the row — where no engine reported one (the fakes): unmeasured, not 0.
+    cached_tokens: int | None = None
 
     def row(self) -> dict:
         """The window as a JSON row — ONE home for the shape the `traffic`
@@ -71,7 +76,9 @@ class TrafficWindow:
                 "ttft_ms_mean": self.ttft_ms_mean,
                 "admit_wait_ms_mean": self.admit_wait_ms_mean,
                 "admit_wait_ms_max": self.admit_wait_ms_max,
-                "inflight": self.inflight}
+                "inflight": self.inflight,
+                **({} if self.cached_tokens is None
+                   else {"cached_tokens": self.cached_tokens})}
 
 
 def merged_traffic(own: dict, residents: Sequence[dict]) -> dict:
@@ -98,6 +105,8 @@ def merged_traffic(own: dict, residents: Sequence[dict]) -> dict:
     for row in residents:
         for field in ("prefill_tokens", "decode_tokens", "requests"):
             out[field] = int(out.get(field) or 0) + int(row.get(field) or 0)
+        if row.get("cached_tokens") is not None:
+            out["cached_tokens"] = int(out.get("cached_tokens") or 0) + int(row["cached_tokens"])
     out["ttft_ms_mean"] = weighted / weight if weight else None
     return out
 
@@ -147,6 +156,7 @@ class TrafficMeter:
         self.admit_wait_ms_max = 0.0
         self.admit_waits = 0
         self.inflight = 0
+        self.cached_tokens: int | None = None
 
     # ---- what the engine counts ---------------------------------------------
 
@@ -166,6 +176,11 @@ class TrafficMeter:
         its own sample count and not over requests."""
         self.ttft_ms_total += seconds * 1000.0
         self.ttft_samples += 1
+
+    def cached(self, tokens: int) -> None:
+        """Prompt tokens of one request the engine's prefix cache already
+        held — reported by the engine once per request (ADR 0022)."""
+        self.cached_tokens = (self.cached_tokens or 0) + tokens
 
     def decoded(self, tokens: int) -> None:
         """Tokens streamed out of a generate loop, counted where the loop
@@ -210,7 +225,8 @@ class TrafficMeter:
             admit_wait_ms_max=(self.admit_wait_ms_max
                                if self.admit_waits else None),
             inflight=self.inflight,
-            requests_served=self.requests_served)
+            requests_served=self.requests_served,
+            cached_tokens=self.cached_tokens)
         self.started = now
         self.prefill_tokens = 0
         self.decode_tokens = 0
@@ -220,6 +236,7 @@ class TrafficMeter:
         self.admit_wait_ms_total = 0.0
         self.admit_wait_ms_max = 0.0
         self.admit_waits = 0
+        self.cached_tokens = None
         return window
 
 

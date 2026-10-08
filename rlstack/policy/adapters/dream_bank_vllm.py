@@ -181,7 +181,8 @@ class DreamBankRollout(RolloutLowering):
                 self._stacks[key] = self._adapter(
                     f"{attached.bundle_id}/{route}",
                     _named_dir(self._bundle_dir(attached.bundle_id) / "stacks", route),
-                    lora_torch.stack_fragments(first, second))
+                    lora_torch.stack_fragments(*(lora_torch.rehome(part, self.build.decoder_prefix())
+                                                 for part in (first, second))))
             return self._stacks[key]
 
     def forget_library(self, name: str) -> None:
@@ -207,7 +208,8 @@ class DreamBankRollout(RolloutLowering):
     def _adapter(self, lora_name: str, adapter_dir: Path, payload: bytes) -> LoRARequest:
         """One named payload as an adapter dir and its LoRARequest — refused,
         and its dir removed, when it is wider than the build's kernels."""
-        rank = lora_torch.write_adapter_dir(adapter_dir, self.build.base, {lora_name: payload})
+        rank = lora_torch.write_adapter_dir(adapter_dir, self.build.base, {lora_name: payload},
+                                            self.build.decoder_prefix())
         try:
             check_rank_fits(f"adapter {lora_name!r}", rank, self.build)
         except ValueError:

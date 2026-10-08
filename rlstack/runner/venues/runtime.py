@@ -85,6 +85,7 @@ class DeskRuntime:
                  bootable_metals: frozenset[str],
                  auto_recover: bool = True,
                  idle_s: float = IDLE_S,
+                 host_idle_s: float | None = None,
                  restored_idle_s: float | None = None,
                  idle_tick_s: float = 30.0,
                  reap_tick_s: float | None = 900.0,
@@ -104,13 +105,15 @@ class DeskRuntime:
             finite_positive("reap_tick_s", reap_tick_s)
         if restored_idle_s is not None:
             finite_positive("restored_idle_s", restored_idle_s)
+        if host_idle_s is not None:
+            finite_positive("host_idle_s", host_idle_s)
         if reap_probes < 0 or not math.isfinite(reap_wait_s) or reap_wait_s < 0:
             raise ValueError("reaper probes and wait must be nonnegative and finite")
         self.desk = Desk.from_journal(
             store, host_for=lambda address: RemoteHost(transport_for(address)),
             metal_for=lambda address: RemoteMetal(transport_for(address)),
             boot_for=provider.boot, terminate_for=provider.terminate,
-            bootable_metals=bootable_metals, idle_s=idle_s,
+            bootable_metals=bootable_metals, idle_s=idle_s, host_idle_s=host_idle_s,
             lease_s=lease_s, heartbeat_s=heartbeat_s,
             probe_deadline_s=probe_deadline_s,
             residual_deadline_s=residual_deadline_s, clock=clock)
@@ -220,7 +223,8 @@ class MetalRuntime:
         service = MetalService(
             MetalService.measure(name), store=store, builds=builds,
             address_of=lambda host: host_address(host, epoch),
-            schema_for=hf_schema, transport_for=transport_for, epoch=epoch)
+            schema_for=hf_schema, transport_for=transport_for, epoch=epoch,
+            desk=desk)
         return cls(service, desk, address=address, container=container,
                    idle_s=idle_s, builds=builds, heartbeat_s=heartbeat_s)
 

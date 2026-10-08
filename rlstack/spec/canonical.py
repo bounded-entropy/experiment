@@ -31,13 +31,23 @@ _TYPE_KEY = "__type__"
 # (runner/remote.py) reads an absent key as the field's default.
 IDENTITY = "identity"
 WHEN_SET = "when_set"
+# A field declared with `metadata={IDENTITY: RESOURCE}` is a RESOURCE, not
+# science (ADR 0022): how many replicas serve a pool, how many data-parallel
+# groups split a learner's microbatches. It never enters identity — the
+# canonical form below drops it, so run_id and the manifest are the same at
+# any width and resume-equivalence holds across widths — but it must still
+# reach the host that runs the experiment, so the WIRE form (`wire_json`)
+# carries it whenever it differs from its default.
+RESOURCE = "resource"
 
 
-def _canonicalize(obj: object) -> JSONValue:
-    """Lower one object onto the plain JSON tree. Recursive; raises on anything unsupported."""
+def _canonicalize(obj: object, wire: bool = False) -> JSONValue:
+    """Lower one object onto the plain JSON tree. Recursive; raises on anything
+    unsupported. `wire` keeps the RESOURCE fields that differ from their
+    default; the identity form (wire=False) never holds one."""
     # Enum first: IntEnum/StrEnum members are also int/str and would pass through untagged.
     if isinstance(obj, Enum):
-        return _canonicalize(obj.value)
+        return _canonicalize(obj.value, wire)
 
     if obj is None:
         return None
@@ -68,7 +78,10 @@ def _canonicalize(obj: object) -> JSONValue:
             value = getattr(obj, f.name)
             if value is None and f.metadata.get(IDENTITY) == WHEN_SET:
                 continue
-            out[f.name] = _canonicalize(value)
+            if f.metadata.get(IDENTITY) == RESOURCE and not (
+                    wire and value != f.default):
+                continue
+            out[f.name] = _canonicalize(value, wire)
         return out
 
     # Any Mapping, MappingProxyType included; keys sorted at dumps time, str-only.
@@ -79,11 +92,11 @@ def _canonicalize(obj: object) -> JSONValue:
                 raise TypeError(
                     f"canonical_json: mapping keys must be str, got {type(key).__name__}"
                 )
-            mapped[key] = _canonicalize(value)
+            mapped[key] = _canonicalize(value, wire)
         return mapped
 
     if isinstance(obj, (tuple, list)):
-        return [_canonicalize(item) for item in obj]
+        return [_canonicalize(item, wire) for item in obj]
 
     raise TypeError(f"canonical_json: unsupported type {type(obj).__name__}")
 
@@ -92,6 +105,21 @@ def canonical_json(obj: object) -> str:
     """Deterministic JSON for any spec tree: sorted keys, no whitespace, no NaN."""
     return json.dumps(
         _canonicalize(obj),
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+        allow_nan=False,
+    )
+
+
+def wire_json(obj: object) -> str:
+    """The canonical JSON a FRAME carries: the identity form plus every
+    RESOURCE field that is not at its default (ADR 0022). What crosses to a
+    host is the whole experiment — how wide to run it included — while
+    `canonical_json`, and so run_id and the manifest, never sees the width.
+    A spec at every default is byte-for-byte its canonical form."""
+    return json.dumps(
+        _canonicalize(obj, wire=True),
         sort_keys=True,
         separators=(",", ":"),
         ensure_ascii=False,

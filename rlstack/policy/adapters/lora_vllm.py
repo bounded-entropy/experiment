@@ -58,7 +58,9 @@ class LoraRollout(RolloutLowering):
         the payload (lora_torch.emit writes module paths as keys) and this side
         only has to say where the file is.
         """
-        merged, leaves, rank = lora_torch.merge_fragments(dict(payloads))
+        merged, leaves, rank = lora_torch.merge_fragments(
+            {name: lora_torch.rehome(payload, self.build.decoder_prefix())
+             for name, payload in payloads.items()})
         adapter_dir = self.build.workdir / bundle_id.replace(":", "_")
         adapter_dir.mkdir(parents=True, exist_ok=True)
         (adapter_dir / "adapter_model.safetensors").write_bytes(merged)

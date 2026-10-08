@@ -14,7 +14,7 @@ from rlstack.data.stores.base import Store, run_reference
 from rlstack.data.stores.local import LocalStore
 from rlstack.runner.checkpointing import Checkpointing
 from rlstack.runner.remote import RemoteDesk, spec_from_json
-from rlstack.spec.canonical import canonical_json
+from rlstack.spec.canonical import wire_json
 from rlstack.spec.specs import ExperimentSpec
 
 
@@ -70,7 +70,7 @@ class VenueClient:
                 store.cas_put(await self.desk.read_cas(uri))
             built = build(store)
             specs = built if isinstance(built, dict) else {"": built}
-            rows = {name: json.loads(canonical_json(spec)) for name, spec in specs.items()}
+            rows = {name: json.loads(wire_json(spec)) for name, spec in specs.items()}
             for key in store._list("cas"):
                 await self.desk.put_plan(store._read(key))
         return rows if isinstance(built, dict) else rows[""]

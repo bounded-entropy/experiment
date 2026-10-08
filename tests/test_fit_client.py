@@ -188,7 +188,8 @@ class FitClientTest(unittest.TestCase):
         self.assertTrue(all(n > 0 for n in event["probe_tokens"]))
         self.assertEqual([lane["probes"][-1] for lane in event["lanes"]], list(map(list, vectors)))
         self.assertTrue(all(lane["steps"] == 4 for lane in event["lanes"]))
-        self.assertEqual(set(event["phases"]), {"queue", "prepare", "train", "probe"})
+        self.assertEqual(set(event["phases"]), {"queue", "lanes", "prepare", "train", "probe"})
+        self.assertEqual(set(event["prepare"]), {"flatten", "load"})
         self.assertEqual([step["optimizer_step"] for step in event["fit_steps"]], [1, 4])
         self.assertTrue(all(batch["rows"] and batch["scored_tokens"] > 0
                             for step in event["fit_steps"] for batch in step["microbatches"]))
@@ -258,7 +259,7 @@ class FitClientTest(unittest.TestCase):
         self.assertNotEqual(first, second)
 
     def test_forks_handed_the_same_rows_train_alike(self) -> None:
-        """Forks share one shuffle key: fork_score's empty dream is the
+        """Forks share one shuffle key: a fork with no extra rows is the
         control exactly, and a fork that differs does so by its rows alone."""
         control, empty, dreamt = asyncio.run(self.client(LaneLearner()).forks(
             b"s", [SEVEN[:3], SEVEN[:3], SEVEN[:4]], PROBE, RECIPE))

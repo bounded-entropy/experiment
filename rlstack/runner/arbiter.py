@@ -66,6 +66,8 @@ class Arbiter:
         self.clock = clock
         self.meter = meter or TrafficMeter()
         self.switches: list[str] = []       # residency history, labels
+        # each switch's wall clock, until the host journals it (take_switches)
+        self.switch_timings: list[dict] = []
         # every admission since this door was born, monotone: the desk's
         # idleness test compares it ACROSS ticks (ADR 0003, Q1)
         self.admissions = 0
@@ -258,17 +260,31 @@ class Arbiter:
         (concept venue, 2026-09-05: 33 GiB per device under a 64 GiB build,
         every on-policy arm dead at its first wave). Every sleep is
         idempotent, so a member already asleep costs one door verb."""
+        started = time.time()
+        evicted: dict[str, float] = {}
         for oid, other in sorted(self._residents.items(),
                                  key=lambda pair: pair[1].label):
             if (other.group == entry.group and self._objects[oid] is not obj
                     and other.evict is not None):
+                began = time.time()
                 await other.evict()
+                evicted[other.label] = time.time() - began
+        woke = time.time()
         if entry.wake is not None:
             await entry.wake()
+        self.switch_timings.append({"t": started, "to": entry.label, "evict": evicted,
+                                    "wake": time.time() - woke,
+                                    "seconds": time.time() - started})
         group.resident = obj
         group.last_switch = self.clock()
         group.handoff_to = None
         self.switches.append(entry.label)
+
+    def take_switches(self) -> list[dict]:
+        """The switches since the last take, each with its evict and wake
+        seconds — what the host journals as `switch` events."""
+        taken, self.switch_timings = self.switch_timings, []
+        return taken
 
     # ---- plumbing ------------------------------------------------------------
 

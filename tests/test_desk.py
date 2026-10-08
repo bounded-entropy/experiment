@@ -346,7 +346,7 @@ class DeskTest(DeskFixture):
         self.assertEqual(sorted(reborn.listings), ["serve-a", "train-b"])
         placement, boot = go(reborn.place_listings(demands_of(self.split_spec())))
         self.assertEqual(boot, [])
-        self.assertEqual(placement[None].name, "train-b")
+        self.assertEqual(placement["learner"].name, "train-b")
         self.assertEqual(placement["main"].name, "serve-a")
 
     def test_a_listing_is_never_replaced(self) -> None:
@@ -729,7 +729,7 @@ class LivenessTest(DeskFixture):
 
         placement, boot = go(desk.place_listings(demands_of(arith_spec(self.train))))
         self.assertEqual(boot, [])
-        self.assertEqual(placement[None].name, "alive-a")
+        self.assertEqual(placement["learner"].name, "alive-a")
 
         desk.delist("dead-z")
         reborn = Desk.from_journal(

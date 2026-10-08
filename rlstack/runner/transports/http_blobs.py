@@ -25,7 +25,10 @@ class HttpLimits:
     max_blob_bytes: int = 2 * 1024**3
     spool_bytes: int = 8 * 1024**3
     max_blobs: int = 128
-    max_connections: int = 64
+    # concurrent requests one runner's server holds open: a sample call holds
+    # its connection for the whole generation, and a metal serving two
+    # replicas of a pool (ADR 0022) is asked max_inflight per replica at once
+    max_connections: int = 512
     ttl_s: float = 300
     io_timeout_s: float = 30
 
@@ -33,7 +36,8 @@ class HttpLimits:
     def from_environment(cls) -> "HttpLimits":
         """The gateway, clients and workers share explicit operator byte budgets."""
         return cls(max_blob_bytes=int(os.environ.get("RLSTACK_HTTP_MAX_BLOB_BYTES", 2 * 1024**3)),
-                   spool_bytes=int(os.environ.get("RLSTACK_HTTP_SPOOL_BYTES", 8 * 1024**3)))
+                   spool_bytes=int(os.environ.get("RLSTACK_HTTP_SPOOL_BYTES", 8 * 1024**3)),
+                   max_connections=int(os.environ.get("RLSTACK_HTTP_MAX_CONNECTIONS", 512)))
 
     def __post_init__(self) -> None:
         import math

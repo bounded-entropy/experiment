@@ -21,6 +21,13 @@ exit will then join forever.
 The group is deliberately small-minded: one node, one rank per visible device,
 rank r on cuda:r — a host is a partition, the container is that partition, and
 its device indices are its own.
+
+TWO AXES SINCE ADR 0022: `width = dp × fsdp`. Rank r sits in data-parallel
+group r // fsdp at shard position r % fsdp, so a dp group is `fsdp`
+consecutive devices sharding one copy of the base, and the ranks holding the
+same shard position across groups form that position's dp sub-group — the
+one a gradient all-gather runs over. dp = 1 is the one-axis chorus it always
+was.
 """
 
 from __future__ import annotations
@@ -80,6 +87,7 @@ class RankGroup:
     width: int
     port: int
     children: tuple[torch.multiprocessing.Process, ...] = ()
+    dp: int = 1                     # data-parallel groups; width = dp * fsdp
     _mesh: Any = field(default=None, repr=False)
     _stopped: bool = False
 
@@ -87,13 +95,16 @@ class RankGroup:
 
     @classmethod
     def lead(cls, width: int, follower: Callable[..., None], *,
-             timeout_s: float = 1800.0) -> RankGroup:
+             timeout_s: float = 1800.0, dp: int = 1) -> RankGroup:
         """Rank 0: spawn ranks 1..width-1, then take rank 0's own place.
 
         Spawn, never fork: a child builds its own CUDA context on its own
         device, and a forked one would inherit this process's. width == 1 is
         a legal degenerate chorus — no children, no process group, so an
         unsharded build costs nothing to express."""
+        if width % dp:
+            raise ValueError(f"a chorus of {width} ranks cannot hold dp={dp} "
+                             f"equal groups")
         if width == 1:
             return cls(rank=0, width=1, port=0)
         port = free_port()
@@ -105,18 +116,18 @@ class RankGroup:
         for child in children:
             child.start()
         return cls._take_place(0, width, port, children=children,
-                               timeout_s=timeout_s)
+                               timeout_s=timeout_s, dp=dp)
 
     @classmethod
     def join(cls, rank: int, width: int, port: int, *,
-             timeout_s: float = 1800.0) -> RankGroup:
+             timeout_s: float = 1800.0, dp: int = 1) -> RankGroup:
         """Every other rank: take the place rank 0 spawned this process for."""
-        return cls._take_place(rank, width, port, timeout_s=timeout_s)
+        return cls._take_place(rank, width, port, timeout_s=timeout_s, dp=dp)
 
     @classmethod
     def _take_place(cls, rank: int, width: int, port: int, *,
                     children: tuple[torch.multiprocessing.Process, ...] = (),
-                    timeout_s: float) -> RankGroup:
+                    timeout_s: float, dp: int = 1) -> RankGroup:
         """The rendezvous itself: this rank's device, then the group.
 
         The timeout is generous because the first collective after `install`
@@ -130,9 +141,20 @@ class RankGroup:
             backend="nccl", init_method=f"tcp://127.0.0.1:{port}",
             world_size=width, rank=rank,
             timeout=timedelta(seconds=timeout_s))
-        return cls(rank=rank, width=width, port=port, children=children)
+        return cls(rank=rank, width=width, port=port, children=children, dp=dp)
 
     # ---- what a rank IS ------------------------------------------------------
+
+    @property
+    def fsdp(self) -> int:
+        """Ranks per data-parallel group: the width one copy of the base
+        shards across."""
+        return self.width // self.dp
+
+    @property
+    def dp_index(self) -> int:
+        """Which data-parallel group this rank belongs to."""
+        return self.rank // self.fsdp
 
     @property
     def device(self) -> torch.device:
@@ -146,13 +168,26 @@ class RankGroup:
         return f"cuda:{self.rank}"
 
     def mesh(self):
-        """The one-dimensional device mesh FSDP shards over. Built once and
-        kept: a mesh is the group's shape, and the group's shape is a birth
-        fact (#43)."""
+        """The device mesh FSDP shards over: one-dimensional at dp = 1, as it
+        always was, and otherwise THIS RANK'S fsdp sub-mesh of the (dp, fsdp)
+        mesh — so each dp group shards its own copy of the base. Built once
+        and kept: a mesh is the group's shape, and the group's shape is a
+        birth fact (#43)."""
         if self._mesh is None:
             from torch.distributed.device_mesh import init_device_mesh
-            self._mesh = init_device_mesh("cuda", (self.width,))
-        return self._mesh
+            if self.dp == 1:
+                self._mesh = init_device_mesh("cuda", (self.width,))
+            else:
+                self._mesh = init_device_mesh(
+                    "cuda", (self.dp, self.fsdp), mesh_dim_names=("dp", "fsdp"))
+        return self._mesh if self.dp == 1 else self._mesh["fsdp"]
+
+    def dp_group(self):
+        """The process group of this rank's shard position across the dp
+        groups — what an update's per-microbatch gradients are gathered
+        over (ADR 0022). Asked only at dp > 1."""
+        self.mesh()
+        return self._mesh["dp"].get_group()
 
     # ---- the wire between ranks ---------------------------------------------
 

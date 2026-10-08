@@ -100,6 +100,8 @@ class Heard:
 
     rank = 0
     width = 2
+    fsdp = 2        # one data-parallel group of two shards (ADR 0022)
+    dp = 1
 
     def __init__(self) -> None:
         self.said: list[str] = []

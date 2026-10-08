@@ -45,6 +45,26 @@ vocab × 4 bytes is ~0.6 GiB, held twice at the peak of one chunk. The whole-
 copy path this replaced held it for EVERY position at once."""
 
 
+def unscored_prefix(batch: TokenBatch, spans: list[tuple[int, int]]) -> int:
+    """How many leading positions EVERY row of a padded forward leaves
+    unscored: the shortest run of loss_mask=0 tokens that opens a document.
+
+    No logit is needed there — nothing credits a prompt token — and a long
+    prompt makes them the whole cost: a dreamer reads ten articles (~65k
+    tokens) before it writes, and that prompt's logits over Qwen3.5's 248k
+    vocabulary are ~32 GB in bf16 (post 0010). Position t scores token t from
+    the hidden state at t-1, so the first scored token at index f needs
+    logits from f-1 on; those positions' logprobs are reported as 0.0, the
+    value a document's first position already has. Every scored number is
+    the same arithmetic as before."""
+    first = []
+    for start, stop in spans:
+        mask = batch.loss_mask[start:stop]
+        scored = next((t for t, bit in enumerate(mask) if bit), len(mask))
+        first.append(max(scored - 1, 0))
+    return min(first, default=0)
+
+
 def chosen_logprobs(logits: torch.Tensor, targets: torch.Tensor,
                     chunk: int = LOGPROB_CHUNK) -> torch.Tensor:
     """log p(target_t | prefix) at every position, in fp32, from the model's
@@ -77,6 +97,41 @@ def chosen_logprobs(logits: torch.Tensor, targets: torch.Tensor,
 
 def _chunk_logprob(piece: torch.Tensor, picked: torch.Tensor) -> torch.Tensor:
     return torch.log_softmax(piece.float(), dim=-1).gather(1, picked)[:, 0]
+
+
+def head_logprobs(hidden: torch.Tensor, head, targets: torch.Tensor,
+                  chunk: int = LOGPROB_CHUNK) -> torch.Tensor:
+    """`chosen_logprobs` from the FINAL HIDDEN STATE [R, W, H] instead of the
+    logits: the vocabulary projection itself runs CHUNK positions at a time
+    under recompute, so no [R, W, V] logits tensor ever exists. A 10k-token
+    dreamer episode over Qwen3.5's 248k vocabulary is a 5 GiB logits block
+    and as much again for its gradient, and it was refused at 40 and at 46
+    GiB (post 0011, grpo1/grpo2 update 1); here autograd keeps the hidden
+    state, which it kept anyway. Same numbers: the head is the model's own
+    `lm_head`, applied to the same rows."""
+    rows, width, _ = hidden.shape
+    if width == 0:
+        return hidden.new_zeros((rows, 0), dtype=torch.float32)
+    out = []
+    for row in range(rows):
+        for start in range(0, width, chunk):
+            out.append(torch.utils.checkpoint.checkpoint(
+                _head_chunk_logprob, head, hidden[row, start:start + chunk],
+                targets[row, start:start + chunk, None], use_reentrant=False))
+    return torch.cat(out).reshape(rows, width)
+
+
+def _head_chunk_logprob(head, piece: torch.Tensor, picked: torch.Tensor) -> torch.Tensor:
+    return torch.log_softmax(head(piece).float(), dim=-1).gather(1, picked)[:, 0]
+
+
+def trunk_and_head(model):
+    """(trunk, head) for a Hugging Face causal LM — `model.model` returns the
+    final hidden state and `get_output_embeddings()` is the plain vocabulary
+    projection — or None for anything else (the replay then reads logits)."""
+    trunk = getattr(model, "model", None)
+    head = model.get_output_embeddings() if hasattr(model, "get_output_embeddings") else None
+    return (trunk, head) if trunk is not None and head is not None else None
 
 
 @dataclass
@@ -120,6 +175,7 @@ class TorchLearner:
         self._asleep = False
         self.checkpoint_activations = checkpoint_activations
         self.fsdp = 1               # build fact: this build is unsharded
+        self.dp = 1                 # build fact: one group (ADR 0022)
         self._tokenizer = None
         self._base: str | None = None
         self._model: torch.nn.Module | None = None
@@ -277,6 +333,12 @@ class TorchLearner:
                           logprob_gap=result.logprob_gap,
                           grad_norm=self._grad_norm(state), tokens=len(batch),
                           provided=_summarize(provided), components=result.components)
+
+    def accumulate(self, tenant: str,
+                   batches) -> tuple[TrainStats, ...]:
+        """Every microbatch of one update, in order (ADR 0022): one group,
+        so the loop the Trainer always ran."""
+        return tuple(self.forward_backward(tenant, batch) for batch in batches)
 
     def _provided(self, state: _Tenant) -> dict[str, Any]:
         """The bank's PROVIDED tensors for this forward, merged under their
@@ -618,9 +680,22 @@ class TorchLearner:
         # appended K/V to a DynamicCache on the first pass would append a
         # second copy on the recompute — the replay forward decodes nothing,
         # so there is no cache to want
-        logits = self._model(input_ids=ids, attention_mask=attention,
-                             use_cache=False).logits
-        chosen = chosen_logprobs(logits[:, :-1], ids[:, 1:])         # [R, W-1]
+        start = unscored_prefix(batch, spans)
+        split = trunk_and_head(self._model)
+        if split is not None:
+            trunk, head = split
+            hidden = trunk(input_ids=ids, attention_mask=attention,
+                           use_cache=False).last_hidden_state
+            scored = head_logprobs(hidden[:, start:-1], head, ids[:, start + 1:],
+                                   chunk=LOGPROB_CHUNK)
+        else:
+            keep = {} if start == 0 else {"logits_to_keep": width - start}
+            logits = self._model(input_ids=ids, attention_mask=attention,
+                                 use_cache=False, **keep).logits
+            scored = chosen_logprobs(logits[:, :-1], ids[:, start + 1:])
+        chosen = torch.cat([                                         # [R, W-1]
+            torch.zeros((len(spans), start), dtype=torch.float32, device=self.device),
+            scored], dim=1)
         zero = torch.zeros(1, dtype=chosen.dtype, device=self.device)
         return torch.cat([torch.cat([zero, chosen[row, :stop - start - 1]])
                           for row, (start, stop) in enumerate(spans)])

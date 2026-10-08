@@ -61,12 +61,17 @@ class FittingClient:
     names: Names
 
     async def sample(self, messages: Sequence[Message], stop: tuple[str, ...] = (), *,
-                     directives: Sequence[Directive] = ()) -> Turn:
-        return await self.pools.sample(messages, stop, directives=directives)
+                     directives: Sequence[Directive] = (),
+                     max_tokens: int | None = None,
+                     affinity: str | None = None) -> Turn:
+        return await self.pools.sample(messages, stop, directives=directives,
+                                       max_tokens=max_tokens, affinity=affinity)
 
     async def score(self, messages: Sequence[Message], token_ids: Sequence[int], *,
-                    directives: Sequence[Directive] = ()) -> tuple[float, ...]:
-        return await self.pools.score(messages, token_ids, directives=directives)
+                    directives: Sequence[Directive] = (),
+                    affinity: str | None = None) -> tuple[float, ...]:
+        return await self.pools.score(messages, token_ids, directives=directives,
+                                      affinity=affinity)
 
     def pool(self, name: str) -> PoolClient:
         return self.pools.pool(name)
@@ -137,7 +142,8 @@ async def run_pipeline(
             # over the run's generation sampling; None inherits
             client = EnginePoolClient(
                 routes, pdef.instance.sampling or sampling,
-                derive(master, phase, update, group.key, name))
+                derive(master, phase, update, group.key, name),
+                episode=f"{phase}/{update}/{group.key}/{name}")
             if pdef.fits:
                 if fit is None or names is None:
                     raise RuntimeError(
