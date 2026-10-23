@@ -5,7 +5,7 @@
 | | |
 |---|---|
 | **Date** | 2026-10-23 |
-| **Status** | Proposed — user requirements recorded; Q1–Q2 await answers |
+| **Status** | Accepted — Q1–Q2 answered by Samarth on 2026-10-23; implementation in progress |
 | **Author** | Codex with Samarth |
 | **Touches** | `runner/`, `runner/roles/`, `runner/learners/`, `runner/engines/`, `runner/transports/`, `policy/`, shared submission wiring, tests and architecture documentation |
 | **Invariants** | I1/I2 (policy crosses the training/inference boundary), I5 (resource choices do not change the scientific experiment), I8 (immutable version pins and tenant isolation), I10 (checkpoint and recovery ownership) |
@@ -114,13 +114,15 @@ The two user requirements above are settled. These are additional choices the re
 
 Recommendation: keep one chosen cadence per run, applied universally to all its adapters, and allow separate runs to choose different cadences. This preserves a coherent model/optimizer checkpoint and the existing rewind rule. Independent per-entry cadences require a new recovery contract: restoring different adapters from different logical updates is not a coherent continuation of coupled training. If independent cadences are intended, design that recovery explicitly before changing the checkpoint layout.
 
-> **Samarth:**
+> **Samarth:** yes, we can have the same checkpoint frequency for all the adpaters in a run.
 
 **Q2. Should the first NCCL implementation carry direct serving tensors, or existing serialized payload bytes?**
 
 Recommendation: a common tensor-state representation for both backends, because faster iteration is the motivation and merely placing existing serialized archives onto a GPU retains substantial export/staging work. Proceed only after the representation and bundle/resume compatibility boundary above are made concrete. The smaller alternative is NCCL carriage of the existing opaque payload bytes: still universal and easier to keep byte-compatible, but it must be described and measured as a transport optimization, not as removal of serialization or direct parameter loading.
 
-> **Samarth:**
+> **Samarth:** we should not serialize with the nccl backend into base64 before transferring, since my understanding is that this would be very slow in python. we should just do whatever is the fastest.
+
+Accepted interpretation: NCCL carries tensor buffers, never base64 or a serialized checkpoint archive. Small layout/version metadata uses the control channel. Base64 remains the distinct compatibility backend. Use immutable snapshots, persistent peer channels and coalesced tensor transfers where possible. The existing inference consumers may still need local payload conversion; measure installation separately rather than mislabeling transport as end-to-end zero-copy. Version the tensor-bundle content ID independently of legacy byte-bundle IDs; checkpoint payloads keep their old format, with a deterministic tensor-manifest reconstruction for restoration of the new IDs. No historical artifacts are rewritten.
 
 ## Outcome
 
