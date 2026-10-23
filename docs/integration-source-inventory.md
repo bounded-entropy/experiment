@@ -34,19 +34,23 @@ experiment branch's older framework snapshot.
 
 ## Private experiment changes
 
-The other 316 changed paths are experiment scripts, tests, plans, corpus and
-analysis artifacts, run/preservation records, and operational tooling. They remain
-verbatim in the separate private integration worktree at source commit
+The other 316 changed paths are private experiment scripts, tests, plans, corpus
+and analysis artifacts, run/preservation records, and operational tooling. Their
+original versions remain in the private integration branch history at source commit
 `e19f1ccf60fc95761112d6c681589aa13b656b17` on `codex/shared-trainer-integration`.
-Their contents are not copied into the general framework repository.
+Scientific artifacts remain unchanged. Active scripts and tests that called the
+retired fitting interfaces are migrated in that private branch to explicit adapter
+specifications and bounded ordinary Replay runs. Their contents are not copied
+into this general framework repository.
 
 A complete machine-readable inventory of all 98 source commits and all 334 changed
 paths, including each disposition, is retained in that private worktree as
-`docs/integration-source-inventory.json`. The completed shared framework will be
-overlaid into its `research/dreams-impl` subtree, followed by explicit migration of
-experiment callers to the common Trainer. Until that overlay and caller checks
-finish, this inventory does not claim that the private experiment is runnable
-against the rewritten APIs.
+`docs/integration-source-inventory.json`. The shared framework is overlaid into its `research/dreams-impl` subtree while
+retaining private recipe modules and their registrations. Retired fitting executor
+files and obsolete tests are explicitly removed. Active teaching callers now use
+the common Trainer; their reports retain every bounded child run identity and
+read exact committed probe and training statistics. Final validation and GPU
+qualification limits are recorded with the integration evidence.
 
 ## Local validation of the imported changes
 

@@ -253,10 +253,10 @@ class TestDefaults(unittest.TestCase):
     def test_measurement_left_the_spec(self) -> None:
         """#70: a run's identity is its training loop. Plans carries no eval
         and the spec no EvalSpec — measurement is an observation OUTSIDE the
-        run (runner/measure.py), configured by its own manifest. (`fit` is
-        ADR 0019's plan kind: a fit run's jobs, in identity only when set.)"""
+        run (runner/measure.py), configured by its own manifest. Supervised
+        Replay curricula use the normal train plan (ADR 0029)."""
         self.assertEqual([f.name for f in fields(Plans)],
-                         ["train", "rollout", "fit"])
+                         ["train", "rollout"])
         self.assertNotIn("eval",
                          [f.name for f in fields(ExperimentSpec)])
 
@@ -270,7 +270,7 @@ class TestDefaults(unittest.TestCase):
         s = Schedule()
         self.assertEqual((s.microbatch_tokens, s.max_policy_lag), (16384, 0))
         self.assertEqual([f.name for f in fields(Schedule)],
-                         ["microbatch_tokens", "max_policy_lag", "lr_scales"])
+                         ["microbatch_tokens", "max_policy_lag", "probes", "lr_scales"])
         self.assertIsNone(s.lr_scales)
 
     def test_optim_spec(self) -> None:

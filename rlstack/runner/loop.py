@@ -40,6 +40,7 @@ from rlstack.runner.interfaces import (
 )
 from rlstack.runner.arbiter import Arbiter
 from rlstack.runner.meters import HostJournal
+from rlstack.runner.names import names_ready, names_subdir
 from rlstack.runner.pool import Handed, Pool, add_if_missing, replica_key
 from rlstack.data.plan import RunPlan, decode
 from rlstack.runner.assemble import rollouts_needed
@@ -174,6 +175,10 @@ async def run_experiment_async(
     for a drained stop: the Trainer reads it at every update boundary.
     """
     needs = needs_of(spec)
+    recompute = checkpointing.state == "recompute"
+    if recompute and (spec.algo is None or spec.gen is not None or traffic_pools(spec)
+                      or any(adapter.out is not None for adapter in spec.policy.bank.values())):
+        raise ValueError("recompute recovery requires learner-only training without named weight exports")
     if weight_transfer.backend == "nccl":
         if checkpointing.delivery != "wire":
             raise ValueError("NCCL publication requires wire delivery, not store delivery")
@@ -228,6 +233,8 @@ async def run_experiment_async(
         "data": fingerprint,
         "schema": schema.fingerprint(),   # same base name, different schema → loud
         "parent": spec.init.policy if spec.init is not None else None,
+        **({"parent_run": spec.parent_run} if spec.parent_run is not None else {}),
+        **({"recovery": "recompute"} if recompute else {}),
     })
     # the run describes its own observability: a UI reads THIS, never the
     # registries (spec/flow.py — same walk the submit gate validated with)
@@ -237,48 +244,72 @@ async def run_experiment_async(
     for kind, plan in plans.items():
         data = await store_work(store.cas_get, getattr(spec.plans, kind))
         await store_work(run.write_plan, kind, data)
+    if spec.algo is not None and any(probe.update > len(plans["train"])
+                                     for probe in spec.algo.schedule.probes or ()):
+        raise ValueError("a scheduled probe must fall within the train plan's extent")
+    if recompute and run_progress(store, run_reference(rid, subdir)).done:
+        return RunReport(rid, len(plans["train"]), "train", None)
 
     # ---- Phase 1: idempotent setup ------------------------------------------
     # Every run persists its initial policy; inference loads it only when
     # needed. Training initializes through the learner; generation-only runs
     # use the adapter type's init function (ADR 0006 Part B, Q6).
     bank = spec.policy.bank
+    outputs = [adapter.out for adapter in bank.values() if adapter.out is not None]
+    if outputs:
+        folder = names_subdir(run)
+        await store_work(store.promise_named, folder, outputs, run_reference(rid, subdir))
     trains = any(need.learner for need in needs)
     trainable = sorted(name for name, a in bank.items() if a.trainable)
     servable = sorted(name for name, a in bank.items()
                       if ADAPTER_TYPES.get(a.adapter_type).instance.serving is not None)
     adapter_types = {name: bank[name].adapter_type for name in servable}
     resolved = {name: resolve(space, a.site) for name, a in bank.items()}
-    if trains:
-        # a Learner verb is synchronous by protocol (ADR 0002 Q6) and WAITS
-        # on a resident or another host; the wait leaves this loop
-        await asyncio.to_thread(learner.install, rid,
-                                parameterization_of(spec, resolved))
+    tail = await store_work(run.checkpoint_tail)
+    if tail is None and spec.init is not None and spec.init.policy.startswith("named://"):
+        folder, name = named_start_source(spec.init)
+        await names_ready(store, folder, (name,), RunSignals(),
+                          stopped=lambda: stop is not None and stop.requested,
+                          journal=journal)
+        if stop is not None and stop.requested:
+            stop.drained = True
+            return RunReport(rid, 0, spec.plans.extent, None, stopped=True)
     if arbiter is None:
         arbiter = Arbiter()
     attach_residents(spec, pools, learner if trains else None, arbiter)
+    if trains:
+        # Installation changes the shared wrapper roster. It holds the same
+        # resident admission as a forward, even for a composed child run.
+        async with arbiter.admit(learner):
+            await asyncio.to_thread(learner.install, rid, parameterization_of(spec, resolved))
 
     policy_version = {name: 0 for name in bank}
     resumed_from: int | None = None
     # THE CHECKPOINT TAIL is what resume restores (ADR 0014): attach has
     # already rewound the ledger to it, so the two agree; checkpoint 0 is the
     # initial blobs, written below on a run's first breath
-    tail = await store_work(run.checkpoint_tail)
     if trains:
-        if tail is not None:
-            policy_version = {name: int(v) for name, v in tail["versions"].items()}
-            await asyncio.to_thread(restore_tenant, learner, rid,
-                                    policy_version, run.read_blob, trainable)
-            resumed_from = int(tail["update"]) or None
-        elif spec.init is not None:
-            await asyncio.to_thread(
-                _warm_start, spec.init, tenant=rid, bank_names=set(bank),
-                trainable=trainable, store=store, learner=learner)
-        emitted = await asyncio.to_thread(learner.emit_initial, rid, policy_version)
-        adapters, moments = emitted.adapters, emitted.optim
+        async with arbiter.admit(learner):
+            if tail is not None:
+                policy_version = {name: int(v) for name, v in tail["versions"].items()}
+                await asyncio.to_thread(restore_tenant, learner, rid,
+                                        policy_version, run.read_blob, trainable)
+                resumed_from = int(tail["update"]) or None
+            elif spec.init is not None:
+                await asyncio.to_thread(
+                    _warm_start, spec.init, tenant=rid, bank_names=set(bank),
+                    trainable=trainable, store=store, learner=learner,
+                    base=spec.policy.base)
+            if recompute:
+                await asyncio.to_thread(learner.bind_versions, rid, policy_version)
+                adapters, moments = {}, {}
+            else:
+                emitted = await asyncio.to_thread(learner.emit_initial, rid, policy_version)
+                adapters, moments = emitted.adapters, emitted.optim
     else:
         adapters = await store_work(
-            initial_adapters, bank_entries(spec, resolved), spec.init, store)
+            initial_adapters, bank_entries(spec, resolved), spec.init, store,
+            spec.policy.base)
         moments = {}
 
     # every servable delta's blob at the version the run STARTS from: the
@@ -287,9 +318,10 @@ async def run_experiment_async(
     # first wave restores it from these, and could not otherwise (observed
     # live: nine tenants on an eight-bundle pool, and the on-policy arms
     # died at their first route on `no adapters blob v@0`)
-    await store_work(write_initial_blobs, run, adapters, policy_version, set(servable),
-                     fresh=(tail is None))
-    if tail is None:
+    if not recompute:
+        await store_work(write_initial_blobs, run, adapters, policy_version, set(servable),
+                         fresh=(tail is None))
+    if tail is None and not recompute:
         # CHECKPOINT 0: the initial blobs, sealed — the point a run that dies
         # before its first checkpoint rewinds to (ADR 0014). A checkpoint
         # promises adapters AND moments, so the trainable entries' version-0
@@ -300,7 +332,12 @@ async def run_experiment_async(
                 await store_work(run.write_blob, "optim", name,
                                  policy_version[name], moments[name])
         await store_work(run.append_checkpoint, 0, policy_version)
-    bundle = compile_bundle(adapters, policy_version, servable, adapter_types)
+    if recompute:
+        async with arbiter.admit(learner):
+            bundle = await asyncio.to_thread(learner.policy_pin, rid, policy_version,
+                                             servable, adapter_types)
+    else:
+        bundle = compile_bundle(adapters, policy_version, servable, adapter_types)
 
     # THE POOLS THAT SERVE THE POLICY (ADR 0014, Part B) get the policy's
     # bundle; every other pool serves its own base, installed on demand.
@@ -451,7 +488,7 @@ async def attach_run(store: Store, rid: str, *, manifest: dict,
 
 
 def initial_adapters(entries: Sequence[EntryInstall], init: WarmStart | None,
-                     store: Store) -> dict[str, bytes]:
+                     store: Store, base: str | None = None) -> dict[str, bytes]:
     """VERSION 0 FOR A RUN WITH NO LEARNER: each bank entry's payload from its
     adapter type's own init function (ADR 0006 Part B, Q6) — the same bytes an
     install would have emitted, so the bundle is the same content-addressed
@@ -467,6 +504,8 @@ def initial_adapters(entries: Sequence[EntryInstall], init: WarmStart | None,
         sealed = {}
     elif init.policy.startswith("cas://"):
         sealed = cas_warm_start(init, store, names).adapters
+    elif init.policy.startswith("named://"):
+        sealed = named_warm_start(init, store, names, base).adapters
     else:
         sealed = sealed_payloads(*warm_start_source(init, store), init.map, names)
     return {
@@ -591,9 +630,9 @@ def plan_runners(spec: ExperimentSpec, *, run, store, pools, learner,
     # no train plan nothing consumes anything, and the Generator is unpaced
     due_at = rollouts_needed(plans["train"].waves) if "train" in plans else {}
     runners: list[Runner] = []
-    # four needs, four runners — the closed set needs_of produces; each is
+    # Three needs, three runners — the closed set needs_of produces; each is
     # built with what only it takes (the Trainer its learner and journal, the
-    # Generator its tasks and pacing, the Fitter its jobs)
+    # Generator its tasks and pacing)
     for need in (needs_of(spec) if needs is None else needs):
         residents = tuple(pools[name] for name in need.pools)
         if need.runner is Trainer:
@@ -751,6 +790,31 @@ def cas_warm_start(init: WarmStart, store: Store, bank_names: set[str],
     return Emitted(adapters=adapters, optim=optim)
 
 
+def named_start_source(init: WarmStart) -> tuple[str, str]:
+    """A named source declares its exact experiment folder and library name."""
+    folder, _, name = init.policy[len("named://"):].partition("#")
+    return folder, name
+
+
+def named_warm_start(init: WarmStart, store: Store, bank_names: set[str],
+                     base: str | None) -> Emitted:
+    """A named adapter starts mapped entries with fresh optimizer moments."""
+    folder, name = named_start_source(init)
+    meta = store.named_meta(folder, name)
+    if meta is None:
+        raise FileNotFoundError(f"named warm start {init.policy!r} is not present")
+    if base is not None and meta.get("base") != base:
+        raise ValueError(f"named warm start {init.policy!r} belongs to base {meta.get('base')!r}, "
+                         f"requested {base!r}")
+    payload = store.read_named(folder, name)
+    if payload is None:
+        raise FileNotFoundError(f"named warm start {init.policy!r} has no payload")
+    destination = init.map.get("adapter", "adapter")
+    if destination not in bank_names or set(init.map) - {"adapter"}:
+        raise ValueError("a named warm start maps source 'adapter' to an entry in this bank")
+    return Emitted({destination: payload}, {})
+
+
 def warm_start_source(init: WarmStart, store: Store) -> tuple[RunHandle, int]:
     """Read the named parent without attaching or sweeping its in-flight work."""
     if not init.policy.startswith("store://"):
@@ -786,8 +850,13 @@ def sealed_payloads(parent: RunHandle, version: int,
 
 
 def _warm_start(init: WarmStart, *, tenant: str, bank_names: set[str],
-                trainable: list[str], store: Store, learner: Learner) -> None:
+                trainable: list[str], store: Store, learner: Learner,
+                base: str | None = None) -> None:
     """Load another run's sealed deltas (renamed via init.map) into this learner."""
+    if init.policy.startswith("named://"):
+        state = named_warm_start(init, store, bank_names, base)
+        learner.load(tenant, state.adapters, None)
+        return
     if init.policy.startswith("cas://"):
         state = cas_warm_start(init, store, bank_names, trainable)
         learner.load(tenant, state.adapters,

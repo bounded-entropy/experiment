@@ -378,6 +378,10 @@ class Learner(Protocol):
         """Serialize `tenant`'s deltas + optimizer moments for store and bundle."""
         ...
 
+    def bind_versions(self, tenant: str, versions: Mapping[str, int]) -> None:
+        """Bind logical publication counters without serializing checkpoint state."""
+        ...
+
     def emit_initial(self, tenant: str, versions: Mapping[str, int]) -> Emitted:
         """Bind logical versions after restore/warm-start, then export checkpoint zero."""
         ...

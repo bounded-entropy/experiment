@@ -14,7 +14,7 @@ are maintained separately.
 | Piece | What it does |
 | --- | --- |
 | **Spec** | Declares the base model, adapters, generation settings, loss, plans, seeds, and host topology. |
-| **Plan** | Says which tasks to sample or replay at each step, or which supervised fit jobs to run. |
+| **Plan** | Says which sealed trajectories to replay or tasks to sample for each update. |
 | **Environment** | Turns a task into a rollout, recording the generated tokens and their sampling probabilities. |
 | **Postprocessor** | Scores completed trajectories and produces columns such as rewards or advantages. |
 | **Loss** | Computes the training objective from recorded data and the learner's model outputs. |
@@ -24,7 +24,7 @@ are maintained separately.
 
 A typical RL update samples a wave of trajectories, scores them, trains on the
 recorded data, and commits the resulting policy and metrics. Generation-only
-runs and supervised fit runs use the same storage and scheduling infrastructure.
+runs and sealed supervised curricula use the same Trainer, storage and scheduling infrastructure.
 
 Run identity is derived from the spec and the code and content it names.
 Operational settings such as checkpoint cadence are declared separately. Run
@@ -41,7 +41,7 @@ learner and inference implementations, with native or custom GPU providers.
 - Named adapters can be saved, reused by other runs, and stacked with a trainable
   adapter. Fit jobs can share a learner while keeping separate adapter state,
   optimizer schedules, and document normalization.
-- Postprocessors can use the fit/fork API to evaluate the effect of training a
+- Postprocessors can compose normal supervised child runs to evaluate training a
   copy of an adapter. The API does not prescribe an experiment's reward.
 - Checkpoints support resume and configurable durability cadence. Deliberate
   stops drain and checkpoint before being recorded as stopped.
@@ -75,7 +75,7 @@ provider access are skipped. Passing local tests does not establish GPU or
 cross-pod behavior.
 
 For small executable examples, start with [spec construction](tests/test_examples.py),
-[generation and training](tests/test_loop.py), [fit jobs](tests/test_fit.py), and
+[generation and training](tests/test_loop.py), [sealed supervision](tests/test_supervision.py), and
 [checkpoint/resume behavior](tests/test_resume.py). These fixtures run without
 renting GPUs. Real model workers need the compatible dependencies and cached
 weights described by their deployment configuration.
@@ -117,9 +117,11 @@ compatibility and validation limits.
 
 Optimizer state is exported at checkpoints rather than every update. A
 learner-only SFT run over sealed trajectories also skips intermediate adapter
-exports. Completion and a drained stop still checkpoint. The legacy FitJob
-workflow remains available; this change does not migrate its callers or remove
-its Dreamer-specific slot assumptions.
+exports. Completion and a drained stop still checkpoint. Supervised curricula
+compile to ordinary Replay plans; independently routed LoRA entries share
+forwards and keep their own optimizer state, learning rates and loss means.
+The separate fitting runner, fit-job plan and fit client have been removed.
+See [sealed supervision](docs/sealed-supervision.md) for migration and probes.
 
 - **Modal:** [desk deployment](deploy/desk.py) and [venue wiring](deploy/modal_venue.py).
 - **Strange Loop:** [setup and operations](examples/strangeloop-desk.md),
@@ -141,7 +143,7 @@ plans, environments, and postprocessors.
 | `rlstack/policy/` | Adapter definitions and their training/inference implementations. |
 | `rlstack/inference/` | Rollouts and environments. |
 | `rlstack/training/` | Losses and postprocessors. |
-| `rlstack/runner/` | Run roles, fit APIs, engines, learners, scheduling, transports, and exporters. |
+| `rlstack/runner/` | Run roles, training composition, engines, learners, scheduling, transports, and exporters. |
 | `rlstack/observe/` | Read-only metrics and the browser UI. |
 | `rlstack_engine/` | Plugins and integration code for inference workers. |
 | `deploy/`, `examples/` | Deployment wiring and configuration examples. |

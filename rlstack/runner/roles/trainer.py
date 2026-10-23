@@ -55,7 +55,10 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Mapping, Sequence
+from collections import defaultdict, deque
 import math
+from dataclasses import replace
+import json
 from functools import lru_cache, partial
 import time
 
@@ -65,7 +68,7 @@ from rlstack.runner.assemble import realize
 from rlstack.runner.refs import RefReader
 from rlstack.data.stores.base import RunHandle, bump
 from rlstack.data.stores.retention import DEFAULT_RETENTION, RetentionPolicy
-from rlstack.data.trajectory import wave_from_rows
+from rlstack.data.trajectory import trajectory_from_row, wave_from_rows
 from rlstack.policy.compile import compile_bundle
 from rlstack.registry import ADAPTER_TYPES
 from rlstack.runner.arbiter import Arbiter
@@ -76,7 +79,7 @@ from rlstack.runner.names import (
     LIB_PREFIX, check_plan_names, names_ready, names_subdir, row_lib_names,
     wave_lib_names,
 )
-from rlstack.runner.fit import FitClient                  # ADR 0019 fit client
+from rlstack.runner.training_client import TrainingClient
 from rlstack.runner.post import NamesReader, run_pipeline
 from rlstack.runner.checkpointing import Checkpointing
 from rlstack.runner.weight_transfer import WeightTransfer
@@ -87,6 +90,7 @@ from rlstack.runner.signals import RunSignals, store_work
 from rlstack.spec.flow import split_pipeline
 from rlstack.spec.validate import serving_pools
 from rlstack.spec.specs import ExperimentSpec, SamplingSpec
+from rlstack.spec.canonical import canonical_json
 
 
 class Trainer(Runner):
@@ -100,11 +104,10 @@ class Trainer(Runner):
                  stop: StopRequest | None = None,
                  journal: HostJournal | None = None,
                  retention: RetentionPolicy = DEFAULT_RETENTION,
-                 fit_client: FitClient | None = None) -> None:   # ADR 0019 fit client
+                 training_client: TrainingClient | None = None) -> None:
         super().__init__(signals, arbiter, run)
-        # ADR 0019 fit client: what a `fits` processor's client carries —
-        # None in every run whose inline pipeline holds none (loop.fit_client_of)
-        self.fit_client = fit_client
+        # Only a processor declaring training receives the composition client.
+        self.training_client = training_client
         self.tenant = tenant
         self.checkpointing = checkpointing
         # THE WIRE (ADR 0014, Part B): the serving pools this runner pushes
@@ -206,6 +209,10 @@ class Trainer(Runner):
         await store_work(self.sweep_stale)  # converge interrupted work
         committed = await store_work(self.committed)
         self.last_update = committed
+        if self.schedule.lr_scales is not None and len(self.schedule.lr_scales) != len(self.plan):
+            raise ValueError("Schedule.lr_scales needs exactly one mapping per train wave")
+        if committed == 0:
+            await self.measure_probes(0)
         for update in range(committed + 1, len(self.plan) + 1):
             clock = UpdateClock()
             # THE WAITS ARE WHERE A STOP IS READ (ADR 0014, Q6): at the top of
@@ -232,13 +239,12 @@ class Trainer(Runner):
             if given is None:
                 await self.drain()
                 return
-            if self.fit_client is not None:
-                self.fit_client.update = update
+            if self.training_client is not None:
+                self.training_client.update = update
             produced = await run_pipeline(
                 self.inline, wave, {},
                 self.sampling, self.spec.seeds.master, update, given=given,
-                # ADR 0019 fit client
-                fit=self.fit_client, names=NamesReader(self.run))
+                training=self.training_client, names=NamesReader(self.run))
             postdata = {**given, **produced}
             await store_work(self.run.write_postdata, update, postdata)
             clock.posted()
@@ -268,11 +274,16 @@ class Trainer(Runner):
                 # ONE VERB PER UPDATE (ADR 0022): a dp learner splits the
                 # microbatches across its groups and sums their gradients in
                 # microbatch order, so the step is the same bytes at any dp
+                batches = training_batches(self.spec, docs, self.schedule.microbatch_tokens)
                 stats.extend(await asyncio.to_thread(
-                    self.learner.accumulate, self.tenant,
-                    list(pack(docs, self.schedule.microbatch_tokens))))
-                await asyncio.to_thread(self.learner.optim_step, self.tenant)
-                self.version = bump(self.version, self.trainable)
+                    self.learner.accumulate, self.tenant, batches))
+                scales = (self.schedule.lr_scales[update - 1]
+                          if self.schedule.lr_scales is not None else None)
+                if scales is None:
+                    await asyncio.to_thread(self.learner.optim_step, self.tenant)
+                else:
+                    await asyncio.to_thread(self.learner.optim_step, self.tenant, scales)
+                self.version = bump(self.version, active_entries(self.spec, trained))
                 due = self.checkpointing.due(update, len(self.plan))
                 tensor_pin = None
                 export_started = time.monotonic()
@@ -300,6 +311,10 @@ class Trainer(Runner):
                         self.pin_s = time.monotonic() - pin_started
                 if self.loaded_libraries:
                     await self.drop_libraries(keep=self.next_libraries(update))
+            await self.measure_probes(update)
+            if any(stat.components for stat in stats):
+                await store_work(self.run.write_postdata_part, update, "training",
+                                 training_measurements(trained, flats, batches, stats))
             clock.trained()
 
             bundle = tensor_pin or compile_bundle(self.adapters or {}, self.version,
@@ -317,6 +332,38 @@ class Trainer(Runner):
             clock.sealed()
             await store_work(self.journal_update, clock, update)
             await self.signals.notify()
+
+    async def measure_probes(self, update: int) -> None:
+        """Persist complete read-only probe vectors at declared boundaries."""
+        probes = [probe for probe in self.schedule.probes or () if probe.update == update]
+        if not probes:
+            return
+        rows = []
+        for probe in probes:
+            loaded = await store_work(self.refs.rows, probe.rows)
+            if loaded is None:
+                raise FileNotFoundError(probe.rows)
+            rows.extend(loaded)
+        trajectories = [trajectory_from_row(row) for row in rows]
+        async with self.arbiter.admit(self.learner):
+            flats = await asyncio.to_thread(
+                lambda: [flatten(trajectory, self.tokenize) for trajectory in trajectories])
+            values = [None] * len(flats)
+            batches = training_batches(self.spec, [(flat, {}) for flat in flats],
+                                       self.schedule.microbatch_tokens)
+            positions = document_indices(trajectories, flats, batches)
+            for batch, indices in zip(batches, positions, strict=True):
+                measured = await asyncio.to_thread(self.learner.forward, self.tenant, batch)
+                for index, value in zip(indices, measured, strict=True):
+                    values[index] = float(value)
+        counts = [sum(flat.loss_mask) for flat in flats]
+        await store_work(self.run.write_postdata_part, update, "probe", {
+            "row_ids": [row["task"]["id"] for row in rows],
+            "routes": [trajectory_route(trajectory) for trajectory in trajectories],
+            "nll": values, "scored_tokens": counts,
+            "nll_sum": [value * count for value, count in zip(values, counts)],
+            "versions": dict(self.version),
+            "reduction": "selected-token mean NLL per sealed document"})
 
     # ---- the library: named adapters the rows train under (ADR 0019) --------
 
@@ -407,7 +454,7 @@ class Trainer(Runner):
         them, then the sweep of what that line moved past. At the declared
         cadence, at the extent's last update, and on a drained stop — the
         only times bytes of policy state reach the store."""
-        if not self.dirty:
+        if not self.dirty or self.checkpointing.state == "recompute":
             return                      # nothing committed since the last checkpoint
         started = time.monotonic()
         adapters = self.adapters
@@ -425,6 +472,8 @@ class Trainer(Runner):
                              self.version[name], adapters[name])
             await store_work(self.run.write_blob, "optim", name,
                              self.version[name], optim[name])
+        if update == len(self.plan):
+            await self.publish_outputs(adapters, update)
         await store_work(self.run.append_checkpoint, update, dict(self.version))
         self.adapters, self.dirty = None, False
         self.checkpoint_stats = {"export_s": exported - started,
@@ -437,6 +486,54 @@ class Trainer(Runner):
                 "run_id": self.tenant, "versions": dict(self.version),
                 **self.checkpoint_stats})
         await store_work(self.sweep_stale)
+
+    async def publish_outputs(self, adapters: Mapping[str, bytes], update: int) -> None:
+        """Seal named exports before the final checkpoint declares completion.
+
+        The snapshot's blobs already exist. A crash before the checkpoint
+        append replays the ordinary update and checks this same name/provenance.
+        Consumers therefore cannot see a completed producer with an owed name.
+        """
+        from rlstack.spec.canonical import canonical_json
+
+        outputs = [(name, adapter) for name, adapter in self.spec.policy.bank.items()
+                   if adapter.out is not None]
+        if not outputs:
+            return
+        subdir = names_subdir(self.run)
+        run_ref = f"{subdir}/{self.tenant}"
+        for name, adapter in outputs:
+            vectors, probe_uri = [], None
+            for probe in self.schedule.probes or ():
+                result = await store_work(self.run.read_postdata_part, probe.update, "probe")
+                if result is None:
+                    continue
+                vector = [nll for route, nll in zip(result["routes"], result["nll"])
+                          if route == adapter.route]
+                if vector and probe.update not in [number for number, _ in vectors]:
+                    vectors.append((probe.update, vector))
+                if probe_uri is None and vector:
+                    rows = await store_work(self.refs.rows, probe.rows)
+                    selected = [row for row in rows
+                                if trajectory_route(trajectory_from_row(row)) == adapter.route]
+                    probe_uri = await store_work(self.run.store.cas_put,
+                        b"".join(json.dumps(row, sort_keys=True, separators=(",", ":")).encode()
+                                 + b"\n" for row in selected))
+            meta = {"base": self.spec.policy.base, "adapter_type": adapter.adapter_type,
+                    "site": adapter.site, "init": dict(adapter.init),
+                    "run_ref": run_ref, "entry": name, "update": update,
+                    "version": self.version[name], "loss": self.spec.algo.loss,
+                    "parent": self.spec.init.policy if self.spec.init else None,
+                    "steps": self.version[name], "probe": probe_uri,
+                    "probes": [vector for _, vector in sorted(vectors)]}
+            if "r" in adapter.init:
+                meta["r"] = int(adapter.init["r"])
+            existing = await store_work(self.run.store.named_meta, subdir, adapter.out)
+            if existing is not None and canonical_json(
+                    {key: value for key, value in existing.items() if key != "sha256"}) != canonical_json(meta):
+                raise ValueError(f"named output {adapter.out!r} already has different provenance")
+            await store_work(self.run.store.write_named, subdir, adapter.out,
+                             adapters[name], meta)
 
     async def drain(self) -> None:
         """A DELIBERATE STOP LOSES NOTHING (ADR 0014, Q6): at the update
@@ -495,6 +592,82 @@ class Trainer(Runner):
             if self.pin_s is not None:
                 self.journal.append({"event": "policy-pin", "run_id": self.tenant,
                     "update": update, "versions": dict(self.version), "hash_s": self.pin_s})
+
+
+def trajectory_route(trajectory) -> str | None:
+    """A document has one explicit route, or uses the default policy slot."""
+    routes = {turn.turn_extras["route"] for turn in trajectory.turns
+              if "route" in turn.turn_extras}
+    if len(routes) > 1:
+        raise ValueError(f"one supervised document has multiple routes: {sorted(routes)}")
+    return next(iter(routes), None)
+
+
+def training_measurements(trajectories, flats, batches, stats) -> dict:
+    """Join exact microbatch sufficient statistics to sealed document IDs."""
+    measured = []
+    for indices, stat in zip(document_indices(trajectories, flats, batches), stats, strict=True):
+        measured.append({"row_ids": [trajectories[index].task.id for index in indices],
+                         "routes": [trajectory_route(trajectories[index]) for index in indices],
+                         "tokens": stat.tokens, "loss": stat.loss, "components": dict(stat.components)})
+    return {"microbatches": measured,
+            "cadence": "every committed optimizer update",
+            "reduction": "loss-defined; per-document numerators, counts and weights retained unaveraged"}
+
+
+def document_indices(trajectories, flats, batches) -> list[list[int]]:
+    """Packing may reorder cohorts, while measurements keep declared row IDs."""
+    identities = defaultdict(deque)
+    for index, (trajectory, flat) in enumerate(zip(trajectories, flats, strict=True)):
+        identities[(flat.token_ids, flat.loss_mask, trajectory_route(trajectory))].append(
+            index)
+    positions = []
+    for batch in batches:
+        indices = []
+        ends = (*batch.doc_starts[1:], len(batch))
+        for index, (start, stop) in enumerate(zip(batch.doc_starts, ends, strict=True)):
+            facts = batch.doc_turn_extras[index] if batch.doc_turn_extras else ()
+            route = next((fact["route"] for fact in facts if "route" in fact), None)
+            indices.append(identities[(batch.token_ids[start:stop], batch.loss_mask[start:stop], route)].popleft())
+        positions.append(indices)
+    if any(identities.values()):
+        raise ValueError("packed measurement omitted sealed documents")
+    return positions
+
+
+def active_entries(spec, trajectories) -> list[str]:
+    routes = {trajectory_route(trajectory) for trajectory in trajectories}
+    return sorted(name for name, adapter in spec.policy.bank.items()
+                  if adapter.trainable and (adapter.route is None or adapter.route in routes))
+
+
+def training_batches(spec, docs, budget):
+    """Compatible routes share forwards; other lowerings keep uniform rows.
+
+    Packing never changes a route's statistical weight. The independent SFT
+    loss gets its explicit per-document weights from the normal post phase.
+    """
+    routed = {adapter.route for adapter in spec.policy.bank.values() if adapter.route is not None}
+    if not routed:
+        return list(pack(docs, budget))
+    cohorts, route_keys = {}, {}
+    for route in routed | {None}:
+        entries = [adapter for _, adapter in sorted(spec.policy.bank.items()) if adapter.route == route]
+        signature = tuple(canonical_json({"type": adapter.adapter_type, "site": adapter.site,
+                                         "init": {key: value for key, value in adapter.init.items() if key != "seed"}})
+                          for adapter in entries)
+        mixed = entries and all(ADAPTER_TYPES.get(adapter.adapter_type).instance.supports_mixed_routes
+                                for adapter in entries)
+        route_keys[route] = signature if mixed else ("route", route)
+    for doc in docs:
+        flat, _ = doc
+        routes = {turn["route"] for turn in flat.turn_extras if "route" in turn}
+        route = next(iter(routes), None)
+        key = route_keys.get(route, ("route", route))
+        cohorts.setdefault(key, []).append(doc)
+    batches = [batch for cohort in cohorts.values() for batch in pack(cohort, budget)]
+    return [replace(batch, microbatches_in_update=len(batches), documents_in_update=len(docs))
+            for batch in batches]
 
 
 def trained_rows(wave, postdata: Mapping[str, Sequence]) -> tuple[list, dict[str, list]]:

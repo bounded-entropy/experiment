@@ -23,11 +23,13 @@ still reads tensor bytes on the host, but does not ship weight archives through
 the runner. Its hashing time is recorded separately. A crash resumes at the last complete checkpoint,
 not merely the last ledger entry. Initialization still writes checkpoint zero;
 checkpoint I/O can carry serialized bytes even when the live backend is NCCL.
+Disposable learner-only measurements can explicitly choose recompute recovery
+to retain observations without weight archives; see the supervision guide.
 
-The legacy `Plans.fit`/Fitter remains a compatibility workflow with its existing
-completed-job durability semantics and Dreamer slot assumptions. Migrating those
-callers to ordinary replay training is separate work. It is not necessary to use
-that workflow to get infrequent checkpoints in ordinary multi-adapter training.
+Sealed supervision uses that same Trainer. `Plans.fit`, its separate runner,
+job records and optimizer-driving client have been removed (ADR 0029).
+[Curriculum compilation](sealed-supervision.md) creates ordinary Replay waves
+and optionally routes independent bank entries through shared forwards.
 
 ## Shared representation and two backends
 

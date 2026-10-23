@@ -241,7 +241,7 @@ class TrainingClientTest(unittest.IsolatedAsyncioTestCase):
                 raise TimeoutError("test failed to release child")
             return original(*args)
         spec = self.child_spec()
-        child_id = experiment_identity(spec, SCHEMA)
+        child_id = experiment_identity(replace(spec, parent_run="family/parent"), SCHEMA)
         with patch.object(self.learner, "accumulate", blocked):
             task = asyncio.create_task(self.client.run(spec, checkpoint_every=3))
             try:

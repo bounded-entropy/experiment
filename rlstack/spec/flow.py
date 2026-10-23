@@ -53,9 +53,8 @@ class PipelineSplit:
 
 def split_pipeline(pipeline: Sequence[str]) -> PipelineSplit:
     """THE SPLIT RULE: a processor declaring `pools` is SCORER-RUN, a pool-less
-    one is TRAINER-INLINE — and so is one declaring `fits` (ADR 0019), whatever
-    else it declares: it fits on the run's own learner, and the Trainer is the
-    runner that holds it.
+    one is TRAINER-INLINE — and so is one declaring `training` (ADR 0019), whatever
+    else it declares: it uses the run's learner, held by the Trainer.
 
     Declared, never guessed. `pools` already names every pool a processor sends
     traffic to — the submit gate vets it and the runner admits engines for it —
@@ -71,7 +70,7 @@ def split_pipeline(pipeline: Sequence[str]) -> PipelineSplit:
     inline: list[str] = []
     for name in pipeline:
         pdef = POST.get(name) if name in POST else None
-        scorer_run = pdef is not None and bool(pdef.pools) and not pdef.fits
+        scorer_run = pdef is not None and bool(pdef.pools) and not pdef.training
         (pooled if scorer_run else inline).append(name)
     return PipelineSplit(tuple(pooled), tuple(inline))
 

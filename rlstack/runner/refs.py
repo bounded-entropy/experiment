@@ -82,6 +82,14 @@ class RefReader:
         self._run = run
         self._cache: dict[str, list[dict]] = {}
 
+    @property
+    def store(self) -> Store:
+        return self._store
+
+    @property
+    def run(self) -> RunHandle:
+        return self._run
+
     def rows(self, location: str) -> list[dict] | None:
         """Every sealed row at `location`, or None when it is not sealed yet."""
         if location in self._cache:

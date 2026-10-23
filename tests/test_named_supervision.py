@@ -130,6 +130,19 @@ class NamedSupervisionTest(unittest.IsolatedAsyncioTestCase):
         with self.assertRaisesRegex(ValueError, "named://"):
             WarmStart("named://source")
 
+    async def test_named_outputs_refuse_missing_writer_duplicate_and_invalid_names(self):
+        from rlstack.spec.validate import check_named_outputs_have_one_trainer_writer
+        spec = self.spec()
+        self.assertEqual(check_named_outputs_have_one_trainer_writer(spec, SCHEMA), [])
+        self.assertEqual(check_named_outputs_have_one_trainer_writer(replace(spec, algo=None), SCHEMA)[0].code,
+                         "output-without-trainer")
+        entry = spec.policy.bank["student0"]
+        duplicate = replace(spec, policy=replace(spec.policy, bank={"a": entry, "b": entry}))
+        self.assertEqual(check_named_outputs_have_one_trainer_writer(duplicate, SCHEMA)[0].code,
+                         "duplicate-output-name")
+        invalid = replace(spec, policy=replace(spec.policy, bank={"a": replace(entry, out="bad//name")}))
+        self.assertEqual(check_named_outputs_have_one_trainer_writer(invalid, SCHEMA)[0].code, "bad-output-name")
+
 
 if __name__ == "__main__":
     unittest.main()

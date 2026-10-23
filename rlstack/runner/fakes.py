@@ -900,6 +900,9 @@ class FakeLearner:
     def emit(self, tenant: str) -> Emitted:
         return Emitted(adapters=self.emit_adapters(tenant), optim=self.emit_optim(tenant))
 
+    def bind_versions(self, tenant: str, versions: Mapping[str, int]) -> None:
+        self._tenant(tenant)
+
     def emit_initial(self, tenant: str, versions: Mapping[str, int]) -> Emitted:
         return self.emit(tenant)
 

@@ -1004,10 +1004,12 @@ def run_progress(store: "Store", run_id: str) -> RunProgress:
     if train is not None:
         entries = store.peek_ledger(run_id)
         sealed = store.peek_checkpoints(run_id)
+        manifest = store.peek_manifest(run_id) or {}
         return RunProgress("train",
                            int(entries[-1]["update"]) if entries else 0,
                            wave_count(train),
-                           checkpointed=int(sealed[-1]["update"]) if sealed else 0)
+                           checkpointed=(None if manifest.get("recovery") == "recompute"
+                                         else int(sealed[-1]["update"]) if sealed else 0))
     fit = store.peek_plan(run_id, "fit")
     if fit is not None:
         # a FIT RUN (ADR 0019): one ledger line per fit job, so the ledger is
@@ -1434,6 +1436,12 @@ class RunHandle:
         """
         self._repair_ledger()
         self._repair_record(self.checkpoints_key)
+        # Disposable supervision retains completed observations, never a
+        # resumable weight state. Incomplete work replays from initialization.
+        if self.manifest.get("recovery") == "recompute" and run_done(
+                self.store, self.run_dir.removeprefix("runs/")):
+            self.store._sweep_partial(self._key())
+            return
         sealed = self.read_checkpoints()
         # no checkpoint at all: NOTHING is sealed, update 0's artifacts included
         tail_update = int(sealed[-1]["update"]) if sealed else -1

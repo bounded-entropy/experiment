@@ -193,7 +193,7 @@ def _spec_classes() -> dict[str, type]:
 
     classes = (
         specs.SamplingSpec, specs.GenSpec, specs.AdapterSpec,
-        specs.PolicySpec, specs.Plans, specs.OptimSpec, specs.Schedule,
+        specs.PolicySpec, specs.Plans, specs.OptimSpec, specs.Schedule, specs.ProbeSpec,
         specs.AlgoSpec, specs.PoolMember, specs.LearnerMember,
         specs.HostSpec, specs.Topology, specs.Seeds, specs.WarmStart,
         specs.ExperimentSpec,
@@ -235,6 +235,8 @@ def _decode_dataclass(tree: dict) -> object:
 
     classes = _spec_classes()
     tag = tree[TYPE_KEY]
+    if tag == "Plans" and tree.get("fit") is not None:
+        raise ValueError("legacy fit plans have no executor; compile sealed Replay training waves")
     if tag not in classes:
         raise TypeError(
             f"from_canonical: unknown spec type {tag!r} — the decode table "
@@ -673,7 +675,7 @@ def check_epoch(payload: Mapping, mine: str, who: str) -> None:
 
 LEARNER_VERBS = ("gradient_cosines", "install", "uninstall", "forward_backward", "accumulate",
                  "optim_step",
-                 "emit", "emit_initial", "emit_adapters", "emit_optim", "policy_pin", "load", "learner_tokenize",
+                 "emit", "emit_initial", "bind_versions", "emit_adapters", "emit_optim", "policy_pin", "load", "learner_tokenize",
                  "prepare_transfer", "send_transfer", "release_transfer",
                  "forward", "load_set", "drop_set", "emit_set")
 """The Learner protocol as frames — the whole of what crosses a host door to
@@ -1063,6 +1065,9 @@ class LearnerService:
             return encode_emitted(self.learner.emit(tenant))
         if verb == "emit_initial":
             return encode_emitted(self.learner.emit_initial(tenant, payload["versions"]))
+        if verb == "bind_versions":
+            self.learner.bind_versions(tenant, payload["versions"])
+            return {}
         if verb == "emit_adapters":
             return {"adapters": encode_payloads(self.learner.emit_adapters(
                 tenant, payload.get("versions")))}
@@ -1605,6 +1610,9 @@ class RemoteLearner:
 
     def emit_initial(self, tenant: str, versions: Mapping[str, int]) -> Emitted:
         return decode_emitted(self.frame("emit_initial", {"tenant": tenant, "versions": dict(versions)}))
+
+    def bind_versions(self, tenant: str, versions: Mapping[str, int]) -> None:
+        self.frame("bind_versions", {"tenant": tenant, "versions": dict(versions)})
 
     def emit_adapters(self, tenant: str, versions: Mapping[str, int] | None = None) -> Mapping[str, bytes]:
         return decode_payloads(self.frame("emit_adapters", {

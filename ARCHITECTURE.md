@@ -1357,3 +1357,21 @@ referenced by number throughout the code. In short, by subject:
 
 Deltas agreed after the last spec fold-in live in `agent-context/CONTEXT.md`;
 later entries supersede earlier ones, and the code plus the latest entry win.
+
+
+## Sealed supervision and composed training (ADR 0029)
+
+A supervised curriculum is a normal sealed Replay train plan. The Trainer is
+its only optimizer-driving runner; there is no fitting runner or fit-job plan.
+Optional explicit bank-entry routes select independent parameters per document,
+with ordinary per-entry learning-rate schedules and independent optimizer ages.
+The common curriculum compiler builds these values without executing metal.
+
+A processor declaring training receives a TrainingClient. It composes complete
+ordinary child specs on the learner already owned by its parent and performs
+read-only measurements against explicitly declared adapters. Child state lives
+in normal checkpoints; disposable measurements can instead explicitly choose
+recompute recovery and retain observations without weight archives. Named output
+exports and named initialization use the existing verified write-once library.
+Full mechanics, provenance, reductions and limitations are in
+[sealed supervision](docs/sealed-supervision.md).

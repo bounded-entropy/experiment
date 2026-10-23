@@ -65,6 +65,7 @@ class AdapterSpec:
     # None applies this entry to every row; an explicit route selects it
     # only for documents carrying that route in their recorded turn extras.
     route: str | None = field(default=None, metadata={"identity": "when_set"})
+    out: str | None = field(default=None, metadata={"identity": "when_set"})
 
 
 @dataclass(frozen=True)
@@ -109,6 +110,18 @@ class OptimSpec:
 
 
 @dataclass(frozen=True)
+class ProbeSpec:
+    """Score sealed documents before training (0) or after one update.
+
+    Rows carry ordinary adapter routes. Full per-document results are stored
+    in that update's probe postdata part, outside the training objective.
+    """
+
+    update: int
+    rows: str
+
+
+@dataclass(frozen=True)
 class Schedule:
     """How a wave is CONSUMED — its shape is the plan's (#59).
 
@@ -127,6 +140,7 @@ class Schedule:
 
     microbatch_tokens: int = 16384
     max_policy_lag: int = 0
+    probes: tuple[ProbeSpec, ...] | None = field(default=None, metadata={"identity": "when_set"})
     # One mapping per committed update, scaling optimizer base learning rates.
     lr_scales: tuple[Mapping[str, float], ...] | None = field(
         default=None, metadata={"identity": "when_set"})
@@ -251,7 +265,7 @@ class WarmStart:
     initialize an ordinary run without a synthetic parent run.
     """
 
-    policy: str                   # "store://<run_id>@<version>" or "cas://<sha>"
+    policy: str                   # store://run@version, cas://sha, named://folder#name
     optim: str = "fresh"          # "load" restores Adam moments; "fresh" starts over
     map: Mapping[str, str] = field(default_factory=dict)
 
@@ -260,11 +274,17 @@ class WarmStart:
             raise ValueError(
                 f"WarmStart.optim must be 'load' or 'fresh', got {self.optim!r}"
             )
-        if not self.policy.startswith(("store://", "cas://")):
+        if not self.policy.startswith(("store://", "cas://", "named://")):
             raise ValueError(
                 f"WarmStart.policy must be sealed state ('store://...' or "
-                f"'cas://...'), got {self.policy!r}"
+                f"'cas://...' or 'named://folder#name'), got {self.policy!r}"
             )
+        if self.policy.startswith("named://"):
+            folder, separator, name = self.policy[len("named://"):].partition("#")
+            if not folder or not separator or not name:
+                raise ValueError("a named warm start is named://<subdir>#<name>")
+            if self.optim != "fresh":
+                raise ValueError("a named payload has no optimizer moments; use optim='fresh'")
 
 
 @dataclass(frozen=True)
@@ -280,6 +300,10 @@ class ExperimentSpec:
     seeds: Seeds
     init: WarmStart | None = None
     tier: str = "lab"             # "lab" | "release"
+    # Composed child runs retain their exact parent reference. Besides lineage,
+    # this keeps identical child curricula of concurrent parents in distinct
+    # learner tenancies; older standalone specs keep their canonical identity.
+    parent_run: str | None = field(default=None, metadata={"identity": "when_set"})
 
     def __post_init__(self) -> None:
         if self.tier not in ("lab", "release"):

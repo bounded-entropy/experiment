@@ -31,6 +31,7 @@ from rlstack.registry import (
     POST,
 )
 from rlstack.spec.specs import PoolMember, ExperimentSpec, LearnerMember
+from rlstack.data.stores.base import StoreError, check_name
 
 MAIN_POOL = "main"
 """The pool name a rollout plan samples the policy through — the one pool
@@ -261,15 +262,11 @@ def check_adapter_types_accept_their_sites(
 
 def check_sites_do_not_overlap(
         spec: ExperimentSpec, schema: SiteSchema) -> list[ValidationIssue]:
-    """THE BANK RULE, at the gate: a site carries at most one delta per
-    tenant, so no two bank entries may resolve to a common site.
+    """A site carries at most one delta for each selectable row route.
 
-    Stated at the replay seam since #44 (adapters/replay.py) and, until ADR
-    0004, enforced nowhere: two entries at one path both installed and both
-    applied — two policies wearing one version number, summed silently, for
-    every adapter type. The fix for a spec is one entry (a wider pattern, or
-    `tie`); across TENANTS nothing here applies — that is I8, and the site
-    wrapper's roster. Reported once per pair, at the later entry.
+    Unrouted entries accompany every explicit route. Different explicit
+    routes never cooccur on one row, so they may claim the same site.
+    Across tenants the wrapper roster preserves additive installation (I8).
     """
     space = site_space(spec, schema)
     matched = {name: {meta.name for meta in resolve(space, adapter.site)}
@@ -281,13 +278,14 @@ def check_sites_do_not_overlap(
             shared = sorted(matched[earlier] & matched[later])
             first_route = spec.policy.bank[earlier].route
             second_route = spec.policy.bank[later].route
-            may_cooccur = first_route is None or second_route is None or first_route == second_route
+            may_cooccur = (first_route is None or second_route is None
+                           or first_route == second_route)
             if shared and may_cooccur:
                 issues.append(_issue(
                     "site-overlap", f"policy.bank.{later}.site",
                     f"entries {earlier!r} and {later!r} both resolve to "
                     f"{len(shared)} site(s) ({', '.join(shared[:4])}) — a "
-                    f"site carries at most one delta per tenant"))
+                    f"site carries at most one delta per row route"))
     return issues
 
 
@@ -316,6 +314,30 @@ def check_adapter_routes_are_supported(
         issues.append(_issue("routed-serving-unsupported", "policy.bank",
                              "explicit bank routes currently select sealed replay rows; "
                              "serving pools do not yet select bank entries by route"))
+    return issues
+
+
+def check_named_outputs_have_one_trainer_writer(spec: ExperimentSpec, schema: SiteSchema) -> list[ValidationIssue]:
+    """Only a Trainer's final checkpoint publishes distinct named outputs."""
+    issues, owners = [], {}
+    for name, adapter in sorted(spec.policy.bank.items()):
+        if adapter.out is None:
+            continue
+        path = f"policy.bank.{name}.out"
+        if spec.algo is None:
+            issues.append(_issue("output-without-trainer", path,
+                                 "a named weight output needs a Trainer's final checkpoint"))
+        if not isinstance(adapter.out, str):
+            issues.append(_issue("bad-output-name", path, "a named weight output must be a string"))
+            continue
+        try:
+            check_name(adapter.out)
+        except StoreError as error:
+            issues.append(_issue("bad-output-name", path, str(error)))
+        if adapter.out in owners:
+            issues.append(_issue("duplicate-output-name", path,
+                                 f"named output {adapter.out!r} is already written by {owners[adapter.out]!r}"))
+        owners[adapter.out] = name
     return issues
 
 
@@ -738,8 +760,8 @@ def check_post_pools_can_coreside(spec: ExperimentSpec, schema: SiteSchema) -> l
 
 
 def check_plans_declare_an_extent(spec: ExperimentSpec, schema: SiteSchema) -> list[ValidationIssue]:
-    """A run has a LENGTH: a train plan (one wave per update), a fit plan (one
-    job per line — ADR 0019) or a rollout plan (one wave per rollout). A spec
+    """A run has a LENGTH: a train plan (one wave per update)
+    or a rollout plan (one wave per rollout). A spec
     declaring none describes a run with no work and nothing to be done, which
     nothing could ever call finished (ADR 0006 Part B)."""
     plans = spec.plans
@@ -809,6 +831,23 @@ def _declares_a_learner(spec: ExperimentSpec) -> bool:
 
 
 
+def check_training_post_has_a_learner(spec: ExperimentSpec, schema: SiteSchema) -> list[ValidationIssue]:
+    """Inline child training and measurements need the run's declared learner."""
+    if spec.algo is None:
+        return []
+    issues = []
+    for index, name in enumerate(spec.algo.post):
+        if name not in POST or not POST.get(name).training:
+            continue
+        if not _declares_a_learner(spec):
+            issues.append(_issue("training-without-learner", f"algo.post[{index}]",
+                                 f"postprocessor {name!r} declares training but has no learner"))
+        if POST.get(name).pools:
+            issues.append(_issue("training-with-pools", f"algo.post[{index}]",
+                                 f"postprocessor {name!r} runs inline and cannot also declare pools"))
+    return issues
+
+
 def check_a_rollout_plan_has_gen(spec: ExperimentSpec, schema: SiteSchema) -> list[ValidationIssue]:
     """A rollout plan MAKES trajectories, which takes an environment and tasks
     to make them from — so gen must exist to declare both."""
@@ -835,6 +874,10 @@ def check_schedule_is_sane(spec: ExperimentSpec, schema: SiteSchema) -> list[Val
         issues.append(_issue(
             "bad-schedule", "algo.schedule.max_policy_lag",
             f"max_policy_lag must be >= 0, got {s.max_policy_lag}"))
+    for index, probe in enumerate(s.probes or ()):
+        if type(probe.update) is not int or probe.update < 0 or not probe.rows.startswith("cas://"):
+            issues.append(_issue("bad-schedule", f"algo.schedule.probes[{index}]",
+                                 "a probe names a nonnegative update and sealed CAS rows"))
     for update, scales in enumerate(s.lr_scales or ()):
         for key, value in scales.items():
             if not isinstance(key, str) or not key:
@@ -871,6 +914,7 @@ CHECKS = (
     check_adapter_types_accept_their_sites,
     check_sites_do_not_overlap,
     check_adapter_routes_are_supported,
+    check_named_outputs_have_one_trainer_writer,
     check_plora_entries_name_their_factors,
     check_plora_shapes_are_positive,
     check_latent_priors_are_a_recipe,
@@ -885,6 +929,7 @@ CHECKS = (
     check_learnerless_bank_is_frozen,
     check_plans_declare_an_extent,
     check_train_plan_and_algo_agree,
+    check_training_post_has_a_learner,
     check_a_rollout_plan_has_gen,
     check_rollout_pool_serves_the_policy,
     check_schedule_is_sane,

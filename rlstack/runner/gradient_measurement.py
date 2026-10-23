@@ -64,7 +64,7 @@ async def finish_thread_call(verb: Callable[[], Any]) -> Any:
         return await asyncio.shield(operation)
     except asyncio.CancelledError:
         # A cancellation cannot stop a thread or a remote learner operation.
-        # Keep its admission and the fitting lock until that operation returns.
+        # Keep its admission and the client mutation lock until that operation returns.
         while not operation.done():
             try:
                 await asyncio.shield(operation)

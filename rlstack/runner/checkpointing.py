@@ -42,12 +42,17 @@ class Checkpointing:
 
     every: int
     delivery: Delivery = "wire"
+    state: Literal["save", "recompute"] = "save"
 
     def __post_init__(self) -> None:
         if isinstance(self.every, bool) or not isinstance(self.every, int) or self.every < 1:
             raise ValueError(f"Checkpointing.every must be an int >= 1, got {self.every!r}")
         if self.delivery not in DELIVERIES:
             raise ValueError(f"Checkpointing.delivery must be one of {DELIVERIES}, got {self.delivery!r}")
+        if self.state not in ("save", "recompute"):
+            raise ValueError("Checkpointing.state must be 'save' or 'recompute'")
+        if self.state == "recompute" and self.delivery != "wire":
+            raise ValueError("recompute training has no stored policy to deliver")
         if self.delivery == "store" and self.every != 1:
             raise ValueError(
                 "Checkpointing(delivery='store') requires every=1: a consumer faulting "
@@ -56,11 +61,12 @@ class Checkpointing:
 
     def due(self, update: int, extent: int) -> bool:
         """Is update `update` (1-based) a checkpoint, in a run `extent` updates long?"""
-        return update % self.every == 0 or update >= extent
+        return self.state == "save" and (update % self.every == 0 or update >= extent)
 
     def row(self) -> dict[str, Any]:
         """The wire form: what rides the frame beside `subdir` and `resume`."""
-        return {"every": self.every, "delivery": self.delivery}
+        return {"every": self.every, "delivery": self.delivery,
+                **({"state": self.state} if self.state != "save" else {})}
 
     @classmethod
     def from_row(cls, row: Mapping[str, Any] | None) -> "Checkpointing":
@@ -70,7 +76,8 @@ class Checkpointing:
                 "a submission must declare its Checkpointing({'every': k, "
                 "'delivery': 'wire'|'store'}): the cadence is a deliberate "
                 "decision and there is no default")
-        return cls(every=int(row["every"]), delivery=str(row.get("delivery", "wire")))
+        return cls(every=int(row["every"]), delivery=str(row.get("delivery", "wire")),
+                   state=str(row.get("state", "save")))
 
 
 EVERY_UPDATE = Checkpointing(every=1)

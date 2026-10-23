@@ -18,6 +18,7 @@ from typing import Any, Protocol
 
 from rlstack.data.trajectory import Message, Turn
 from rlstack.policy.adapters.base import Directive
+from rlstack.spec.specs import AdapterSpec, ExperimentSpec
 
 
 class PoolClient(Protocol):
@@ -66,32 +67,13 @@ class PoolClient(Protocol):
     def pool(self, name: str) -> "PoolClient": ...
 
 
-# ---------------------------------------------------------------------------
-# fits from a postprocessor (ADR 0019)
-# ---------------------------------------------------------------------------
-
-@dataclass(frozen=True)
-class Stage:
-    """One leg of a fit: `rows` ("cas://<sha>", a jsonl of trajectory rows)
-    for `epochs` passes in batches of `batch`, at peak learning rate `lr`
-    under `decay` ("linear": lr falls to 0 across the stage — HF Trainer's
-    default — or "constant"). Declared here because it is what a processor
-    hands `client.fit.forks`; the loop that runs one is runner/fit.py."""
-
-    rows: str
-    epochs: int
-    batch: int
-    lr: float
-    decay: str = "linear"
-
-
 @dataclass(frozen=True)
 class GradientRow:
     """One independently conditioned document, with exact scored-token positions.
 
     `token_ids` already includes its complete student context. The binary mask
     is token-aligned; prompt tokens and each document's first token are zero.
-    The fitting client preserves these IDs and this mask without tokenization.
+    The measurement client preserves these IDs and this mask without tokenization.
     """
 
     row_id: str
@@ -137,60 +119,70 @@ class GradientComparison:
     candidate_cache_hit: bool = False
 
 
-class Fits(Protocol):
-    """`client.fit`: small LoRA fits on the run's OWN learner, under a
-    throwaway tenant, for a processor that declares `fits = True`."""
+@dataclass(frozen=True)
+class TrainingResult:
+    """A completed or deliberately stopped ordinary child run."""
 
-    async def forks(self, start_payload: bytes | None,
-                    fork_rows: Sequence[Sequence[Mapping[str, Any]]],
-                    probe_rows: Sequence[Mapping[str, Any]],
-                    stage: Stage, *, every_probe: bool = False) -> list:
-        """Fork `start_payload` (None = a fresh set) once per entry of
-        `fork_rows`, train fork k on `fork_rows[k]` (trajectory rows) under
-        `stage`'s epochs, batch, lr and decay — its `rows` is ignored — and
-        answer each fork's per-document mean NLL over `probe_rows` AFTER
-        training, in fork order. With `every_probe`, each fork's every probe
-        point instead (before its first step, then after its stage)."""
-        ...
+    run_id: str
+    run_ref: str
+    completed: int
+    versions: Mapping[str, int]
+    stopped: bool = False
+
+
+@dataclass(frozen=True)
+class TrainingSnapshot:
+    """Checkpointed adapter and optimizer state, keyed by bank entry."""
+
+    adapters: Mapping[str, bytes]
+    optim: Mapping[str, bytes]
+    versions: Mapping[str, int]
+
+
+class Training(Protocol):
+    """Compose normal sealed-data runs and read-only learner measurements.
+
+    There is no optimizer loop in this client. A child spec goes through the
+    same setup, Trainer, ledger and checkpoint recovery as a top-level run.
+    """
+
+    base: str
+    seed: int
+    microbatch_tokens: int
+
+    async def run(self, spec: ExperimentSpec, *, checkpoint_every: int,
+                  save_state: bool = True) -> TrainingResult: ...
+
+    async def snapshot(self, run_ref: str) -> TrainingSnapshot: ...
+
+    async def evaluate(self, adapter: AdapterSpec, payload: bytes | None,
+                       rows: Sequence[Mapping[str, Any]]) -> tuple[float, ...]: ...
 
     async def gradient_cosines(
-        self, start_payload: bytes | None,
-        reference_rows: Sequence[GradientRow],
-        candidate_rows: Sequence[Sequence[GradientRow]],
-    ) -> tuple[GradientComparison, ...]:
-        """Compare supervised gradients at one fixed temporary student state.
+            self, start_payload: bytes | None,
+            reference_rows: Sequence[GradientRow],
+            candidate_rows: Sequence[Sequence[GradientRow]], *,
+            adapter: AdapterSpec) -> tuple[GradientComparison, ...]: ...
 
-        References are independent documents, averaged after each selected-token
-        mean NLL. Each candidate is its own document group. Nothing is fitted,
-        no optimizer state conditions the reward, and input tokens/masks remain
-        exact. Results retain candidate order.
-        """
-        ...
+    async def tokenize(self, text: str) -> tuple[int, ...]: ...
 
-    async def tokenize(self, text: str) -> tuple[int, ...]:
-        """`text` as the learner's base tokenizes it, without special tokens:
-        a processor has no tokenizer of its own, and text it builds at run
-        time (a dream) becomes a trajectory row's tokens only through this."""
-        ...
+    async def rows(self, uri: str) -> list[dict[str, Any]]: ...
 
-    async def rows(self, uri: str) -> list[dict[str, Any]]:
-        """The trajectory rows of a `cas://<sha>` jsonl in the run's store —
-        background and probe rows a task's meta names by uri."""
-        ...
+    async def put(self, payload: bytes) -> str: ...
+
+    async def publish(self, name: str, payload: bytes, meta: Mapping[str, Any]) -> None: ...
+
+    async def probes(self, run_ref: str, update: int) -> dict: ...
 
 
 class Names(Protocol):
-    """`client.names`: named adapters, read-only."""
+    """Named adapters, read-only."""
 
-    async def read_named(self, name: str) -> bytes | None:
-        """The named payload under this run's subdir, or None while it does
-        not exist."""
-        ...
+    async def read_named(self, name: str) -> bytes | None: ...
 
 
-class FittingPoolClient(PoolClient, Protocol):
-    """What a `fits = True` processor's `client` is: the pools, plus `fit`
-    and `names`."""
+class TrainingPoolClient(PoolClient, Protocol):
+    """A training processor's pool client and explicit composition doors."""
 
-    fit: Fits
+    training: Training
     names: Names

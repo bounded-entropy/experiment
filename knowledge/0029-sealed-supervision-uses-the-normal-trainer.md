@@ -61,12 +61,12 @@ The former inline fork path returned probes without exporting adapter or optimiz
 
 ### Interfaces
 
-`AdapterSpec.route` selects ordinary bank entries per document. `Schedule.lr_scales` declares each update's multipliers. `TrainingClient.run(spec, checkpointing=...)` executes a full ordinary child spec; `TrainingClient.measure(...)` uses learner forward/gradient APIs. Recipe helpers translate curricula into existing `RunPlan`/`Replay` values and read child checkpoints for named export. No new plan kind or runner role is added. Existing store areas and normal checkpoint records are used.
+`AdapterSpec.route` selects ordinary bank entries per document. `Schedule.lr_scales` declares each update's multipliers. `TrainingClient.run(spec, checkpoint_every=..., save_state=True)` executes a full ordinary child spec; `evaluate` and `gradient_cosines` use learner forward/gradient APIs. Recipe helpers translate curricula into existing `RunPlan`/`Replay` values and read child checkpoints for named export. No new plan kind or runner role is added. Existing store areas and normal checkpoint records are used.
 
 ```python
 AdapterSpec(adapter_type="lora", site=site, init={"r": 8}, route="student/0")
 Schedule(lr_scales=({"student0": 1.0}, {"student0": 0.5}))
-await client.training.run(child_spec, checkpointing=declared_cadence)
+await client.training.run(child_spec, checkpoint_every=20)
 ```
 
 ## Questions and authorization
@@ -77,4 +77,10 @@ Races and recovery: child specs are immutable and content-addressed; concurrent 
 
 ## Outcome
 
-Implementation in progress. Final source inventory, validation counts and hardware limitations will be recorded here before completion.
+Implemented. The legacy fitting runner, role, plan, job and client have been deleted. All active private teaching callers now compile sealed Replay curricula and use the ordinary Trainer. Exact source dispositions are recorded in `docs/integration-source-inventory.md`; local validation is recorded in `knowledge/evidence/0029-local-validation.json`: 1,946 lightweight tests (312 dependency/hardware skips) and 325 selected actual CPU Torch tests (two CUDA skips) pass. The private integrated snapshot passes 2,138 lightweight tests (316 skips) and 46 actual CPU recipe tests (no skips). Counts overlap.
+
+Child specs include an explicit parent run reference to isolate resident tenants across concurrent parents. Direct local Torch operations and FSDP announce/compute pairs are serialized with a reentrant learner lock, matching the existing remote host custody boundary. Names are promised before dependency waits and published before the final checkpoint becomes visible.
+
+The finite source-identity compatibility table was extended only for eight behavior-preserving foreign-row guards. The DreamBank covariance correction intentionally changes its scientific source identity. Historical ordinary identity goldens remain unchanged.
+
+The separately authorized removal of experiment-specific framework modules and Environment/TaskMaker hierarchies is a subsequent migration; this milestone does not claim that broader boundary cleanup is complete. Hardware qualification remains separate from these local checks.
