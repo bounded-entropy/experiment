@@ -38,6 +38,10 @@ Delete the separate fitting plan, runner, job and client execution loop. Build s
 
 Postprocessors that train or measure declare access to a generic training client. That client composes ordinary child experiment specs and sealed plans on the already-owned learner using `run_experiment_async`; it does not own an optimizer loop. Dataset construction, epoch shuffles, stage boundaries, named outputs and task-specific fork interpretation belong in recipe helpers. Child runs have content identities, normal ledgers, checkpoint/resume and explicit cadence. A generic measurement door can inspect resident child policies and compute gradient comparisons without training them. There is no type check for `dream_bank` to permit supervised training or measurement.
 
+### Disposable measurements
+
+The former inline fork path returned probes without exporting adapter or optimizer archives. Replacing it with full final checkpoints would add multiple gigabytes of serialization per candidate group at the observed ranks, defeating the rewrite's speed purpose. Preserve that behavior through a shared, adapter-neutral `Checkpointing(state="recompute")` policy on the normal Trainer, rather than retaining another executor. It saves normal ledger/probe observations but no weight or optimizer archives; incomplete work restarts from its declared sealed initialization. Complete observations can be reused. This mode refuses serving, named weight exports and snapshot reads, because none has a durable weight snapshot. Default `state="save"` and all existing checkpoint/recovery bytes remain unchanged. A lightweight learner `bind_versions` verb sets logical counter offsets without serializing initial tensors. This is a preservation of the existing disposable-fork capability within the explicitly authorized replacement, not a new training algorithm or an adapter-specific exception.
+
 ### Touched / untouched
 
 - **Touched** — `spec/specs.py`, validation and wire records: remove `Plans.fit`; add optional row routes and explicit per-update schedule multipliers without changing old unconfigured identities.
