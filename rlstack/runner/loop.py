@@ -2,8 +2,7 @@
 
 A RUN IS A SET OF RUNNER NEEDS, each naming its runner, the plan it consumes
 and the residents it admits (ADR 0006 Part B). `needs_of` reads the
-experiment's needs off its spec — a Fitter iff there is a fit plan (ADR 0019),
-else a Trainer iff there is an algo, a Scorer iff the post pipeline addresses
+experiment's needs off its spec — a Trainer iff there is an algo, a Scorer iff the post pipeline addresses
 a pool, a Generator iff there is a rollout plan — and everything after that
 is generic: Phase 1 sets up what the needs admit and
 Phase 2 is one TaskGroup over them, run by `plan_runners`.
@@ -34,9 +33,8 @@ from rlstack.registry import ADAPTER_TYPES, POST, code_hashes
 from rlstack.runner.checkpointing import Checkpointing
 from rlstack.runner.weight_transfer import WeightTransfer
 from rlstack.runner.publication import publish_tensors
-from rlstack.runner.roles import Runner, Fitter, Generator, Scorer, Trainer
+from rlstack.runner.roles import Runner, Generator, Scorer, Trainer
 from rlstack.runner.roles.base import StopRequest
-from rlstack.runner.roles.fitter import fit_entry
 from rlstack.runner.interfaces import (
     Emitted, Engine, EntryInstall, Learner, OptimSettings, Parameterization,
 )
@@ -45,7 +43,7 @@ from rlstack.runner.meters import HostJournal
 from rlstack.runner.pool import Handed, Pool, add_if_missing, replica_key
 from rlstack.data.plan import RunPlan, decode
 from rlstack.runner.assemble import rollouts_needed
-from rlstack.runner.fit import FitClient, FitJob, decode_jobs
+from rlstack.runner.training_client import TrainingClient
 from rlstack.runner.refs import RefReader
 from rlstack.runner.restore import restore_bundle_on, restore_tenant
 from rlstack.runner.traffic import Routes, load_task_sets
@@ -91,7 +89,7 @@ class RunnerNeed:
     """
 
     runner: type[Runner]
-    plan: str                          # "train" | "rollout" | "fit": what it consumes
+    plan: str                          # "train" | "rollout": what it consumes
     pools: tuple[str, ...] = ()        # pool names whose engines it admits
     learner: bool = False              # admits the learner
     buffer: int | None = None          # Generator only: None = unpaced
@@ -132,10 +130,6 @@ def data_fingerprint(spec: ExperimentSpec) -> str:
     parts = [spec.plans.train or "-", spec.plans.rollout or "-"]
     if spec.gen is not None:
         parts.extend(spec.gen.tasks)
-    if spec.plans.fit is not None:
-        # appended only when declared (ADR 0019), so every run that has no
-        # fit plan is fingerprinted exactly as it always was
-        parts.append(f"fit:{spec.plans.fit}")
     return "|".join(parts)
 
 
@@ -187,8 +181,7 @@ async def run_experiment_async(
             raise ValueError("NCCL publication requires dedicated awake residents; alternating hosts use base64")
     if any(need.learner for need in needs) and learner is None:
         raise ValueError(
-            "this run needs a Trainer (its spec declares an algo) or a Fitter "
-            "(a fit plan), and both work on a learner, but none was handed to the run: "
+            "this run needs a Trainer, but no learner was handed to the run: "
             "either hand one, or drop the algo — a spec with no algo is a "
             "generation-only run, which needs no learner and writes no ledger")
     handed: dict[str, Handed] = (
@@ -351,11 +344,13 @@ async def run_experiment_async(
         return routes
 
     # ---- Phase 2: the blackboard --------------------------------------------
-    fit_client = (fit_client_of(spec, resolved, learner, arbiter, tenant=rid,
-                                refs=RefReader(store, run), journal=journal)
-                  if trains else None)
+    training_client = (TrainingClient(
+        learner, arbiter, tenant=rid, refs=RefReader(store, run), schema=schema,
+        seed=spec.seeds.master, microbatch_tokens=spec.algo.schedule.microbatch_tokens,
+        journal=journal, weight_transfer=weight_transfer)
+        if trains and any(POST.get(name).training for name in spec.algo.post) else None)
     runners = plan_runners(spec, needs=needs, run=run, store=store,
-                           fit_client=fit_client,
+                           training_client=training_client,
                            pools=pools,
                            learner=learner, routes_at=routes_at, plans=plans,
                            initial_bundle=bundle,
@@ -369,12 +364,12 @@ async def run_experiment_async(
             if stop is not None:
                 group.create_task(end_on_stop(
                     stop, tasks,
-                    drains=any(isinstance(d, (Trainer, Fitter)) for d in runners)))
+                    drains=any(isinstance(d, Trainer) for d in runners)))
     except ExceptionGroup as failures:
         raise failures.exceptions[0] from None
     finally:
-        if fit_client is not None:
-            await fit_client.close()        # the fork tenant ends with the run
+        if training_client is not None:
+            await training_client.close()
 
     extent = spec.plans.extent
     stopped = stop is not None and stop.requested
@@ -420,7 +415,8 @@ def bank_entries(spec: ExperimentSpec,
         init.setdefault("seed", init_seed(spec.seeds.master, name))
         entries.append(EntryInstall(
             name=name, adapter_type=adapter.adapter_type, init=init,
-            trainable=adapter.trainable, sites=tuple(resolved[name])))
+            trainable=adapter.trainable, sites=tuple(resolved[name]),
+            route=adapter.route))
     return tuple(entries)
 
 
@@ -487,20 +483,11 @@ def init_seed(master: int, entry: str) -> int:
     return int.from_bytes(digest[:8], "big")
 
 
-def load_plans(declared: Plans, store: Store) -> dict[str, RunPlan | tuple[FitJob, ...]]:
-    """Resolve the declared plan uris, by kind. A plan the spec leaves None is
-    absent from the map: no train plan is a run that never trains, no rollout
-    plan is a run that never samples, and the gate refuses the spec that
-    declares none. A FIT plan (ADR 0019) decodes to its jobs — checked as it
-    decodes, the way a wave plan's leaves are — and its length is the run's."""
-    out: dict[str, RunPlan | tuple[FitJob, ...]] = {}
-    for kind in ("train", "rollout"):
-        uri = getattr(declared, kind)
-        if uri is not None:
-            out[kind] = decode(store.cas_get(uri))
-    if declared.fit is not None:
-        out["fit"] = decode_jobs(store.cas_get(declared.fit))
-    return out
+def load_plans(declared: Plans, store: Store) -> dict[str, RunPlan]:
+    """Decode the ordinary wave plans the run declares."""
+    return {kind: decode(store.cas_get(uri))
+            for kind in ("train", "rollout")
+            if (uri := getattr(declared, kind)) is not None}
 
 
 def write_initial_blobs(run, adapters: Mapping[str, bytes],
@@ -544,15 +531,9 @@ def write_initial_blobs(run, adapters: Mapping[str, bytes],
 def needs_of(spec: ExperimentSpec) -> tuple[RunnerNeed, ...]:
     """THE ONE PLACE A SPEC BECOMES RUNNERS (ADR 0006 Part B).
 
-    A FITTER iff there is a fit plan (ADR 0019), and then nothing else: a fit
-    run declares an algo for its loss, optimizer and microbatch budget, but
-    its ledger's writer is the Fitter and no Trainer is planned. Otherwise a
-    Trainer iff there is an algo — it is the ledger's only writer, so a run
-    without one commits nothing and its extent is its rollouts; a Scorer iff
-    the post pipeline has a POOLED half; a Generator iff there is a rollout
-    plan. Each need names the RESIDENTS its runner's work occupies: the
-    Trainer the learner, the Scorer the pools of
-    its processors, the Generator its serving pool.
+    A Trainer iff there is an algo; a Scorer iff the post pipeline has a
+    pooled half; a Generator iff there is a rollout plan. The Trainer is the
+    ledger's only writer, including sealed supervised Replay curricula.
 
     The Generator's buffer is the lag when a Trainer consumes what it makes
     and None — UNPACED — when nothing does (Q1): the lag buffer bounds
@@ -563,8 +544,6 @@ def needs_of(spec: ExperimentSpec) -> tuple[RunnerNeed, ...]:
     follows the ledger from outside — runner/measure.py — and writes its own
     area, never the run dir).
     """
-    if spec.plans.fit is not None:
-        return (RunnerNeed(runner=Fitter, plan="fit", learner=True),)
     needs: list[RunnerNeed] = []
     if spec.algo is not None:
         split = split_pipeline(spec.algo.post)
@@ -588,7 +567,7 @@ def plan_runners(spec: ExperimentSpec, *, run, store, pools, learner,
                  needs: Sequence[RunnerNeed] | None = None,
                  journal: HostJournal | None = None,
                  stop: StopRequest | None = None,
-                 fit_client: FitClient | None = None) -> list[Runner]:
+                 training_client: TrainingClient | None = None) -> list[Runner]:
     """THE EXECUTOR OF NEEDS: one runner per need, built with the plan it
     consumes and the engines behind the pools it admits (`needs_of` reads the
     needs off the spec; unasked, this asks it).
@@ -601,7 +580,7 @@ def plan_runners(spec: ExperimentSpec, *, run, store, pools, learner,
     The Trainer journals its update's phase timings (an update is the unit of
     progress the other runners orbit, so they are the run's own clock); the
     Generator journals each rollout wave's episode and call timings, and the
-    Fitter its fits.
+    Trainer its updates.
     Only the Trainer takes the wire (ADR 0014): under `wire` delivery it is
     handed the engine behind every pool that serves the policy, and pushes
     each committed bundle there; under `store` delivery, none.
@@ -617,14 +596,7 @@ def plan_runners(spec: ExperimentSpec, *, run, store, pools, learner,
     # Generator its tasks and pacing, the Fitter its jobs)
     for need in (needs_of(spec) if needs is None else needs):
         residents = tuple(pools[name] for name in need.pools)
-        if need.runner is Fitter:
-            runners.append(Fitter(
-                signals, arbiter, run,
-                spec=spec, jobs=plans[need.plan],
-                refs=RefReader(store, run), learner=learner, tenant=tenant,
-                initial_version=initial_version,
-                checkpointing=checkpointing, stop=stop, journal=journal))
-        elif need.runner is Trainer:
+        if need.runner is Trainer:
             wire = ({name: pools[name] for name in serving_pools(spec)
                      if name in pools}
                     if checkpointing.delivery == "wire" else {})
@@ -634,7 +606,7 @@ def plan_runners(spec: ExperimentSpec, *, run, store, pools, learner,
                 learner=learner, tenant=tenant, journal=journal,
                 initial_version=initial_version,
                 checkpointing=checkpointing, weight_transfer=weight_transfer, pools=wire, stop=stop,
-                fit_client=fit_client))
+                training_client=training_client))
         elif need.runner is Scorer:
             runners.append(Scorer(
                 signals, arbiter, run,
@@ -654,23 +626,6 @@ def plan_runners(spec: ExperimentSpec, *, run, store, pools, learner,
     return runners
 
 
-def fit_client_of(spec: ExperimentSpec, resolved: Mapping[str, tuple],
-                  learner: Learner, arbiter: Arbiter, *, tenant: str,
-                  refs: RefReader, journal: HostJournal | None = None) -> FitClient | None:
-    """THE FIT CLIENT, for a run whose inline pipeline holds a `fits`
-    processor (ADR 0019) — None for every other run, which is every run there
-    was. Its forks are lanes of a second tenant on the run's OWN learner, at
-    the rank and the resolved sites of the run's `dream_bank` entry (the gate
-    has refused a fitting pipeline without one), seeded off the master."""
-    if spec.algo is None or not any(
-            name in POST and POST.get(name).fits for name in spec.algo.post):
-        return None
-    entry = fit_entry(spec)
-    return FitClient(
-        learner, arbiter, tenant=tenant, refs=refs, base=spec.policy.base,
-        sites=tuple(resolved[entry]), r=int(spec.policy.bank[entry].init["r"]),
-        seed=init_seed(spec.seeds.master, f"{entry}:forks"),
-        microbatch_tokens=spec.algo.schedule.microbatch_tokens, journal=journal)
 
 
 def pipeline_pools(pipeline) -> tuple[str, ...]:

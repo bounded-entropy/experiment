@@ -62,6 +62,9 @@ class AdapterSpec:
     site: str                     # canonical name, resolved against the SiteSchema
     init: Mapping[str, object] = field(default_factory=dict)
     trainable: bool = True
+    # None applies this entry to every row; an explicit route selects it
+    # only for documents carrying that route in their recorded turn extras.
+    route: str | None = field(default=None, metadata={"identity": "when_set"})
 
 
 @dataclass(frozen=True)
@@ -79,45 +82,19 @@ class PolicySpec:
 
 @dataclass(frozen=True)
 class Plans:
-    """The shape of the run, by reference: content-addressed plans.
+    """Content-addressed waves for training and generation.
 
-    `train` is what the Trainer consumes, one wave per update; None means
-    nothing trains (a generation-only run — ADR 0006 Part B). `rollout` is
-    what the Generator makes, one wave per rollout index; None means the run
-    samples nothing (every train leaf is already sealed elsewhere). `fit` is
-    what the Fitter consumes, one FIT JOB per line (ADR 0019): a run that
-    declares it is a fit run, and declares neither of the other two. At least
-    one of the three exists, or the run has no work and no length — the gate
-    says so (check_plans_declare_an_extent). Measurement has no plan here: it
-    is not part of the run (a Measurement follows the ledger from outside,
-    observe-side).
-
-    Each uri's sha IS the plan's content hash, so a plan hashes into run_id
-    exactly as if it were written inline, while the spec stays readable.
+    A training wave is exactly one optimizer update. Supervised data is a
+    sealed Replay dataset, consumed by the same Trainer as every other loss.
     """
 
-    train: str | None = None      # "cas://<sha>"
+    train: str | None = None
     rollout: str | None = None
-    # "cas://<sha>" of a jsonl of fit-job rows (runner/fit.py: decode_jobs).
-    # In identity only WHEN SET (spec/canonical.py), so every spec written
-    # before fit runs existed hashes to the run_id it always had.
-    fit: str | None = field(default=None, metadata={"identity": "when_set"})
 
     @property
     def extent(self) -> str:
-        """WHICH PLAN IS THE RUN'S LENGTH: the train plan when one exists —
-        one wave is one gradient update, so a run is done when its updates
-        are — else the fit plan, whose last committed job ends a fit run,
-        else the rollout plan, whose last sealed wave ends a run that only
-        generates.
-
-        A derived property and never a field: the extent is readable off the
-        uris, so no hashed record gains anything and every existing run's
-        identity is exactly what it was (ADR 0006 Part B, Q4).
-        """
-        if self.train is not None:
-            return "train"
-        return "fit" if self.fit is not None else "rollout"
+        """Training updates determine a training run's extent."""
+        return "train" if self.train is not None else "rollout"
 
 
 @dataclass(frozen=True)
@@ -150,6 +127,9 @@ class Schedule:
 
     microbatch_tokens: int = 16384
     max_policy_lag: int = 0
+    # One mapping per committed update, scaling optimizer base learning rates.
+    lr_scales: tuple[Mapping[str, float], ...] | None = field(
+        default=None, metadata={"identity": "when_set"})
 
 
 @dataclass(frozen=True)

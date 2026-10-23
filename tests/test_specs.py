@@ -261,7 +261,7 @@ class TestDefaults(unittest.TestCase):
                          [f.name for f in fields(ExperimentSpec)])
 
     def test_schedule(self) -> None:
-        """Schedule has exactly TWO fields, because the plan states the rest:
+        """The plan states update count; Schedule states consumption and LR:
         group_size, trajectories_per_wave and n_updates are the plan's by
         construction, and epochs_per_wave left with the invariant it violated —
         one wave is one gradient update. What remains is one engineering knob
@@ -270,7 +270,8 @@ class TestDefaults(unittest.TestCase):
         s = Schedule()
         self.assertEqual((s.microbatch_tokens, s.max_policy_lag), (16384, 0))
         self.assertEqual([f.name for f in fields(Schedule)],
-                         ["microbatch_tokens", "max_policy_lag"])
+                         ["microbatch_tokens", "max_policy_lag", "lr_scales"])
+        self.assertIsNone(s.lr_scales)
 
     def test_optim_spec(self) -> None:
         o = OptimSpec("adamw", lr=1e-5)

@@ -21,29 +21,39 @@ its floor.
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from contextlib import contextmanager
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
+import hashlib
+import json
+import math
+import os
 from typing import Any
 import time
 
 import torch
 import torch.utils.checkpoint
 
+from rlstack.client import GradientComparison, GradientDocumentStats
 from rlstack.data.flatten import TokenBatch
-from rlstack.policy.adapters.replay import ReplayRows, row_plan
+from rlstack.policy.adapters.replay import ReplayRows, SiteWrapper, row_plan
 from rlstack.policy.siteschema import SiteMeta
 from rlstack.registry import ADAPTER_TYPES, LOSSES
+from rlstack.runner.learners.gradient_cache import GradientCache
 from rlstack.runner.interfaces import (
     Emitted, Parameterization, TrainStats, check_lr_scales, lr_scale_of,
 )
 from rlstack.training.losses import PolicyOutputs
+from rlstack.training.losses.factual_sft import sequence_sft
 
 
 LOGPROB_CHUNK = 1024
 """Positions per fp32 log-softmax chunk in `chosen_logprobs`: 1024 × a 152k
 vocab × 4 bytes is ~0.6 GiB, held twice at the peak of one chunk. The whole-
 copy path this replaced held it for EVERY position at once."""
+
+GRADIENT_MIN_NORM = 1e-12
+"""Numerical guard in selected-token-mean loss coordinates, not a reward term."""
 
 
 def unscored_prefix(batch: TokenBatch, spans: list[tuple[int, int]]) -> int:
@@ -153,6 +163,7 @@ class _Tenant:
     # scaled step can never compound into the next one
     base_lrs: dict[str, tuple[tuple[str, float], ...]] = field(default_factory=dict)
     slot: dict[str, Any] = field(default_factory=dict)
+    routed_slots: dict[str, dict[str, Any]] = field(default_factory=dict)
 
 
 class TorchLearner:
@@ -182,6 +193,8 @@ class TorchLearner:
         self._model: torch.nn.Module | None = None
         self._tenants: dict[str, _Tenant] = {}
         self._weight_sender = None
+        self.gradient_cache = GradientCache(
+            int(os.environ.get("RLSTACK_GRADIENT_CACHE_BYTES", "0")))
 
     # ---- Learner protocol ---------------------------------------------------
 
@@ -222,7 +235,7 @@ class TorchLearner:
             state.adapter_types[entry.name] = adapter_type
             state.sites[entry.name] = entry.sites
             adapter_type.install_replay(self._model, params, entry.sites)
-            self._claim_slot(state, entry.sites, params)
+            self._claim_slot(state, entry.sites, params, entry.route)
             if entry.name in state.trainable:
                 state.optimizers[entry.name] = self._optimizer_for(
                     entry.name, params, adapter_type, parameterization.optim)
@@ -331,7 +344,9 @@ class TorchLearner:
             # which a dream cut at blank lines produces (a `---` line is one
             # token) and a fork at batch 1 steps alone: its loss is a constant
             # 0 with no graph, and it accumulates nothing
-            if result.loss.requires_grad:
+            # Fully frozen replay measures loss only; its adapter tensors can
+            # still require grad, but there is no trainable entry to accumulate.
+            if state.trainable and result.loss.requires_grad:
                 result.loss.backward()
         return TrainStats(loss=float(result.loss), mean_ratio=result.mean_ratio,
                           logprob_gap=result.logprob_gap,
@@ -367,32 +382,39 @@ class TorchLearner:
 
     def optim_step(self, tenant: str,
                    lr_scales: Mapping[str, float] | None = None) -> None:
-        """One step of every trainable entry. `lr_scales` multiplies the named
+        """One step of every entry that accumulated a gradient. `lr_scales` multiplies the named
         groups' BASE learning rates for THIS step (see `scaled_lrs`); with
         none given no group's lr is touched at all."""
         state = self._tenant(tenant)
+        self.gradient_cache.invalidate(id(state))
         if lr_scales:
             check_lr_scales(lr_scales, {entry: [name for name, _ in groups]
                                         for entry, groups in state.base_lrs.items()})
-        # ONE NORM PER MODEL: entries clipped together as before, except an
-        # entry whose groups are independent fits (AdapterType.clips_by_group),
-        # each of which is clipped by itself so lanes never touch (ADR 0019).
-        together = [p for entry in state.trainable
+        # Unrouted banks retain their shared norm. Explicitly routed banks
+        # clip each entry independently; an absent entry never advances Adam.
+        touched = [entry for entry in state.trainable
+                   if any(p.grad is not None for p in state.params[entry].parameters())]
+        together = [p for entry in touched
                     if not state.adapter_types[entry].clips_by_group
+                    and not state.routed_slots
                     for p in state.params[entry].parameters()]
         if together:
             torch.nn.utils.clip_grad_norm_(together, self.grad_clip)
-        for entry in state.trainable:
+        for entry in touched:
             if state.adapter_types[entry].clips_by_group:
                 for group in state.optimizers[entry].param_groups:
                     held = [p for p in group["params"] if p.grad is not None]
                     if held:
                         torch.nn.utils.clip_grad_norm_(held, self.grad_clip)
-        for entry, optimizer in state.optimizers.items():
+            elif state.routed_slots:
+                torch.nn.utils.clip_grad_norm_(
+                    state.params[entry].parameters(), self.grad_clip)
+        for entry in touched:
+            optimizer = state.optimizers[entry]
             with scaled_lrs(optimizer, entry, state.base_lrs[entry], lr_scales):
                 optimizer.step()
-            optimizer.zero_grad()
-        for entry in state.trainable:
+            optimizer.zero_grad(set_to_none=True)
+        for entry in touched:
             state.adapter_types[entry].after_step(state.params[entry])
 
     def forward(self, tenant: str, batch: TokenBatch) -> tuple[float, ...]:
@@ -417,6 +439,154 @@ class TorchLearner:
                   / mask[start:stop].sum().clamp(min=1.0))
             for start, stop in spans)
 
+    def gradient_cosines(
+        self, tenant: str, entry: str,
+        reference_batches: Sequence[TokenBatch],
+        candidate_batches: Sequence[Sequence[TokenBatch]],
+    ) -> tuple[GradientComparison, ...]:
+        """Read ordinary SFT gradient alignment at one unchanged entry state.
+
+        The base must already be in eval mode. No training flag or RNG state
+        is changed/restored: doing so could overwrite another tenant's state.
+        `enable_grad` is thread-local and restored on success and failure.
+        Replayed stochastic draws, if any, must come from the batch's facts.
+        """
+        if self.fsdp != 1 or self.dp != 1:
+            raise NotImplementedError("gradient_cosines requires fsdp=dp=1")
+        if torch.is_inference_mode_enabled():
+            raise RuntimeError("gradient_cosines cannot run in torch inference mode")
+        state = self._tenant(tenant)
+        if entry not in state.trainable:
+            raise ValueError(f"gradient_cosines requires a trainable entry: {entry!r}")
+        # Replay wrappers are installed after _ensure_base.eval(). Their own
+        # default training flag does not control LoRA replay; the wrapped
+        # base modules retain their eval flags. Do not toggle either tenant.
+        if any(module.training and not isinstance(module, SiteWrapper)
+               for module in self._model.modules()):
+            raise RuntimeError("gradient_cosines requires the base already in eval mode")
+        check_gradient_documents(reference_batches, "reference")
+        if not candidate_batches:
+            raise ValueError("gradient_cosines needs at least one candidate group")
+        for index, batches in enumerate(candidate_batches):
+            check_gradient_documents(batches, f"candidate[{index}]")
+        parameters, schema = self._gradient_parameters(state, entry)
+        parameter_count = sum(parameter.numel() for parameter in parameters)
+        comparisons = []
+        # Tensor versions change on optimizer steps and payload loads. A fresh
+        # installation has a new state object; device moves also change context.
+        context = (id(state), entry, schema, tuple(
+            (id(p), p._version, str(p.device), str(p.dtype)) for p in parameters))
+        cache = self.gradient_cache
+        cache.select(context)
+        reference_key = cache.key(reference_batches)
+        with torch.enable_grad():
+            started = time.perf_counter()
+            saved = cache.reference(reference_key)
+            reference_hit = saved is not None
+            if saved is None:
+                reference, reference_documents, reference_loss_reason = self._document_gradients(
+                    state, parameters, reference_batches)
+                reference_norm, reference_reason = measured_gradient_norm(reference, "reference")
+                cache.save_reference(reference_key, reference, reference_documents,
+                                     reference_loss_reason, reference_norm, reference_reason)
+            else:
+                (reference, reference_documents, reference_loss_reason,
+                 reference_norm, reference_reason) = saved
+            reference_seconds = time.perf_counter() - started
+            for batches in candidate_batches:
+                started = time.perf_counter()
+                candidate_key = (reference_key, cache.key(batches))
+                saved_comparison = cache.comparison(candidate_key)
+                if saved_comparison is not None:
+                    comparisons.append(replace(saved_comparison,
+                        reference_seconds=reference_seconds,
+                        candidate_seconds=time.perf_counter() - started,
+                        reference_cache_hit=reference_hit, candidate_cache_hit=True))
+                    continue
+                candidate, candidate_documents, candidate_loss_reason = self._document_gradients(
+                    state, parameters, batches)
+                candidate_norm, candidate_reason = measured_gradient_norm(candidate, "candidate")
+                reason = (reference_loss_reason or candidate_loss_reason
+                          or reference_reason or candidate_reason)
+                dot = measured_gradient_dot(reference, candidate)
+                cosine = None
+                if reason is None:
+                    cosine = dot / (reference_norm * candidate_norm)
+                    if not math.isfinite(cosine) or abs(cosine) > 1 + 1e-6:
+                        reason = "invalid_cosine_numerics"
+                        cosine = None
+                    else:
+                        # Bound roundoff only; no objective clipping or norm penalty.
+                        cosine = max(-1.0, min(1.0, cosine))
+                comparisons.append(GradientComparison(
+                    cosine=cosine, dot=dot, reference_norm=reference_norm,
+                    candidate_norm=candidate_norm, valid=reason is None, reason=reason,
+                    reference_documents=reference_documents,
+                    candidate_documents=candidate_documents,
+                    reference_seconds=reference_seconds,
+                    candidate_seconds=time.perf_counter() - started,
+                    parameter_count=parameter_count, parameter_schema_sha256=schema,
+                    min_norm=GRADIENT_MIN_NORM,
+                    reference_cache_hit=reference_hit))
+                cache.save_comparison(candidate_key, comparisons[-1])
+        return tuple(comparisons)
+
+    def _gradient_parameters(self, state: _Tenant, entry: str):
+        """One stable coordinate order: sorted groups, then their parameter order."""
+        groups = state.adapter_types[entry].param_groups(state.params[entry])
+        parameters = []
+        coordinates = []
+        seen = set()
+        for group in sorted(groups):
+            for index, parameter in enumerate(groups[group]):
+                if not parameter.requires_grad:
+                    continue
+                if id(parameter) in seen:
+                    raise ValueError("gradient_cosines parameter appears in two groups")
+                seen.add(id(parameter))
+                parameters.append(parameter)
+                coordinates.append((group, index, list(parameter.shape), str(parameter.dtype)))
+        if not parameters:
+            raise ValueError("gradient_cosines entry has no differentiable parameters")
+        layout = {"sites": [site.path for site in state.sites[entry]],
+                  "coordinates": coordinates}
+        schema = hashlib.sha256(json.dumps(layout, sort_keys=True).encode()).hexdigest()
+        return tuple(parameters), schema
+
+    def _document_gradients(self, state: _Tenant, parameters,
+                            batches: Sequence[TokenBatch]):
+        """Use sequence_sft's exact reductions, accumulating into private fp32 tensors."""
+        gradients = [torch.zeros_like(parameter, dtype=torch.float32,
+                                      memory_format=torch.preserve_format)
+                     for parameter in parameters]
+        documents = []
+        loss_reason = None
+        for batch in batches:
+            self.forwards += 1
+            spans = _doc_spans(batch)
+            with row_plan(self._model).route(self._rows_of(state, batch, len(spans))):
+                logprobs = self._batched_logprobs(batch, spans)
+                mask = torch.tensor(batch.loss_mask, dtype=torch.bool, device=logprobs.device)
+                # Zero weight means absent, even if an unused score is NaN.
+                # Undefined derivatives inside the model still invalidate the
+                # measured gradient; masking cannot repair those derivatives.
+                logprobs = torch.where(mask, logprobs, torch.zeros_like(logprobs))
+                result = sequence_sft(PolicyOutputs(logprobs=logprobs), batch)
+                for index in range(len(spans)):
+                    nll = float(result.components[f"document_{index}_nll_sum"])
+                    if not math.isfinite(nll):
+                        loss_reason = "non_finite_document_nll"
+                        nll = None
+                    documents.append(GradientDocumentStats(
+                        nll_sum=nll,
+                        scored_tokens=int(result.components[f"document_{index}_tokens"])))
+                if result.loss.requires_grad:
+                    local = torch.autograd.grad(result.loss, parameters, allow_unused=True)
+                    for accumulated, gradient in zip(gradients, local, strict=True):
+                        if gradient is not None:
+                            accumulated.add_(gradient.detach().to(dtype=torch.float32))
+        return tuple(gradients), tuple(documents), loss_reason
+
     # ---- named sets (ADR 0019): one route of one entry at a time ------------
 
     def load_set(self, tenant: str, entry: str, route: str,
@@ -426,12 +596,14 @@ class TorchLearner:
         route installs a frozen library set outside every optimizer group.
         The adapter type owns what a set IS; this picks the entry."""
         state = self._tenant(tenant)
+        self.gradient_cache.invalidate(id(state))
         self._adapter_type(state, entry).load_set(
             state.params[entry], route, payload, state.optimizers.get(entry))
 
     def drop_set(self, tenant: str, entry: str, route: str) -> None:
         """Forget one library set of `entry` (library sets only)."""
         state = self._tenant(tenant)
+        self.gradient_cache.invalidate(id(state))
         self._adapter_type(state, entry).drop_set(state.params[entry], route)
 
     def emit_set(self, tenant: str, entry: str, route: str) -> bytes:
@@ -508,6 +680,7 @@ class TorchLearner:
         load_state_dict casts to each param's device) — placement is settled
         before any load, never after it."""
         state = self._tenant(tenant)
+        self.gradient_cache.invalidate(id(state))
         for entry, payload in adapters.items():
             state.adapter_types[entry].load(state.params[entry], payload)
         if optim:
@@ -543,6 +716,7 @@ class TorchLearner:
         learner it has not yet installed a tenant on."""
         if self._model is None or self._asleep:
             return
+        self.gradient_cache.clear()
         self._move_everything("cpu")
         torch.cuda.empty_cache()
         self._asleep = True
@@ -658,20 +832,26 @@ class TorchLearner:
             block.forward = _recomputed(block.forward, checkpoint)
 
     def _claim_slot(self, state: _Tenant, sites: tuple[SiteMeta, ...],
-                    params: object) -> None:
-        """One delta per site (the bank rule) reaches the forward as one
-        params object per site PATH — the slot rows route to."""
+                    params: object, route: str | None = None) -> None:
+        """One delta per site and row route reaches its replay slot.
+
+        Unrouted entries accompany every route, so their sites must be
+        disjoint from every explicit route's sites.
+        """
+        slot = state.slot if route is None else state.routed_slots.setdefault(route, {})
         for meta in sites:
-            if meta.path in state.slot:
+            conflicts = (slot, *state.routed_slots.values()) if route is None else (slot, state.slot)
+            if any(meta.path in claimed for claimed in conflicts):
                 raise ValueError(
                     f"two bank entries claim the replay path {meta.path!r} — "
-                    f"a site carries at most one delta")
-            state.slot[meta.path] = params
+                    f"a site carries at most one delta per row route")
+            slot[meta.path] = params
 
     def _remove(self, tenant: str) -> None:
         """Unwire a tenant: every adapter type's uninstall_replay, install order
         reversed. Its params objects survive untouched — what leaves the tree
         is the routability of its deltas, not the deltas."""
+        self.gradient_cache.clear()
         state = self._tenants.pop(tenant)
         for entry in reversed(state.entries):
             state.adapter_types[entry].uninstall_replay(
@@ -686,19 +866,35 @@ class TorchLearner:
 
     def _rows_of(self, state: _Tenant, batch: TokenBatch,
                  rows: int) -> ReplayRows:
-        """Every row of a microbatch pins the verb's tenant: ONE slot, index
-        all zeros. The replay lowering is per-row either way, so a coalesced
-        microbatch is this same record with more slots and a mixed index —
-        the sites need no change to serve it.
+        """Select the tenant's declared bank route for each document.
 
-        The batch's per-document turn extras ride along as the rows' FACTS: the
-        rows of a padded forward ARE the documents, so row r's facts are
-        document r's. Adapter-blind by construction — this passes the mappings
-        through and never reads a key.
+        Only routes present in this microbatch enter its slot table. Keeping
+        absent parameters out of the graph preserves grad=None and Adam's
+        inactive-state semantics. Without explicit bank routes, recorded
+        facts remain entirely adapter-owned, including legacy internal routes.
         """
-        return ReplayRows(slots=(state.slot,),
-                          index=torch.zeros(rows, dtype=torch.long,
-                                            device=self.device),
+        if not state.routed_slots:
+            return ReplayRows(slots=(state.slot,),
+                              index=torch.zeros(rows, dtype=torch.long,
+                                                device=self.device),
+                              facts=batch.doc_turn_extras or None)
+        facts = batch.doc_turn_extras or ((),) * rows
+        selected: dict[str | None, int] = {}
+        slots = []
+        index = []
+        for turns in facts:
+            routes = {turn["route"] for turn in turns if turn.get("route") is not None}
+            if len(routes) > 1:
+                raise ValueError("one replay document must carry one adapter route")
+            route = next(iter(routes), None)
+            if route is not None and route not in state.routed_slots:
+                raise ValueError(f"unknown adapter route {route!r}")
+            if route not in selected:
+                selected[route] = len(slots)
+                slots.append({**state.slot, **state.routed_slots.get(route, {})})
+            index.append(selected[route])
+        return ReplayRows(slots=tuple(slots),
+                          index=torch.tensor(index, dtype=torch.long, device=self.device),
                           facts=batch.doc_turn_extras or None)
 
     def _batched_logprobs(self, batch: TokenBatch,
@@ -796,6 +992,49 @@ def _summarize(provided: Mapping[str, Any]) -> dict[str, float]:
     """
     return {name: float(value.detach().reshape(-1).mean())
             for name, value in provided.items()}
+
+
+def check_gradient_documents(batches: Sequence[TokenBatch], role: str) -> None:
+    """Every independent document has a nonempty binary mask and its own mean."""
+    documents = sum(len(batch.doc_starts) for batch in batches)
+    if not batches or not documents:
+        raise ValueError(f"{role}: gradient measurement needs documents")
+    for batch in batches:
+        if not batch.doc_starts or batch.doc_starts[0] != 0:
+            raise ValueError(f"{role}: document starts must begin at zero")
+        if batch.documents_in_update != documents:
+            raise ValueError(f"{role}: documents_in_update must equal {documents}")
+        if any(bit not in (0, 1) for bit in batch.loss_mask):
+            raise ValueError(f"{role}: gradient loss_mask must be binary")
+        for start, stop in _doc_spans(batch):
+            if start < 0 or stop > len(batch) or stop <= start:
+                raise ValueError(f"{role}: invalid independent document span")
+            if batch.loss_mask[start]:
+                raise ValueError(f"{role}: a document's first token has no causal prediction")
+            if not any(batch.loss_mask[start:stop]):
+                raise ValueError(f"{role}: every document needs scored tokens")
+
+
+def measured_gradient_norm(gradients, role: str) -> tuple[float | None, str | None]:
+    """FP64 reduction of private fp32 gradients, with explicit invalid outcomes."""
+    squared = torch.stack([gradient.to(dtype=torch.float64).square().sum()
+                           for gradient in gradients]).sum()
+    norm = float(squared.sqrt())
+    if not math.isfinite(norm):
+        return None, f"{role}_non_finite_gradient"
+    if norm == 0:
+        return norm, f"{role}_zero_gradient"
+    if norm <= GRADIENT_MIN_NORM:
+        return norm, f"{role}_tiny_gradient"
+    return norm, None
+
+
+def measured_gradient_dot(reference, candidate) -> float | None:
+    """Only one scalar leaves the device, never an exported gradient vector."""
+    dot = float(torch.stack([
+        (left.to(dtype=torch.float64) * right.to(dtype=torch.float64)).sum()
+        for left, right in zip(reference, candidate, strict=True)]).sum())
+    return dot if math.isfinite(dot) else None
 
 
 def _doc_spans(batch: TokenBatch) -> list[tuple[int, int]]:

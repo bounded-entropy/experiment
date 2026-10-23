@@ -62,6 +62,7 @@ from collections.abc import AsyncIterator, Mapping, Sequence
 from dataclasses import asdict, dataclass
 from typing import TYPE_CHECKING, Protocol
 
+from rlstack.client import GradientComparison, GradientDocumentStats
 from rlstack.data.flatten import TokenBatch
 from rlstack.data.trajectory import Message, Role
 from rlstack.policy.adapters.base import (
@@ -319,6 +320,45 @@ def decode_train_stats(row: Mapping) -> TrainStats:
                       components=dict(row.get("components", {})))
 
 
+def encode_gradient_comparison(result: GradientComparison) -> dict:
+    """Gradient measurements carry only scalar diagnostics and NLL statistics."""
+    return {
+        "cosine": result.cosine, "dot": result.dot,
+        "reference_norm": result.reference_norm, "candidate_norm": result.candidate_norm,
+        "valid": result.valid, "reason": result.reason,
+        "reference_documents": [{"nll_sum": d.nll_sum, "scored_tokens": d.scored_tokens}
+                                for d in result.reference_documents],
+        "candidate_documents": [{"nll_sum": d.nll_sum, "scored_tokens": d.scored_tokens}
+                                for d in result.candidate_documents],
+        "reference_seconds": result.reference_seconds,
+        "candidate_seconds": result.candidate_seconds,
+        "parameter_count": result.parameter_count,
+        "parameter_schema_sha256": result.parameter_schema_sha256,
+        "min_norm": result.min_norm,
+        "reference_cache_hit": result.reference_cache_hit,
+        "candidate_cache_hit": result.candidate_cache_hit,
+    }
+
+
+def decode_gradient_comparison(row: Mapping) -> GradientComparison:
+    """Rebuild typed records at the existing learner wire boundary."""
+    return GradientComparison(
+        cosine=row["cosine"], dot=row["dot"], reference_norm=row["reference_norm"],
+        candidate_norm=row["candidate_norm"], valid=bool(row["valid"]), reason=row["reason"],
+        reference_documents=tuple(GradientDocumentStats(
+            nll_sum=d["nll_sum"], scored_tokens=int(d["scored_tokens"]))
+            for d in row["reference_documents"]),
+        candidate_documents=tuple(GradientDocumentStats(
+            nll_sum=d["nll_sum"], scored_tokens=int(d["scored_tokens"]))
+            for d in row["candidate_documents"]),
+        reference_seconds=float(row["reference_seconds"]),
+        candidate_seconds=float(row["candidate_seconds"]),
+        parameter_count=int(row["parameter_count"]),
+        parameter_schema_sha256=row["parameter_schema_sha256"], min_norm=float(row["min_norm"]),
+        reference_cache_hit=bool(row.get("reference_cache_hit", False)),
+        candidate_cache_hit=bool(row.get("candidate_cache_hit", False)))
+
+
 def encode_emitted(emitted: Emitted) -> dict:
     """Bytes as base64, the way bundles already cross. ONE codec on purpose:
     a by-reference carriage later (payloads moving resident-to-resident over
@@ -393,7 +433,9 @@ def encode_parameterization(p: Parameterization) -> dict:
     return {"base": p.base, "loss": p.loss,
             "entries": [{"name": e.name, "adapter_type": e.adapter_type,
                          "init": dict(e.init), "trainable": e.trainable,
-                         "sites": encode_sites(e.sites)} for e in p.entries],
+                         "sites": encode_sites(e.sites),
+                         **({"route": e.route} if e.route is not None else {})}
+                        for e in p.entries],
             "optim": {"name": p.optim.name, "lr": p.optim.lr,
                       "betas": list(p.optim.betas),
                       "weight_decay": p.optim.weight_decay,
@@ -407,7 +449,8 @@ def decode_parameterization(row: Mapping) -> Parameterization:
         base=row["base"], loss=row["loss"],
         entries=tuple(EntryInstall(
             name=e["name"], adapter_type=e["adapter_type"], init=dict(e["init"]),
-            trainable=bool(e["trainable"]), sites=decode_sites(e["sites"]))
+            trainable=bool(e["trainable"]), sites=decode_sites(e["sites"]),
+            route=e.get("route"))
             for e in row["entries"]),
         optim=OptimSettings(name=optim["name"], lr=optim["lr"],
                             betas=tuple(optim["betas"]),
@@ -628,7 +671,7 @@ def check_epoch(payload: Mapping, mine: str, who: str) -> None:
         f"on its next registration)")
 
 
-LEARNER_VERBS = ("install", "uninstall", "forward_backward", "accumulate",
+LEARNER_VERBS = ("gradient_cosines", "install", "uninstall", "forward_backward", "accumulate",
                  "optim_step",
                  "emit", "emit_initial", "emit_adapters", "emit_optim", "policy_pin", "load", "learner_tokenize",
                  "prepare_transfer", "send_transfer", "release_transfer",
@@ -1044,6 +1087,13 @@ class LearnerService:
         if verb == "forward":
             return {"nll": list(self.learner.forward(
                 tenant, decode_token_batch(payload["batch"])))}
+        if verb == "gradient_cosines":
+            comparisons = self.learner.gradient_cosines(
+                tenant, payload["entry"],
+                tuple(decode_token_batch(batch) for batch in payload["reference_batches"]),
+                tuple(tuple(decode_token_batch(batch) for batch in group)
+                      for group in payload["candidate_batches"]))
+            return {"comparisons": [encode_gradient_comparison(result) for result in comparisons]}
         if verb == "load_set":
             named = decode_named_payload(payload["payload"])
             digest = payload.get("digest")
@@ -1591,6 +1641,20 @@ class RemoteLearner:
         reply = self.frame("forward", {
             "tenant": tenant, "batch": encode_token_batch(batch)})
         return tuple(float(nll) for nll in reply["nll"])
+
+    def gradient_cosines(
+        self, tenant: str, entry: str,
+        reference_batches: Sequence[TokenBatch],
+        candidate_batches: Sequence[Sequence[TokenBatch]],
+    ) -> tuple[GradientComparison, ...]:
+        if self.fsdp != 1 or self.dp != 1:
+            raise NotImplementedError("gradient_cosines requires fsdp=dp=1")
+        reply = self.frame("gradient_cosines", {
+            "tenant": tenant, "entry": entry,
+            "reference_batches": [encode_token_batch(batch) for batch in reference_batches],
+            "candidate_batches": [[encode_token_batch(batch) for batch in group]
+                                  for group in candidate_batches]})
+        return tuple(decode_gradient_comparison(row) for row in reply["comparisons"])
 
     def load_set(self, tenant: str, entry: str, route: str,
                  payload: bytes | None) -> None:

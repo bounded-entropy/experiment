@@ -239,6 +239,18 @@ class AdapterType:
             f"{type(self).__name__} has no rollout lowering: it is trainer-"
             f"only (serving is None) and no engine ever hears about it")
 
+    @property
+    def supports_mixed_routes(self) -> bool:
+        """Whether this replay provider can select several row slots at once.
+
+        False providers still train routed entries in uniform microbatches.
+        Transport and checkpoint support do not depend on this capability.
+        """
+        from rlstack.policy.adapters.definition import Operation
+        return self.definition is not None and (
+            self.definition.program is not None or self.definition.operation in (
+                Operation.LOW_RANK, Operation.STEER, Operation.NORM_STEER))
+
     def install_replay(self, model: Any, params: Any, sites: tuple[SiteMeta, ...]) -> None:
         """Wire the replay lowering into the trainer forward. Additive: every
         installed tenant stays wired (I8)."""

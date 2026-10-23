@@ -17,6 +17,7 @@ from collections.abc import AsyncIterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
+from rlstack.client import GradientComparison
 from rlstack.data.flatten import TokenBatch
 from rlstack.data.trajectory import Message
 from rlstack.policy.adapters.base import Directive, Mechanism, Reachability
@@ -99,6 +100,7 @@ class EntryInstall:
     init: Mapping[str, Any]
     trainable: bool
     sites: tuple[SiteMeta, ...]
+    route: str | None = None
 
 
 @dataclass(frozen=True)
@@ -324,6 +326,21 @@ class Learner(Protocol):
         """The no-grad twin of `forward_backward` (ADR 0019): one float per
         document, its mean NLL over its loss_mask tokens, under `tenant`'s
         adapters and each row's own route. Nothing accumulates."""
+        ...
+
+    def gradient_cosines(
+        self, tenant: str, entry: str,
+        reference_batches: Sequence[TokenBatch],
+        candidate_batches: Sequence[Sequence[TokenBatch]],
+    ) -> tuple[GradientComparison, ...]:
+        """Measure ordinary supervised gradients without changing learner state.
+
+        Each group uses equal document weight after its own selected-token
+        mean NLL. Reference gradients are computed once; candidate gradients
+        use the same entry parameters and never touch persistent `.grad`
+        buffers, optimizer moments or parameter versions. Initially unsharded
+        (fsdp=dp=1); distributed builds refuse this operation explicitly.
+        """
         ...
 
     def optim_step(self, tenant: str,
