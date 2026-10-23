@@ -61,7 +61,7 @@ def fabricate_heldout(store, run_id) -> None:
             _json.dumps({"update": update, "episodes": 16,
                          "means": {"reward": 0.25 * update}}).encode())
     store.open_measurement(run_id, "heldout",
-                           {"every": 2, "post": ["verifier"]})
+                           {"every": 2, "post": ["fixture_reward"]})
     for update in (2, 4):
         store.append_measurement_point(
             run_id, "heldout",

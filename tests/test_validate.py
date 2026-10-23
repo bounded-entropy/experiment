@@ -82,11 +82,12 @@ def _needs_behavior(out: Any, batch: Any) -> Any: ...
 def clean_spec(**overrides: Any) -> ExperimentSpec:
     """Validates with zero issues against the 4-layer fake Qwen schema."""
     fields: dict[str, Any] = dict(
+        code=("boundary_fixtures", "test_validate"),
         policy=PolicySpec(base="Qwen/Qwen3-1.7B",
                           bank={"pi": lora("layers.0-3.self_attn.*", r=16)}),
-        gen=GenSpec(envs=("noop_env",), tasks=("cas://x/train.jsonl",)),
+        gen=GenSpec(functions=("boundary_fixtures:single_turn",), tasks=("cas://x/train.jsonl",)),
         plans=Plans(train="cas://plan/train", rollout="cas://plan/roll"),
-        algo=AlgoSpec(loss="grpo", post=("verifier", "grpo_advantage"),
+        algo=AlgoSpec(loss="grpo", post=("fixture_reward", "grpo_advantage"),
                       optim=OptimSpec("adamw", lr=1e-5),
                       schedule=Schedule()),
         topology=Topology(hosts=(HostSpec((pool("main"),)),
@@ -158,12 +159,12 @@ class TestUnknownNames(unittest.TestCase):
         self.assertIn("unknown-loss", codes(spec))
 
     def test_unknown_post(self) -> None:
-        spec = clean_spec(algo=replace(clean_spec().algo, post=("verifier", "nope")))
+        spec = clean_spec(algo=replace(clean_spec().algo, post=("fixture_reward", "nope")))
         self.assertIn("unknown-post", codes(spec))
 
-    def test_unknown_env(self) -> None:
-        spec = clean_spec(gen=replace(clean_spec().gen, envs=("nope",)))
-        self.assertIn("unknown-env", codes(spec))
+    def test_unknown_function(self) -> None:
+        spec = clean_spec(gen=replace(clean_spec().gen, functions=("nope",)))
+        self.assertIn("unknown-function", codes(spec))
 
     def test_unknown_adapter_type(self) -> None:
         spec = clean_spec(policy=PolicySpec(
@@ -207,19 +208,19 @@ class TestDeclarationWiring(unittest.TestCase):
         # val_needs_judge consumes "judge"; nothing earlier produces it.
         spec = clean_spec(algo=replace(
             clean_spec().algo,
-            post=("verifier", "val_needs_judge", "grpo_advantage")))
+            post=("fixture_reward", "val_needs_judge", "grpo_advantage")))
         self.assertEqual(codes(spec), {"post-unwired"})
 
     def test_post_order_matters(self) -> None:
         # grpo_advantage consumes "reward" — BEFORE verifier produces it.
         spec = clean_spec(algo=replace(clean_spec().algo,
-                                       post=("grpo_advantage", "verifier")))
+                                       post=("grpo_advantage", "fixture_reward")))
         self.assertEqual(codes(spec), {"post-unwired"})
 
     def test_post_collision(self) -> None:
         spec = clean_spec(algo=replace(
             clean_spec().algo,
-            post=("verifier", "val_also_reward", "grpo_advantage")))
+            post=("fixture_reward", "val_also_reward", "grpo_advantage")))
         self.assertEqual(codes(spec), {"post-collision"})
 
 
@@ -506,7 +507,7 @@ class TestPostPools(unittest.TestCase):
 
     def judge_algo(self):
         base = clean_spec().algo
-        return replace(base, post=("llm_judge", "grpo_advantage"))
+        return replace(base, post=("fixture_judge", "grpo_advantage"))
 
     def test_judge_without_declared_pool_is_caught(self) -> None:
         spec = clean_spec(algo=self.judge_algo())
@@ -530,7 +531,7 @@ class TestPostPoolCoresidency(unittest.TestCase):
 
     def judge_algo(self):
         base = clean_spec().algo
-        return replace(base, post=("llm_judge", "grpo_advantage"))
+        return replace(base, post=("fixture_judge", "grpo_advantage"))
 
     def alternate_all(self):
         return Topology(hosts=(

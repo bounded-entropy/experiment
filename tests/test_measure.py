@@ -45,9 +45,9 @@ class MeasureFixture(unittest.TestCase):
                                      self.store, self.engine, FakeLearner(), checkpointing=EVERY_UPDATE)
         self.tasks = {t.id: t for t in load_tasks(self.store, self.heldout)}
         self.measurement = Measurement(
-            name="heldout", env="math_single_turn",
+            name="heldout", function="boundary_fixtures:single_turn", code=("boundary_fixtures",),
             task_ids=tuple(sorted(self.tasks)), samples=2, every=2,
-            post=("verifier",), seed=17)
+            post=("fixture_reward",), seed=17)
 
     def measure(self, pool=None, max_inflight: int = 64,
                 pools: dict | None = None, limit: int | None = None) -> list[int]:
@@ -128,7 +128,7 @@ class SecondPoolTest(MeasureFixture):
     def scoring_measurement(self):
         from dataclasses import replace
         return replace(self.measurement, name="distill",
-                       post=("conditioned_teacher_logprobs", "reverse_kl"))
+                       post=("teacher_logprobs", "reverse_kl"))
 
     def measure_through(self, pools: dict) -> list[int]:
         return go(measure_run(self.store, self.report.run_id,
@@ -169,7 +169,7 @@ class EraBoundaryTest(unittest.TestCase):
         _, train, _ = arith_store(tmp.name)
         row = json.loads(canonical_json(arith_spec(train)))
         row["eval"] = {"__type__": "EvalSpec", "every": 5,
-                       "post": ["verifier"], "pool": "main"}
+                       "post": ["fixture_reward"], "pool": "main"}
         row["plans"]["eval"] = "cas://plan/eval"
         spec = spec_from_json(row)
         self.assertFalse(hasattr(spec, "eval"))

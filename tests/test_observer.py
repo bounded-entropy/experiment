@@ -230,8 +230,8 @@ def sealed_rollouts(store: LocalStore, count: int = 2, planned: int = 3) -> None
     the second cut off by length."""
     from rlstack import GroupPlan, RunPlan, Sample, WavePlan, encode
 
-    wave = WavePlan((GroupPlan("t1", (Sample("t1", "single_turn"),)),
-                     GroupPlan("t2", (Sample("t2", "single_turn"),))))
+    wave = WavePlan((GroupPlan("t1", (Sample("t1", "boundary_fixtures:single_turn"),)),
+                     GroupPlan("t2", (Sample("t2", "boundary_fixtures:single_turn"),))))
     run = store.open_run(GENERATED, {"run_id": GENERATED, "spec": "{}"})
     run.write_plan("rollout", encode(RunPlan(tuple(wave for _ in range(planned)))))
     for index in range(1, count + 1):

@@ -55,16 +55,17 @@ class _OtherPair:
 def _small_spec() -> ExperimentSpec:
     """A minimal but complete spec — small enough to golden, real enough to matter."""
     return ExperimentSpec(
+        code=("boundary_fixtures",),
         policy=PolicySpec(
             base="Qwen/Qwen3-1.7B",
             bank={"pi": lora("layers.*.mlp.*", r=16)},
         ),
-        gen=GenSpec(envs=("math_single_turn",),
+        gen=GenSpec(functions=("boundary_fixtures:single_turn",),
                     tasks=("cas://abc/train.jsonl",)),
         plans=Plans(train="cas://plan/train", rollout="cas://plan/roll"),
         algo=AlgoSpec(
             loss="grpo",
-            post=("verifier", "grpo_advantage"),
+            post=("fixture_reward", "grpo_advantage"),
             optim=OptimSpec("adamw", lr=1e-5),
             schedule=Schedule(),
         ),
@@ -87,13 +88,13 @@ class TestCanonicalJsonShape(unittest.TestCase):
         )
 
     def test_golden_nested_dataclass_and_tuple(self) -> None:
-        # gen DECLARES: both envs and tasks are tuples, and a tuple canonicalizes
+        # gen DECLARES: both functions and tasks are tuples, and a tuple canonicalizes
         # as a json array in declaration order (never sorted — order is content).
         self.assertEqual(
-            canonical_json(GenSpec(envs=("math_single_turn",),
+            canonical_json(GenSpec(functions=("boundary_fixtures:single_turn",),
                                    tasks=("cas://abc/train.jsonl",),
                                    sampling=SamplingSpec(top_p=0.9))),
-            '{"__type__":"GenSpec","envs":["math_single_turn"],"makers":[],'
+            '{"__type__":"GenSpec","functions":["boundary_fixtures:single_turn"],'
             '"sampling":{"__type__":"SamplingSpec","max_tokens":1024,'
             '"temperature":1.0,"top_p":0.9},"tasks":["cas://abc/train.jsonl"]}',
         )
@@ -106,9 +107,9 @@ class TestCanonicalJsonShape(unittest.TestCase):
             '{"__type__":"ExperimentSpec","algo":{"__type__":"AlgoSpec",'
             '"loss":"grpo","optim":{"__type__":"OptimSpec","betas":[0.9,0.95],'
             '"lr":1e-05,"name":"adamw","overrides":{},"weight_decay":0.0},'
-            '"post":["verifier","grpo_advantage"],"schedule":{"__type__":"Schedule",'
+            '"post":["fixture_reward","grpo_advantage"],"schedule":{"__type__":"Schedule",'
             '"max_policy_lag":0,"microbatch_tokens":16384}},'
-            '"gen":{"__type__":"GenSpec","envs":["math_single_turn"],"makers":[],'
+            '"code":["boundary_fixtures"],"gen":{"__type__":"GenSpec","functions":["boundary_fixtures:single_turn"],'
             '"sampling":{"__type__":"SamplingSpec","max_tokens":1024,'
             '"temperature":1.0,"top_p":1.0},"tasks":["cas://abc/train.jsonl"]},'
             '"init":null,"plans":{"__type__":"Plans","rollout":"cas://plan/roll",'

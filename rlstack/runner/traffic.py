@@ -15,12 +15,11 @@ import asyncio
 import random
 import time
 from dataclasses import replace
-from collections.abc import Mapping, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 
 from rlstack.data.stores.base import Store
 from rlstack.data.tasks import load_tasks
 from rlstack.data.trajectory import Group, Message, Role, Task, Trajectory, Turn, Wave
-from rlstack.registry import ENVS
 from rlstack.policy.adapters.base import Directive
 from rlstack.policy.compile import Bundle
 from rlstack.runner.interfaces import Engine, FinishEvent
@@ -28,6 +27,7 @@ from rlstack.runner.pool import Pool
 from rlstack.runner.remote import encode_directives
 from rlstack.runner.seeds import derive
 from rlstack.spec.specs import SamplingSpec
+from rlstack.inference.rollout import Rollout
 
 # One named pool: its replicas (a Pool — or, in a table a test builds by
 # hand, one bare Engine) and the bundle its requests pin.
@@ -97,9 +97,10 @@ class EnginePoolClient:
                      stop: tuple[str, ...] = (), *,
                      directives: Sequence[Directive] = (),
                      max_tokens: int | None = None,
+                     sampling: SamplingSpec | None = None,
                      affinity: str | None = None) -> Turn:
         pool, bundle = self.route(self._pool_name)
-        sampling = ceiled(self._sampling, max_tokens)
+        sampling = ceiled(sampling if sampling is not None else self._sampling, max_tokens)
         seed = derive(self._episode_seed, "call", self._counter[0])
         self._counter[0] += 1
 
@@ -111,7 +112,8 @@ class EnginePoolClient:
         pool.counted(replica, len(token_ids))
         if self._calls is not None:
             self._calls.append(call_row(self._pool_name, directives, started,
-                                        len(token_ids), finish.finish, replica))
+                                        len(token_ids), finish.finish, replica,
+                                        sampling=sampling, stop=stop, seed=seed))
 
         return Turn(
             message=Message(Role.ASSISTANT, "".join(text_parts)),
@@ -123,7 +125,8 @@ class EnginePoolClient:
             policy_version=dict(bundle.policy_version),
             seed=seed,
             token_extras={k: tuple(v) for k, v in columns.items()},
-            turn_extras=dict(finish.turn_extras),
+            turn_extras={**dict(finish.turn_extras),
+                         "sampling": sampling_row(sampling, stop)},
         )
 
 
@@ -171,12 +174,20 @@ def ceiled(sampling: SamplingSpec, max_tokens: int | None) -> SamplingSpec:
 
 
 def call_row(pool: str, directives: Sequence[Directive], started: float,
-             tokens: int, finish: str, replica: int = 0) -> dict:
+             tokens: int, finish: str, replica: int = 0, *,
+             sampling: SamplingSpec, stop: tuple[str, ...], seed: int) -> dict:
     """One sample call's timing: where it went (pool and replica), when it
     started, how long it took, how many tokens it made and why it stopped."""
     return {"pool": pool, "replica": replica,
             "directives": encode_directives(directives), "t": started,
-            "seconds": time.time() - started, "tokens": tokens, "finish": finish}
+            "seconds": time.time() - started, "tokens": tokens, "finish": finish,
+            "sampling": sampling_row(sampling, stop), "seed": seed}
+
+
+def sampling_row(sampling: SamplingSpec, stop: tuple[str, ...]) -> dict:
+    """The effective request configuration, persisted beside its sampled tokens."""
+    return {"temperature": sampling.temperature, "top_p": sampling.top_p,
+            "max_tokens": sampling.max_tokens, "stop": list(stop)}
 
 
 def load_task_sets(store: Store, uris: Sequence[str]) -> dict[str, Task]:
@@ -197,9 +208,11 @@ def load_task_sets(store: Store, uris: Sequence[str]) -> dict[str, Task]:
     return tasks
 
 
-async def run_episode(env_name: str, task: Task,
+async def run_episode(function: Callable[..., Awaitable[Rollout]],
+                      source: Task | Trajectory,
                       client: EnginePoolClient) -> Trajectory:
-    """One episode across the membrane: the Environment produces the Rollout,
-    the seal turns it into a Trajectory (I1)."""
-    rollout = await ENVS.get(env_name).instance.run(client, task)
+    """Invoke the experiment's plain function and seal its Rollout (I1)."""
+    rollout = await function(client, source)
+    if not isinstance(rollout, Rollout):
+        raise TypeError("an interaction function must return a Rollout for the runner to seal")
     return rollout.seal()

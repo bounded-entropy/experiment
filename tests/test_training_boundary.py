@@ -154,7 +154,7 @@ class TrainingBoundaryTest(unittest.TestCase):
 
     def test_judge_only_replay_needs_no_main_and_reloads_an_evicted_base(self):
         spec = replace(self.spec,
-            algo=replace(self.spec.algo, post=("llm_judge", "grpo_advantage")),
+            algo=replace(self.spec.algo, post=("fixture_judge", "grpo_advantage")),
             topology=Topology((HostSpec((pool("judge"),)), HostSpec((learner(),)))))
         self.assertEqual(traffic_pools(spec), {"judge"})
         judge = FakeEngine()

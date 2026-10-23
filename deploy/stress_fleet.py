@@ -36,6 +36,8 @@ import time
 
 import modal
 
+from deploy import qualification
+
 from modal_venue import (
     a_store, canonical_row, cpu_image_for, fleet, gpu_image_for, hf_cache,
     ledgers, metal_class, metal_handle, smoke_function, store_volume,
@@ -54,15 +56,15 @@ FSDP = int(os.environ.get("RLSTACK_STRESS_FSDP", "2"))
 HF_SECRET = os.environ.get("RLSTACK_HF_SECRET", "")
 SECRETS = [modal.Secret.from_name(HF_SECRET)] if HF_SECRET else []
 
-cpu_image = cpu_image_for()
+cpu_image = cpu_image_for().add_local_python_source("deploy.qualification")
 gpu_image = gpu_image_for({"RLSTACK_STRESS_TP": str(TP),
-                           "RLSTACK_STRESS_FSDP": str(FSDP)})
+                           "RLSTACK_STRESS_FSDP": str(FSDP)}).add_local_python_source("deploy.qualification")
 
 BASE = "Qwen/Qwen3-0.6B"        # the fleet's base
 HIDDEN = 1024
-TRAIN_TASKS = "cas://09499d32b51e5e1b2a644b1c65e01b44aa42ff1a5bfac78ead41f98f89f09c93"
-EVAL_TASKS = "cas://82ae4626dbb59a2c50e2b13cbe7250c5f1ddd02dfb81edc7495efb77759d420b"
-SCREENED_TASK = "dapo-math-17k/a6d38312-86c7-4022-b8d2-adcf19fa0c3a"
+TRAIN_TASKS = qualification.TRAIN_TASKS
+EVAL_TASKS = qualification.EVAL_TASKS
+QUALIFICATION_TASK = qualification.QUALIFICATION_TASK
 
 LORA_SITE = "layers.*.self_attn.*"
 STEER_SITE = "resid_pre.8-20"
@@ -134,7 +136,7 @@ def rollout_plan(task_ids, updates: int):
         chosen = [task_ids[(u * GROUPS_PER_WAVE + g) % len(task_ids)]
                   for g in range(GROUPS_PER_WAVE)]
         return WavePlan(tuple(
-            GroupPlan(f"{task_id}#{g}", tuple(Sample(task_id, "dapo_math")
+            GroupPlan(f"{task_id}#{g}", tuple(Sample(task_id, qualification.FUNCTION)
                                               for _ in range(GROUP_SIZE)))
             for g, task_id in enumerate(chosen)))
     return RunPlan(tuple(wave(u) for u in range(updates)))
@@ -155,19 +157,17 @@ def spec_for(store, bank: dict, overrides: dict, updates: int, master: int):
         Plans, PolicySpec, PoolMember, SamplingSpec, Schedule, Seeds, Topology,
         encode,
     )
-    from rlstack.data.tasks import load_tasks
-
-    if not any(t.id == SCREENED_TASK for t in load_tasks(store, TRAIN_TASKS)):
-        raise ValueError(f"{SCREENED_TASK!r} is not in {TRAIN_TASKS}")
+    qualification.write_tasks(store)
     plans = Plans(train=store.cas_put(encode(train_plan(updates))),
-                  rollout=store.cas_put(encode(rollout_plan([SCREENED_TASK],
+                  rollout=store.cas_put(encode(rollout_plan([QUALIFICATION_TASK],
                                                             updates))))
     return ExperimentSpec(
+        code=qualification.CODE,
         policy=PolicySpec(base=BASE, bank=bank),
-        gen=GenSpec(envs=("dapo_math",), tasks=(TRAIN_TASKS, EVAL_TASKS),
+        gen=GenSpec(functions=(qualification.FUNCTION,), tasks=(TRAIN_TASKS, EVAL_TASKS),
                     sampling=SamplingSpec(temperature=1.0, max_tokens=MAX_TOKENS)),
         plans=plans,
-        algo=AlgoSpec(loss="grpo", post=("final_answer", "grpo_advantage"),
+        algo=AlgoSpec(loss="grpo", post=("qualification_reward", "grpo_advantage"),
                       optim=OptimSpec("adamw", lr=1e-5, overrides=overrides),
                       schedule=Schedule(microbatch_tokens=512, max_policy_lag=1)),
         topology=Topology(hosts=(
@@ -531,12 +531,13 @@ def probe_base(base: str) -> dict:
             Topology, lora, steer, validate,
         )
         spec = ExperimentSpec(
+            code=qualification.CODE,
             policy=PolicySpec(base=base, bank={
                 "pi": lora(LORA_SITE, r=RANK),
                 "nudge": steer(STEER_SITE, d=out["hidden"])}),
-            gen=GenSpec(envs=("dapo_math",), tasks=(TRAIN_TASKS,)),
+            gen=GenSpec(functions=(qualification.FUNCTION,), tasks=(TRAIN_TASKS,)),
             plans=Plans(train="cas://plan/train", rollout="cas://plan/roll"),
-            algo=AlgoSpec(loss="grpo", post=("final_answer", "grpo_advantage"),
+            algo=AlgoSpec(loss="grpo", post=("qualification_reward", "grpo_advantage"),
                           optim=OptimSpec("adamw", lr=1e-5), schedule=Schedule()),
             topology=Topology(hosts=(HostSpec((PoolMember("main"),)),
                                      HostSpec((LearnerMember(),)))),

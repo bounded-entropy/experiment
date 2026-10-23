@@ -18,7 +18,7 @@ from typing import Any, Protocol
 
 from rlstack.data.trajectory import Message, Turn
 from rlstack.policy.adapters.base import Directive
-from rlstack.spec.specs import AdapterSpec, ExperimentSpec
+from rlstack.spec.specs import AdapterSpec, ExperimentSpec, SamplingSpec
 
 
 class PoolClient(Protocol):
@@ -39,6 +39,10 @@ class PoolClient(Protocol):
     budget (the call gets the smaller of the two): an environment bounding
     one kind of call — a tool's answer — without changing the run's sampling.
 
+    `sampling` replaces the run defaults for this call; a per-call max_tokens
+    ceiling still applies. Experiment functions can explicitly mix greedy
+    evaluation calls and stochastic exploration in one episode.
+
     `affinity` on either verb is the call's ROUTING KEY among the pool's
     replicas (ADR 0022) — OpenAI's `prompt_cache_key`, in this repo's words:
     calls sharing a key go to the replica that already holds their prefix.
@@ -51,6 +55,7 @@ class PoolClient(Protocol):
                      stop: tuple[str, ...] = (), *,
                      directives: Sequence[Directive] = (),
                      max_tokens: int | None = None,
+                     sampling: SamplingSpec | None = None,
                      affinity: str | None = None) -> Turn: ...
 
     async def score(self, messages: Sequence[Message],

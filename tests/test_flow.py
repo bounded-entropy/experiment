@@ -40,7 +40,7 @@ class FlowGraphTest(unittest.TestCase):
     def test_edges_mirror_the_declarations(self) -> None:
         graph = self.graph()   # grpo; post=(verifier, grpo_advantage)
         reward = node(graph, "reward", "post")
-        self.assertEqual(reward.producer, "postprocessor:verifier")
+        self.assertEqual(reward.producer, "postprocessor:fixture_reward")
         self.assertEqual(reward.consumers, ("grpo_advantage",))
         advantage = node(graph, "advantage", "post")
         self.assertEqual(advantage.producer, "postprocessor:grpo_advantage")
@@ -57,11 +57,11 @@ class FlowGraphTest(unittest.TestCase):
         self.assertEqual([n for n in graph.nodes if n.phase == "eval"], [])
 
     def test_direct_requires_and_measurement_only(self) -> None:
-        direct = self.graph(loss="sdft", post=("verifier",))
+        direct = self.graph(loss="fixture_reward_loss", post=("fixture_reward",))
         self.assertTrue(node(direct, "reward", "post").feeds_loss)
-        self.assertIn("loss:sdft", node(direct, "reward", "post").consumers)
+        self.assertIn("loss:fixture_reward_loss", node(direct, "reward", "post").consumers)
 
-        measured = self.graph(loss="replay_distill", post=("verifier",))
+        measured = self.graph(loss="replay_distill", post=("fixture_reward",))
         self.assertFalse(node(measured, "reward", "post").feeds_loss)
 
     def test_records_rails_and_lag_are_in_the_graph(self) -> None:
@@ -75,16 +75,16 @@ class FlowGraphTest(unittest.TestCase):
         self.assertEqual(graph.lag, 2)
 
     def test_pipeline_queries_report_wiring_faults(self) -> None:
-        broken = self.graph(post=("grpo_advantage", "verifier"))  # wrong order
+        broken = self.graph(post=("grpo_advantage", "fixture_reward"))  # wrong order
         (i, name, want, produced), = broken.missing_consumes("post")
         self.assertEqual((i, name, want, produced),
                          (0, "grpo_advantage", "reward", ()))
 
-        colliding = self.graph(post=("verifier", "verifier"))
+        colliding = self.graph(post=("fixture_reward", "fixture_reward"))
         (i, name, column, prior), = colliding.column_collisions("post")
-        self.assertEqual((name, column, prior), ("verifier", "reward", "verifier"))
+        self.assertEqual((name, column, prior), ("fixture_reward", "reward", "fixture_reward"))
 
-        starved = self.graph(loss="sdft", post=())
+        starved = self.graph(loss="fixture_reward_loss", post=())
         self.assertEqual(starved.unsatisfied_requires(), ("reward",))
 
     def test_run_serializes_its_own_dictionary(self) -> None:
@@ -98,7 +98,7 @@ class FlowGraphTest(unittest.TestCase):
         self.assertEqual(dictionary, flow_graph(spec).to_json())
         self.assertEqual(dictionary["loss"], "grpo")
         self.assertEqual(dictionary["post_pipeline"],
-                         ["verifier", "grpo_advantage"])
+                         ["fixture_reward", "grpo_advantage"])
         by_name = {(c["name"], c["phase"]): c for c in dictionary["columns"]}
         self.assertTrue(by_name[("reward", "post")]["feeds_loss"])
         self.assertEqual(by_name[("reward", "post")]["granularity"], "trajectory")

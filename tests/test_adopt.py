@@ -26,6 +26,7 @@ from rlstack.runner.remote import (
 )
 from rlstack.spec.canonical import canonical_json
 from rlstack.spec.specs import Seeds, WarmStart
+from rlstack.registry import code_hashes
 
 SCHEMA = fake_qwen_schema(4, base="Qwen/Qwen3-0.6B")
 
@@ -65,7 +66,7 @@ class SpecRoundtripTest(unittest.TestCase):
             seeds=Seeds(master=23))
         decoded = spec_from_json(row_of(spec))
         self.assertEqual(decoded, spec)
-        self.assertIsInstance(decoded.gen.envs, tuple)
+        self.assertIsInstance(decoded.gen.functions, tuple)
         self.assertIsInstance(decoded.topology.hosts, tuple)
         self.assertIsInstance(decoded.topology.hosts[0].members, tuple)
 
@@ -91,7 +92,7 @@ class AdoptTest(unittest.TestCase):
         """Adopt, then await the background tenancy — one loop for both, the
         way a standing host's own loop holds both."""
         async def drive():
-            reply = await host.adopt(row_of(spec), routes, checkpointing=EVERY_UPDATE.row())
+            reply = await host.adopt(row_of(spec), routes, code=code_hashes(spec), checkpointing=EVERY_UPDATE.row())
             if reply.get("run_id") in host._adoptions:
                 await host._adoptions[reply["run_id"]]
             return reply
@@ -110,8 +111,10 @@ class AdoptTest(unittest.TestCase):
         host = self.host(schema_for=schema)
 
         async def drive():
-            adoption = asyncio.create_task(host.adopt(row_of(arith_spec(self.train)), checkpointing=EVERY_UPDATE.row()))
+            adoption = asyncio.create_task(host.adopt(row_of(arith_spec(self.train)), code=code_hashes(arith_spec(self.train)), checkpointing=EVERY_UPDATE.row()))
             while not entered.is_set():
+                if adoption.done():
+                    self.fail(f"adoption ended before schema lookup: {adoption.result()}")
                 await asyncio.sleep(0)
             responsive = not release.is_set()
             release.set()
@@ -206,18 +209,18 @@ class AdoptTest(unittest.TestCase):
         spec = arith_spec(self.train)
 
         deaf = self.host(schema_for=None)
-        reply = go(deaf.adopt(row_of(spec), checkpointing=EVERY_UPDATE.row()))
+        reply = go(deaf.adopt(row_of(spec), code=code_hashes(spec), checkpointing=EVERY_UPDATE.row()))
         self.assertFalse(reply["accepted"])
         self.assertIn("schema_for", reply["error"])
 
         unresolved = self.host()
-        reply = go(unresolved.adopt(row_of(spec), {"aux": "fleet://aux"}, checkpointing=EVERY_UPDATE.row()))
+        reply = go(unresolved.adopt(row_of(spec), {"aux": "fleet://aux"}, code=code_hashes(spec), checkpointing=EVERY_UPDATE.row()))
         self.assertFalse(reply["accepted"])
         self.assertIn("transport_for", reply["error"])
 
         wide = arith_spec(self.train, topology=Topology(hosts=(
             HostSpec((pool("main", tp=2),)), HostSpec((learner(),)))))
-        reply = go(self.host().adopt(row_of(wide), checkpointing=EVERY_UPDATE.row()))
+        reply = go(self.host().adopt(row_of(wide), code=code_hashes(wide), checkpointing=EVERY_UPDATE.row()))
         self.assertFalse(reply["accepted"])
         self.assertIn("tp=2", reply["error"])
 

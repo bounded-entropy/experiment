@@ -48,7 +48,7 @@ def cas_uri(data: bytes) -> str:
 
 
 def grpo_plan(task_ids: list[str], *, groups: int, size: int, updates: int,
-              env: str = "math_single_turn", seed: int = 0) -> RunPlan:
+              env: str = "boundary_fixtures:single_turn", seed: int = 0) -> RunPlan:
     """`updates` waves of `groups` groups of `size` samples — GRPO's shape,
     written out. What a helper would build; the plan itself is just data."""
     rng = random.Random(seed)
@@ -87,12 +87,13 @@ def arith_spec(train_uri: str, heldout_uri: str | None = None,
                **overrides: Any) -> ExperimentSpec:
     """A small live GRPO spec over the arithmetic tasks."""
     fields: dict[str, Any] = dict(
+        code=("boundary_fixtures",),
         policy=PolicySpec(base="Qwen/Qwen3-0.6B",
                           bank={"pi": lora("layers.0-3.self_attn.*", r=16)}),
-        gen=GenSpec(envs=("math_single_turn",),
+        gen=GenSpec(functions=("boundary_fixtures:single_turn",),
                     tasks=(train_uri,) + ((heldout_uri,) if heldout_uri else ())),
         plans=plans or arith_plans(),
-        algo=AlgoSpec(loss="grpo", post=("verifier", "grpo_advantage"),
+        algo=AlgoSpec(loss="grpo", post=("fixture_reward", "grpo_advantage"),
                       optim=OptimSpec("adamw", lr=1e-5),
                       schedule=Schedule(microbatch_tokens=64)),
         # main and the learner as two dedicated hosts (the side-by-side
@@ -114,8 +115,9 @@ def generation_spec(train_uri: str, **overrides: Any) -> ExperimentSpec:
     replays by `store://<run_id>/rollouts/<r>#<i>`.
     """
     fields: dict[str, Any] = dict(
+        code=("boundary_fixtures",),
         policy=PolicySpec(base="Qwen/Qwen3-0.6B", bank={}),
-        gen=GenSpec(envs=("math_single_turn",), tasks=(train_uri,)),
+        gen=GenSpec(functions=("boundary_fixtures:single_turn",), tasks=(train_uri,)),
         plans=Plans(rollout=arith_plans().rollout),
         algo=None,
         topology=Topology(hosts=(HostSpec((pool("main"),)),)),

@@ -5,12 +5,10 @@ from __future__ import annotations
 import unittest
 from typing import Any
 
-from rlstack.inference.environments.base import Environment, EnvironmentDef, environment
 from rlstack.policy.adapters import AdapterType, AdapterTypeDef, Mechanism, adapter_type
 from rlstack.training.post.base import PostDef, PostProcessor, postprocessor
 from rlstack.registry import (
     ADAPTER_TYPES,
-    ENVS,
     LOSSES,
     POST,
     LossDef,
@@ -123,16 +121,6 @@ class TestDecorators(unittest.TestCase):
         self.assertIsInstance(ldef, LossDef)
         self.assertEqual(ldef.requires, ("values", "reward"))
 
-    def test_environment_decorator_registers(self) -> None:
-        @environment("test_dec_env")
-        class MyEnv(Environment):
-            async def run(self, client: Any, task: Any) -> Any:
-                raise NotImplementedError
-
-        edef = ENVS.get("test_dec_env")
-        self.assertIsInstance(edef, EnvironmentDef)
-        self.assertIsInstance(edef.instance, MyEnv)
-
     def test_adapter_registers_class_and_instance(self) -> None:
         @adapter_type("test_dec_adapter")
         class MyAdapter(AdapterType):
@@ -206,11 +194,12 @@ class TestAdapters(unittest.TestCase):
 def minimal_spec(**overrides: Any) -> ExperimentSpec:
     """A tiny valid spec over the builtins, for identity tests."""
     fields: dict[str, Any] = dict(
+        code=("boundary_fixtures",),
         policy=PolicySpec(base="Qwen/Qwen3-1.7B",
                           bank={"pi": lora("layers.*.mlp.*", r=16)}),
-        gen=GenSpec(envs=("noop_env",), tasks=("cas://x/train.jsonl",)),
+        gen=GenSpec(functions=("boundary_fixtures:single_turn",), tasks=("cas://x/train.jsonl",)),
         plans=Plans(train="cas://plan/train", rollout="cas://plan/roll"),
-        algo=AlgoSpec(loss="grpo", post=("verifier", "grpo_advantage"),
+        algo=AlgoSpec(loss="grpo", post=("fixture_reward", "grpo_advantage"),
                       optim=OptimSpec("adamw", lr=1e-5),
                       schedule=Schedule()),
         topology=Topology(hosts=(HostSpec((pool("main"),)),
@@ -226,8 +215,8 @@ class TestCodeHashes(unittest.TestCase):
         hashes = code_hashes(minimal_spec())
         self.assertEqual(
             set(hashes),
-            {"loss:grpo", "postprocessor:verifier",
-             "postprocessor:grpo_advantage", "environment:noop_env",
+            {"loss:grpo", "postprocessor:fixture_reward",
+             "postprocessor:grpo_advantage", "function:boundary_fixtures:single_turn", "module:boundary_fixtures",
              "adapter_type:lora"},
         )
         for digest in hashes.values():
@@ -236,7 +225,7 @@ class TestCodeHashes(unittest.TestCase):
     def test_offline_run_without_gen_or_algo(self) -> None:
         spec = minimal_spec(gen=None, algo=None,
                             plans=Plans(train="cas://plan/train"))
-        self.assertEqual(set(code_hashes(spec)), {"adapter_type:lora"})
+        self.assertEqual(set(code_hashes(spec)), {"adapter_type:lora", "module:boundary_fixtures"})
 
     def test_measurement_names_are_not_identity(self) -> None:
         """#70: a measurement's post pipeline is an observation's config,
@@ -246,7 +235,7 @@ class TestCodeHashes(unittest.TestCase):
 
     def test_unknown_name_raises_helpful_keyerror(self) -> None:
         spec = minimal_spec(algo=AlgoSpec(
-            loss="not_registered", post=("verifier", "grpo_advantage"),
+            loss="not_registered", post=("fixture_reward", "grpo_advantage"),
             optim=OptimSpec("adamw", lr=1e-5),
             schedule=Schedule()))
         with self.assertRaises(KeyError) as caught:

@@ -42,6 +42,7 @@ from rlstack.data.stores.base import Store
 from rlstack.data.trajectory import Task, Wave
 from rlstack.policy.compile import Bundle, restore_bundle
 from rlstack.registry import POST
+from rlstack.code import require_declared_definition, require_declared_function, load_code, source_manifest
 from rlstack.runner.assemble import sample_wave
 from rlstack.runner.interfaces import Engine
 from rlstack.runner.post import run_pipeline
@@ -53,7 +54,7 @@ class Measurement:
     """One observation's whole configuration — the manifest IS this value."""
 
     name: str                      # measurements/<run_id>/<name>/
-    env: str                       # the environment the problems run under
+    function: str                  # qualified interaction function
     task_ids: tuple[str, ...]      # the pinned held-out problems
     samples: int                   # completions per problem per point
     every: int                     # measure each EVERY-th committed update
@@ -61,10 +62,12 @@ class Measurement:
     seed: int                      # the measurement's own master, never the run's
     temperature: float = 1.0
     max_tokens: int = 512
+    code: tuple[str, ...] = ()     # explicit source roots for interaction and post
 
     def manifest(self) -> dict:
         return {**asdict(self), "task_ids": list(self.task_ids),
-                "post": list(self.post)}
+                "post": list(self.post), "code": list(self.code),
+                "source": source_manifest(self.code)}
 
 
 def measurement_bank(store: Store, run_id: str) -> dict[str, str]:
@@ -88,9 +91,12 @@ def restore_at(store: Store, run_id: str, entry: Mapping) -> Bundle:
         return store._read(f"{prefix}/{section}/{name}@{version}.bin")
 
     bank = measurement_bank(store, run_id)
+    manifest = store.peek_manifest(run_id)
+    code = {name.removeprefix("module:"): digest
+            for name, digest in manifest["code"].items() if name.startswith("module:")}
     versions = {name: int(v) for name, v in entry["versions"].items()}
     return restore_bundle(versions, entry["bundle_id"], read_blob,
-                          sorted(bank), bank)
+                          sorted(bank), bank, code)
 
 
 def base_bundles(pools: Mapping[str, Engine]) -> dict[str, Bundle]:
@@ -137,13 +143,17 @@ async def measure_run(store: Store, run_id: str, measurement: Measurement,
     """
     # Measurement storage remains keyed by scientific ID, outside runs/.
     # Checkpoint reads below use the caller's explicit run reference.
+    load_code(measurement.code)
+    require_declared_function(measurement.function, measurement.code)
+    for name in measurement.post:
+        require_declared_definition(POST.get(name).cls.__module__, measurement.code)
     measurement_id = run_id.rsplit("/", 1)[-1]
     store.open_measurement(measurement_id, measurement.name, measurement.manifest())
     done = store.measured_updates(measurement_id, measurement.name)
     sampling = SamplingSpec(temperature=measurement.temperature,
                             max_tokens=measurement.max_tokens)
     plan = WavePlan(tuple(
-        GroupPlan(task, tuple(Sample(task, measurement.env)
+        GroupPlan(task, tuple(Sample(task, measurement.function)
                               for _ in range(measurement.samples)))
         for task in measurement.task_ids))
     extra = await asyncio.to_thread(
@@ -161,6 +171,7 @@ async def measure_run(store: Store, run_id: str, measurement: Measurement,
                   **{name: (pools[name], base) for name, base in extra.items()}}
         wave = await sample_wave(plan, index=update, tasks=tasks,
                                  sampling=sampling, routes=routes,
+                                 functions=(measurement.function,), code=measurement.code,
                                  master=measurement.seed, phase="eval",
                                  max_inflight=max_inflight)
         columns = await run_pipeline(measurement.post, wave, routes, sampling,

@@ -215,11 +215,12 @@ class SealTest(unittest.TestCase):
         facts = engine.record_directives(self.BUNDLE.bundle_id, (1, 2), None, ())
         self.assertEqual(facts, {STEER_RECORD: [0, None]})
 
-    def test_a_bundle_with_no_steer_records_nothing(self) -> None:
+    def test_a_bundle_with_no_steer_records_only_generic_sampling(self) -> None:
         """The teacher run's shape: an EMPTY bank serves the bare base, so
         its turns carry no window and need none."""
         turn = go(self.client(self.BARE).sample((Message(Role.USER, "2+3"),)))
-        self.assertEqual(dict(turn.turn_extras), {})
+        self.assertEqual(dict(turn.turn_extras), {"sampling": {
+            "temperature": 1.0, "top_p": 1.0, "max_tokens": 1024, "stop": []}})
 
 
 class SteerResumeTest(unittest.TestCase):

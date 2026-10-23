@@ -1,6 +1,6 @@
 """The Rollout: one episode in progress — inference-world, mutable.
 
-An environment builds a Rollout by driving sample calls; the runner then calls
+An experiment function builds a Rollout by driving sample calls; the runner then calls
 .seal(), and the episode crosses the membrane (I1) as a frozen Trajectory. The
 membrane is the type system: nothing on the training side can see a Rollout.
 """
@@ -18,9 +18,9 @@ from rlstack.data.trajectory import Message, Task, Trajectory, Turn
 class Rollout:
     """One episode being generated. Freely mutable until sealed.
 
-    The environment appends to `messages` and `turns` (a Turn's message object
+    The interaction function appends to `messages` and `turns` (a Turn's message object
     appears in BOTH — that identity is how flatten later tells generated tokens
-    from injected ones). `env_extras` is the environment's open notebook (tool
+    from injected ones). `env_extras` is the interaction's open notebook (tool
     logs, intermediate hints). Scores about the episode are NOT written here:
     rewards are postdata, computed after the seal.
     """

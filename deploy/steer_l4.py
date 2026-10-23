@@ -30,8 +30,8 @@ Everything semantics-bearing is in the two specs — the banks, the loss, the
 plans — and everything else here is the chassis' (I5, ADR 0007): the
 transports, the desk container and the metal container's bring-up all left
 this file for `deploy/modal_venue.py` and `deploy/desk.py`, and every spec
-value below is byte-identical to what it was before they did
-(tests/test_venues.py).
+value below declares synthetic qualification behavior. Historical DAPO
+recipes live in the companion repository and retain their own records.
 """
 
 from __future__ import annotations
@@ -41,6 +41,8 @@ import os
 import time
 
 import modal
+
+from deploy import qualification
 
 from modal_venue import (
     canonical_row, cpu_image_for, desk, fleet, gpu_image_for, hf_cache,
@@ -57,26 +59,23 @@ app = modal.App(APP)
 GPU = os.environ.get("RLSTACK_STEER_GPU", "L4")
 TP = int(os.environ.get("RLSTACK_STEER_TP", "1"))
 
-cpu_image = cpu_image_for()
-gpu_image = gpu_image_for({"RLSTACK_STEER_TP": str(TP)}, with_tests=True)
+cpu_image = cpu_image_for().add_local_python_source("deploy.qualification")
+gpu_image = gpu_image_for({"RLSTACK_STEER_TP": str(TP)}, with_tests=True).add_local_python_source("deploy.qualification")
 
 BASE = "Qwen/Qwen3-0.6B"
 HIDDEN = 1024                   # Qwen3-0.6B's width — a boundary has no shape, the spec states it
-# the task sets built by deploy/tasks_dapo.py (#60), reused verbatim
-TRAIN_TASKS = "cas://09499d32b51e5e1b2a644b1c65e01b44aa42ff1a5bfac78ead41f98f89f09c93"
-EVAL_TASKS = "cas://82ae4626dbb59a2c50e2b13cbe7250c5f1ddd02dfb81edc7495efb77759d420b"
+# Synthetic data owned by this qualification, written through the normal CAS.
+TRAIN_TASKS = qualification.TRAIN_TASKS
+EVAL_TASKS = qualification.EVAL_TASKS
 
 STEER_SITE = "resid_pre.8-20"   # thirteen boundaries, one vector each
 LORA_SITE = "layers.0-27.self_attn.*"
 RANK = 16
 STEER_LR = 1e-3                 # a vector wants its own LR (the soft prompt's lesson, #46)
 
-# THE one problem both tenants train on — screened by deploy/plora_l4.py: the
-# base passes it 4/8 at temperature 1.0, so its groups split and the
-# advantages are non-zero. An unscreened draw of the task file gave two
-# updates of all-or-nothing groups and a loss of exactly 0.0 on the first
-# clean check (rails fine, gradient never exercised).
-SCREENED_TASK = "dapo-math-17k/a6d38312-86c7-4022-b8d2-adcf19fa0c3a"
+# Both tenants share one synthetic task. This tests the shared service path;
+# the prompt is not screened to guarantee a nonzero gradient on a given base.
+QUALIFICATION_TASK = qualification.QUALIFICATION_TASK
 UPDATES = 2
 GROUPS_PER_WAVE = 2
 GROUP_SIZE = 8
@@ -136,7 +135,7 @@ def rollout_plan(task_ids, updates: int):
         # of one problem are two baselines, keyed apart (a wave refuses
         # duplicate group keys — found on the venue, the plora key is the rule)
         return WavePlan(tuple(
-            GroupPlan(f"{task_id}#{g}", tuple(Sample(task_id, "dapo_math")
+            GroupPlan(f"{task_id}#{g}", tuple(Sample(task_id, qualification.FUNCTION)
                                               for _ in range(GROUP_SIZE)))
             for g, task_id in enumerate(chosen)))
     return RunPlan(tuple(wave(u) for u in range(updates)))
@@ -156,19 +155,17 @@ def spec_for(store, bank: dict, overrides: dict, updates: int, master: int):
         Plans, PolicySpec, PoolMember, SamplingSpec, Schedule, Seeds, Topology,
         encode,
     )
-    from rlstack.data.tasks import load_tasks
-
-    if not any(t.id == SCREENED_TASK for t in load_tasks(store, TRAIN_TASKS)):
-        raise ValueError(f"{SCREENED_TASK!r} is not in {TRAIN_TASKS}")
+    qualification.write_tasks(store)
     plans = Plans(train=store.cas_put(encode(train_plan(updates))),
-                  rollout=store.cas_put(encode(rollout_plan([SCREENED_TASK],
+                  rollout=store.cas_put(encode(rollout_plan([QUALIFICATION_TASK],
                                                             updates))))
     return ExperimentSpec(
+        code=qualification.CODE,
         policy=PolicySpec(base=BASE, bank=bank),
-        gen=GenSpec(envs=("dapo_math",), tasks=(TRAIN_TASKS, EVAL_TASKS),
+        gen=GenSpec(functions=(qualification.FUNCTION,), tasks=(TRAIN_TASKS, EVAL_TASKS),
                     sampling=SamplingSpec(temperature=1.0, max_tokens=MAX_TOKENS)),
         plans=plans,
-        algo=AlgoSpec(loss="grpo", post=("final_answer", "grpo_advantage"),
+        algo=AlgoSpec(loss="grpo", post=("qualification_reward", "grpo_advantage"),
                       optim=OptimSpec("adamw", lr=1e-5, overrides=overrides),
                       schedule=Schedule(microbatch_tokens=512, max_policy_lag=1)),
         # the SAME demands for both specs: the second submission JOINS the

@@ -3213,7 +3213,7 @@ class CloseAtHandTest(DeskFixture):
             told = await RemoteMetal(
                 self.LazyPlane(self, "metal://fake-metal")).measure(
                     reply["run_id"],
-                    Measurement(name="probe", env="single_turn",
+                    Measurement(name="probe", function="boundary_fixtures:single_turn", code=("boundary_fixtures",),
                                 task_ids=("h0",), samples=1, every=1,
                                 post=(), seed=3).manifest(),
                     tasks, BASE, 1)

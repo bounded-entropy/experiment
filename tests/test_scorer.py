@@ -28,7 +28,9 @@ import unittest
 from dataclasses import replace
 from typing import Any
 
-from common import arith_spec, arith_store, sealed
+from common import arith_spec as base_arith_spec, arith_store, sealed
+from boundary_fixtures import SampledAgreement
+from rlstack.code import load_code
 from test_resume import CrashingStore, SimulatedCrash
 from rlstack.runner.checkpointing import EVERY_UPDATE
 from rlstack import (
@@ -42,6 +44,10 @@ from rlstack.data.stores.base import StoreError, postdata_part_key
 from rlstack.runner.roles import SCORER
 from rlstack.runner.refs import RefReader
 from rlstack.spec.flow import PipelineSplit, split_pipeline
+
+def arith_spec(*args, **kwargs):
+    return base_arith_spec(*args, code=("boundary_fixtures", "test_scorer"), **kwargs)
+
 
 SCHEMA = fake_qwen_schema(4, base="Qwen/Qwen3-0.6B")
 TEACHER_BASE = "Qwen/Qwen3-32B"
@@ -70,18 +76,18 @@ def judged_spec(train_uri: str, heldout_uri: str | None = None):
     base = arith_spec(train_uri, heldout_uri)
     return replace(
         base,
-        algo=replace(base.algo, post=("llm_judge", "grpo_advantage")),
+        algo=replace(base.algo, post=("fixture_judge", "grpo_advantage")),
         topology=Topology(hosts=(
             HostSpec((pool("main"),)), HostSpec((pool("judge"),)),
             HostSpec((learner(),)))))
 
 
 def selfscored_spec(train_uri: str):
-    """OPSD: `hinted_logprobs` scores the POLICY pool, which is the only
+    """The generic scorer asks the POLICY pool, which is the only
     pipeline shape the version-pinning rule can bite on."""
     base = arith_spec(train_uri)
     return replace(base, algo=replace(
-        base.algo, loss="opsd", post=("verifier", "hinted_logprobs")))
+        base.algo, loss="replay_distill", post=("fixture_reward", "policy_logprobs")))
 
 
 def judge_metal():
@@ -127,23 +133,23 @@ def sealed_at(task_id: str, bundle_id: str, versions: dict[str, int]) -> Traject
 
 class SplitRuleTest(unittest.TestCase):
     def test_pools_decide_the_side(self) -> None:
-        split = split_pipeline(("verifier", "teacher_logprobs"))
+        split = split_pipeline(("fixture_reward", "teacher_logprobs"))
         self.assertEqual(split.pooled, ("teacher_logprobs",))
-        self.assertEqual(split.inline, ("verifier",))
+        self.assertEqual(split.inline, ("fixture_reward",))
 
     def test_a_pipeline_with_no_traffic_is_wholly_inline(self) -> None:
-        split = split_pipeline(("verifier", "grpo_advantage"))
+        split = split_pipeline(("fixture_reward", "grpo_advantage"))
         self.assertEqual(split.pooled, ())
-        self.assertEqual(split.inline, ("verifier", "grpo_advantage"))
+        self.assertEqual(split.inline, ("fixture_reward", "grpo_advantage"))
 
     def test_each_half_keeps_the_declared_order(self) -> None:
         split = split_pipeline(
-            ("llm_judge", "verifier", "teacher_logprobs", "grpo_advantage"))
-        self.assertEqual(split.pooled, ("llm_judge", "teacher_logprobs"))
-        self.assertEqual(split.inline, ("verifier", "grpo_advantage"))
+            ("fixture_judge", "fixture_reward", "teacher_logprobs", "grpo_advantage"))
+        self.assertEqual(split.pooled, ("fixture_judge", "teacher_logprobs"))
+        self.assertEqual(split.inline, ("fixture_reward", "grpo_advantage"))
 
     def test_the_two_halves_partition_the_pipeline(self) -> None:
-        pipeline = ("llm_judge", "verifier", "grpo_advantage")
+        pipeline = ("fixture_judge", "fixture_reward", "grpo_advantage")
         split = split_pipeline(pipeline)
         self.assertEqual(sorted(split.pooled + split.inline), sorted(pipeline))
 
@@ -173,30 +179,30 @@ class SplitOrderGateTest(unittest.TestCase):
         return [issue.code for issue in validate(spec, SCHEMA)]
 
     def test_pooled_consuming_inline_is_refused(self) -> None:
-        codes = self.codes(("verifier", "scorer_test_pooled_consumer",
+        codes = self.codes(("fixture_reward", "scorer_test_pooled_consumer",
                             "grpo_advantage"))
         self.assertIn("post-split-order", codes)
 
     def test_inline_consuming_pooled_is_fine(self) -> None:
         """The normal case: the trainer awaits the part, then runs its half
         over it."""
-        self.assertEqual(self.codes(("llm_judge", "grpo_advantage")), [])
+        self.assertEqual(self.codes(("fixture_judge", "grpo_advantage")), [])
 
     def test_a_wholly_inline_pipeline_is_never_examined(self) -> None:
-        self.assertEqual(self.codes(("verifier", "grpo_advantage")), [])
+        self.assertEqual(self.codes(("fixture_reward", "grpo_advantage")), [])
 
     def test_the_issue_names_both_sides(self) -> None:
         base = arith_spec(self.train)
         spec = replace(
             base, algo=replace(base.algo, post=(
-                "verifier", "scorer_test_pooled_consumer", "grpo_advantage")),
+                "fixture_reward", "scorer_test_pooled_consumer", "grpo_advantage")),
             topology=Topology(hosts=(
                 HostSpec((pool("main"),)), HostSpec((pool("judge"),)),
                 HostSpec((learner(),)))))
         issue = next(i for i in validate(spec, SCHEMA)
                      if i.code == "post-split-order")
         self.assertEqual(issue.path, "algo.post[1]")
-        self.assertIn("verifier", issue.message)
+        self.assertIn("fixture_reward", issue.message)
         self.assertIn("reward", issue.message)
 
 
@@ -331,7 +337,7 @@ class VersionPinningTest(unittest.TestCase):
         make another run's replayed trajectories unscoreable for no reason."""
         base = arith_spec(self.train)
         teacher = replace(base, algo=replace(
-            base.algo, loss="opd", post=("verifier", "teacher_logprobs")),
+            base.algo, loss="opd", post=("fixture_reward", "teacher_logprobs")),
             topology=Topology(hosts=(
                 HostSpec((pool("main"),)),
                 HostSpec((pool("teacher", base=TEACHER_BASE),)),
@@ -382,7 +388,7 @@ class TwoWorldsTest(unittest.TestCase):
             wave = wave_from_rows(run.read_wave(update))
             turn = wave.trajectories[0].turns[0]
             bundle = restore_bundle(turn.policy_version, turn.bundle_id,
-                                    run.read_blob, ("pi",), {"pi": "lora"})
+                                    run.read_blob, ("pi",), {"pi": "lora"}, load_code(spec.code))
             engines["main"].add_bundle(bundle)
             routes = {"main": (engines["main"], bundle)}
             for name, engine in engines.items():
@@ -506,7 +512,7 @@ class ScorerConditionTest(unittest.TestCase):
     def test_already_scored_reads_the_part(self) -> None:
         scorer = self.scorer()
         self.assertFalse(scorer.already_scored(1))
-        self.run.write_postdata_part(1, SCORER, {"hinted_logprobs": [[0.5]]})
+        self.run.write_postdata_part(1, SCORER, {"policy_logprobs": [[0.5]]})
         self.assertTrue(scorer.already_scored(1))
 
     def test_next_rows_prefers_the_wave_the_trainer_wrote(self) -> None:

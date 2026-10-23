@@ -188,6 +188,9 @@ class FlowGraph:
 
 def flow_graph(spec: ExperimentSpec) -> FlowGraph:
     """The one canonical walk. Everything else is a query on its result."""
+    from rlstack.code import load_code
+
+    load_code(spec.code)
     loss = spec.algo.loss if spec.algo is not None else None
     post_pipeline = tuple(spec.algo.post) if spec.algo is not None else ()
     # measurement left the spec (#70): the eval phase survives as a

@@ -12,6 +12,7 @@ from rlstack import (
 )
 from rlstack.runner.traffic import EnginePoolClient
 from rlstack.runner.traffic import run_episode
+from boundary_fixtures import single_turn
 from rlstack.data.trajectory import wave_to_rows
 
 BUNDLE = Bundle(bundle_id="bundle:test0000", policy_version={"pi": 0})
@@ -106,7 +107,7 @@ class RunEpisodeTest(unittest.TestCase):
     def test_env_runs_and_seals(self) -> None:
         task = Task("t0", "What is 2+3?", {"answer": 5})
         client = EnginePoolClient(make_pools(p_correct=1.0), SAMPLING, 7)
-        traj = go(run_episode("math_single_turn", task, client))
+        traj = go(run_episode(single_turn, task, client))
         self.assertIsInstance(traj, Trajectory)
         self.assertEqual(traj.turns[0].message.content, "5")
 
@@ -117,13 +118,13 @@ class SampleWaveTest(unittest.TestCase):
     TASKS = {f"t{i}": Task(f"t{i}", f"What is {i}+{i}?", {"answer": 2 * i})
              for i in range(8)}
     PLAN = WavePlan(tuple(
-        GroupPlan(f"t{i}", tuple(Sample(f"t{i}", "math_single_turn")
+        GroupPlan(f"t{i}", tuple(Sample(f"t{i}", "boundary_fixtures:single_turn")
                                  for _ in range(4)))
         for i in range(4)))
 
     def collect(self, index: int = 1):
         return go(sample_wave(self.PLAN, index=index, tasks=self.TASKS,
-                              sampling=SAMPLING, routes=make_pools(), master=17))
+                              sampling=SAMPLING, functions=("boundary_fixtures:single_turn",), code=("boundary_fixtures",), routes=make_pools(), master=17))
 
     def test_the_plan_is_the_group_structure(self) -> None:
         wave = self.collect()
@@ -147,7 +148,7 @@ class SampleWaveTest(unittest.TestCase):
 
     def test_a_trace_times_every_episode_and_call_and_never_reaches_the_wave(self) -> None:
         trace: list[dict] = []
-        traced = go(sample_wave(self.PLAN, index=1, tasks=self.TASKS, sampling=SAMPLING,
+        traced = go(sample_wave(self.PLAN, index=1, tasks=self.TASKS, sampling=SAMPLING, functions=("boundary_fixtures:single_turn",), code=("boundary_fixtures",),
                                 routes=make_pools(), master=17, trace=trace))
         self.assertEqual(wave_to_rows(traced), wave_to_rows(self.collect()))
         self.assertEqual([(row["group"], row["position"]) for row in trace],
@@ -160,15 +161,15 @@ class SampleWaveTest(unittest.TestCase):
             self.assertTrue(all(call["seconds"] >= 0 for call in row["calls"]))
 
     def test_a_leaf_naming_no_declared_task_is_refused(self) -> None:
-        plan = WavePlan((GroupPlan("gone", (Sample("gone", "math_single_turn"),)),))
+        plan = WavePlan((GroupPlan("gone", (Sample("gone", "boundary_fixtures:single_turn"),)),))
         with self.assertRaises(PlanError):
-            go(sample_wave(plan, index=1, tasks=self.TASKS, sampling=SAMPLING,
+            go(sample_wave(plan, index=1, tasks=self.TASKS, sampling=SAMPLING, functions=("boundary_fixtures:single_turn",), code=("boundary_fixtures",),
                            routes=make_pools(), master=17))
 
     def test_a_replay_leaf_is_refused_on_the_making_side(self) -> None:
         plan = WavePlan((GroupPlan("g", (Replay("cas://x#0"),)),))
         with self.assertRaises(PlanError):
-            go(sample_wave(plan, index=1, tasks=self.TASKS, sampling=SAMPLING,
+            go(sample_wave(plan, index=1, tasks=self.TASKS, sampling=SAMPLING, functions=("boundary_fixtures:single_turn",), code=("boundary_fixtures",),
                            routes=make_pools(), master=17))
 
 

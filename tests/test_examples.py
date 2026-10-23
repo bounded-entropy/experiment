@@ -46,7 +46,6 @@ from rlstack import (
     code_hashes,
     encode,
     pool,
-    environment,
     flatten,
     learner,
     lora,
@@ -69,21 +68,6 @@ TASKS = "cas://3fa9c2/math_train.jsonl"
 HELD_OUT = "cas://8c31f0/gsm_heldout.jsonl"
 HELD_OUT_IDS = tuple(f"gsm-{i:04d}" for i in range(4))   # ids inside HELD_OUT
 UPDATES = 30
-
-
-# --- Example 4's registrations. math_single_turn and verifier are REAL
-# builtins (inference/environments/, inference/rewards/) — importing rlstack
-# registered them; only the still-stubbed ones are declared here.
-
-from rlstack import Environment  # noqa: E402
-
-
-@environment("tool_use")
-class ToolUse(Environment):
-    """Sample / execute-tool loop; tool-result tokens get loss_mask=0."""
-
-    async def run(self, client: Any, task: Any) -> Any:
-        raise NotImplementedError
 
 
 # A judge is just a postprocessor that SAMPLES — scoring is post-seal
@@ -139,6 +123,7 @@ def plans_for(env: str) -> Plans:
 
 def example_1() -> ExperimentSpec:
     return ExperimentSpec(
+        code=("boundary_fixtures", "test_examples"),
         policy=PolicySpec(
             base="Qwen/Qwen3-8B",
             bank={
@@ -149,11 +134,11 @@ def example_1() -> ExperimentSpec:
         ),
         # both task sets are DECLARED here; the firewall between them is the
         # plans', which is why eval no longer carries a task file of its own
-        gen=GenSpec(envs=("math_single_turn",), tasks=(TASKS, HELD_OUT)),
-        plans=plans_for("math_single_turn"),
+        gen=GenSpec(functions=("boundary_fixtures:single_turn",), tasks=(TASKS, HELD_OUT)),
+        plans=plans_for("boundary_fixtures:single_turn"),
         algo=AlgoSpec(
             loss="grpo",
-            post=("verifier", "grpo_advantage"),
+            post=("fixture_reward", "grpo_advantage"),
             optim=OptimSpec("adamw", lr=1e-5, betas=(0.9, 0.95),
                             overrides={"head": {"lr": 3e-6}}),
             schedule=Schedule(),
@@ -174,7 +159,7 @@ class TestExample1BasicLora(unittest.TestCase):
     def test_the_plan_states_the_shape_the_schedule_used_to(self) -> None:
         """§3's narrative — "a wave of 16 (4 groups of 4)", thirty updates —
         read off the plan, which is where those numbers live now."""
-        wave = rollout_plan("math_single_turn").wave(1)
+        wave = rollout_plan("boundary_fixtures:single_turn").wave(1)
         self.assertEqual([len(group.leaves) for group in wave.groups],
                          [4, 4, 4, 4])
         self.assertEqual(len(train_plan()), UPDATES)   # the run's length IS this
@@ -221,7 +206,7 @@ class TestExample2PPO(unittest.TestCase):
         exp2 = replace(
             exp,
             policy=replace(exp.policy, bank=bank),
-            algo=replace(exp.algo, loss="ppo_critic", post=("verifier", "gae")),
+            algo=replace(exp.algo, loss="ppo_critic", post=("fixture_reward", "gae")),
         )
         validate_or_raise(exp2, SCHEMA)  # value_head provides "values"; ppo_critic needs it
 
@@ -290,7 +275,7 @@ class TestExample4DataPath(unittest.TestCase):
         engine = FakeEngine()
         engine.add_bundle(bundle)
         columns = asyncio.run(run_pipeline(
-            ("verifier", "grpo_advantage"), wave, {"main": (engine, bundle)},
+            ("fixture_reward", "grpo_advantage"), wave, {"main": (engine, bundle)},
             SamplingSpec(), master=17, update=1))
         self.assertEqual(columns["reward"], [1.0, 0.0, 1.0, 0.0])
         adv = columns["advantage"]
@@ -325,8 +310,8 @@ class TestExample5MultiNode(unittest.TestCase):
                               bank={"pi": lora("layers.0-31.self_attn.*", r=32)}),
             # a leaf names its environment, so a run under a different env is a
             # different plan — the declaration and the plan move together
-            gen=replace(example_1().gen, envs=("tool_use",)),
-            plans=plans_for("tool_use"),
+            gen=replace(example_1().gen, functions=("boundary_fixtures:tool_use",)),
+            plans=plans_for("boundary_fixtures:tool_use"),
             algo=replace(example_1().algo,
                          schedule=Schedule(max_policy_lag=1)),
             topology=Topology(hosts=(

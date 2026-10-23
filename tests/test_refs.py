@@ -30,7 +30,7 @@ class StoreRefPacingTest(unittest.TestCase):
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
         self.store = LocalStore(tmp.name)
-        wave = WavePlan((GroupPlan("t", (Sample("t", "single_turn"),)),))
+        wave = WavePlan((GroupPlan("t", (Sample("t", "boundary_fixtures:single_turn"),)),))
         self.source = self.store.open_run(SOURCE, {"run_id": SOURCE, "spec": "{}"})
         self.source.write_plan("rollout", encode(RunPlan((wave, wave, wave))))
         self.source.write_rollout(1, [a_row(1)])

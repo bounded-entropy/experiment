@@ -25,12 +25,13 @@ from typing import Any
 import copy
 
 from rlstack.data.plan import (
-    TRAIN, Derive, GroupPlan, PlanError, Replay, Sample, WavePlan, WaveRef, Waves,
+    TRAIN, Continue, GroupPlan, HistoricalDerive, HistoricalSample, PlanError,
+    Replay, RunPlan, Sample, WavePlan, WaveRef, Waves,
     route_of_role,
 )
 from rlstack.data.trajectory import Group, Task, Trajectory, Wave, trajectory_from_row
-from rlstack.registry import ENVS, MAKERS
-from rlstack.runner.refs import RefReader
+from rlstack.code import require_declared_function
+from rlstack.runner.refs import SELF, RefReader, parse
 from rlstack.runner.seeds import derive
 from rlstack.runner.traffic import EnginePoolClient, Routes, run_episode
 from rlstack.spec.specs import SamplingSpec
@@ -42,11 +43,12 @@ from rlstack.spec.specs import SamplingSpec
 
 async def sample_wave(plan: WavePlan, *, index: int, tasks: Mapping[str, Task],
                       sampling: SamplingSpec, routes: Routes, master: int,
+                      functions: Sequence[str], code: tuple[str, ...],
                       phase: str = "rollout",
                       max_inflight: int = 64,
                       reader: RefReader | None = None,
                       trace: list[dict] | None = None) -> Wave:
-    """Run every Sample and Derive leaf of one planned wave; return the
+    """Run every Sample and Continue leaf of one planned wave; return the
     sealed Wave.
 
     Deterministic given (master, phase, index) and the PLAN: an episode's seed
@@ -55,56 +57,52 @@ async def sample_wave(plan: WavePlan, *, index: int, tasks: Mapping[str, Task],
     Episodes are scheduled flat and reassembled in PLAN order, so completion
     order cannot reach the bytes (#53).
 
-    A Derive leaf MINTS its task first: `reader` resolves the source ref to a
-    sealed trajectory and the registered maker derives the task, purely — so
-    the mint re-runs identically on resume. The generator makes waves in
-    order, which is why a self source naming an EARLIER wave is always
-    already sealed, and one naming a later wave is a plan error rather than
-    an await.
+    Continue resolves one sealed source before invoking the experiment's
+    function. Self sources name earlier rollout waves. The same per-leaf seed
+    is reused after a crash; already sealed waves are not invoked again.
 
     `trace`, when handed a list, receives one row per episode in PLAN order:
     when it was admitted and ended, and every sample call it made (the
     generator journals it; it never reaches the wave's bytes).
     """
+    check_generation_plan(RunPlan((plan,)), functions, first_index=index)
+    resolved = {name: require_declared_function(name, code) for name in functions}
     limiter = asyncio.Semaphore(max_inflight)
     jobs: list[asyncio.Future] = []
     shape: list[int] = []
 
-    def minted(group_key: str, leaf: Derive) -> Task:
+    def sealed_source(group_key: str, leaf: Continue) -> Trajectory:
         if reader is None:
             raise PlanError(
                 f"group {group_key!r} derives from {leaf.source!r} but this "
-                f"caller resolves no refs — Derive leaves need the run's "
+                f"caller resolves no refs — Continue leaves need the run's "
                 f"reader")
         row = reader.row(leaf.source)
         if row is None:
             raise PlanError(
                 f"group {group_key!r} derives from {leaf.source!r}, which is "
-                f"not sealed yet — a Derive sources an EARLIER wave (the "
+                f"not sealed yet — a Continue sources an EARLIER wave (the "
                 f"generator makes waves in order)")
-        return MAKERS.get(leaf.maker).instance.make(trajectory_from_row(row))
+        return trajectory_from_row(row)
 
-    async def one(group_key: str, position: int, leaf: Sample | Derive,
+    async def one(group_key: str, position: int, leaf: Sample | Continue,
                   row: dict | None) -> Trajectory:
         async with limiter:
             if row is not None:
                 row["start"] = time.time()
-            if isinstance(leaf, Derive):
-                task = minted(group_key, leaf)
+            if isinstance(leaf, Continue):
+                source = sealed_source(group_key, leaf)
             else:
                 if leaf.task_id not in tasks:
                     raise PlanError(
                         f"group {group_key!r} samples task {leaf.task_id!r}, "
                         f"which no declared task set contains")
-                task = tasks[leaf.task_id]
+                source = tasks[leaf.task_id]
             seed = derive(master, phase, index, group_key, position)
-            # an environment's own sampling wins over the run's (an answering
-            # environment is greedy while the dreams sample); None inherits
-            own = ENVS.get(leaf.env).instance.sampling
-            client = EnginePoolClient(routes, own or sampling, seed,
+            client = EnginePoolClient(routes, sampling, seed,
                                       calls=row["calls"] if row is not None else None,
                                       episode=episode_id(phase, index, group_key, position))
-            trajectory = await run_episode(leaf.env, task, client)
+            trajectory = await run_episode(resolved[leaf.function], source, client)
             if row is not None:
                 row["end"] = time.time()
             return trajectory
@@ -112,10 +110,10 @@ async def sample_wave(plan: WavePlan, *, index: int, tasks: Mapping[str, Task],
     for group in plan.groups:
         shape.append(len(group.leaves))
         for position, leaf in enumerate(group.leaves):
-            if not isinstance(leaf, (Sample, Derive)):
+            if not isinstance(leaf, (Sample, Continue)):
                 raise PlanError(
                     f"group {group.key!r}: a rollout plan MAKES trajectories, "
-                    f"so its leaves are Sample or Derive; got "
+                    f"so its leaves are Sample or Continue; got "
                     f"{type(leaf).__name__}")
             row = None
             if trace is not None:
@@ -129,6 +127,34 @@ async def sample_wave(plan: WavePlan, *, index: int, tasks: Mapping[str, Task],
         groups.append(Group(group.key, done[cursor:cursor + width]))
         cursor += width
     return Wave(groups)
+
+
+def check_generation_plan(plan: RunPlan, functions: Sequence[str], *,
+                          first_index: int = 1) -> None:
+    """Only declared functions execute; self continuations source earlier waves.
+
+    Historical leaves decode for inspection but cannot enter a new run.
+    Checking the whole plan before setup avoids discovering a bad later leaf
+    after earlier waves have already sampled.
+    """
+    for index, wave in enumerate(plan.waves, first_index):
+        if not isinstance(wave, WavePlan):
+            raise PlanError("a rollout plan makes trajectories and cannot contain WaveRef")
+        for leaf in wave.leaves():
+            if isinstance(leaf, (HistoricalSample, HistoricalDerive)):
+                raise PlanError("legacy environment/maker plans are read-only; migrate to Sample/Continue functions")
+            if not isinstance(leaf, (Sample, Continue)):
+                raise PlanError("a rollout plan holds only Sample or Continue leaves")
+            if leaf.function not in functions:
+                raise PlanError(f"function {leaf.function!r} is not declared in gen.functions")
+            if isinstance(leaf, Continue):
+                source = parse(leaf.source)
+                if source.index is None:
+                    raise PlanError("Continue requires one sealed source trajectory (#<row>)")
+                if source.location.startswith(SELF):
+                    before = source.location[len(SELF):]
+                    if not before.isdigit() or not 1 <= int(before) < index:
+                        raise PlanError(f"Continue {leaf.source!r} must source an earlier rollout wave than {index}")
 
 
 def episode_id(phase: str, index: int, group_key: str, position: int) -> str:

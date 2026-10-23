@@ -394,7 +394,7 @@ class JudgePoolTest(unittest.TestCase):
         base = arith_spec(self.train)
         return replace(
             base,
-            algo=replace(base.algo, post=("llm_judge", "grpo_advantage")),
+            algo=replace(base.algo, post=("fixture_judge", "grpo_advantage")),
             topology=Topology(hosts=(
                 HostSpec((pool("main"),)), HostSpec((pool("judge"),)),
                 HostSpec((learner(),)))))

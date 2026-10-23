@@ -50,16 +50,17 @@ BANK = {
 def example_1(bank: dict[str, AdapterSpec] | None = None) -> ExperimentSpec:
     """SPEC.md Example 1 — a basic LoRA experiment, end to end."""
     return ExperimentSpec(
+        code=("boundary_fixtures",),
         policy=PolicySpec(
             base="Qwen/Qwen3-8B",
             bank=dict(BANK) if bank is None else bank,
         ),
-        gen=GenSpec(envs=("math_single_turn",),
+        gen=GenSpec(functions=("boundary_fixtures:single_turn",),
                     tasks=("cas://3fa9c2.../math_train.jsonl",)),
         plans=Plans(train="cas://plan/train", rollout="cas://plan/roll"),
         algo=AlgoSpec(
             loss="grpo",
-            post=("verifier", "grpo_advantage"),
+            post=("fixture_reward", "grpo_advantage"),
             optim=OptimSpec("adamw", lr=1e-5, betas=(0.9, 0.95),
                             overrides={"head": {"lr": 3e-6}}),
             schedule=Schedule(microbatch_tokens=16384,
@@ -162,15 +163,13 @@ class TestIdentity(unittest.TestCase):
         warm = replace(exp, init=WarmStart(policy="store://parent@40", optim="load"))
         self.assertNotEqual(content_hash(exp), content_hash(warm))
 
-    def test_an_existing_spec_keeps_the_run_id_it_has_always_had(self) -> None:
-        """ADR 0006 Part B, promise 1: `Plans.train` became optional and the
-        extent a derived PROPERTY, so no hashed record gained a field and no
-        existing run's identity moved. The literal below is what a pre-Part-B
-        tree computes for tests/common.py's arith_spec — if it ever changes,
-        every sealed run in every store has been orphaned."""
+    def test_function_plans_deliberately_get_a_new_identity(self) -> None:
+        """ADR30 changes behavior ownership; old records keep their old IDs."""
         spec = arith_spec(cas_uri(arith_task_bytes(TRAIN[1], TRAIN[2], TRAIN[0])))
         schema = fake_qwen_schema(4, base="Qwen/Qwen3-0.6B")
-        self.assertEqual(experiment_identity(spec, schema), "2432682289f4")
+        actual = experiment_identity(spec, schema)
+        self.assertNotEqual(actual, "2432682289f4")
+        self.assertEqual(actual, experiment_identity(spec, schema))
 
 
 class TestVocabularies(unittest.TestCase):

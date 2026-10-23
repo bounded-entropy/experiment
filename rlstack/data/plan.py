@@ -10,17 +10,11 @@ content-addressed like its tasks and pinned into identity.
     GroupPlan one group's leaves, under a key the postprocessor sees
     Leaf      one trajectory-to-be: SAMPLE it, or REPLAY one already sealed
 
-THE LEAF IS THE WHOLE TAXONOMY. `Sample` names a task to run under an
-environment, and until someone runs it the wave does not exist yet — that
-"not yet" is the only thing runners ever await. `Replay` names a trajectory
-that is already sealed somewhere: this run's own rollouts, another run's
-waves, a content-addressed file. `Derive` is mint-then-make: a registered
-task MAKER turns an already-sealed trajectory into a NEW task (its critique
-prompt, its retry request), and the environment runs that — the reflect
-loop's leaf, and the reason a plan can pin an iterative run's whole SHAPE
-while its content is only derivable at runtime. Live / replay / static /
-iterative stop being four feeds and become three leaf constructors, which is
-what lets one wave hold any mix and one run go SFT then RL then reflect.
+Sample invokes an experiment-owned function on a declared Task. Continue
+invokes one on an already sealed trajectory; the function owns both deriving
+its next Task and interacting with the model. Replay takes existing sealed
+rows. Legacy environment/maker leaves remain readable as historical records
+and have no executor.
 
 Plans are written as jsonl — one line per wave — so a plan reads and diffs
 like the waves it describes, and a long run's plan streams rather than loads.
@@ -52,11 +46,22 @@ class PlanError(ValueError):
 
 @dataclass(frozen=True)
 class Sample:
-    """Make this trajectory: run `env` on `task_id`, under this run's sampling.
+    """Invoke a declared async function on a task from the run's task sets."""
 
-    The task's CONTENT (prompt, answer, hints) lives in the run's task sets;
-    a leaf carries the id alone, so one task set serves many plans.
-    """
+    task_id: str
+    function: str
+    role: str = TRAIN
+    dependencies: tuple[str, ...] = ()
+
+    def row(self) -> dict:
+        return {"leaf": "sample", "task": self.task_id,
+                "function": self.function, "role": self.role,
+                **({"dependencies": list(self.dependencies)} if self.dependencies else {})}
+
+
+@dataclass(frozen=True)
+class HistoricalSample:
+    """An old environment leaf, preserved for reading and never executed."""
 
     task_id: str
     env: str
@@ -87,19 +92,27 @@ class Replay:
 
 
 @dataclass(frozen=True)
-class Derive:
-    """Mint it, then make it: a registered task maker turns the sealed
-    trajectory at `source` into a NEW task, and `env` runs an episode on it.
+class Continue:
+    """Invoke a declared async function on one sealed source trajectory.
 
-    `source` speaks Replay's ref grammar (`self://rollouts/<r>#<i>` and the
-    rest); within a rollout plan a self source must name an EARLIER wave —
-    the generator makes waves in order, so an earlier wave is always sealed
-    by the time this leaf runs, and a later one is a plan error, not an
-    await. The maker is registered code (@task_maker): its source hashes into
-    run identity through the spec's `gen.makers` declaration, and it is a
-    PURE function of the sealed bytes, so a resumed run re-mints the same
-    task to the byte.
+    A self source names an earlier rollout wave. The function owns deriving
+    any new Task and returns a Rollout for the framework to seal.
     """
+
+    source: str
+    function: str
+    role: str = TRAIN
+    dependencies: tuple[str, ...] = ()
+
+    def row(self) -> dict:
+        return {"leaf": "continue", "source": self.source,
+                "function": self.function, "role": self.role,
+                **({"dependencies": list(self.dependencies)} if self.dependencies else {})}
+
+
+@dataclass(frozen=True)
+class HistoricalDerive:
+    """An old maker/environment leaf, preserved for reading only."""
 
     source: str
     maker: str
@@ -111,7 +124,7 @@ class Derive:
                 "env": self.env, "role": self.role}
 
 
-Leaf = Sample | Replay | Derive
+Leaf = Sample | Continue | Replay | HistoricalSample | HistoricalDerive
 
 
 @dataclass(frozen=True)
@@ -215,12 +228,18 @@ def _wave(row: dict) -> Waves:
 
 def _leaf(row: dict) -> Leaf:
     if row["leaf"] == "sample":
-        return Sample(row["task"], row["env"], row.get("role", TRAIN))
+        if "function" in row:
+            return Sample(row["task"], row["function"], row.get("role", TRAIN),
+                          tuple(row.get("dependencies", ())))
+        return HistoricalSample(row["task"], row["env"], row.get("role", TRAIN))
     if row["leaf"] == "replay":
         return Replay(row["ref"], row.get("role", TRAIN))
+    if row["leaf"] == "continue":
+        return Continue(row["source"], row["function"], row.get("role", TRAIN),
+                        tuple(row.get("dependencies", ())))
     if row["leaf"] == "derive":
-        return Derive(row["source"], row["maker"], row["env"],
+        return HistoricalDerive(row["source"], row["maker"], row["env"],
                       row.get("role", TRAIN))
     raise PlanError(f"unknown leaf kind {row['leaf']!r}; plans hold "
                     f"'sample' (make it), 'replay' (take it) and "
-                    f"'derive' (mint it, then make it)")
+                    f"'continue' (interact from sealed source)")
