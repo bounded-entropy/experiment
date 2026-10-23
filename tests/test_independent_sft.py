@@ -44,6 +44,24 @@ class IndependentSftTest(unittest.TestCase):
         torch.testing.assert_close(torch.autograd.grad(actual, scores, retain_graph=True)[0],
                                    torch.autograd.grad(expected, scores)[0])
 
+    def test_zero_target_document_counts_in_group_but_contributes_no_gradient(self):
+        scores = torch.tensor([0., -.2, 0., -.6], requires_grad=True)
+        batch = TokenBatch(token_ids=(1, 2, 3, 4), loss_mask=(0, 0, 0, 1),
+            behavior_logprobs=(0.,) * 4, segment_ids=(0,) * 4, doc_starts=(0, 2),
+            postdata={"sft_document_weight": (0., 0., 0., .5)}, documents_in_update=2)
+        measured = independent_sft(PolicyOutputs(logprobs=scores), batch)
+        torch.testing.assert_close(measured.loss, -.5 * scores[3])
+        gradient, = torch.autograd.grad(measured.loss, scores)
+        torch.testing.assert_close(gradient, torch.tensor([0., 0., 0., -.5]))
+        self.assertEqual(measured.components["document_0_tokens"], 0.)
+        self.assertEqual(measured.components["document_0_nll_sum"], 0.)
+        all_zero = TokenBatch(token_ids=(1, 2), loss_mask=(0, 0),
+            behavior_logprobs=(0., 0.), segment_ids=(0, 0), doc_starts=(0,),
+            postdata={"sft_document_weight": (0., 0.)})
+        result = independent_sft(PolicyOutputs(logprobs=scores[:2]), all_zero)
+        self.assertEqual(float(result.loss), 0.)
+        self.assertFalse(result.loss.requires_grad)
+
     def test_normal_trainer_preserves_real_components_and_ids_after_cohort_reordering(self):
         from dataclasses import replace
         import tempfile

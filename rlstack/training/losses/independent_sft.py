@@ -14,7 +14,13 @@ def independent_sft(out, batch):
     for start, stop in zip(starts, starts[1:]):
         selected = [weights[index] for index in range(start, stop) if batch.loss_mask[index]]
         if not selected:
-            raise ValueError("each supervised document needs selected target tokens")
+            # It remains in its group's document denominator, but contributes
+            # no gradient. Broadcast columns may be all zero on injected text.
+            document_weights.append(max(weights[start:stop], default=0.))
+            zero = lp.new_zeros(())
+            terms.append(zero)
+            values.append(torch.stack((zero, zero)))
+            continue
         weight = selected[0]
         if weight <= 0 or any(value != weight for value in selected):
             raise ValueError("one supervised document needs one positive group weight")
