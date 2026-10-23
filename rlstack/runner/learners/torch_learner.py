@@ -24,12 +24,14 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
+from functools import wraps
 import hashlib
 import json
 import math
 import os
-from typing import Any
+from typing import Any, Callable
 import time
+import threading
 
 import torch
 import torch.utils.checkpoint
@@ -54,6 +56,19 @@ copy path this replaced held it for EVERY position at once."""
 
 GRADIENT_MIN_NORM = 1e-12
 """Numerical guard in selected-token-mean loss coordinates, not a reward term."""
+
+
+def serialized_learner_operation(operation: Callable[..., Any]) -> Callable[..., Any]:
+    """One local resident operation owns its shared model and wrapper roster.
+
+    Admission governs residency; it permits overlapping calls. The model's
+    RowPlan and adapter installation require this separate, reentrant lock.
+    """
+    @wraps(operation)
+    def serialized(self, *args, **kwargs):
+        with self._operation_lock:
+            return operation(self, *args, **kwargs)
+    return serialized
 
 
 def unscored_prefix(batch: TokenBatch, spans: list[tuple[int, int]]) -> int:
@@ -171,6 +186,7 @@ class TorchLearner:
                  dtype: torch.dtype = torch.bfloat16,
                  grad_clip: float = 1.0,
                  checkpoint_activations: bool = True) -> None:
+        self._operation_lock = threading.RLock()
         self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
         self.dtype = dtype
         self.grad_clip = grad_clip
@@ -198,6 +214,7 @@ class TorchLearner:
 
     # ---- Learner protocol ---------------------------------------------------
 
+    @serialized_learner_operation
     def tokenize(self, tenant: str, text: str) -> tuple[int, ...]:
         """The same base tokenizer and encoding convention as VllmEngine.
 
@@ -210,6 +227,7 @@ class TorchLearner:
             self._tokenizer = AutoTokenizer.from_pretrained(self._base)
         return tuple(self._tokenizer.encode(text, add_special_tokens=False))
 
+    @serialized_learner_operation
     def install(self, tenant: str, parameterization: Parameterization) -> None:
         """The record is everything this learner may know of the experiment:
         the loss and every adapter type are resolved BY KEY against this
@@ -268,6 +286,7 @@ class TorchLearner:
         return [round(torch.cuda.max_memory_allocated(index) / 2 ** 30, 3)
                 for index in range(torch.cuda.device_count())]
 
+    @serialized_learner_operation
     def uninstall(self, tenant: str) -> None:
         """Install's inverse as a VERB (ADR 0006 Part A): the tenancy ends, so
         the module tree goes back to the way install found it. Idempotent — a
@@ -327,6 +346,7 @@ class TorchLearner:
             (name, float(self._group_settings(optim, entry, name)["lr"]))
             for name in sorted(adapter_type.param_groups(params)))
 
+    @serialized_learner_operation
     def forward_backward(self, tenant: str, batch: TokenBatch) -> TrainStats:
         state = self._tenant(tenant)
         self.forwards += 1
@@ -353,6 +373,7 @@ class TorchLearner:
                           grad_norm=self._grad_norm(state), tokens=len(batch),
                           provided=_summarize(provided), components=result.components)
 
+    @serialized_learner_operation
     def accumulate(self, tenant: str,
                    batches) -> tuple[TrainStats, ...]:
         """Every microbatch of one update, in order (ADR 0022): one group,
@@ -380,6 +401,7 @@ class TorchLearner:
                 provided[name] = value
         return provided
 
+    @serialized_learner_operation
     def optim_step(self, tenant: str,
                    lr_scales: Mapping[str, float] | None = None) -> None:
         """One step of every entry that accumulated a gradient. `lr_scales` multiplies the named
@@ -417,6 +439,7 @@ class TorchLearner:
         for entry in touched:
             state.adapter_types[entry].after_step(state.params[entry])
 
+    @serialized_learner_operation
     def forward(self, tenant: str, batch: TokenBatch) -> tuple[float, ...]:
         """Per-document mean NLL over the document's loss_mask tokens, with no
         gradient: the SAME routed padded forward `forward_backward` scores
@@ -439,6 +462,7 @@ class TorchLearner:
                   / mask[start:stop].sum().clamp(min=1.0))
             for start, stop in spans)
 
+    @serialized_learner_operation
     def gradient_cosines(
         self, tenant: str, entry: str,
         reference_batches: Sequence[TokenBatch],
@@ -589,6 +613,7 @@ class TorchLearner:
 
     # ---- named sets (ADR 0019): one route of one entry at a time ------------
 
+    @serialized_learner_operation
     def load_set(self, tenant: str, entry: str, route: str,
                  payload: bytes | None) -> None:
         """Start one set over — from a named payload, or from its init when
@@ -600,12 +625,14 @@ class TorchLearner:
         self._adapter_type(state, entry).load_set(
             state.params[entry], route, payload, state.optimizers.get(entry))
 
+    @serialized_learner_operation
     def drop_set(self, tenant: str, entry: str, route: str) -> None:
         """Forget one library set of `entry` (library sets only)."""
         state = self._tenant(tenant)
         self.gradient_cache.invalidate(id(state))
         self._adapter_type(state, entry).drop_set(state.params[entry], route)
 
+    @serialized_learner_operation
     def emit_set(self, tenant: str, entry: str, route: str) -> bytes:
         """One set of `entry` as a named payload."""
         state = self._tenant(tenant)
@@ -618,15 +645,22 @@ class TorchLearner:
                            f"(entries: {state.entries})")
         return state.adapter_types[entry]
 
+    @serialized_learner_operation
     def emit(self, tenant: str) -> Emitted:
         return Emitted(adapters=self.emit_adapters(tenant), optim=self.emit_optim(tenant))
 
-    def emit_initial(self, tenant: str, versions: Mapping[str, int]) -> Emitted:
+    @serialized_learner_operation
+    def bind_versions(self, tenant: str, versions: Mapping[str, int]) -> None:
         state = self._tenant(tenant)
         for entry, params in state.params.items():
             params.bind_version(versions[entry])
+
+    @serialized_learner_operation
+    def emit_initial(self, tenant: str, versions: Mapping[str, int]) -> Emitted:
+        self.bind_versions(tenant, versions)
         return self.emit(tenant)
 
+    @serialized_learner_operation
     def emit_adapters(self, tenant: str, versions: Mapping[str, int] | None = None) -> Mapping[str, bytes]:
         state = self._tenant(tenant)
         if versions is None:       # legacy initial export, including its draw counter
@@ -636,12 +670,14 @@ class TorchLearner:
                     state.params[entry], versions[entry]).encode()
                 for entry in state.params}
 
+    @serialized_learner_operation
     def export_state(self, tenant: str, versions: Mapping[str, int], names: Sequence[str]):
         state = self._tenant(tenant)
         return {entry: state.adapter_types[entry].export_state(
                     state.params[entry], versions[entry])
                 for entry in names}
 
+    @serialized_learner_operation
     def policy_pin(self, tenant, versions, names, adapter_types):
         """Content identity without shipping weights or an optimizer archive."""
         from rlstack.policy.compile import compile_tensor_pin
@@ -649,6 +685,7 @@ class TorchLearner:
         return compile_tensor_pin({name: snapshot.layout() for name, snapshot in states.items()},
                                   versions, adapter_types)
 
+    @serialized_learner_operation
     def prepare_transfer(self, tenant, versions, names, adapter_types) -> dict:
         from rlstack.runner.transports.tensor import TensorSender
         if self._weight_sender is None:
@@ -660,19 +697,23 @@ class TorchLearner:
         manifest["materialize_s"] = materialized - started
         return manifest
 
+    @serialized_learner_operation
     def send_transfer(self, token, endpoint, timeout_s) -> dict:
         if self._weight_sender is None:
             raise ValueError("no tensor snapshot was captured")
         return self._weight_sender.send(token, endpoint, timeout_s)
 
+    @serialized_learner_operation
     def release_transfer(self, token) -> None:
         if self._weight_sender is not None:
             self._weight_sender.release(token)
 
+    @serialized_learner_operation
     def emit_optim(self, tenant: str) -> Mapping[str, bytes]:
         state = self._tenant(tenant)
         return {entry: _state_bytes(state.optimizers[entry]) for entry in state.trainable}
 
+    @serialized_learner_operation
     def load(self, tenant: str, adapters: Mapping[str, bytes],
              optim: Mapping[str, bytes] | None) -> None:
         """Restore in place. Install already placed this tenant's params on
@@ -710,6 +751,7 @@ class TorchLearner:
         no forward meets a half-woken learner."""
         self.take_the_device_back()
 
+    @serialized_learner_operation
     def hand_the_device_back(self) -> None:
         """sleep's body, on whichever rank runs it. Idempotent, and quiet on a
         learner that holds no base yet — which is what lets a host evict a
@@ -721,6 +763,7 @@ class TorchLearner:
         torch.cuda.empty_cache()
         self._asleep = True
 
+    @serialized_learner_operation
     def take_the_device_back(self) -> None:
         """wake's body, on whichever rank runs it. Idempotent, and quiet on a
         learner that never slept."""
@@ -729,6 +772,7 @@ class TorchLearner:
         self._move_everything(self.device)
         self._asleep = False
 
+    @serialized_learner_operation
     def shutdown(self) -> None:
         """Close publication groups; the sharded build also ends its rank chorus."""
         if self._weight_sender is not None:
@@ -739,6 +783,7 @@ class TorchLearner:
         self.move_the_base(device)
         self.move_the_tenants(device)
 
+    @serialized_learner_operation
     def move_the_base(self, device: str) -> None:
         """The frozen base and its buffers across the bus, in one `Module.to`.
 
@@ -754,6 +799,7 @@ class TorchLearner:
         """
         self._model.to(device)
 
+    @serialized_learner_operation
     def move_the_tenants(self, device: str) -> None:
         """Every installed tenant's deltas, their grads, and their optimizer
         moments — PER TENSOR and in place (`parameter.data = ...`), never

@@ -58,7 +58,7 @@ from rlstack.client import GradientComparison
 from rlstack.data.flatten import TokenBatch
 from rlstack.runner.interfaces import Emitted, Parameterization, TrainStats
 from rlstack.runner.learners.ranks import STOP, RankCommand, RankGroup
-from rlstack.runner.learners.torch_learner import TorchLearner
+from rlstack.runner.learners.torch_learner import TorchLearner, serialized_learner_operation
 from rlstack.runner.residents import cap_memory
 
 
@@ -221,6 +221,7 @@ class FsdpTorchLearner(TorchLearner):
 
     # ---- the verbs, each announced before it runs ---------------------------
 
+    @serialized_learner_operation
     def install(self, tenant: str, parameterization: Parameterization) -> None:
         """Announced: it loads and shards the base (a collective build), and
         every rank needs this tenant's params to run its half of a forward.
@@ -229,6 +230,7 @@ class FsdpTorchLearner(TorchLearner):
         self.announce("install", (tenant, parameterization))
         super().install(tenant, parameterization)
 
+    @serialized_learner_operation
     def uninstall(self, tenant: str) -> None:
         """Announced: install was, and every rank wired this tenant's params
         into its own copy of the tree — a rank left holding them would route
@@ -236,6 +238,7 @@ class FsdpTorchLearner(TorchLearner):
         self.announce("uninstall", (tenant,))
         super().uninstall(tenant)
 
+    @serialized_learner_operation
     def forward_backward(self, tenant: str, batch: TokenBatch) -> TrainStats:
         """Announced: the forward all-gathers the base and the backward
         re-gathers it. Rank 0's stats are the run's stats. At dp > 1 it is
@@ -245,6 +248,7 @@ class FsdpTorchLearner(TorchLearner):
         self.announce("forward_backward", (tenant, batch))
         return super().forward_backward(tenant, batch)
 
+    @serialized_learner_operation
     def accumulate(self, tenant: str, batches) -> tuple[TrainStats, ...]:
         """Announced at dp > 1: every rank runs its group's share of the
         update (`accumulate_share`). At dp = 1 it is the per-microbatch loop
@@ -255,6 +259,7 @@ class FsdpTorchLearner(TorchLearner):
         self.announce("accumulate", (tenant, batches))
         return self.accumulate_share(tenant, batches)
 
+    @serialized_learner_operation
     def accumulate_share(self, tenant: str, batches: list) -> tuple[TrainStats, ...]:
         """THIS RANK'S PART OF ONE UPDATE AT dp > 1 (ADR 0022). Round by
         round: microbatch `start + g` runs on group g (its gradients alone —
@@ -310,6 +315,7 @@ class FsdpTorchLearner(TorchLearner):
             print(f"[dp] {json.dumps(self.dp_timings)}", flush=True)
         return tuple(stats)
 
+    @serialized_learner_operation
     def optim_step(self, tenant: str,
                    lr_scales: Mapping[str, float] | None = None) -> None:
         """Announced, though it takes no collective: every rank holds a whole
@@ -318,12 +324,14 @@ class FsdpTorchLearner(TorchLearner):
         self.announce("optim_step", (tenant, lr_scales))
         super().optim_step(tenant, lr_scales)
 
+    @serialized_learner_operation
     def forward(self, tenant: str, batch: TokenBatch) -> tuple[float, ...]:
         """Announced: a no-grad forward all-gathers the base exactly as a
         training forward does. Rank 0's NLLs are the answer."""
         self.announce("forward", (tenant, batch))
         return super().forward(tenant, batch)
 
+    @serialized_learner_operation
     def gradient_cosines(
         self, tenant: str, entry: str,
         reference_batches: Sequence[TokenBatch],
@@ -333,6 +341,7 @@ class FsdpTorchLearner(TorchLearner):
         raise NotImplementedError(
             "gradient_cosines requires an unsharded TorchLearner; FSDP measurements are unsupported")
 
+    @serialized_learner_operation
     def load_set(self, tenant: str, entry: str, route: str,
                  payload: bytes | None) -> None:
         """Announced, for `load`'s reason: every rank holds a whole copy of
@@ -340,11 +349,13 @@ class FsdpTorchLearner(TorchLearner):
         self.announce("load_set", (tenant, entry, route, payload))
         super().load_set(tenant, entry, route, payload)
 
+    @serialized_learner_operation
     def drop_set(self, tenant: str, entry: str, route: str) -> None:
         """Announced: every rank installed the library set."""
         self.announce("drop_set", (tenant, entry, route))
         super().drop_set(tenant, entry, route)
 
+    @serialized_learner_operation
     def load(self, tenant: str, adapters: Mapping[str, bytes],
              optim: Mapping[str, bytes] | None) -> None:
         """Announced: the payload comes off rank 0's store and every rank
@@ -354,6 +365,7 @@ class FsdpTorchLearner(TorchLearner):
                                dict(optim) if optim else None))
         super().load(tenant, adapters, optim)
 
+    @serialized_learner_operation
     def emit(self, tenant: str) -> Emitted:
         """NOT announced: the trainable state is replicated, so serializing
         it is rank-local work — and that is exactly the invariant, so it is
@@ -361,14 +373,22 @@ class FsdpTorchLearner(TorchLearner):
         self.attest_emit_is_width_free(tenant)
         return super().emit(tenant)
 
+    @serialized_learner_operation
     def emit_adapters(self, tenant, versions=None):
         self.attest_emit_is_width_free(tenant)
         return super().emit_adapters(tenant, versions)
 
+    @serialized_learner_operation
+    def bind_versions(self, tenant, versions):
+        self.announce("bind_versions", (tenant, dict(versions)))
+        super().bind_versions(tenant, versions)
+
+    @serialized_learner_operation
     def emit_optim(self, tenant):
         self.attest_emit_is_width_free(tenant)
         return super().emit_optim(tenant)
 
+    @serialized_learner_operation
     def export_state(self, tenant, versions, names):
         self.attest_emit_is_width_free(tenant)
         return super().export_state(tenant, versions, names)
@@ -390,8 +410,9 @@ class FsdpTorchLearner(TorchLearner):
         exactly as `install` and `forward_backward` do — and for the same
         reason, that a chorus verb is entered by every rank in the same order.
         """
-        self.announce("sleep", ())
-        self.hand_the_device_back()
+        with self._operation_lock:
+            self.announce("sleep", ())
+            self.hand_the_device_back()
 
     async def wake(self) -> None:
         """Announced, and the mirror of sleep. The arbiter switches only at
@@ -399,9 +420,11 @@ class FsdpTorchLearner(TorchLearner):
         awake — which it must: FSDP materializes its comm state on the first
         forward (`FSDPParamGroup.lazy_init`) and an all-gather reads whatever
         device the shard is on."""
-        self.announce("wake", ())
-        self.take_the_device_back()
+        with self._operation_lock:
+            self.announce("wake", ())
+            self.take_the_device_back()
 
+    @serialized_learner_operation
     def first_contact(self) -> dict:
         """WHAT EVERY RANK ACTUALLY TOOK after the first forward (ADR 0008,
         F5), gathered across the chorus.
@@ -520,6 +543,7 @@ class FsdpTorchLearner(TorchLearner):
                 if buffer is not None and buffer.device.type == "cpu":
                     module._buffers[name] = buffer.to(self.device)
 
+    @serialized_learner_operation
     def move_the_base(self, device: str) -> None:
         """The sharded base across the bus — and FSDP's own view of it moved
         with it. THE RULE: NEVER SWAP A SHARDED PARAMETER'S STORAGE WITHOUT
@@ -693,6 +717,8 @@ class FsdpTorchLearner(TorchLearner):
             self.accumulate_share(*command.args)
         elif command.verb == "optim_step":
             super().optim_step(*command.args)
+        elif command.verb == "bind_versions":
+            super().bind_versions(*command.args)
         elif command.verb == "load":
             super().load(*command.args)
         elif command.verb == "forward":
@@ -718,11 +744,13 @@ class FsdpTorchLearner(TorchLearner):
                 return
             self.follow(command)
 
+    @serialized_learner_operation
     def stop(self) -> None:
         """End the chorus. Deploy code calls this in a finally — a run that
         crashed and a run that finished both leave children holding GPUs."""
         self.ranks.stop()
 
+    @serialized_learner_operation
     def shutdown(self) -> None:
         """A resident's last verb: end the chorus (the ladder inside the
         resident's own ladder — ADR 0002, Q9)."""
