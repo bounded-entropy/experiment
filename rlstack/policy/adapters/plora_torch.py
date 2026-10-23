@@ -328,6 +328,8 @@ class PloraSite(SiteWrapper):
         recorded noise — and a slot carrying no PLORA here gets the inner
         module untouched."""
         rows = self.plan.rows
+        if len(rows.slots) > 1 and not rows.carries(self.path, PloraState):
+            return self.inner(x)
         one = rows.uniform()
         if one is not None and not isinstance(one.get(self.path), PloraState):
             return self.inner(x)              # the transparent case

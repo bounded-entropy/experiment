@@ -70,6 +70,10 @@ class ReplayRows:
         """
         return self.slots[0] if len(self.slots) == 1 else None
 
+    def carries(self, path: str, state_type: type) -> bool:
+        """Whether any selected slot owns this provider's state at the site."""
+        return any(isinstance(slot.get(path), state_type) for slot in self.slots)
+
 
 class RowPlan:
     """The model's routing table: EMPTY between forwards, set for exactly one.

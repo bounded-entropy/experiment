@@ -127,6 +127,8 @@ def cores(state: LearnedTaskState, path: str, z: torch.Tensor):
 class LearnedTaskSite(SiteWrapper):
     def forward(self, x):
         rows = self.plan.rows
+        if len(rows.slots) > 1 and not rows.carries(self.path, LearnedTaskState):
+            return self.inner(x)
         slot = rows.uniform()
         if slot is None:
             raise ValueError("one tenant per forward required")

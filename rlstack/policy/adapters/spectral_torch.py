@@ -143,6 +143,8 @@ class SpectralSite(SiteWrapper):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         rows = self.plan.rows
+        if len(rows.slots) > 1 and not rows.carries(self.path, SpectralState):
+            return self.inner(x)
         one = rows.uniform()
         if one is None:
             raise ValueError(

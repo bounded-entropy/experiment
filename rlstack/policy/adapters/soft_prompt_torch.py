@@ -179,6 +179,8 @@ class PromptBoundary:
     def rows_for(self, batch_rows: int) -> torch.Tensor | None:
         """The [rows, n, d] block this forward prepends, or None for none."""
         plan = self.plan.rows
+        if not plan.carries(self.path, SoftPromptState):
+            return None
         one = plan.uniform()
         if one is not None:
             state = one.get(self.path)

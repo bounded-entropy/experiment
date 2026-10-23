@@ -257,6 +257,8 @@ class SlatentSite(SiteWrapper):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         rows = self.plan.rows
+        if len(rows.slots) > 1 and not rows.carries(self.path, SlatentState):
+            return self.inner(x)
         one = rows.uniform()
         if one is None:
             raise ValueError(

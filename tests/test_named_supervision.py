@@ -50,12 +50,13 @@ class NamedSupervisionTest(unittest.IsolatedAsyncioTestCase):
         pending = asyncio.create_task(self.run_spec(child))
         try:
             for _ in range(100):
-                if self.store.peek_manifest(f"{FOLDER}/{child_id}") is not None:
+                if self.store.named_writer(FOLDER, "child") == f"{FOLDER}/{child_id}":
                     break
                 await asyncio.sleep(0.001)
             self.assertNotIn(child_id, self.learner._tenants)
             self.assertEqual(self.arbiter.in_flight(), 0)
             self.assertFalse(pending.done())
+            self.assertEqual(self.store.named_writer(FOLDER, "child"), f"{FOLDER}/{child_id}")
             source = await self.run_spec(producer)
             completed = await asyncio.wait_for(pending, 3)
         finally:

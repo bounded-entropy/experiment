@@ -103,7 +103,7 @@ def routed_bias(rows: ReplayRows) -> torch.Tensor | None:
     carry different biases, but they may not disagree about whether there IS
     one, nor about the rectangle's size.
     """
-    present = [BIAS_PATH in slot for slot in rows.slots]
+    present = [isinstance(slot.get(BIAS_PATH), AttnBiasState) for slot in rows.slots]
     if not any(present):
         return None
     if not all(present):

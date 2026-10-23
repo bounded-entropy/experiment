@@ -169,6 +169,53 @@ class RowAwareLoraTest(unittest.TestCase):
 
 @needs_torch
 class AdditiveInstallTest(unittest.TestCase):
+    def test_foreign_mixed_rows_pass_through_every_linear_provider(self) -> None:
+        """A resident's unused wrapper cannot constrain another tenant's rows."""
+        from rlstack.policy.adapters import (
+            dream_bank_torch, learned_tasks_torch, plora_torch, spectral_torch,
+            spectral_latent_torch, spectral_tasks_torch,
+        )
+        providers = (lora_torch.LoraSite, plora_torch.PloraSite,
+                     dream_bank_torch.DreamBankSite, spectral_torch.SpectralSite,
+                     spectral_latent_torch.SlatentSite, spectral_tasks_torch.TaskSite,
+                     learned_tasks_torch.LearnedTaskSite)
+        for provider in providers:
+            with self.subTest(provider=provider.__name__):
+                model = a_model().requires_grad_(False)
+                base = model.block.proj
+                model.block.proj = provider(base, PATH, row_plan(model))
+                rows = ReplayRows(slots=({PATH: object()}, {PATH: object()}),
+                                  index=torch.tensor([0, 1]))
+                x = torch.randn(2, 3, 8, requires_grad=True)
+                with row_plan(model).route(rows):
+                    got = model.block.proj(x)
+                self.assertTrue(torch.equal(got, base(x)))
+                got.sum().backward()
+                torch.testing.assert_close(x.grad, base.weight.sum(0).expand_as(x))
+
+    def test_mixed_lora_children_ignore_resident_dream_bank_state(self) -> None:
+        from rlstack.policy.adapters import dream_bank_torch
+
+        model = a_model().requires_grad_(False)
+        parent = dream_bank_torch.build(SITES, {"r": 4, "memories": 1})
+        dream_bank_torch.install(model, parent)
+        first, second = a_state(71), a_state(72)
+        lora_torch.install(model, first)
+        lora_torch.install(model, second)
+        x = torch.randn(2, 3, 8)
+        rows = ReplayRows(slots=({PATH: first}, {PATH: second}),
+                          index=torch.tensor([0, 1]))
+        base = model.block.proj.inner.inner
+        want = base(x) + torch.stack([swap_install_delta(x[0], first),
+                                      swap_install_delta(x[1], second)])
+        with row_plan(model).route(rows):
+            got = model.block.proj(x)
+            got.sum().backward()
+        torch.testing.assert_close(got, want)
+        self.assertTrue(all(parameter.grad is None for parameter in parent.parameters()))
+        self.assertIsNotNone(first.b[PATH].grad)
+        self.assertIsNotNone(second.b[PATH].grad)
+
     def test_a_second_tenant_joins_the_wrapper_it_finds(self) -> None:
         model = a_model()
         inner = model.block.proj

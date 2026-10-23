@@ -67,6 +67,8 @@ class LoraSite(SiteWrapper):
         """A row's delta is the one its slot carries HERE — and a slot that
         carries none of THIS family here gets the inner module untouched."""
         rows = self.plan.rows
+        if len(rows.slots) > 1 and not rows.carries(self.path, LoraState):
+            return self.inner(x)
         one = rows.uniform()
         if one is not None:
             state = one.get(self.path)

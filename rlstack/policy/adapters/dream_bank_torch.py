@@ -210,6 +210,8 @@ class DreamBankSite(SiteWrapper):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         rows = self.plan.rows
+        if len(rows.slots) > 1 and not rows.carries(self.path, DreamBankState):
+            return self.inner(x)
         slot = rows.uniform()
         if slot is None:
             raise ValueError("dream_bank routes rows within one tenant's forward")

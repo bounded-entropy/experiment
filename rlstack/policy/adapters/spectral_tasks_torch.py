@@ -98,6 +98,8 @@ def task_latents(state, rows):
 class TaskSite(SiteWrapper):
     def forward(self, x):
         rows = self.plan.rows
+        if len(rows.slots) > 1 and not rows.carries(self.path, TaskState):
+            return self.inner(x)
         slot = rows.uniform()
         if slot is None:
             raise ValueError("one tenant per forward required")
