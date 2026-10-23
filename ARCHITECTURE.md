@@ -249,7 +249,7 @@ Q1), `final_hidden` is the final norm's output.
 `rlstack/policy/siteschema.py`
 
 **Mechanism / lever** — the closed set of ways an engine can reach a site:
-`punica`, `prompt_embeds`, `logits`, `side_attention`, `residual`, `none`. A
+`punica`, `prompt_embeds`, `logits`, `side_attention`, `residual`, `site`, `none`. A
 *lever* is the same thing named from the build's side — something an engine
 build pays for and then has. Native levers are the engine's own;
 `side_attention` and `residual` are ours, shipped as plugins.
@@ -272,10 +272,12 @@ build pays for and then has. Native levers are the engine's own;
 > select *into* a mechanism; they never create one.
 
 **Lowering** — how one adapter type's math is realized on one side of the
-bridge. Every adapter type ships two. A **rollout lowering** serves it through
-an engine build (`<adapter_type>_vllm.py`, contract in `rollout.py`); a **replay
-lowering** wires it into a trainer forward (`<adapter_type>_torch.py`, entered
-through `install_replay`). A
+bridge. Both compile from one `AdapterDefinition` (ADR 0028), describing the
+operation, site and state. A **rollout lowering** selects a native engine or
+custom site provider (contract in `rollout.py`); a **replay lowering** wires
+its differentiable provider into a trainer forward (`lowering.py`, entered
+through `install_replay`). Existing per-side compute modules are preserved
+providers, not separately authored lifecycle definitions. A
 replay lowering may be a module replacement *or* a boundary around the base's
 forward; either way its obligation is alignment.
 `rlstack/policy/adapters/rollout.py`, `rlstack/policy/adapters/replay.py`

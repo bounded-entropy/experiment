@@ -36,6 +36,10 @@ The one reader is Samarth, six months from now, mid-experiment. Optimize for
                    TYPE PER SIDE — lora_torch/lora_vllm — plus the two seams:
                    replay.py (RowPlan/ReplayRows, #44) and rollout.py (the
                    RolloutLowering contract, #48)) + compile
+                   ADR 0028: pure definition.py/lowering.py describe BOTH
+                   sides; *_torch.py, *_vllm.py and *_triton.py are lazy
+                   compute providers. A custom type declares its operation
+                   once and uses common site providers instead of two files.
    inference/      the sampling world: Rollout + environments/ (an episode is
                    everything needed to complete and seal a rollout — scoring
                    is NOT here) — never imports training/

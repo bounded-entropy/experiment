@@ -32,6 +32,7 @@ holds at install, and the engine only ever sees materialized k-rank tensors.
 
 from __future__ import annotations
 
+from rlstack.policy.adapters.definition import Operation, SiteKind, builtin
 from collections.abc import Mapping
 from typing import Any
 
@@ -47,6 +48,8 @@ GAIN_SPAN_PROVIDED = "spectral_gain_span"
 
 @adapter_type("spectral")
 class Spectral(AdapterType):
+    definition = builtin(Operation.SPECTRAL, SiteKind.LINEAR, 'spectral',
+                         'spectral', 'SpectralRollout', 'punica')
     serving = Mechanism.PUNICA
     provides = frozenset({GAIN_SPAN_PROVIDED})
 
@@ -54,35 +57,10 @@ class Spectral(AdapterType):
         """A weighted matrix: the gains ARE that matrix's own spectrum."""
         return meta.has_weight
 
-    # compute halves — torch/vLLM load lazily, from here only (rule 7)
-
-    def rollout_lowering(self, build):
-        from rlstack.policy.adapters import spectral_vllm
-        return spectral_vllm.SpectralRollout(build)
-
-    def params(self, sites: tuple[SiteMeta, ...], init: dict):
-        from rlstack.policy.adapters import spectral_torch
-        return spectral_torch.build(sites, init)
-
-    def install_replay(self, model, params, sites: tuple[SiteMeta, ...]) -> None:
-        from rlstack.policy.adapters import spectral_torch
-        spectral_torch.install(model, params)
-
-    def uninstall_replay(self, model, params, sites: tuple[SiteMeta, ...]) -> None:
-        from rlstack.policy.adapters import spectral_torch
-        spectral_torch.uninstall(model, params)
 
     def provide(self, params) -> Mapping[str, Any]:
         from rlstack.policy.adapters import spectral_torch
         return spectral_torch.provide(params)
-
-    def emit(self, params) -> bytes:
-        from rlstack.policy.adapters import spectral_torch
-        return spectral_torch.emit(params)
-
-    def load(self, params, payload: bytes) -> None:
-        from rlstack.policy.adapters import spectral_torch
-        spectral_torch.load(params, payload)
 
 
 def spectral(site: str, k: int = 16):

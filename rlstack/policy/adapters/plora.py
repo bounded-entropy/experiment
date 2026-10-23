@@ -34,6 +34,7 @@ out of its own gradient.
 
 from __future__ import annotations
 
+from rlstack.policy.adapters.definition import Operation, SiteKind, builtin
 from collections.abc import Mapping
 from typing import Any
 
@@ -60,6 +61,8 @@ PRIORS = (FIXED_PRIOR, LEARNED_PRIOR)
 
 @adapter_type("plora")
 class Plora(AdapterType):
+    definition = builtin(Operation.PROBABILISTIC_LOW_RANK, SiteKind.LINEAR, 'plora',
+                         'plora', 'PloraRollout', 'punica')
     serving = Mechanism.PUNICA
     provides = frozenset({KL_PROVIDED, SIGMA_PROVIDED, PRIOR_PROVIDED})
     records = (EPS_RECORD, MEMBER_RECORD)
@@ -69,24 +72,6 @@ class Plora(AdapterType):
         singular directions — there is nothing to factor at a boundary."""
         return meta.has_weight
 
-    # compute halves — plora_torch imports torch and plora_vllm imports vLLM,
-    # so both load lazily, from here only (rule 7)
-
-    def rollout_lowering(self, build):
-        from rlstack.policy.adapters import plora_vllm
-        return plora_vllm.PloraRollout(build)
-
-    def params(self, sites: tuple[SiteMeta, ...], init: dict):
-        from rlstack.policy.adapters import plora_torch
-        return plora_torch.build(sites, init)
-
-    def install_replay(self, model, params, sites: tuple[SiteMeta, ...]) -> None:
-        from rlstack.policy.adapters import plora_torch
-        plora_torch.install(model, params)
-
-    def uninstall_replay(self, model, params, sites: tuple[SiteMeta, ...]) -> None:
-        from rlstack.policy.adapters import plora_torch
-        plora_torch.uninstall(model, params)
 
     def provide(self, params) -> Mapping[str, Any]:
         """The latent's KL to its prior, the posterior's mean scale, and the
@@ -116,11 +101,3 @@ class Plora(AdapterType):
         reason to move at the hypernet's pace."""
         from rlstack.policy.adapters import plora_torch
         return plora_torch.param_groups(params)
-
-    def emit(self, params) -> bytes:
-        from rlstack.policy.adapters import plora_torch
-        return plora_torch.emit(params)
-
-    def load(self, params, payload: bytes) -> None:
-        from rlstack.policy.adapters import plora_torch
-        plora_torch.load(params, payload)

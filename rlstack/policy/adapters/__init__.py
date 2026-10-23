@@ -9,5 +9,5 @@ from rlstack.policy.adapters.base import (  # noqa: F401
 )
 from rlstack.policy.adapters import (  # noqa: F401  (registers builtins)
     attn_bias, dream_bank, learned_tasks, lora, plora, soft_prompt, spectral, spectral_latent,
-    spectral_tasks, steer, value_head,
+    spectral_tasks, steer, value_head, site_examples,
 )

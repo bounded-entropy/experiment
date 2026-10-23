@@ -47,7 +47,7 @@ from collections.abc import AsyncIterator, Mapping, Sequence
 from pathlib import Path
 
 from rlstack.data.trajectory import Message
-from rlstack.policy.adapters.base import Directive, Mechanism
+from rlstack.policy.adapters.base import Directive, Mechanism, Reachability
 from rlstack.policy.adapters.rollout import (
     Levers, Library, Request, RolloutLowering, ServingBuild, check_demand_fits,
     check_levers_compose,
@@ -98,7 +98,9 @@ class VllmEngine:
                                    workdir=self._workdir,
                                    max_bundles=max_bundles, max_rank=max_rank,
                                    max_members=max_members, cas=cas_get,
-                                   library=self._library)
+                                   library=self._library,
+                                   site_types=tuple(name for name in serves
+                                       if ADAPTER_TYPES.get(name).instance.serving == Mechanism.SITE))
         self._lowerings = self._serving_adapter_types()
         self._engine_args = dict(
             model=base, max_model_len=max_model_len,
@@ -203,7 +205,7 @@ class VllmEngine:
     def tokenize(self, text: str) -> tuple[int, ...]:
         return tuple(self._tokenizer.encode(text, add_special_tokens=False))
 
-    def reachability(self, sites) -> Mapping[str, Mechanism]:
+    def reachability(self, sites) -> Reachability:
         """This build's inventory: the union of what its served adapter types
         reach, asked in build order.
 
@@ -211,11 +213,11 @@ class VllmEngine:
         so its sites come back NONE and a tenant needing one is refused at Phase
         0 rather than served wrong.
         """
-        def reach(meta) -> Mechanism:
-            for lowering in self._lowerings.values():
-                if lowering.reaches(meta):
-                    return lowering.mechanism
-            return Mechanism.NONE
+        def reach(meta):
+            mechanisms = frozenset(lowering.mechanism for lowering in self._lowerings.values()
+                                   if lowering.reaches(meta))
+            return (Mechanism.NONE if not mechanisms else next(iter(mechanisms))
+                    if len(mechanisms) == 1 else mechanisms)
         return {meta.name: reach(meta) for meta in sites}
 
     def add_bundle(self, bundle: Bundle) -> None:
@@ -406,6 +408,7 @@ class VllmEngine:
         self._request_count += 1
         request_id = f"rlstack-{self._request_count}-{seed}"
         with self._held_for(prompt_ids, bundle_id, seed, directives) as levers:
+            await self._prepare_bundle(bundle_id)
             # DELTA outputs: each step hands over only its new tokens, log-
             # probs and text, so a long completion costs O(n) here, not the
             # O(n^2) of re-reading the cumulative output every step
@@ -474,6 +477,7 @@ class VllmEngine:
         # deterministic, so an adapter type that chooses per request is told
         # there is no seed rather than handed one
         with self._held_for(full_ids, bundle_id, None, directives) as levers:
+            await self._prepare_bundle(bundle_id)
             params = SamplingParams(max_tokens=1, temperature=0.0,
                                     prompt_logprobs=0,
                                     extra_args=dict(levers.extra_args) or None)
@@ -495,6 +499,11 @@ class VllmEngine:
                 for j, tok in enumerate(token_ids))
 
     # ---- the sleep seam (a build capability, NOT the Engine protocol) -------
+
+    async def _prepare_bundle(self, bundle_id: str) -> None:
+        engine = self._ensure_llm()
+        for name, attached in self._residency.attached(bundle_id).items():
+            await self._lowerings[name].prepare(engine, attached)
 
     async def sleep(self) -> None:
         """Hand the device back: vLLM's sleep(level=1) offloads the weights to

@@ -14,40 +14,17 @@ without a soft prompt in the bank dies at Phase 0 with site-no-match.
 
 from __future__ import annotations
 
+from rlstack.policy.adapters.definition import Operation, SiteKind, builtin
 from rlstack.policy.adapters.base import AdapterType, Mechanism, adapter_type
 from rlstack.policy.siteschema import SiteMeta
 
 
 @adapter_type("attn_bias")
 class AttnBias(AdapterType):
+    definition = builtin(Operation.ATTENTION_BIAS, SiteKind.ATTENTION, 'attn_bias',
+                         'attn_bias', 'AttnBiasRollout', 'side_attention')
     serving = Mechanism.SIDE_ATTENTION
     engine_plugin = "rlstack_engine.side_attention"
 
     def site_ok(self, meta: SiteMeta) -> bool:
         return not meta.has_weight
-
-    # compute halves — attn_bias_torch imports torch, so it loads lazily
-    # (rule 7); attn_bias_vllm is the rollout half this build cannot pay for
-    def rollout_lowering(self, build):
-        from rlstack.policy.adapters import attn_bias_vllm
-        return attn_bias_vllm.AttnBiasRollout(build)
-
-    def params(self, sites: tuple[SiteMeta, ...], init: dict):
-        from rlstack.policy.adapters import attn_bias_torch
-        return attn_bias_torch.build(sites, init)
-
-    def install_replay(self, model, params, sites: tuple[SiteMeta, ...]) -> None:
-        from rlstack.policy.adapters import attn_bias_torch
-        attn_bias_torch.install(model, params)
-
-    def uninstall_replay(self, model, params, sites: tuple[SiteMeta, ...]) -> None:
-        from rlstack.policy.adapters import attn_bias_torch
-        attn_bias_torch.uninstall(model, params)
-
-    def emit(self, params) -> bytes:
-        from rlstack.policy.adapters import attn_bias_torch
-        return attn_bias_torch.emit(params)
-
-    def load(self, params, payload: bytes) -> None:
-        from rlstack.policy.adapters import attn_bias_torch
-        attn_bias_torch.load(params, payload)

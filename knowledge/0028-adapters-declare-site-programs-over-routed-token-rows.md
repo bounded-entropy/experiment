@@ -223,7 +223,9 @@ All live drills use the standing desk with explicit checkpoint/delivery cadence,
 
 ## Outcome
 
-Proposed implementation plan only. No framework implementation, GPU allocation, scientific experiment, parity claim or performance claim is made by this document. The shared definition, native/custom operation support and migration of BOTH lowerings are settled user requirements; the author signatures, filenames and seven implementation stages are concrete proposals for review. The implementation requires the remaining questions above to be answered and this ADR accepted under CLAUDE.md; that requirement does not block preparing or saving this plan.
+The shared-definition implementation is on `codex/adapter-definitions`, directly atop ADR 0027 implementation commit `483259c`, in `research/rlstack-adapters`. All twelve existing adapter types use common replay/rollout lifecycle compilation with their preserved compute providers. Declaration-only `site_steer` and `site_lora16` add real Triton math, generic replay/reference autograd, canonical tensor state and local IPC installation; the pinned V1 site bridge installs banks before memory profiling and prepares routing outside graph replay. Native LoRA wrappers and packed logical projection slices retain one base GEMM.
+
+See `docs/adapter-definitions.md`, CONTEXT #99 and `knowledge/evidence/0028-local-validation.json` for interfaces, exact local test counts, identity/payload compatibility and remaining qualification. This is implementation of the shared-definition and token-local execution portions, not completion of every future phase or a live GPU certificate. Writable request/recurrent state, explicit post-RoPE K/V staging, TP/speculation/sleep qualification and throughput profiling remain open. No GPU, experiment or deployment was launched. The ADR remains Accepted until its outstanding broader gates are satisfied; runtime code does not mark those gates passed.
 
 ## Implementation authorization
 

@@ -63,6 +63,7 @@ posterior and its KL. The decoder and basis are data independent.
 
 from __future__ import annotations
 
+from rlstack.policy.adapters.definition import Operation, SiteKind, builtin
 from collections.abc import Mapping
 from typing import Any
 
@@ -98,6 +99,8 @@ AMPLITUDES = (JOINT_AMPLITUDE, SPLIT_AMPLITUDE, FIXED_LINEAR, FIXED_BASIS)
 
 @adapter_type("spectral_latent")
 class SpectralLatent(AdapterType):
+    definition = builtin(Operation.SPECTRAL_LATENT, SiteKind.LINEAR, 'spectral_latent',
+                         'spectral_latent', 'SlatentRollout', 'punica')
     serving = Mechanism.PUNICA
     provides = frozenset({KL_PROVIDED, SIGMA_PROVIDED, PRIOR_PROVIDED,
                           GAIN_SPAN_PROVIDED, AMPLITUDE_PROVIDED,
@@ -108,23 +111,6 @@ class SpectralLatent(AdapterType):
         """A weighted matrix: the gains ARE that matrix's own spectrum."""
         return meta.has_weight
 
-    # compute halves — torch/vLLM load lazily, from here only (rule 7)
-
-    def rollout_lowering(self, build):
-        from rlstack.policy.adapters import spectral_latent_vllm
-        return spectral_latent_vllm.SlatentRollout(build)
-
-    def params(self, sites: tuple[SiteMeta, ...], init: dict):
-        from rlstack.policy.adapters import spectral_latent_torch
-        return spectral_latent_torch.build(sites, init)
-
-    def install_replay(self, model, params, sites: tuple[SiteMeta, ...]) -> None:
-        from rlstack.policy.adapters import spectral_latent_torch
-        spectral_latent_torch.install(model, params)
-
-    def uninstall_replay(self, model, params, sites: tuple[SiteMeta, ...]) -> None:
-        from rlstack.policy.adapters import spectral_latent_torch
-        spectral_latent_torch.uninstall(model, params)
 
     def provide(self, params) -> Mapping[str, Any]:
         from rlstack.policy.adapters import spectral_latent_torch
@@ -137,14 +123,6 @@ class SpectralLatent(AdapterType):
         (the per-site scalars) under the split recipe."""
         from rlstack.policy.adapters import spectral_latent_torch
         return spectral_latent_torch.param_groups(params)
-
-    def emit(self, params) -> bytes:
-        from rlstack.policy.adapters import spectral_latent_torch
-        return spectral_latent_torch.emit(params)
-
-    def load(self, params, payload: bytes) -> None:
-        from rlstack.policy.adapters import spectral_latent_torch
-        spectral_latent_torch.load(params, payload)
 
 
 def spectral_latent(site: str, k: int = 16, latent: int = 32, members: int = 4,

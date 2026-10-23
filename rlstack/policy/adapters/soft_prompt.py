@@ -9,6 +9,7 @@ the same rows at the same place.
 
 from __future__ import annotations
 
+from rlstack.policy.adapters.definition import Operation, SiteKind, builtin
 from rlstack.policy.adapters.base import AdapterType, Mechanism, adapter_type
 from rlstack.policy.siteschema import SiteMeta
 from rlstack.spec.specs import AdapterSpec
@@ -16,6 +17,8 @@ from rlstack.spec.specs import AdapterSpec
 
 @adapter_type("soft_prompt")
 class SoftPrompt(AdapterType):
+    definition = builtin(Operation.PROMPT, SiteKind.PROMPT, 'soft_prompt',
+                         'soft_prompt', 'SoftPromptRollout', 'prompt_embeds')
     serving = Mechanism.PROMPT_EMBEDS
 
     def site_ok(self, meta: SiteMeta) -> bool:
@@ -29,30 +32,3 @@ class SoftPrompt(AdapterType):
             SiteMeta(name=f"queries -> prompt[:{n}]", path="attn_scores",
                      has_weight=False, shape=None, is_boundary=False),
         )
-
-    # compute halves — both import torch, so both load lazily, from here
-    # only (rule 7)
-
-    def rollout_lowering(self, build):
-        from rlstack.policy.adapters import soft_prompt_vllm
-        return soft_prompt_vllm.SoftPromptRollout(build)
-
-    def params(self, sites: tuple[SiteMeta, ...], init: dict):
-        from rlstack.policy.adapters import soft_prompt_torch
-        return soft_prompt_torch.build(sites, init)
-
-    def install_replay(self, model, params, sites: tuple[SiteMeta, ...]) -> None:
-        from rlstack.policy.adapters import soft_prompt_torch
-        soft_prompt_torch.install(model, params)
-
-    def uninstall_replay(self, model, params, sites: tuple[SiteMeta, ...]) -> None:
-        from rlstack.policy.adapters import soft_prompt_torch
-        soft_prompt_torch.uninstall(model, params)
-
-    def emit(self, params) -> bytes:
-        from rlstack.policy.adapters import soft_prompt_torch
-        return soft_prompt_torch.emit(params)
-
-    def load(self, params, payload: bytes) -> None:
-        from rlstack.policy.adapters import soft_prompt_torch
-        soft_prompt_torch.load(params, payload)

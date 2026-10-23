@@ -21,7 +21,7 @@ from collections.abc import AsyncIterator, Mapping, Sequence
 from rlstack.data.flatten import TokenBatch
 from rlstack.data.trajectory import Message
 from rlstack.policy.adapters.base import (
-    AdapterType, Directive, Mechanism, adapter_type,
+    AdapterType, Directive, Mechanism, Reachability, adapter_type,
 )
 from rlstack.policy.adapters.dream_bank import (
     BASE, Route, check_route, check_trains_at_most_one, is_library,
@@ -136,15 +136,18 @@ class FakeEngine:
         return {"weights_gb": 0.0, "kv_tokens": self.served * 16,
                 "requests": self.served}
 
-    def reachability(self, sites: Sequence[SiteMeta]) -> Mapping[str, Mechanism]:
+    def reachability(self, sites: Sequence[SiteMeta]) -> Reachability:
         """A realistic fake build: punica reaches weighted matrices, prompt
         rows enter at the embedding boundary, logits have a processor, and the
         two plugin levers — the side-attention rectangle, the residual
         boundaries — are reachable only when their plugin is installed.
         Everything else is honestly NONE."""
-        def reach(meta: SiteMeta) -> Mechanism:
+        def reach(meta: SiteMeta) -> Mechanism | frozenset[Mechanism]:
             if meta.has_weight:
-                return Mechanism.PUNICA
+                return (frozenset((Mechanism.PUNICA, Mechanism.SITE))
+                        if Mechanism.SITE in self.plugins and
+                        meta.path.rsplit(".", 1)[-1] not in ("embed_tokens", "lm_head")
+                        else Mechanism.PUNICA)
             if meta.path == "model.embed_tokens":
                 return Mechanism.PROMPT_EMBEDS
             if meta.name == "logits":
@@ -155,6 +158,9 @@ class FakeEngine:
                         else Mechanism.NONE)
             if meta.is_boundary and (meta.path.startswith("model.layers.")
                                      or meta.path == "model.norm"):
+                if Mechanism.SITE in self.plugins:
+                    return (frozenset((Mechanism.RESIDUAL, Mechanism.SITE))
+                            if Mechanism.RESIDUAL in self.plugins else Mechanism.SITE)
                 return (Mechanism.RESIDUAL
                         if Mechanism.RESIDUAL in self.plugins
                         else Mechanism.NONE)

@@ -22,6 +22,7 @@ instead, and its checkpoint IS the anchor a stream run warm-starts from.
 
 from __future__ import annotations
 
+from rlstack.policy.adapters.definition import Operation, SiteKind, builtin
 import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
@@ -160,6 +161,8 @@ class Route(Directive):
 
 @adapter_type("dream_bank")
 class DreamBank(AdapterType):
+    definition = builtin(Operation.ROUTED_LOW_RANK, SiteKind.LINEAR, 'dream_bank',
+                         'dream_bank', 'DreamBankRollout', 'punica')
     serving = Mechanism.PUNICA
     directive = Route
     records = (ROUTE_RECORD,)
@@ -177,23 +180,6 @@ class DreamBank(AdapterType):
         route = DREAMER if directive is None else directive.name
         return {ROUTE_RECORD: route}
 
-    # compute halves — lazy, from here only (STYLE rule 7)
-
-    def rollout_lowering(self, build):
-        from rlstack.policy.adapters import dream_bank_vllm
-        return dream_bank_vllm.DreamBankRollout(build)
-
-    def params(self, sites: tuple[SiteMeta, ...], init: dict):
-        from rlstack.policy.adapters import dream_bank_torch
-        return dream_bank_torch.build(sites, init)
-
-    def install_replay(self, model, params, sites: tuple[SiteMeta, ...]) -> None:
-        from rlstack.policy.adapters import dream_bank_torch
-        dream_bank_torch.install(model, params)
-
-    def uninstall_replay(self, model, params, sites: tuple[SiteMeta, ...]) -> None:
-        from rlstack.policy.adapters import dream_bank_torch
-        dream_bank_torch.uninstall(model, params)
 
     def provide(self, params) -> Mapping[str, Any]:
         from rlstack.policy.adapters import dream_bank_torch
@@ -203,13 +189,6 @@ class DreamBank(AdapterType):
         from rlstack.policy.adapters import dream_bank_torch
         return dream_bank_torch.param_groups(params)
 
-    def emit(self, params) -> bytes:
-        from rlstack.policy.adapters import dream_bank_torch
-        return dream_bank_torch.emit(params)
-
-    def load(self, params, payload: bytes) -> None:
-        from rlstack.policy.adapters import dream_bank_torch
-        dream_bank_torch.load(params, payload)
 
     # the named-set verbs (ADR 0019) — one route of the entry at a time
 

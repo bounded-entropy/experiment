@@ -17,6 +17,7 @@ the spec states it), hidden (the head's own width)."""
 
 from __future__ import annotations
 
+from rlstack.policy.adapters.definition import Operation, SiteKind, builtin
 from collections.abc import Mapping
 from typing import Any
 
@@ -28,25 +29,13 @@ VALUES_PROVIDED = "values"     # [rows, padded_tokens], zero at padding
 
 @adapter_type("value_head")
 class ValueHead(AdapterType):
+    definition = builtin(Operation.VALUE, SiteKind.RESIDUAL, 'value_head')
     serving = None
     provides = frozenset({VALUES_PROVIDED})
 
     def site_ok(self, meta: SiteMeta) -> bool:
         return meta.is_boundary and not meta.has_weight
 
-    # compute half — torch loads lazily, from here only (rule 7)
-
-    def params(self, sites: tuple[SiteMeta, ...], init: dict):
-        from rlstack.policy.adapters import value_head_torch
-        return value_head_torch.build(sites, init)
-
-    def install_replay(self, model, params, sites: tuple[SiteMeta, ...]) -> None:
-        from rlstack.policy.adapters import value_head_torch
-        value_head_torch.install(model, params)
-
-    def uninstall_replay(self, model, params, sites: tuple[SiteMeta, ...]) -> None:
-        from rlstack.policy.adapters import value_head_torch
-        value_head_torch.uninstall(model, params)
 
     def provide(self, params) -> Mapping[str, Any]:
         """Per-position values for the forward that just ran, off the captured
@@ -55,14 +44,6 @@ class ValueHead(AdapterType):
         value training never leaks gradient into the policy's adapters)."""
         from rlstack.policy.adapters import value_head_torch
         return value_head_torch.provide(params)
-
-    def emit(self, params) -> bytes:
-        from rlstack.policy.adapters import value_head_torch
-        return value_head_torch.emit(params)
-
-    def load(self, params, payload: bytes) -> None:
-        from rlstack.policy.adapters import value_head_torch
-        value_head_torch.load(params, payload)
 
 
 def value_head(site: str, d_model: int, hidden: int = 128):

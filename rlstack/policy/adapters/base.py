@@ -2,13 +2,10 @@
 
 The class registers an ADAPTER TYPE — `AdapterSpec.adapter_type` names it by
 string, and a configured bank entry is an adapter. Because the policy is the
-only primitive living in both worlds (I2), an adapter type ships BOTH
-lowerings, each in its own file beside this one and imported lazily so the
-client library stays stdlib-clean: the replay lowering in
-`<adapter_type>_torch.py` (entered through install_replay), the rollout
-lowering in `<adapter_type>_vllm.py` (built by rollout_lowering, contract in
-adapters/rollout.py). Parity — the exam that binds the pair — is then
-reviewable in one directory.
+only primitive living in both worlds (I2), both lowerings consume one shared
+AdapterDefinition. Existing per-side modules are lazy compute providers;
+custom site programs use common providers generated from their declaration.
+Parity binds the implementations of that one definition (ADR 0028).
 
 `records` and `provides` are mirror images across the membrane: records are
 sampling-time FACTS, frozen at the seal and never recomputable; provides are
@@ -26,6 +23,7 @@ from rlstack.policy.siteschema import SiteMeta
 from rlstack.registry import ADAPTER_TYPES, source_hash
 from rlstack.spec.specs import AdapterSpec
 from rlstack.policy.state import AdapterState
+from rlstack.policy.adapters.definition import AdapterDefinition
 
 if TYPE_CHECKING:                       # the seam imports this module back
     from rlstack.policy.adapters.rollout import (
@@ -50,6 +48,23 @@ class Mechanism(StrEnum):
     RESIDUAL = "residual"             # our hook: a per-slot vector added at a
     #                                   residual boundary (ADR 0004)
     NONE = "none"                     # inventory answer only: not reachable
+    SITE = "site"                     # a declared token-local GPU program
+
+
+Reachability = Mapping[str, Mechanism | frozenset[Mechanism]]
+
+
+def encode_reachability(reachability: Reachability) -> dict:
+    """Preserve legacy scalar rows; multiple providers use sorted name lists."""
+    return {name: (value.name if isinstance(value, Mechanism)
+                   else sorted(mechanism.name for mechanism in value))
+            for name, value in reachability.items()}
+
+
+def decode_reachability(row: Mapping) -> Reachability:
+    return {name: (Mechanism[value] if isinstance(value, str)
+                   else frozenset(Mechanism[mechanism] for mechanism in value))
+            for name, value in row.items()}
 
 
 @dataclass(frozen=True)
@@ -75,6 +90,8 @@ class AdapterType:
     must construct with no arguments — the decorator instantiates one shared
     instance for Phase-0 predicate calls."""
 
+    definition: AdapterDefinition | None = None
+    adapter_name: str = ""
     engine_plugin: str | None = None          # module the engine image must carry
     records: tuple[str, ...] = ()             # per-token columns the rollout writes
     serving: Mechanism | None = None          # None: trainer-only, never served
@@ -103,7 +120,7 @@ class AdapterType:
     def site_ok(self, meta: SiteMeta) -> bool:
         """Can this adapter type live at a site with this metadata? Checked at
         Phase 0."""
-        return True
+        return self.definition is None or self.definition.accepts(meta)
 
     def exports(self, spec: AdapterSpec) -> tuple[SiteMeta, ...]:
         """Sites this bank entry CREATES — points the base checkpoint does not
@@ -141,7 +158,10 @@ class AdapterType:
 
     def params(self, sites: tuple[SiteMeta, ...], init: dict) -> Any:
         """Build the trainable parameterization for the matched sites."""
-        raise NotImplementedError
+        if self.definition is None:
+            raise NotImplementedError
+        from rlstack.policy.adapters.lowering import compile_replay
+        return compile_replay(self.definition).build(self.definition.resolve(sites, init))
 
     def initial_params(self, sites: tuple[SiteMeta, ...],
                        init: Mapping[str, Any]) -> Any:
@@ -212,6 +232,9 @@ class AdapterType:
         adapter type through. A trainer-only adapter type (serving None) has
         none, and says so.
         """
+        if self.definition is not None:
+            from rlstack.policy.adapters.lowering import compile_rollout
+            return compile_rollout(self.definition, build, self.adapter_name)
         raise NotImplementedError(
             f"{type(self).__name__} has no rollout lowering: it is trainer-"
             f"only (serving is None) and no engine ever hears about it")
@@ -219,13 +242,20 @@ class AdapterType:
     def install_replay(self, model: Any, params: Any, sites: tuple[SiteMeta, ...]) -> None:
         """Wire the replay lowering into the trainer forward. Additive: every
         installed tenant stays wired (I8)."""
-        raise NotImplementedError
+        if self.definition is None:
+            raise NotImplementedError
+        from rlstack.policy.adapters.lowering import compile_replay
+        compile_replay(self.definition).install(model, params)
 
     def uninstall_replay(self, model: Any, params: Any, sites: tuple[SiteMeta, ...]) -> None:
         """install_replay's exact inverse: restore the module tree when a
         tenant leaves (the trainer-side mirror of the engine evicting a
         bundle). An adapter type without it cannot share a multi-tenant
         learner."""
+        if self.definition is not None:
+            from rlstack.policy.adapters.lowering import compile_replay
+            compile_replay(self.definition).uninstall(model, params)
+            return
         raise NotImplementedError(
             f"{type(self).__name__} has no uninstall_replay: install is "
             f"ADDITIVE, so without its inverse a tenant could never be REMOVED "
@@ -233,7 +263,10 @@ class AdapterType:
 
     def emit(self, params: Any) -> Any:
         """Lower params into the bundle payload the engine-side consumer reads."""
-        raise NotImplementedError
+        if self.definition is None:
+            raise NotImplementedError
+        from rlstack.policy.adapters.lowering import compile_replay
+        return compile_replay(self.definition).emit(params)
 
     def export_state(self, params: AdapterState, version: int):
         """Tensor state at an explicit version, independent of carriage.
@@ -247,7 +280,10 @@ class AdapterType:
     def load(self, params: Any, payload: bytes) -> None:
         """emit's inverse: restore params in place from an emitted payload
         (resume and warm-start walk through here)."""
-        raise NotImplementedError
+        if self.definition is None:
+            raise NotImplementedError
+        from rlstack.policy.adapters.lowering import compile_replay
+        compile_replay(self.definition).load(params, payload)
 
     def load_set(self, params: Any, route: str, payload: bytes | None,
                  optimizer: Any) -> None:
@@ -295,6 +331,15 @@ class AdapterTypeDef:
 
 def adapter_type(name: str):
     def register(cls: type[AdapterType]) -> type[AdapterType]:
-        ADAPTER_TYPES.add(AdapterTypeDef(name, cls, cls(), source_hash(cls)))
+        cls.adapter_name = name
+        definition = cls.definition
+        digest = source_hash(cls)
+        if definition is not None:
+            cls.serving = None if definition.mechanism is None else Mechanism(definition.mechanism)
+            import hashlib
+            from rlstack.policy.adapters.identity_compat import EXTRACTED_DEFINITIONS
+            combined = hashlib.sha256((digest + definition.source_hash()).encode()).hexdigest()
+            digest = EXTRACTED_DEFINITIONS.get(combined, combined)
+        ADAPTER_TYPES.add(AdapterTypeDef(name, cls, cls(), digest))
         return cls
     return register

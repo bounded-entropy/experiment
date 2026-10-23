@@ -43,6 +43,9 @@ from rlstack.policy.siteschema import SiteMeta, SiteSchema, fake_qwen_schema, re
 from rlstack.policy.adapters import (
     AdapterType, AdapterTypeDef, Directive, Mechanism, adapter_type,
 )
+from rlstack.policy.adapters.definition import (
+    AdapterDefinition, Dim, Init, Input, Operation, Parameter, SiteKind, SiteProgram, Symbol,
+)
 from rlstack.policy.adapters.steer import SteerWindow
 from rlstack.inference.rollout import Rollout
 from rlstack.inference import makers as _makers   # registers task makers

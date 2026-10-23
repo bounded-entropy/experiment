@@ -188,6 +188,7 @@ class ServingBuild:
     # THE ENGINE'S LIBRARY, the same sharing: the one object the engine's
     # `add_library` writes and every lowering reads at request time.
     library: Library = field(default_factory=Library, repr=False, compare=False)
+    site_types: tuple[str, ...] = ()
 
     def next_lora_id(self) -> int:
         """Allocate a unique LoRA slot across every lowering on this engine.
@@ -405,6 +406,13 @@ class RolloutLowering:
 
     def __init__(self, build: ServingBuild) -> None:
         self.build = build
+
+    async def prepare(self, engine, attached) -> None:
+        """Finish worker installation before a pinned request enters generation.
+
+        Native request levers need no separate step. Site programs use this
+        boundary to acknowledge tensor installation outside captured compute.
+        """
 
     def attach_state(self, bundle_id: str, states: Mapping[str, Any]) -> Any:
         """Install transported tensors using this engine's existing consumer.

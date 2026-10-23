@@ -19,7 +19,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Sequence
 
-from rlstack.policy.adapters.base import Mechanism
+from rlstack.policy.adapters.base import Mechanism, Reachability
 from rlstack.policy.adapters.plora import FIXED_PRIOR, PRIORS
 from rlstack.policy.siteschema import SiteMeta, SiteSchema, resolve
 from rlstack.registry import (
@@ -250,6 +250,14 @@ def check_adapter_types_accept_their_sites(
         if adapter.adapter_type not in ADAPTER_TYPES:
             continue
         adapter_type = ADAPTER_TYPES.get(adapter.adapter_type).instance
+        definition = adapter_type.definition
+        if definition is not None and adapter.trainable and not definition.trainable:
+            issues.append(_issue("adapter-backward-missing", f"policy.bank.{entry_name}",
+                                 "trainable site programs require a differentiable reference"))
+        if (definition is not None and definition.program is not None and adapter.trainable
+                and not any(parameter.trainable for parameter in definition.parameters)):
+            issues.append(_issue("adapter-parameters-frozen", f"policy.bank.{entry_name}",
+                                 "a trainable site entry must declare trainable parameters"))
         rejected = [m.name for m in resolve(space, adapter.site)
                     if not adapter_type.site_ok(m)]
         if rejected:
@@ -384,7 +392,7 @@ def check_sites_reachable_on(
     spec: ExperimentSpec,
     schema: SiteSchema,
     pool: str,
-    reachability: Mapping[str, Mechanism],
+    reachability: Reachability,
 ) -> list[ValidationIssue]:
     """A served adapter type's mechanism must be how `pool`'s engine reaches
     every matched site.
@@ -403,8 +411,11 @@ def check_sites_reachable_on(
         serving = ADAPTER_TYPES.get(adapter.adapter_type).instance.serving
         if serving is None:
             continue
-        unreachable = [m.name for m in resolve(space, adapter.site)
-                       if reachability.get(m.name, Mechanism.NONE) != serving]
+        def supported(meta):
+            available = reachability.get(meta.name, Mechanism.NONE)
+            return (available == serving if isinstance(available, Mechanism)
+                    else serving in available)
+        unreachable = [m.name for m in resolve(space, adapter.site) if not supported(m)]
         if unreachable:
             issues.append(_issue(
                 "site-unreachable", f"policy.bank.{entry_name}.site",

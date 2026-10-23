@@ -50,6 +50,7 @@ transport.
 
 from __future__ import annotations
 
+
 import asyncio
 import base64
 import hashlib
@@ -63,7 +64,9 @@ from typing import TYPE_CHECKING, Protocol
 
 from rlstack.data.flatten import TokenBatch
 from rlstack.data.trajectory import Message, Role
-from rlstack.policy.adapters.base import Directive, Mechanism
+from rlstack.policy.adapters.base import (
+    Directive, Mechanism, Reachability, encode_reachability, decode_reachability,
+)
 from rlstack.policy.compile import Bundle
 from rlstack.policy.siteschema import SiteMeta
 from rlstack.registry import ADAPTER_TYPES
@@ -952,8 +955,7 @@ class EngineService:
             return {"known": self.engine.knows_bundle(payload["bundle_id"])}
         if verb == "reachability":
             reach = self.engine.reachability(decode_sites(payload["sites"]))
-            return {"mechanisms": {name: mech.name
-                                   for name, mech in reach.items()}}
+            return {"mechanisms": encode_reachability(reach)}
         if verb == "tokenize":
             return {"token_ids": list(self.engine.tokenize(payload["text"]))}
         if verb == "traffic":
@@ -1402,11 +1404,10 @@ class RemotePool:
             **self._address(), "bundle_id": bundle_id})
         return bool(reply["known"])
 
-    def reachability(self, sites: Sequence[SiteMeta]) -> Mapping[str, Mechanism]:
+    def reachability(self, sites: Sequence[SiteMeta]) -> Reachability:
         reply = self._asked("reachability", {
             **self._address(), "sites": encode_sites(sites)})
-        return {name: Mechanism[mech]
-                for name, mech in reply["mechanisms"].items()}
+        return decode_reachability(reply["mechanisms"])
 
     def tokenize(self, text: str) -> tuple[int, ...]:
         reply = self._asked("tokenize", {

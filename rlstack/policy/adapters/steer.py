@@ -27,6 +27,7 @@ not).
 
 from __future__ import annotations
 
+from rlstack.policy.adapters.definition import Operation, SiteKind, builtin
 from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
@@ -86,6 +87,8 @@ def window_record(start: int, end: int | None) -> dict[str, Any]:
 
 @adapter_type("steer")
 class Steer(AdapterType):
+    definition = builtin(Operation.STEER, SiteKind.RESIDUAL, 'steer',
+                         'steer', 'SteerRollout', 'residual')
     serving = Mechanism.RESIDUAL
     records = (STEER_RECORD,)
     directive = SteerWindow
@@ -101,33 +104,6 @@ class Steer(AdapterType):
         what the default was."""
         start, end = resolve_window(directive, request)
         return window_record(start, end)
-
-    # compute halves — both import torch, so both load lazily, from here
-    # only (rule 7)
-
-    def rollout_lowering(self, build):
-        from rlstack.policy.adapters import steer_vllm
-        return steer_vllm.SteerRollout(build)
-
-    def params(self, sites: tuple[SiteMeta, ...], init: dict):
-        from rlstack.policy.adapters import steer_torch
-        return steer_torch.build(sites, init)
-
-    def install_replay(self, model, params, sites: tuple[SiteMeta, ...]) -> None:
-        from rlstack.policy.adapters import steer_torch
-        steer_torch.install(model, params)
-
-    def uninstall_replay(self, model, params, sites: tuple[SiteMeta, ...]) -> None:
-        from rlstack.policy.adapters import steer_torch
-        steer_torch.uninstall(model, params)
-
-    def emit(self, params) -> bytes:
-        from rlstack.policy.adapters import steer_torch
-        return steer_torch.emit(params)
-
-    def load(self, params, payload: bytes) -> None:
-        from rlstack.policy.adapters import steer_torch
-        steer_torch.load(params, payload)
 
 
 @adapter_type("nsteer")
@@ -157,10 +133,9 @@ class NSteer(Steer):
     the residual lever, the engine hook (which reads alpha off the fused
     file's metadata and scales per token), the replay wrapper.
     """
+    definition = builtin(Operation.NORM_STEER, SiteKind.RESIDUAL, 'steer',
+                         'steer', 'NSteerRollout', 'residual')
 
-    def rollout_lowering(self, build):
-        from rlstack.policy.adapters import steer_vllm
-        return steer_vllm.NSteerRollout(build)
 
     provides = frozenset({ALPHA_PROVIDED})
 
@@ -176,4 +151,3 @@ class NSteer(Steer):
     def after_step(self, params) -> None:
         from rlstack.policy.adapters import steer_torch
         steer_torch.project(params)
-

@@ -25,7 +25,7 @@ TORCH_SEAMS = ("policy/adapters/replay.py", "policy/adapters/plora_factors.py")
 the replay seam (#44) and plora's factor math. Both are torch, both are
 reached only from a training process."""
 
-HEAVY_SUBSTRATES = ("torch", "vllm", "modal")
+HEAVY_SUBSTRATES = ("torch", "vllm", "modal", "triton")
 """The dependencies the heavy files exist to contain. `import rlstack` in a
 stdlib-only interpreter must not reach any of them — which the local fakes
 suite proves every run, and this test names."""
@@ -42,7 +42,7 @@ def loads_lazily(relative: str) -> bool:
     if any(relative.startswith(region) for region in HEAVY_REGIONS):
         return True
     return (relative.startswith("policy/adapters/")
-            and (relative.endswith(("_torch.py", "_vllm.py"))
+            and (relative.endswith(("_torch.py", "_vllm.py", "_triton.py"))
                  or relative in TORCH_SEAMS))
 
 

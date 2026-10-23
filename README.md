@@ -33,6 +33,9 @@ run, without searching other folders.
 
 ## Capabilities
 
+Adapter authors use [shared definitions](docs/adapter-definitions.md) for both
+learner and inference implementations, with native or custom GPU providers.
+
 - Adapter implementations include LoRA, learned task bases, spectral adapters,
   steering, soft prompts, and a routed adapter bank (`dream_bank`).
 - Named adapters can be saved, reused by other runs, and stacked with a trainable

@@ -19,7 +19,7 @@ from typing import Any, Protocol
 
 from rlstack.data.flatten import TokenBatch
 from rlstack.data.trajectory import Message
-from rlstack.policy.adapters.base import Directive, Mechanism
+from rlstack.policy.adapters.base import Directive, Mechanism, Reachability
 from rlstack.policy.compile import Bundle
 from rlstack.policy.siteschema import SiteMeta
 from rlstack.runner.meters import TrafficMeter
@@ -241,8 +241,8 @@ class Engine(Protocol):
         """
         ...
 
-    def reachability(self, sites: Sequence[SiteMeta]) -> Mapping[str, Mechanism]:
-        """This build's inventory: for each site, the mechanism that reaches it
+    def reachability(self, sites: Sequence[SiteMeta]) -> Reachability:
+        """This build's inventory: for each site, the mechanisms that reach it
         (Mechanism.NONE when nothing does). Self-reported, per build."""
         ...
 

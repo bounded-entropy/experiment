@@ -1,0 +1,103 @@
+{
+  "date": "2026-10-23",
+  "adr": "0028",
+  "base_commit": "483259ca3cd56c79fcc46fc0d2c6d78e7de60c32",
+  "branch": "codex/adapter-definitions",
+  "scope": "Shared definition and both lowerings for existing adapters; token-local custom replay and pinned engine bridge",
+  "lightweight_suite": {
+    "command": "python3.13 -m unittest discover -s tests",
+    "tests_run": 1919,
+    "passed": 1643,
+    "skipped": 276,
+    "failures": 0,
+    "errors": 0,
+    "elapsed_seconds": 71.831
+  },
+  "selected_torch_suites": {
+    "python": "3.12.12",
+    "torch": "2.14.0",
+    "cuda_available": false,
+    "tests_run": 278,
+    "passed": 276,
+    "skipped": 2,
+    "failures": 0,
+    "errors": 0,
+    "elapsed_seconds": 3.977,
+    "suites": [
+      "test_batched_replay",
+      "test_dream_bank",
+      "test_soft_prompt",
+      "test_spectral",
+      "test_spectral_latent",
+      "test_steer",
+      "test_plora",
+      "test_weight_transfer",
+      "test_learned_tasks",
+      "test_task_posteriors",
+      "test_nsteer",
+      "test_site_programs"
+    ],
+    "hardware_skips": [
+      "test_weight_transfer.LiveNcclTransport",
+      "test_site_programs.LiveGraphTests"
+    ]
+  },
+  "counts_overlap": true,
+  "new_coverage": [
+    "All twelve legacy adapters use common lifecycle and both lowering entry points",
+    "Native/custom mechanism sets survive RPC while scalar rows retain legacy shape",
+    "Native and custom declarations pass the same reachability gate",
+    "One base call for mixed tenants; gradients for parameters and activation inputs",
+    "Explicit autograd reference VJP passes double-precision gradcheck",
+    "Checkpoint/tensor state round trips; invalid layout rejected before mutation",
+    "CPU tensor IPC handles survive serialization, including scalars and empty tensors",
+    "Publication path does not call TensorState.encode; exact worker version ack required",
+    "Cancelled/uncertain installation is retired before slot reuse",
+    "Two custom types compose under one full-policy cache identity",
+    "Runtime buffers keep addresses while versions and new-token metadata change",
+    "Inactive fused-residual output remains bit-identical",
+    "Pinned runner mock loads logical packed q projection and hooks native wrapper once",
+    "Client import remains free of torch/vllm/triton",
+    "Historical run-id literal 2432682289f4 stays unchanged"
+  ],
+  "checks": [
+    "git diff --check",
+    "python3.13 -m compileall -q rlstack rlstack_engine"
+  ],
+  "native_registration_aliases": "Exact new class+definition+provider digests map to parent digests only; edits receive new IDs",
+  "gpu_allocated": false,
+  "experiment_launched": false,
+  "deployed": false,
+  "performance_claim": null,
+  "implementation_limits": [
+    "Custom worker currently single GPU/model replica, serialized lane, V1 vLLM 0.28 floating-point projections and dense residual boundaries",
+    "Existing native providers retain their prior modes and algorithms",
+    "Custom state currently parameters and read-only token/prefix context",
+    "Writable request/recurrent state, explicit post-RoPE K/V staging, historical KV mutation and BPTT are later phases"
+  ],
+  "remaining_qualification": [
+    "Actual pinned vLLM boot, memory profile and graph capture on CUDA",
+    "CUDA IPC installation with the shared NCCL service",
+    "Live prefill/chunked-prefill/decode parity and mixed native/custom traffic",
+    "TP/pipeline/DP, speculative and sleep-mode qualification",
+    "Bounded throughput, memory, per-phase timings and profiler traces under the shared desk"
+  ],
+  "pinned_engine_sources": {
+    "vllm/v1/worker/gpu_model_runner.py": {
+      "url": "https://github.com/vllm-project/vllm/blob/v0.28.0/vllm/v1/worker/gpu_model_runner.py",
+      "sha256": "7f2890eefca1efe25565bf1c7e5906a87948ae922610a7aaac620b28b46f26aa"
+    },
+    "vllm/v1/worker/gpu_worker.py": {
+      "url": "https://github.com/vllm-project/vllm/blob/v0.28.0/vllm/v1/worker/gpu_worker.py",
+      "sha256": "5e8faf3e00649289c81c2917dd4557a80b0b351c33295d8e0c4b204a304e6552"
+    },
+    "vllm/model_executor/layers/linear.py": {
+      "url": "https://github.com/vllm-project/vllm/blob/v0.28.0/vllm/model_executor/layers/linear.py",
+      "sha256": "fc4e96ba5e36895513b801b99e746e2b07959d402e36d56aae7d8ad3f124cfe7"
+    },
+    "vllm/v1/engine/async_llm.py": {
+      "url": "https://github.com/vllm-project/vllm/blob/v0.28.0/vllm/v1/engine/async_llm.py",
+      "sha256": "bceed0b3f5f0c834fef79525f2462a092f082390f0070526280abc95945837dd"
+    }
+  }
+}
