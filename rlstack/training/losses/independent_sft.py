@@ -10,11 +10,15 @@ def independent_sft(out, batch):
     lp, mask, behavior = token_tensors(out, batch)
     starts = (*batch.doc_starts, len(batch))
     weights = batch.postdata["sft_document_weight"]
-    terms, values = [], []
+    terms, values, document_weights = [], [], []
     for start, stop in zip(starts, starts[1:]):
-        weight = weights[start]
-        if weight <= 0 or any(value != weight for value in weights[start:stop]):
+        selected = [weights[index] for index in range(start, stop) if batch.loss_mask[index]]
+        if not selected:
+            raise ValueError("each supervised document needs selected target tokens")
+        weight = selected[0]
+        if weight <= 0 or any(value != weight for value in selected):
             raise ValueError("one supervised document needs one positive group weight")
+        document_weights.append(weight)
         count = mask[start:stop].sum()
         nll = -(lp[start:stop] * mask[start:stop]).sum()
         terms.append(weight * nll / count.clamp(min=1))
@@ -28,5 +32,5 @@ def independent_sft(out, batch):
     for index, (nll, count) in enumerate(statistics):
         components[f"document_{index}_nll_sum"] = nll
         components[f"document_{index}_tokens"] = count
-        components[f"document_{index}_weight"] = float(weights[starts[index]])
+        components[f"document_{index}_weight"] = float(document_weights[index])
     return LossResult(objective, ratio, gap, components)

@@ -43,3 +43,66 @@ class IndependentSftTest(unittest.TestCase):
         torch.testing.assert_close(actual, expected)
         torch.testing.assert_close(torch.autograd.grad(actual, scores, retain_graph=True)[0],
                                    torch.autograd.grad(expected, scores)[0])
+
+    def test_normal_trainer_preserves_real_components_and_ids_after_cohort_reordering(self):
+        from dataclasses import replace
+        import tempfile
+        from types import SimpleNamespace
+        from test_routed_bank import SITE, TinyModel
+        from rlstack import LocalStore, Message, Role, Task, Trajectory, Turn, lora
+        from rlstack.data.trajectory import trajectory_to_row
+        from rlstack.policy.siteschema import SiteSchema
+        from rlstack.runner.checkpointing import Checkpointing
+        from rlstack.runner.learners.torch_learner import TorchLearner
+        from rlstack.runner.loop import run_experiment
+        from rlstack.training.supervision import SftStage, supervised_spec
+
+        def row(name, tokens):
+            prompt = Message(Role.USER, "context")
+            response = Message(Role.ASSISTANT, "recorded exact tokens")
+            turn = Turn(response, tokens, (0.,) * len(tokens), "stop", None, "sealed", {}, 1)
+            return trajectory_to_row(Trajectory(Task(name, "", {}),
+                (prompt, response), (turn,), {}))
+        datasets = ((row("alpha/0", (2, 3)), row("alpha/1", (2, 3))),
+                    (row("beta/0", (4, 5, 6)),), (row("gamma/0", (2, 3)),))
+        with tempfile.TemporaryDirectory() as folder:
+            store = LocalStore(folder)
+            spec = supervised_spec("route-toy", lora("proj", 2), datasets,
+                (SftStage(1, 2, 1e-4), SftStage(1, 1, 1e-4), SftStage(1, 1, 1e-4)),
+                17, store.cas_put, microbatch_tokens=128)
+            # Compatible ranks share a packed forward; rank3 is a separate
+            # cohort, so the actual forward order is alpha,gamma then beta.
+            bank = dict(spec.policy.bank)
+            bank["student1"] = replace(bank["student1"], init={**bank["student1"].init, "r": 3})
+            spec = replace(spec, policy=replace(spec.policy, bank=bank))
+            with torch.random.fork_rng():
+                torch.manual_seed(41)
+                learner = TorchLearner("cpu", torch.float32, checkpoint_activations=False)
+                learner._model = TinyModel().requires_grad_(False).eval()
+            learner._base = "route-toy"
+            learner._tokenizer = SimpleNamespace(encode=lambda text, add_special_tokens=False: [1])
+            report = run_experiment(spec, SiteSchema("route-toy", (SITE,)), store, {}, learner,
+                                    checkpointing=Checkpointing(every=1))
+            handle = store.open_run(report.run_id)
+            measured = handle.read_postdata_part(1, "training")
+            first, second = measured["microbatches"]
+            self.assertEqual(set(first["row_ids"]), {"alpha/0", "alpha/1", "gamma/0"})
+            self.assertEqual(second["row_ids"], ["beta/0"])
+            by_id = {}
+            for micro in measured["microbatches"]:
+                objective = 0.
+                for index, (name, route) in enumerate(zip(micro["row_ids"], micro["routes"], strict=True)):
+                    components = micro["components"]
+                    numerator = components[f"document_{index}_nll_sum"]
+                    count = components[f"document_{index}_tokens"]
+                    weight = components[f"document_{index}_weight"]
+                    self.assertGreater(numerator, 0.)
+                    self.assertEqual(count, 3 if name == "beta/0" else 2)
+                    self.assertEqual(weight, .5 if name.startswith("alpha/") else 1.)
+                    self.assertEqual(route, {"alpha": "student/0", "beta": "student/1", "gamma": "student/2"}[name.split('/')[0]])
+                    objective += weight * numerator / count
+                    by_id[name] = (numerator, count, weight)
+                self.assertAlmostEqual(micro["loss"], objective, places=6)
+            self.assertEqual(set(by_id), {"alpha/0", "alpha/1", "beta/0", "gamma/0"})
+            self.assertEqual(handle.checkpoint_tail()["versions"],
+                             {"student0": 1, "student1": 1, "student2": 1})
