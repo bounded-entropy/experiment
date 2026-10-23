@@ -49,11 +49,12 @@ import dataclasses
 import functools
 import json
 import traceback
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 
 import torch
 
+from rlstack.client import GradientComparison
 from rlstack.data.flatten import TokenBatch
 from rlstack.runner.interfaces import Emitted, Parameterization, TrainStats
 from rlstack.runner.learners.ranks import STOP, RankCommand, RankGroup
@@ -322,6 +323,15 @@ class FsdpTorchLearner(TorchLearner):
         training forward does. Rank 0's NLLs are the answer."""
         self.announce("forward", (tenant, batch))
         return super().forward(tenant, batch)
+
+    def gradient_cosines(
+        self, tenant: str, entry: str,
+        reference_batches: Sequence[TokenBatch],
+        candidate_batches: Sequence[Sequence[TokenBatch]],
+    ) -> tuple[GradientComparison, ...]:
+        """A local-shard gradient is not a global cosine; no chorus is implemented."""
+        raise NotImplementedError(
+            "gradient_cosines requires an unsharded TorchLearner; FSDP measurements are unsupported")
 
     def load_set(self, tenant: str, entry: str, route: str,
                  payload: bytes | None) -> None:

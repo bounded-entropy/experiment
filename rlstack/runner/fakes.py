@@ -12,12 +12,14 @@ equivalence depends on it.
 from __future__ import annotations
 
 import hashlib
+import math
 import random
 import re
 import time
 from dataclasses import dataclass, field
 from collections.abc import AsyncIterator, Mapping, Sequence
 
+from rlstack.client import GradientComparison, GradientDocumentStats
 from rlstack.data.flatten import TokenBatch
 from rlstack.data.trajectory import Message
 from rlstack.policy.adapters.base import (
@@ -678,6 +680,72 @@ class FakeLearner:
             })[:8], 16) / 16 ** 8
             for (start, stop), parts in zip(_doc_spans(batch),
                                             self.doc_parts(state, batch)))
+
+    def gradient_cosines(
+        self, tenant: str, entry: str,
+        reference_batches: Sequence[TokenBatch],
+        candidate_batches: Sequence[Sequence[TokenBatch]],
+    ) -> tuple[GradientComparison, ...]:
+        """Explicit synthetic scalar measurements, never evidence of real gradients.
+
+        Eight digest-derived coordinates exercise masking, document means and
+        candidate ordering without torch. Timings are zero, the schema names
+        this synthetic contract, and no tenant digest or optimizer is changed.
+        """
+        if self.fsdp != 1 or self.dp != 1:
+            raise NotImplementedError("gradient_cosines requires fsdp=dp=1")
+        state = self._tenant(tenant)
+        if entry not in state.trainable:
+            raise ValueError("gradient_cosines requires a trainable entry")
+        if not candidate_batches:
+            raise ValueError("gradient_cosines needs candidates")
+        reference, reference_documents = self._synthetic_gradient(tenant, entry, reference_batches)
+        reference_norm = math.hypot(*reference)
+        comparisons = []
+        for batches in candidate_batches:
+            candidate, candidate_documents = self._synthetic_gradient(tenant, entry, batches)
+            candidate_norm = math.hypot(*candidate)
+            dot = math.fsum(left * right for left, right in zip(reference, candidate))
+            reason = ("reference_tiny_gradient" if reference_norm <= 1e-12 else
+                      "candidate_tiny_gradient" if candidate_norm <= 1e-12 else None)
+            comparisons.append(GradientComparison(
+                cosine=None if reason else max(-1., min(1., dot / (reference_norm * candidate_norm))),
+                dot=dot, reference_norm=reference_norm, candidate_norm=candidate_norm,
+                valid=reason is None, reason=reason,
+                reference_documents=reference_documents, candidate_documents=candidate_documents,
+                parameter_count=8, parameter_schema_sha256=content_hash({
+                    "measurement": "synthetic-fake-gradient-v1", "coordinates": 8})))
+        return tuple(comparisons)
+
+    def _synthetic_gradient(self, tenant: str, entry: str, batches: Sequence[TokenBatch]):
+        """Selected-token feature means, then equal document means, in fake coordinates."""
+        documents = sum(len(batch.doc_starts) for batch in batches)
+        if not documents:
+            raise ValueError("gradient measurement needs documents")
+        vectors = []
+        statistics = []
+        for batch in batches:
+            if batch.documents_in_update != documents:
+                raise ValueError("documents_in_update disagrees with gradient document group")
+            means = self.forward(tenant, batch)
+            for (start, stop), nll in zip(_doc_spans(batch), means):
+                mask = batch.loss_mask[start:stop]
+                if not mask or mask[0] or any(bit not in (0, 1) for bit in mask) or not sum(mask):
+                    raise ValueError("gradient document needs a binary nonempty causal mask")
+                count = sum(mask)
+                statistics.append(GradientDocumentStats(nll * count, count))
+                features = []
+                for i, bit in enumerate(mask):
+                    if not bit:
+                        continue
+                    digest = content_hash({"synthetic_gradient": entry, "nll": nll,
+                                           "prefix": batch.token_ids[start:start + i + 1]})
+                    features.append(tuple(int(digest[j:j + 8], 16) / 16 ** 8 * 2 - 1
+                                          for j in range(0, 64, 8)))
+                vectors.append(tuple(math.fsum(feature[k] for feature in features) / count
+                                     for k in range(8)))
+        return (tuple(math.fsum(vector[k] for vector in vectors) / documents for k in range(8)),
+                tuple(statistics))
 
     def fold_documents_into_their_sets(self, state: _FakeTenant,
                                        batch: TokenBatch) -> None:

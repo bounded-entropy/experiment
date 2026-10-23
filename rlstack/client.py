@@ -85,6 +85,58 @@ class Stage:
     decay: str = "linear"
 
 
+@dataclass(frozen=True)
+class GradientRow:
+    """One independently conditioned document, with exact scored-token positions.
+
+    `token_ids` already includes its complete student context. The binary mask
+    is token-aligned; prompt tokens and each document's first token are zero.
+    The fitting client preserves these IDs and this mask without tokenization.
+    """
+
+    row_id: str
+    token_ids: tuple[int, ...]
+    loss_mask: tuple[int, ...]
+
+
+@dataclass(frozen=True)
+class GradientDocumentStats:
+    """Selected-token NLL numerator and denominator for one measured document.
+
+    A nonfinite numerator is None, accompanied by an invalid comparison; it
+    never becomes a serialized NaN or a fabricated zero loss.
+    """
+
+    nll_sum: float | None
+    scored_tokens: int
+
+
+@dataclass(frozen=True)
+class GradientComparison:
+    """Read-only loss-gradient alignment on identical student coordinates.
+
+    References and each candidate are means of per-document token-mean NLLs.
+    Invalid comparisons have no cosine. Only scalars and document sufficient
+    statistics cross the wire; no gradient or optimizer state is exposed.
+    """
+
+    cosine: float | None
+    dot: float | None
+    reference_norm: float | None
+    candidate_norm: float | None
+    valid: bool
+    reason: str | None
+    reference_documents: tuple[GradientDocumentStats, ...]
+    candidate_documents: tuple[GradientDocumentStats, ...]
+    reference_seconds: float = 0.0
+    candidate_seconds: float = 0.0
+    parameter_count: int = 0
+    parameter_schema_sha256: str = ""
+    min_norm: float = 1e-12
+    reference_cache_hit: bool = False
+    candidate_cache_hit: bool = False
+
+
 class Fits(Protocol):
     """`client.fit`: small LoRA fits on the run's OWN learner, under a
     throwaway tenant, for a processor that declares `fits = True`."""
@@ -99,6 +151,20 @@ class Fits(Protocol):
         answer each fork's per-document mean NLL over `probe_rows` AFTER
         training, in fork order. With `every_probe`, each fork's every probe
         point instead (before its first step, then after its stage)."""
+        ...
+
+    async def gradient_cosines(
+        self, start_payload: bytes | None,
+        reference_rows: Sequence[GradientRow],
+        candidate_rows: Sequence[Sequence[GradientRow]],
+    ) -> tuple[GradientComparison, ...]:
+        """Compare supervised gradients at one fixed temporary student state.
+
+        References are independent documents, averaged after each selected-token
+        mean NLL. Each candidate is its own document group. Nothing is fitted,
+        no optimizer state conditions the reward, and input tokens/masks remain
+        exact. Results retain candidate order.
+        """
         ...
 
     async def tokenize(self, text: str) -> tuple[int, ...]:

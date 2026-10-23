@@ -5,10 +5,12 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Callable, Iterable
 import json
+import os
 import tempfile
 import time
 from urllib.parse import quote, urlencode
-from urllib.request import urlopen
+from urllib.error import HTTPError
+from urllib.request import Request, urlopen
 
 from rlstack.data.stores.base import Store, run_reference
 from rlstack.data.stores.local import LocalStore
@@ -94,15 +96,20 @@ class VenueClient:
         subdir, _, name = run_id.rpartition("/")
         query = urlencode({"root": folder, "subdir": subdir})
         url = f"{self.observer.rstrip('/')}/api/run/{quote(name, safe='')}?{query}"
-        with urlopen(url, timeout=60) as answer:
+        token = os.environ.get('RLSTACK_HTTP_TOKEN', '')
+        request = Request(url, headers={'Authorization': 'Bearer ' + token}) if token else url
+        with urlopen(request, timeout=60) as answer:
             told = json.loads(answer.read().decode("utf-8"))
         if "run_id" not in told:
             raise SystemExit(f"the observer does not know run {run_id}: {told}")
         updates = told["updates"]
-        return {"extent": told["extent"], "completed": told["committed"],
+        result = {"extent": told["extent"], "completed": told["committed"],
                 "planned": told["target"], "done": bool(told["done"]),
                 "committed": int(updates[-1]["update"]) if updates else 0,
                 "train": [dict(u.get("train", {})) for u in updates[-tail:]]}
+        if 'status' in told:
+            result['status'] = told['status']
+        return result
 
     def ledgers(self, run_ids: Iterable[str], folder: str = "", tail: int = 8) -> dict:
         return {run_id: self.progress(run_id, folder, tail) for run_id in run_ids}
@@ -111,7 +118,17 @@ class VenueClient:
                      folder: str = "") -> str:
         deadline = time.monotonic() + timeout_s
         while time.monotonic() < deadline:
-            told = await asyncio.to_thread(self.progress, run_id, folder)
+            try:
+                told = await asyncio.to_thread(self.progress, run_id, folder)
+            except HTTPError as error:
+                if error.code != 404:
+                    raise
+                # An accepted frame may not have published its manifest yet.
+                # Retry only this read; never resubmit or rediscover a run.
+                await asyncio.sleep(every_s)
+                continue
+            if told.get('status') in ('failed', 'stopped'):
+                raise RuntimeError(f"{run_id}: observer reports {told['status']}")
             print(f"[{run_id[:12]}] {told['completed']}/{told['planned']} "
                   f"{told['extent']} — {json.dumps(told['train'])}", flush=True)
             if told["done"]:

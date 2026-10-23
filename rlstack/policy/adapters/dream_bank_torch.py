@@ -82,6 +82,9 @@ class DreamBankState(AdapterState):
     anchor: Anchor | None = None
     # calibrate mode: Σ x xᵀ per path in fp32, and the token count
     sums: dict[str, torch.Tensor] = field(default_factory=dict)
+    # A short calibration corpus has fewer token rows than input dimensions.
+    # Keep X instead of its much larger X.T @ X; the empirical moment is identical.
+    samples: dict[str, torch.Tensor] = field(default_factory=dict)
     count: int = 0
     # what a set's re-init needs (load_set with no payload): the entry's seed
     # and the sites its sets were built over
@@ -303,6 +306,19 @@ def provide(state: DreamBankState) -> Mapping[str, torch.Tensor]:
 def accumulate(state: DreamBankState, path: str, x: torch.Tensor) -> None:
     """Calibrate mode: Σ x xᵀ over every token the site sees, in fp32."""
     flat = x.detach().reshape(-1, x.shape[-1]).float()
+    if path not in state.sums and flat.shape[1] > 1024:
+        previous = state.samples.get(path)
+        rows = flat.clone() if previous is None else torch.cat((previous, flat), dim=0)
+        if rows.shape[0] < rows.shape[1]:
+            state.samples[path] = rows
+            if path == state.paths[0]:
+                state.count += flat.shape[0]
+            return
+        state.samples.pop(path, None)
+        state.sums[path] = rows.T @ rows
+        if path == state.paths[0]:
+            state.count += flat.shape[0]
+        return
     if path not in state.sums:
         state.sums[path] = torch.zeros(flat.shape[1], flat.shape[1],
                                        dtype=torch.float32, device=flat.device)
@@ -314,21 +330,36 @@ def accumulate(state: DreamBankState, path: str, x: torch.Tensor) -> None:
 def factorize(state: DreamBankState) -> Anchor:
     """The accumulated covariance per path, ridged and eigendecomposed: the
     top-k directions and eigenvalues, the residual as the mean dropped one."""
-    if not state.sums or state.count == 0:
+    if not (state.sums or state.samples) or state.count == 0:
         raise ValueError("dream_bank calibrate: no activations accumulated yet")
     u, e, delta, captured = {}, {}, {}, {}
     for path in state.paths:
+        if path in state.samples:
+            x = state.samples[path]
+            # Thin SVD computes the nonzero spectrum of X.T X without a d² matrix.
+            _, singular, vh = torch.linalg.svd(x, full_matrices=False)
+            values = singular.square() / state.count
+            d = x.shape[1]
+            ridge = ANCHOR_RIDGE * values.sum() / d
+            k = min(state.anchor_rank, len(values))
+            u[path] = vh[:k].T.contiguous()
+            delta[path] = float((values[k:].sum() + ridge * (d-k)) / (d-k)) if d > k else 0.
+            e[path] = (values[:k] + ridge - delta[path]).clamp(min=0).contiguous()
+            captured[path] = float((values[:k] + ridge).sum() / (values.sum() + ridge*d))
+            continue
         c = state.sums[path] / state.count
         d = c.shape[0]
         c = c + (ANCHOR_RIDGE * c.trace() / d) * torch.eye(d, device=c.device)
         values, vectors = torch.linalg.eigh(c)              # ascending
         k = min(state.anchor_rank, d)
         top = torch.arange(d - k, d, device=c.device)
-        e[path] = values[top].flip(0).contiguous()
         u[path] = vectors[:, top].flip(1).contiguous()
         dropped = values[: d - k]
         delta[path] = float(dropped.mean()) if len(dropped) else 0.0
-        captured[path] = float(e[path].sum() / values.sum())
+        # The diagonal residual already contributes along U too.
+        # Store only the excess eigenvalue, otherwise that variance is counted twice.
+        e[path] = (values[top].flip(0) - delta[path]).clamp(min=0).contiguous()
+        captured[path] = float(values[top].sum() / values.sum())
     return Anchor(u=u, e=e, delta=delta, captured=captured, count=state.count)
 
 
@@ -339,7 +370,7 @@ def factorize(state: DreamBankState) -> Anchor:
 def export_state(state: DreamBankState, version: int | None = None) -> TensorState:
     """Every set's (A, B) under its route prefix in peft key form, and the
     anchor's factors — a calibrate run's anchor is factorized here, at emit."""
-    anchor = factorize(state) if state.mode == "calibrate" and state.sums else state.anchor
+    anchor = factorize(state) if state.mode == "calibrate" and (state.sums or state.samples) else state.anchor
     tensors: dict[str, torch.Tensor] = {}
     for route in set_routes(state.memories):
         lora = state.sets[route]
