@@ -911,7 +911,7 @@ class FakeLearner:
     def _adapter_payloads(state) -> dict[str, bytes]:
         return {
             name: (f"fake-delta:{name}:{state.entry_states[name].state if state.routes else state.state}".encode()
-                   if name in state.trainable else hashlib.sha256(state.frozen[name]).hexdigest())
+                   if name in state.trainable else state.frozen[name])
             for name in state.all_names
         }
 
