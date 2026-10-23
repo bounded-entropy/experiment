@@ -8,5 +8,5 @@ from rlstack.training.losses import (  # noqa: F401  (registers builtins)
     anchor_calibrate, dream_stream, grpo, grpo_elbo, grpo_latent_kl,
     grpo_latent_kl_gated, grpo_latent_kl_gated_priced, grpo_reference_kl,
     gspo, opd, opsd, ppo, replay_distill, sdft,
-    sdpo, self_anchor, sft, factual_sft,
+    sdpo, self_anchor, sft, factual_sft, independent_sft,
 )

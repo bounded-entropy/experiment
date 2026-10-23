@@ -11,5 +11,5 @@ from rlstack.training.post import (  # noqa: F401  (registers builtins)
     dream_diagnostics, dream_effect, final_answer, gold_logprob, group_accuracy,
     grpo_advantage, hinted_logprobs, llm_judge, policy_logprobs, program_correctness,
     program_diagnostics, reverse_kl, teacher_logprobs,
-    verifier,
+    verifier, sft_document_weights,
 )

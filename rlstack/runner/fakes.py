@@ -435,6 +435,8 @@ class _FakeTenant:
     sets: dict[tuple[str, str], _FakeSet] = field(default_factory=dict)
     libraries: dict[tuple[str, str], str] = field(default_factory=dict)
     lr_scales: list[dict[str, float]] = field(default_factory=list)  # one per step
+    routes: dict[str, str | None] = field(default_factory=dict)
+    entry_states: dict[str, _FakeSet] = field(default_factory=dict)
 
 
 class FakeLearner:
@@ -515,6 +517,12 @@ class FakeLearner:
                 for name, entry in entries.items()},
             memories={name: int(entry.init.get("memories", FAKE_MEMORIES))
                       for name, entry in entries.items()})
+        state = self._tenants[tenant]
+        if any(entry.route is not None for entry in entries.values()):
+            state.routes = {name: entry.route for name, entry in entries.items()}
+            state.entry_states = {name: _FakeSet(state.set_inits[name])
+                                  for name in state.trainable}
+            self.refresh_routed_digest(state)
 
     def uninstall(self, tenant: str) -> None:
         """The tenancy ends and its digest state goes with it; a tenant
@@ -567,8 +575,11 @@ class FakeLearner:
                     gradient: dict) -> TrainStats:
         """One microbatch's gradient folded into the tenant's digest — the
         order of these calls IS the summation order — and its stats."""
-        state.state = content_hash({"state": state.state, **gradient})
-        self.fold_documents_into_their_sets(state, batch)
+        if state.routes:
+            self.fold_routed_documents(state, batch)
+        else:
+            state.state = content_hash({"state": state.state, **gradient})
+            self.fold_documents_into_their_sets(state, batch)
         return TrainStats(
             loss=int(state.state[:8], 16) / 16 ** 8,
             mean_ratio=1.0,
@@ -577,6 +588,53 @@ class FakeLearner:
             tokens=len(batch),
             provided=self.provided_digest(state),
         )
+
+    @staticmethod
+    def refresh_routed_digest(state: _FakeTenant) -> None:
+        """Routed fake state reconstructs from independent checkpointed entries."""
+        state.state = content_hash({name: held.pending or held.state
+                                    for name, held in sorted(state.entry_states.items())})
+
+    @staticmethod
+    def routed_entries(state: _FakeTenant, turns) -> tuple[str, ...]:
+        """A row activates unconditionally installed entries plus its exact route."""
+        routes = {turn["route"] for turn in turns if turn.get("route") is not None}
+        if len(routes) > 1:
+            raise ValueError("one replay document must carry one adapter route")
+        route = next(iter(routes), None)
+        if route is not None and route not in state.routes.values():
+            raise ValueError(f"unknown adapter route {route!r}")
+        return tuple(name for name, selected in state.routes.items()
+                     if selected is None or selected == route)
+
+    def fold_routed_documents(self, state: _FakeTenant, batch: TokenBatch) -> None:
+        """Only entries active on a scored document accumulate a private gradient."""
+        facts = batch.doc_turn_extras or ((),) * len(batch.doc_starts)
+        for (start, stop), turns in zip(_doc_spans(batch), facts, strict=True):
+            if not any(batch.loss_mask[start:stop]):
+                continue
+            for entry in self.routed_entries(state, turns):
+                held = state.entry_states.get(entry)
+                if held is not None:
+                    held.pending = content_hash({
+                        "state": held.pending or held.state,
+                        "ids": batch.token_ids[start:stop],
+                        "mask": batch.loss_mask[start:stop],
+                        "blp": batch.behavior_logprobs[start:stop],
+                        "post": {key: batch.postdata[key][start:stop]
+                                 for key in sorted(batch.postdata)}})
+        self.refresh_routed_digest(state)
+
+    def forward_routed_documents(self, state: _FakeTenant,
+                                 batch: TokenBatch) -> tuple[float, ...]:
+        """A routed probe reads the entries it selected, including frozen entries."""
+        facts = batch.doc_turn_extras or ((),) * len(batch.doc_starts)
+        return tuple(int(content_hash({
+            "ids": batch.token_ids[start:stop], "mask": batch.loss_mask[start:stop],
+            "under": [(state.entry_states[name].state if name in state.entry_states
+                       else hashlib.sha256(state.frozen[name]).hexdigest())
+                      for name in self.routed_entries(state, turns)]})[:8], 16) / 16 ** 8
+            for (start, stop), turns in zip(_doc_spans(batch), facts, strict=True))
 
     def provided_digest(self, state: _FakeTenant) -> dict[str, float]:
         """One digest-derived float per DECLARED provided name.
@@ -602,6 +660,18 @@ class FakeLearner:
         state = self._tenant(tenant)
         scales = {key: float(lr_scales[key]) for key in sorted(lr_scales or {})}
         state.lr_scales.append(scales)
+        if state.routes:
+            for entry, held in state.entry_states.items():
+                if held.pending is None:
+                    continue
+                held.steps += 1
+                held.state = content_hash({
+                    "state": held.pending, "step": held.steps,
+                    "scale": lr_scale_of(scales, entry, "")})
+                held.pending = None
+            state.steps = max((held.steps for held in state.entry_states.values()), default=0)
+            self.refresh_routed_digest(state)
+            return
         state.steps += 1
         fold: dict = {"state": state.state, "step": state.steps}
         if scales:
@@ -672,6 +742,8 @@ class FakeLearner:
         Nothing is folded: a forward trains nothing."""
         state = self._tenant(tenant)
         self.forwards += 1
+        if state.routes:
+            return self.forward_routed_documents(state, batch)
         return tuple(
             int(content_hash({
                 "ids": batch.token_ids[start:stop],
@@ -838,8 +910,8 @@ class FakeLearner:
     @staticmethod
     def _adapter_payloads(state) -> dict[str, bytes]:
         return {
-            name: (f"fake-delta:{name}:{state.state}".encode()
-                   if name in state.trainable else state.frozen[name])
+            name: (f"fake-delta:{name}:{state.entry_states[name].state if state.routes else state.state}".encode()
+                   if name in state.trainable else hashlib.sha256(state.frozen[name]).hexdigest())
             for name in state.all_names
         }
 
@@ -851,6 +923,9 @@ class FakeLearner:
 
     def emit_optim(self, tenant: str) -> Mapping[str, bytes]:
         state = self._tenant(tenant)
+        if state.routes:
+            return {name: f"fake-optim:{name}:{held.steps}:{held.state}".encode()
+                    for name, held in state.entry_states.items()}
         return {name: f"fake-optim:{name}:{state.steps}:{state.state}".encode()
                 for name in state.trainable}
 
@@ -879,6 +954,18 @@ class FakeLearner:
     def load(self, tenant: str, adapters: Mapping[str, bytes],
              optim: Mapping[str, bytes] | None) -> None:
         state = self._tenant(tenant)
+        if state.routes:
+            for name, payload in adapters.items():
+                if name in state.entry_states:
+                    held = state.entry_states[name]
+                    held.state = payload.decode().rsplit(":", 1)[1]
+                    held.pending = None
+            for name, held in state.entry_states.items():
+                held.steps = (int(optim[name].decode().split(":")[2])
+                              if optim and name in optim else 0)
+            state.steps = max((held.steps for held in state.entry_states.values()), default=0)
+            self.refresh_routed_digest(state)
+            return
         states = {payload.decode().rsplit(":", 1)[1] for name, payload
                   in adapters.items() if name in state.trainable}
         if len(states) > 1:
