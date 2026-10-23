@@ -32,6 +32,8 @@ from rlstack.policy.compile import Bundle, compile_bundle
 from rlstack.policy.siteschema import SiteSchema, resolve
 from rlstack.registry import ADAPTER_TYPES, POST, code_hashes
 from rlstack.runner.checkpointing import Checkpointing
+from rlstack.runner.weight_transfer import WeightTransfer
+from rlstack.runner.publication import publish_tensors
 from rlstack.runner.roles import Runner, Fitter, Generator, Scorer, Trainer
 from rlstack.runner.roles.base import StopRequest
 from rlstack.runner.roles.fitter import fit_entry
@@ -101,7 +103,8 @@ def run_experiment(spec: ExperimentSpec, schema: SiteSchema, store: Store,
                    max_inflight: int = 64,
                    arbiter: Arbiter | None = None,
                    subdir: str | None = None, resume: bool = False, *,
-                   checkpointing: Checkpointing) -> RunReport:
+                   checkpointing: Checkpointing,
+                   weight_transfer: WeightTransfer = WeightTransfer()) -> RunReport:
     """Submit and drive one experiment to completion. Safe to call again on the
     same spec: identical identity attaches and continues (or no-ops if done).
 
@@ -113,7 +116,7 @@ def run_experiment(spec: ExperimentSpec, schema: SiteSchema, store: Store,
     return asyncio.run(
         run_experiment_async(spec, schema, store, engines, learner, max_inflight,
                              arbiter, subdir=subdir, resume=resume,
-                             checkpointing=checkpointing))
+                             checkpointing=checkpointing, weight_transfer=weight_transfer))
 
 
 def data_fingerprint(spec: ExperimentSpec) -> str:
@@ -153,6 +156,7 @@ async def run_experiment_async(
         journal: HostJournal | None = None,
         subdir: str | None = None, resume: bool = False, *,
         checkpointing: Checkpointing,
+        weight_transfer: WeightTransfer = WeightTransfer(),
         stop: StopRequest | None = None) -> RunReport:
     """The async form of run_experiment — the multi-tenant entry.
 
@@ -176,6 +180,11 @@ async def run_experiment_async(
     for a drained stop: the Trainer reads it at every update boundary.
     """
     needs = needs_of(spec)
+    if weight_transfer.backend == "nccl":
+        if checkpointing.delivery != "wire":
+            raise ValueError("NCCL publication requires wire delivery, not store delivery")
+        if any(len(host.members) > 1 for host in spec.topology.hosts):
+            raise ValueError("NCCL publication requires dedicated awake residents; alternating hosts use base64")
     if any(need.learner for need in needs) and learner is None:
         raise ValueError(
             "this run needs a Trainer (its spec declares an algo) or a Fitter "
@@ -272,7 +281,7 @@ async def run_experiment_async(
             await asyncio.to_thread(
                 _warm_start, spec.init, tenant=rid, bank_names=set(bank),
                 trainable=trainable, store=store, learner=learner)
-        emitted = await asyncio.to_thread(learner.emit, rid)
+        emitted = await asyncio.to_thread(learner.emit_initial, rid, policy_version)
         adapters, moments = emitted.adapters, emitted.optim
     else:
         adapters = await store_work(
@@ -303,6 +312,11 @@ async def run_experiment_async(
     # THE POOLS THAT SERVE THE POLICY (ADR 0014, Part B) get the policy's
     # bundle; every other pool serves its own base, installed on demand.
     serving = serving_pools(spec)
+    if trains and serving and weight_transfer.backend == "nccl":
+        async with arbiter.admit(learner):
+            bundle = await publish_tensors(learner, rid, policy_version, servable,
+                adapter_types, {name: pools[name] for name in serving if name in pools},
+                weight_transfer, journal, 0)
     base_bundles = {name: Bundle(f"bundle:base:{name}", {}, {})
                     for name in pools if name not in serving}
 
@@ -348,7 +362,7 @@ async def run_experiment_async(
                            initial_version=policy_version,
                            max_inflight=max_inflight,
                            arbiter=arbiter, tenant=rid, journal=journal,
-                           checkpointing=checkpointing, stop=stop)
+                           checkpointing=checkpointing, weight_transfer=weight_transfer, stop=stop)
     try:
         async with asyncio.TaskGroup() as group:
             tasks = [group.create_task(runner.run_forever()) for runner in runners]
@@ -570,6 +584,7 @@ def needs_of(spec: ExperimentSpec) -> tuple[RunnerNeed, ...]:
 def plan_runners(spec: ExperimentSpec, *, run, store, pools, learner,
                  routes_at, plans, initial_bundle, initial_version,
                  max_inflight, arbiter, tenant, checkpointing: Checkpointing,
+                 weight_transfer: WeightTransfer = WeightTransfer(),
                  needs: Sequence[RunnerNeed] | None = None,
                  journal: HostJournal | None = None,
                  stop: StopRequest | None = None,
@@ -618,7 +633,7 @@ def plan_runners(spec: ExperimentSpec, *, run, store, pools, learner,
                 spec=spec, plan=plans[need.plan], refs=RefReader(store, run),
                 learner=learner, tenant=tenant, journal=journal,
                 initial_version=initial_version,
-                checkpointing=checkpointing, pools=wire, stop=stop,
+                checkpointing=checkpointing, weight_transfer=weight_transfer, pools=wire, stop=stop,
                 fit_client=fit_client))
         elif need.runner is Scorer:
             runners.append(Scorer(

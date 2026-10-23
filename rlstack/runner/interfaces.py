@@ -200,6 +200,18 @@ class Engine(Protocol):
         """Register a compiled bundle (the add_lora analog)."""
         ...
 
+    def prepare_transfer(self, manifest: Mapping, transfer) -> dict:
+        """Prepare an immutable tensor publication at this resident's epoch."""
+        ...
+
+    def finish_transfer(self, source: str, token: str) -> dict:
+        """Acknowledge installation of the exact received bundle."""
+        ...
+
+    def abort_transfer(self, source: str, token: str) -> None:
+        """Discard partial publication; preserve existing immutable bundles."""
+        ...
+
     def add_library(self, name: str, payload: bytes) -> None:
         """Hold one NAMED PAYLOAD for routes to read (ADR 0019): the bytes
         `lora_torch.emit` writes for one LoRA set, read from the store by a
@@ -347,6 +359,38 @@ class Learner(Protocol):
 
     def emit(self, tenant: str) -> Emitted:
         """Serialize `tenant`'s deltas + optimizer moments for store and bundle."""
+        ...
+
+    def emit_initial(self, tenant: str, versions: Mapping[str, int]) -> Emitted:
+        """Bind logical versions after restore/warm-start, then export checkpoint zero."""
+        ...
+
+    def emit_adapters(self, tenant: str, versions: Mapping[str, int] | None = None) -> Mapping[str, bytes]:
+        """Adapter bytes only; never serialize optimizer state for publication."""
+        ...
+
+    def emit_optim(self, tenant: str) -> Mapping[str, bytes]:
+        """Optimizer bytes, requested only at a durable checkpoint."""
+        ...
+
+    def export_state(self, tenant: str, versions: Mapping[str, int], names: Sequence[str]):
+        """Immutable tensor states, retained in the GPU-owning resident."""
+        ...
+
+    def policy_pin(self, tenant, versions, names, adapter_types) -> Bundle:
+        """Content identity for replay-only updates, without exporting weights."""
+        ...
+
+    def prepare_transfer(self, tenant, versions, names, adapter_types) -> dict:
+        """Capture state on the resident, returning only its control manifest."""
+        ...
+
+    def send_transfer(self, token: str, endpoint: Mapping, timeout_s: float) -> dict:
+        """Move a captured snapshot over the peer data channel."""
+        ...
+
+    def release_transfer(self, token: str) -> None:
+        """Drop a publication snapshot after acknowledgement or failure."""
         ...
 
     def load(self, tenant: str, adapters: Mapping[str, bytes],

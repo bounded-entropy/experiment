@@ -227,7 +227,9 @@ class HostedDeployTests(unittest.TestCase):
         self.assertEqual((hosted.config.gateway_port, hosted.config.observer_port, hosted.config.store),
                          (general.gateway_port, general.observer_port, general.store))
         self.assertEqual(hosted.ROOT, REPO)
-        self.assertTrue(hosted.CLI_WHEEL.endswith("/strangeloop_cli-0.8.1-py3-none-any.whl"))
+        # The deployed image already pins 0.8.12; retain the pin check without
+        # requiring the superseded 0.8.1 wheel. No deployment pin changes here.
+        self.assertTrue(hosted.CLI_WHEEL.endswith("/strangeloop_cli-0.8.12-py3-none-any.whl"))
 
     def test_the_desk_runs_on_a_loop_of_its_own_and_stops_from_another_thread(self):
         """Modal's user loop runs only while a hook runs, so a task on it

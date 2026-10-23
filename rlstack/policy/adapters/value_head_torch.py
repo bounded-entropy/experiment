@@ -18,6 +18,9 @@ type's methods (STYLE rule 7).
 
 from __future__ import annotations
 
+from rlstack.policy.adapters.state_torch import TensorState
+from rlstack.policy.state import AdapterState
+
 import hashlib
 import json
 import math
@@ -41,7 +44,7 @@ def rms_norm(x: torch.Tensor) -> torch.Tensor:
 
 
 @dataclass
-class VhState:
+class VhState(AdapterState):
     """One bank entry's value head: two weights, and the capture buffers the
     wrappers fill per forward."""
 
@@ -57,6 +60,9 @@ class VhState:
 
     def parameters(self) -> list[torch.nn.Parameter]:
         return [self.w_in, self.w_out]
+
+    def export_state(self, version: int) -> TensorState:
+        return export_state(self, version)
 
 
 def _draw_seed(seed: int, path: str) -> int:
@@ -134,14 +140,19 @@ def uninstall(model: torch.nn.Module, state: VhState) -> None:
         state.hook = None
 
 
-def emit(state: VhState) -> bytes:
+def export_state(state: VhState, version: int | None = None) -> TensorState:
     """A JSON head plus safetensors body — pure function of the parameters."""
     head = json.dumps({"d_model": state.d_model, "hidden": state.hidden,
                        "path": state.path},
                       sort_keys=True, separators=(",", ":")).encode("utf-8")
-    tensors = {"w_in": state.w_in.data.cpu(), "w_out": state.w_out.data.cpu()}
-    return len(head).to_bytes(8, "big") + head + st_save(tensors)
+    tensors = {"w_in": state.w_in.data, "w_out": state.w_out.data}
+    return TensorState(tensors, len(head).to_bytes(8, "big") + head)
 
+
+def emit(state: VhState) -> bytes:
+    """Encode the existing checkpoint format; publication can use tensors directly."""
+    snapshot = export_state(state)
+    return snapshot.encode()
 
 def load(state: VhState, payload: bytes) -> None:
     """emit's inverse, in place."""

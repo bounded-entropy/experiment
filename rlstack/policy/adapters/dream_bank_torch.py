@@ -25,7 +25,11 @@ the layers below it and never INTO it.
 
 from __future__ import annotations
 
+from rlstack.policy.adapters.state_torch import TensorState
+from rlstack.policy.state import AdapterState
+
 import hashlib
+import json
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 
@@ -62,7 +66,7 @@ class Anchor:
 
 
 @dataclass
-class DreamBankState:
+class DreamBankState(AdapterState):
     """One entry's state: the sets by route, the anchor, the mode — and the
     LIBRARY sets (`lib:<name>` -> a frozen LoraState), which are deliberately
     not in `sets`: everything that walks `sets` (parameters, param groups,
@@ -88,6 +92,9 @@ class DreamBankState:
     def parameters(self) -> list[torch.nn.Parameter]:
         return [p for route in set_routes(self.memories)
                 for p in self.sets[route].parameters()]
+
+    def export_state(self, version: int) -> TensorState:
+        return export_state(self, version)
 
 
 # ---------------------------------------------------------------------------
@@ -329,7 +336,7 @@ def factorize(state: DreamBankState) -> Anchor:
 # the payload
 # ---------------------------------------------------------------------------
 
-def emit(state: DreamBankState) -> bytes:
+def export_state(state: DreamBankState, version: int | None = None) -> TensorState:
     """Every set's (A, B) under its route prefix in peft key form, and the
     anchor's factors — a calibrate run's anchor is factorized here, at emit."""
     anchor = factorize(state) if state.mode == "calibrate" and state.sums else state.anchor
@@ -337,8 +344,8 @@ def emit(state: DreamBankState) -> bytes:
     for route in set_routes(state.memories):
         lora = state.sets[route]
         for path in state.paths:
-            tensors[f"{route}/{PEFT_PREFIX}{path}.lora_A.weight"] = lora.a[path].data.cpu()
-            tensors[f"{route}/{PEFT_PREFIX}{path}.lora_B.weight"] = lora.b[path].data.cpu()
+            tensors[f"{route}/{PEFT_PREFIX}{path}.lora_A.weight"] = lora.a[path].data
+            tensors[f"{route}/{PEFT_PREFIX}{path}.lora_B.weight"] = lora.b[path].data
     meta: dict[str, object] = {
         "format": FORMAT, "r": state.r, "memories": state.memories, "lam": state.lam,
         "anchor_rank": state.anchor_rank, "mode": state.mode, "paths": list(state.paths),
@@ -349,10 +356,16 @@ def emit(state: DreamBankState) -> bytes:
         meta["anchor_delta"] = {path: anchor.delta[path] for path in state.paths}
         meta["anchor_captured"] = {path: anchor.captured.get(path, 0.0) for path in state.paths}
         for path in state.paths:
-            tensors[f"anchor/{path}/u"] = anchor.u[path].detach().to(torch.bfloat16).cpu()
-            tensors[f"anchor/{path}/e"] = anchor.e[path].detach().float().cpu()
-    return pack_artifact(meta, tensors)
+            tensors[f"anchor/{path}/u"] = anchor.u[path].detach().to(torch.bfloat16)
+            tensors[f"anchor/{path}/e"] = anchor.e[path].detach().float()
+    head = json.dumps(dict(meta), sort_keys=True, separators=(",", ":")).encode()
+    return TensorState(tensors, len(head).to_bytes(8, "big") + head)
 
+
+def emit(state: DreamBankState) -> bytes:
+    """Encode the existing checkpoint format; publication can use tensors directly."""
+    snapshot = export_state(state)
+    return snapshot.encode()
 
 def load(state: DreamBankState, payload: bytes) -> None:
     """emit's inverse. The sets present in the payload are restored in place

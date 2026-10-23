@@ -30,6 +30,9 @@ type's methods (STYLE rule 7).
 
 from __future__ import annotations
 
+from rlstack.policy.adapters.state_torch import TensorState
+from rlstack.policy.state import AdapterState
+
 import json
 import math
 from collections.abc import Mapping, Sequence
@@ -60,7 +63,7 @@ PEFT_PREFIX = "base_model.model."
 
 
 @dataclass
-class SlatentState:
+class SlatentState(AdapterState):
     """One bank entry's latent-spectral state: a posterior over ONE latent,
     the trunk that reads it, one gains head per site, and the frozen spectrum
     (filled at install, from the weights themselves). `version` is the noise
@@ -91,6 +94,7 @@ class SlatentState:
     v: dict[str, torch.Tensor] = field(default_factory=dict)      # [in, m]
     sigma: dict[str, torch.Tensor] = field(default_factory=dict)  # [m]
     version: int = 0
+    publication_origin: int = 0
 
     def parameters(self) -> list[torch.nn.Parameter]:
         """What trains: the posterior, a learned prior, the mapper, and the
@@ -105,6 +109,12 @@ class SlatentState:
     def prior_parameters(self) -> list[torch.nn.Parameter]:
         """The prior's log-scale when it is LEARNED; nothing when it is fixed."""
         return [self.prior_log_std] if self.prior == LEARNED_PRIOR else []
+
+    def bind_version(self, version: int) -> None:
+        self.publication_origin = self.version - version
+
+    def export_state(self, version: int) -> TensorState:
+        return export_state(self, version)
 
 
 def _draw_seed(seed: int, tag: str) -> int:
@@ -437,33 +447,33 @@ def member_peft(state: SlatentState, tag: str,
             lora_b = (state.u[path][:, picked].to(torch.float32)
                       * eff[picked][None, :])
             tensors[f"peft.{tag}.{PEFT_PREFIX}{path}.lora_A.weight"] = \
-                lora_a.to(FROZEN_DTYPE).contiguous().cpu()
+                lora_a.to(FROZEN_DTYPE).contiguous()
             tensors[f"peft.{tag}.{PEFT_PREFIX}{path}.lora_B.weight"] = \
-                lora_b.to(FROZEN_DTYPE).contiguous().cpu()
+                lora_b.to(FROZEN_DTYPE).contiguous()
     return tensors
 
 
-def emit(state: SlatentState) -> bytes:
-    """Draw this version's ensemble, materialize every member (and the
-    posterior MEAN, for seedless score traffic), pack beside the trained
-    half. The counter is the version — emit uses it, records it, then
-    advances — so a resumed run's n-th emit ships the n-th ensemble."""
-    noise = noise_for(state.seed, state.version, state.members, state.latent)
+def export_state(state: SlatentState, version: int | None = None) -> TensorState:
+    """Export a version-pinned ensemble and its trained state, without mutation.
+
+    Served members stay on their source device until carriage or a checkpoint
+    needs host bytes. The legacy emit wrapper alone advances its counter."""
+    noise = noise_for(state.seed, (state.version if version is None else state.publication_origin + version), state.members, state.latent)
     # the draw is CPU (a seeded Generator's home); the posterior lives on the
     # weight's device — reparameterize where the parameters are
     noise = noise.to(state.mu.device)
     tensors: dict[str, torch.Tensor] = {
-        "posterior.mu": state.mu.data.cpu(),
-        "posterior.log_std": state.log_std.data.cpu(),
-        "prior.log_std": state.prior_log_std.data.cpu(),
-        "noise": noise.cpu(),
+        "posterior.mu": state.mu.data,
+        "posterior.log_std": state.log_std.data,
+        "prior.log_std": state.prior_log_std.data,
+        "noise": noise,
     }
     for key, value in state.trunk.state_dict().items():
-        tensors[f"trunk.{key}"] = value.cpu()
+        tensors[f"trunk.{key}"] = value
     for path, head in state.heads.items():
-        tensors[f"heads.{path}"] = head.data.cpu()
+        tensors[f"heads.{path}"] = head.data
     for path, amp in state.amp.items():
-        tensors[f"amp.{path}"] = amp.data.cpu()
+        tensors[f"amp.{path}"] = amp.data
     with torch.no_grad():
         for index in range(state.members):
             tensors.update(member_peft(
@@ -475,11 +485,16 @@ def emit(state: SlatentState) -> bytes:
         "prior_std": state.prior_std, "prior": state.prior,
         "hidden": state.hidden, "amplitude": state.amplitude,
         "bound": state.bound,
-        "paths": list(state.paths), "version": state.version},
+        "paths": list(state.paths), "version": (state.version if version is None else state.publication_origin + version)},
         sort_keys=True, separators=(",", ":")).encode("utf-8")
-    state.version += 1
-    return len(head).to_bytes(8, "big") + head + st_save(tensors)
+    return TensorState(tensors, len(head).to_bytes(8, "big") + head)
 
+
+def emit(state: SlatentState) -> bytes:
+    """Encode the existing checkpoint format; publication can use tensors directly."""
+    snapshot = export_state(state)
+    state.version += 1
+    return snapshot.encode()
 
 def unpack(payload: bytes) -> tuple[dict, dict[str, torch.Tensor]]:
     size = int.from_bytes(payload[:8], "big")

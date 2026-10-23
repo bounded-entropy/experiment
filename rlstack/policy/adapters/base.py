@@ -25,6 +25,7 @@ from typing import TYPE_CHECKING, Any, ClassVar
 from rlstack.policy.siteschema import SiteMeta
 from rlstack.registry import ADAPTER_TYPES, source_hash
 from rlstack.spec.specs import AdapterSpec
+from rlstack.policy.state import AdapterState
 
 if TYPE_CHECKING:                       # the seam imports this module back
     from rlstack.policy.adapters.rollout import (
@@ -233,6 +234,15 @@ class AdapterType:
     def emit(self, params: Any) -> Any:
         """Lower params into the bundle payload the engine-side consumer reads."""
         raise NotImplementedError
+
+    def export_state(self, params: AdapterState, version: int):
+        """Tensor state at an explicit version, independent of carriage.
+
+        This conversion owns tensor names and semantic metadata, never NCCL
+        or base64. It is pure: checkpoint cadence cannot advance ensemble
+        draws. Training-only entries use it for checkpointing as well.
+        """
+        return params.export_state(version)
 
     def load(self, params: Any, payload: bytes) -> None:
         """emit's inverse: restore params in place from an emitted payload

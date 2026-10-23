@@ -18,6 +18,9 @@ type's methods (STYLE rule 7).
 
 from __future__ import annotations
 
+from rlstack.policy.adapters.state_torch import TensorState
+from rlstack.policy.state import AdapterState
+
 import hashlib
 import math
 from collections.abc import Mapping
@@ -35,7 +38,7 @@ from rlstack.policy.siteschema import SiteMeta
 
 
 @dataclass
-class SteerState:
+class SteerState(AdapterState):
     """One bank entry's trainable state: one [d] vector per boundary path —
     or ONE vector every path shares, when tied."""
 
@@ -65,6 +68,9 @@ class SteerState:
         if self.log_alpha is not None:
             out.append(self.log_alpha)
         return out
+
+    def export_state(self, version: int) -> TensorState:
+        return export_state(self, version)
 
 
 class SteerSite(SiteWrapper):
@@ -269,16 +275,21 @@ def uninstall(model: torch.nn.Module, state: SteerState) -> None:
         leave_site(model, path, SteerSite, state)
 
 
-def emit(state: SteerState) -> bytes:
+def export_state(state: SteerState, version: int | None = None) -> TensorState:
     """safetensors keyed by boundary PATH — the engine-side consumer adds each
     key's vector at that path. A tied entry emits its one vector under every
     path (cloned: safetensors refuses shared storage), so the payload is
     self-describing either way."""
     alpha = effective_alpha(state)
-    return st_save({path: state.vectors[path].data.cpu().clone()
+    return TensorState({path: state.vectors[path].data.clone()
                     for path in state.paths},
                    metadata=None if alpha is None else {ALPHA_KEY: repr(alpha)})
 
+
+def emit(state: SteerState) -> bytes:
+    """Encode the existing checkpoint format; publication can use tensors directly."""
+    snapshot = export_state(state)
+    return snapshot.encode()
 
 def load(state: SteerState, payload: bytes) -> None:
     """emit's inverse, in place."""

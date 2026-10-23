@@ -91,6 +91,33 @@ subdirectory and `Checkpointing(every=..., delivery=...)`; there is no implicit
 checkpoint cadence. `delivery="wire"` sends policy updates to serving pools;
 `delivery="store"` requires a checkpoint at every update.
 
+Checkpoint frequency is shared by all adapters in a run. Live policy publication
+chooses its backend separately:
+
+```python
+from rlstack import WeightTransfer
+from rlstack.runner.checkpointing import Checkpointing
+
+# Pass these to VenueClient.submit, RemoteDesk.submit or run_experiment.
+checkpointing = Checkpointing(every=20, delivery="wire")
+weight_transfer = WeightTransfer(backend="nccl")  # or "base64" (the default)
+```
+
+NCCL sends immutable tensor buffers directly between residents, coalesced by
+dtype over persistent peer channels. It does not base64-encode or serialize a
+checkpoint archive for transfer. Every serving adapter uses the same channel;
+its lowering still owns state conversion and inference installation. Current
+file-based inference consumers can require local encoding on receipt, so direct
+NCCL carriage is not a claim of end-to-end zero-copy loading or a measured speedup.
+See [publication and checkpointing](docs/adapter-publication.md) for setup,
+compatibility and validation limits.
+
+Optimizer state is exported at checkpoints rather than every update. A
+learner-only SFT run over sealed trajectories also skips intermediate adapter
+exports. Completion and a drained stop still checkpoint. The legacy FitJob
+workflow remains available; this change does not migrate its callers or remove
+its Dreamer-specific slot assumptions.
+
 - **Modal:** [desk deployment](deploy/desk.py) and [venue wiring](deploy/modal_venue.py).
 - **Strange Loop:** [setup and operations](examples/strangeloop-desk.md),
   [local desk configuration](examples/strangeloop-config.json), and

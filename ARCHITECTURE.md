@@ -136,6 +136,21 @@ Everything checkable before a GPU is touched is checked here.
 
 ### The bridge (the policy)
 
+**Tensor publication (ADR 0027)** — a compute-side adapter state's
+`export_state(version)` returns named tensors and adapter-owned metadata. The
+shared runner chooses base64 payload carriage or a direct NCCL tensor channel;
+adapters never implement either transport. A tensor bundle's content ID has the
+`bundle:tensor:` namespace and can be reconstructed from its unchanged checkpoint
+payload. State conversion and inference installation remain adapter-owned.
+`rlstack/policy/state.py`, `rlstack/policy/adapters/state_torch.py`,
+`rlstack/runner/publication.py`, `rlstack/runner/transports/tensor.py`
+
+**WeightTransfer** — a submission-time backend choice, distinct from checkpoint
+cadence and from `Checkpointing.delivery`'s wire/store choice. Optimizer state is
+serialized only for checkpointing; learner-only replay SFT also skips intermediate
+adapter exports. One chosen cadence captures the run's adapters coherently.
+`rlstack/runner/weight_transfer.py`, `rlstack/runner/roles/trainer.py`
+
 **Base** — the pretrained checkpoint, named by HF id plus pinned revision. One
 frozen base is loaded per learner and per engine build, and is shared by every
 tenant.

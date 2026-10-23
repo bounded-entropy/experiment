@@ -21,7 +21,11 @@ type's methods (STYLE rule 7).
 
 from __future__ import annotations
 
+from rlstack.policy.adapters.state_torch import TensorState
+from rlstack.policy.state import AdapterState
+
 import hashlib
+import json
 import math
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
@@ -97,7 +101,7 @@ def _drawn(out_features: int, in_features: int,
 
 
 @dataclass
-class PloraState:
+class PloraState(AdapterState):
     """One bank entry's plora: a posterior over ONE latent, the hypernet that
     reads it, one head per site, and the frozen directions the heads steer.
 
@@ -131,6 +135,7 @@ class PloraState:
     u: dict[str, torch.Tensor] = field(default_factory=dict)   # path -> [out, k]
     a: dict[str, torch.Tensor] = field(default_factory=dict)   # path -> [k, in]
     version: int = 0
+    publication_origin: int = 0
 
     def parameters(self) -> list[torch.nn.Parameter]:
         """What trains: the posterior, a learned prior, the mapper."""
@@ -143,6 +148,12 @@ class PloraState:
     def prior_parameters(self) -> list[torch.nn.Parameter]:
         """The prior's log-scale when it is LEARNED; nothing when it is fixed."""
         return [self.prior_log_std] if self.prior == LEARNED_PRIOR else []
+
+    def bind_version(self, version: int) -> None:
+        self.publication_origin = self.version - version
+
+    def export_state(self, version: int) -> TensorState:
+        return export_state(self, version)
 
 
 def _draw_seed(seed: int, path: str) -> int:
@@ -540,40 +551,34 @@ def noise_for(seed: int, version: int, members: int,
         for member in range(members)])
 
 
-def emit(state: PloraState) -> bytes:
-    """Lower the trained half into the bundle payload — and DRAW the ensemble.
+def export_state(state: PloraState, version: int | None = None) -> TensorState:
+    """Export a version-pinned ensemble without advancing its draw counter.
 
-    What ships is kilobytes: the posterior, the hypernet, one head per site, and
-    the `members` noise vectors this version is served as. The frozen directions
-    do NOT ship; the payload carries their cas ADDRESS, and the engine resolves
-    it once per build.
-
-    THE COUNTER IS THE VERSION, and that is what makes resume work. emit uses
-    the counter it holds, RECORDS it, and only then advances, while load
-    restores it — so the n-th emit of a run always draws the n-th ensemble
-    whether it happened in this process or in the one that crashed. This is the
-    one adapter type whose payload is not a pure function of its parameters
-    alone, because the served ensemble is a fresh DRAW at each version, and the
-    counter is what keeps that draw reproducible.
-    """
-    tensors = {"posterior.mu": state.mu.data.cpu(),
-               "posterior.log_std": state.log_std.data.cpu(),
-               "prior.log_std": state.prior_log_std.data.cpu(),
-               "noise": noise_for(state.seed, state.version, state.members,
+    Frozen factors remain content-addressed; the header retains their URI.
+    The legacy emit wrapper alone advances its counter."""
+    tensors = {"posterior.mu": state.mu.data,
+               "posterior.log_std": state.log_std.data,
+               "prior.log_std": state.prior_log_std.data,
+               "noise": noise_for(state.seed, (state.version if version is None else state.publication_origin + version), state.members,
                                   state.latent)}
     for key, value in state.trunk.state_dict().items():
-        tensors[f"trunk.{key}"] = value.cpu()
+        tensors[f"trunk.{key}"] = value
     for path, head in state.heads.items():
-        tensors[f"heads.{path}"] = head.data.cpu()
-    payload = plora_factors.pack_artifact({
+        tensors[f"heads.{path}"] = head.data
+    head = json.dumps({
         "k": state.k, "latent": state.latent, "members": state.members,
         "prior_std": state.prior_std, "prior": state.prior,
         "hidden": state.hidden,
         "factors": state.factors, "paths": list(state.paths),
-        "version": state.version}, tensors)
-    state.version += 1
-    return payload
+        "version": (state.version if version is None else state.publication_origin + version)}, sort_keys=True, separators=(",", ":")).encode()
+    return TensorState(tensors, len(head).to_bytes(8, "big") + head)
 
+
+def emit(state: PloraState) -> bytes:
+    """Encode the existing checkpoint format; publication can use tensors directly."""
+    snapshot = export_state(state)
+    state.version += 1
+    return snapshot.encode()
 
 def resident(payload: bytes,
              factors: Mapping[str, tuple[torch.Tensor, torch.Tensor]]

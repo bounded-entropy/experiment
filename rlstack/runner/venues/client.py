@@ -13,6 +13,7 @@ from urllib.request import urlopen
 from rlstack.data.stores.base import Store, run_reference
 from rlstack.data.stores.local import LocalStore
 from rlstack.runner.checkpointing import Checkpointing
+from rlstack.runner.weight_transfer import WeightTransfer
 from rlstack.runner.remote import RemoteDesk, spec_from_json
 from rlstack.spec.canonical import wire_json
 from rlstack.spec.specs import ExperimentSpec
@@ -77,12 +78,14 @@ class VenueClient:
 
     async def submit(self, row: dict, subdir: str, *, anchor: str | None = None,
                      solo: bool = False, resume: bool = False,
-                     checkpointing: Checkpointing) -> dict:
+                     checkpointing: Checkpointing,
+                     weight_transfer: WeightTransfer = WeightTransfer()) -> dict:
         """Submit the same canonical row through either provider's transport,
         with the submission's own Checkpointing (ADR 0014) — no default."""
+        options = {} if weight_transfer == WeightTransfer() else {"weight_transfer": weight_transfer}
         return await self.desk.submit(spec_from_json(row), subdir=subdir,
                                       anchor=anchor, solo=solo, resume=resume,
-                                      checkpointing=checkpointing)
+                                      checkpointing=checkpointing, **options)
 
     def progress(self, run_id: str, folder: str = "", tail: int = 3) -> dict:
         """Read committed progress from the existing observer API."""
@@ -118,8 +121,10 @@ class VenueClient:
 
     async def submit_and_follow(self, row: dict, subdir: str, timeout_s: float,
                                 anchor: str | None = None, *,
-                                checkpointing: Checkpointing) -> str:
-        reply = await self.submit(row, subdir, anchor=anchor, checkpointing=checkpointing)
+                                checkpointing: Checkpointing,
+                                weight_transfer: WeightTransfer = WeightTransfer()) -> str:
+        reply = await self.submit(row, subdir, anchor=anchor, checkpointing=checkpointing,
+                                  weight_transfer=weight_transfer)
         if not reply.get("accepted"):
             raise SystemExit(f"not accepted: {reply}")
         return await self.follow(run_reference(reply["run_id"], subdir), timeout_s)

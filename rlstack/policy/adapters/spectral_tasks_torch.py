@@ -9,6 +9,9 @@ from dataclasses import dataclass, field, replace
 import json
 
 import torch
+
+from rlstack.policy.adapters.state_torch import TensorState
+from rlstack.policy.state import AdapterState
 from safetensors.torch import save as st_save
 
 from rlstack.policy.adapters import spectral_latent_torch as spectral
@@ -19,7 +22,7 @@ from rlstack.policy.adapters.spectral_torch import FROZEN_DTYPE, full_spectrum
 
 
 @dataclass
-class TaskState:
+class TaskState(AdapterState):
     decoder: spectral.SlatentState
     scope: str
     train_decoder: bool
@@ -29,6 +32,9 @@ class TaskState:
 
     def parameters(self):
         return [p for group in param_groups(self).values() for p in group]
+
+    def export_state(self, version: int) -> TensorState:
+        return export_state(self, version)
 
 
 def build(sites, init):
@@ -148,18 +154,23 @@ def uninstall(model, state):
         leave_site(model, path, TaskSite, state)
 
 
-def emit(state):
+def export_state(state, version: int | None = None) -> TensorState:
     """Checkpoint the decoder and posteriors; rebuild the fixed basis."""
     d = state.decoder
-    tensors = {"posterior.mu": d.mu.detach().cpu(),
-               "posterior.log_std": d.log_std.detach().cpu()}
-    tensors.update({f"trunk.{k}": v.detach().cpu() for k, v in d.trunk.state_dict().items()})
-    tensors.update({f"heads.{k}": v.detach().cpu() for k, v in d.heads.items()})
+    tensors = {"posterior.mu": d.mu.detach(),
+               "posterior.log_std": d.log_std.detach()}
+    tensors.update({f"trunk.{k}": v.detach() for k, v in d.trunk.state_dict().items()})
+    tensors.update({f"heads.{k}": v.detach() for k, v in d.heads.items()})
     head = json.dumps({"scope": state.scope, "k": d.k, "latent": d.latent,
                        "hidden": d.hidden, "paths": d.paths, "bound": d.bound,
                        "support": "leading"}, sort_keys=True).encode()
-    return len(head).to_bytes(8, "big") + head + st_save(tensors)
+    return TensorState(tensors, len(head).to_bytes(8, "big") + head)
 
+
+def emit(state):
+    """Encode the existing checkpoint format; publication can use tensors directly."""
+    snapshot = export_state(state)
+    return snapshot.encode()
 
 def load(state, payload):
     """Same scope restores q; a new scope inherits only the frozen decoder."""

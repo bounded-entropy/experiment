@@ -351,6 +351,18 @@ class FsdpTorchLearner(TorchLearner):
         self.attest_emit_is_width_free(tenant)
         return super().emit(tenant)
 
+    def emit_adapters(self, tenant, versions=None):
+        self.attest_emit_is_width_free(tenant)
+        return super().emit_adapters(tenant, versions)
+
+    def emit_optim(self, tenant):
+        self.attest_emit_is_width_free(tenant)
+        return super().emit_optim(tenant)
+
+    def export_state(self, tenant, versions, names):
+        self.attest_emit_is_width_free(tenant)
+        return super().export_state(tenant, versions, names)
+
     async def sleep(self) -> None:
         """Announced: the base is ONE object across the chorus, so it leaves
         the devices only if every rank puts its own shard down — a rank that
@@ -704,6 +716,7 @@ class FsdpTorchLearner(TorchLearner):
     def shutdown(self) -> None:
         """A resident's last verb: end the chorus (the ladder inside the
         resident's own ladder — ADR 0002, Q9)."""
+        super().shutdown()
         self.stop()
 
     # ---- the one override that shards ---------------------------------------

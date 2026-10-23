@@ -36,6 +36,7 @@ from rlstack.data.stores.base import Store, run_reference
 from rlstack.policy.siteschema import SiteSchema
 from rlstack.runner.arbiter import Arbiter
 from rlstack.runner.checkpointing import Checkpointing
+from rlstack.runner.weight_transfer import WeightTransfer
 from rlstack.runner.roles.base import StopRequest
 from rlstack.runner.signals import store_work
 from rlstack.runner.interfaces import Engine, Learner
@@ -495,6 +496,7 @@ class Host:
                      learner: Learner | None = None,
                      resume: bool = False, *,
                      checkpointing: Checkpointing,
+                     weight_transfer: WeightTransfer = WeightTransfer(),
                      stop: StopRequest | None = None) -> RunReport:
         """Run one experiment on this host's metal: bind, fit, solo, attest, run.
         `remotes` maps pool names served by OTHER hosts to their RemotePools
@@ -531,7 +533,7 @@ class Host:
             report = await run_experiment_async(
                 spec, schema, run_store, binding, learner,
                 max_inflight, arbiter=self.arbiter, subdir=subdir, resume=resume,
-                checkpointing=checkpointing, stop=stop,
+                checkpointing=checkpointing, weight_transfer=weight_transfer, stop=stop,
                 # the tenant knows its own phases but not its metal: this is
                 # the door through which its update timings reach THIS host's
                 # journal, and the only reason the runner learns a host name
@@ -641,7 +643,8 @@ class Host:
                     routes: Mapping[str, str] | None = None,
                     code: Mapping[str, str] | None = None,
                     subdir: str | None = None, resume: bool = False,
-                    checkpointing: Mapping | None = None) -> dict:
+                    checkpointing: Mapping | None = None,
+                    weight_transfer: Mapping | None = None) -> dict:
         """Take an experiment IN OVER THE WIRE and run it as one more tenancy
         on this host's own loop — submit, without the submitter in-process.
 
@@ -663,6 +666,7 @@ class Host:
         """
         try:
             cadence = Checkpointing.from_row(checkpointing)   # no default (ADR 0014)
+            transfer = WeightTransfer.from_row(weight_transfer)
             spec = self.decode_adoption(spec_row)
             self.check_code_agreement(spec, code)
             # Config lookup may wait on a model registry. It must not hold
@@ -698,7 +702,7 @@ class Host:
         task = asyncio.create_task(
             self.submit(spec, schema, remotes=routed.pools, subdir=subdir,
                         learner=routed.learner, resume=resume,
-                        checkpointing=cadence, stop=stop))
+                        checkpointing=cadence, weight_transfer=transfer, stop=stop))
         # a failed run already journals and rosters its failure (submit's own
         # except path) — but the EXCEPTION ITSELF would otherwise vanish into
         # a retrieved future, and a silent adoption death is undiagnosable

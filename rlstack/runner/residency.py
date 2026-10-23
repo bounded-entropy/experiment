@@ -22,6 +22,7 @@ with the content-addressed id as proof it is the same one.
 from __future__ import annotations
 
 import contextlib
+import threading
 from collections.abc import Callable, Mapping
 
 # One bundle's state, adapter type -> whatever that type's attach() made.
@@ -33,6 +34,7 @@ class BundleResidency:
                  detach: Callable[[Attached], None]) -> None:
         self.max_bundles = max_bundles
         self._detach = detach
+        self._lock = threading.RLock()
         # bundle_id -> attached, in LEAST-RECENTLY-USED ORDER: a dict keeps
         # insertion order and `touch` reinserts, so the eviction candidate is
         # always the first key.
@@ -43,47 +45,57 @@ class BundleResidency:
         """Is this bundle resident right now? Not "was it ever registered" —
         residency is not durable, and the caller's next move on a miss is to
         restore it, not to fail."""
-        return bundle_id in self._held
+        with self._lock:
+            return bundle_id in self._held
 
     def attached(self, bundle_id: str) -> Attached:
         """What each adapter type made resident for this bundle."""
-        return self._held.get(bundle_id, {})
+        with self._lock:
+            return self._held.get(bundle_id, {})
 
     def census(self) -> Mapping[str, int]:
         """How many resident bundles each adapter type holds state for."""
-        counts: dict[str, int] = {}
-        for state in self._held.values():
-            for adapter_type in state:
-                counts[adapter_type] = counts.get(adapter_type, 0) + 1
-        return counts
+        with self._lock:
+            counts: dict[str, int] = {}
+            for state in self._held.values():
+                for adapter_type in state:
+                    counts[adapter_type] = counts.get(adapter_type, 0) + 1
+            return counts
 
     def hold(self, bundle_id: str, attached: Attached) -> None:
         """Take one bundle's state, then come back within the bound."""
-        self._held[bundle_id] = attached
-        self.evict_until_within_bound()
+        with self._lock:
+            self._held[bundle_id] = attached
+            self.evict_until_within_bound()
 
     def release(self, bundle_id: str) -> None:
         """Hand one bundle's residency back to its adapter types."""
-        self._detach(self._held.pop(bundle_id))
+        with self._lock:
+            self._detach(self._held.pop(bundle_id))
 
     def touch(self, bundle_id: str) -> None:
         """Mark most-recently-used: reinsertion moves it to the end."""
-        if bundle_id in self._held:
-            self._held[bundle_id] = self._held.pop(bundle_id)
+        with self._lock:
+            if bundle_id in self._held:
+                self._held[bundle_id] = self._held.pop(bundle_id)
 
     @contextlib.contextmanager
     def pinned(self, bundle_id: str):
         """One request's hold: most-recently-used on entry, and immune from
         eviction until the last token is out (I8)."""
-        self.touch(bundle_id)
-        self._inflight[bundle_id] = self._inflight.get(bundle_id, 0) + 1
+        with self._lock:
+            if bundle_id not in self._held:
+                raise RuntimeError(f"bundle {bundle_id!r} was evicted before its request pinned it")
+            self.touch(bundle_id)
+            self._inflight[bundle_id] = self._inflight.get(bundle_id, 0) + 1
         try:
             yield
         finally:
-            if self._inflight[bundle_id] > 1:
-                self._inflight[bundle_id] -= 1
-            else:
-                self._inflight.pop(bundle_id)
+            with self._lock:
+                if self._inflight[bundle_id] > 1:
+                    self._inflight[bundle_id] -= 1
+                else:
+                    self._inflight.pop(bundle_id)
 
     def evict_until_within_bound(self) -> None:
         """Drop least-recently-used bundles until the bound holds.
@@ -99,11 +111,12 @@ class BundleResidency:
         version held by a lagging request does not protect the merely stale
         versions behind it.
         """
-        carrying = [bundle_id for bundle_id, state in self._held.items() if state]
-        for bundle_id in carrying[:-1]:         # never the most recently used
-            if len(carrying) <= self.max_bundles:
-                return
-            if self._inflight.get(bundle_id):
-                continue                        # pinned: immune (I8)
-            self.release(bundle_id)
-            carrying.remove(bundle_id)
+        with self._lock:
+            carrying = [bundle_id for bundle_id, state in self._held.items() if state]
+            for bundle_id in carrying[:-1]:         # never the most recently used
+                if len(carrying) <= self.max_bundles:
+                    return
+                if self._inflight.get(bundle_id):
+                    continue                        # pinned: immune (I8)
+                self.release(bundle_id)
+                carrying.remove(bundle_id)

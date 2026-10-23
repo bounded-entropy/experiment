@@ -108,3 +108,4 @@ from rlstack.runner.loop import (
     plan_runners, run_experiment,
 )
 from rlstack.runner.fakes import FakeAdapter, FakeEngine, FakeLearner
+from rlstack.runner.weight_transfer import WeightTransfer

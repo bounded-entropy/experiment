@@ -5,7 +5,7 @@
 | | |
 |---|---|
 | **Date** | 2026-10-23 |
-| **Status** | Accepted — Q1–Q2 answered by Samarth on 2026-10-23; implementation in progress |
+| **Status** | Implemented on CPU/fakes; live NCCL and serving qualification pending |
 | **Author** | Codex with Samarth |
 | **Touches** | `runner/`, `runner/roles/`, `runner/learners/`, `runner/engines/`, `runner/transports/`, `policy/`, shared submission wiring, tests and architecture documentation |
 | **Invariants** | I1/I2 (policy crosses the training/inference boundary), I5 (resource choices do not change the scientific experiment), I8 (immutable version pins and tenant isolation), I10 (checkpoint and recovery ownership) |
@@ -126,4 +126,11 @@ Accepted interpretation: NCCL carries tensor buffers, never base64 or a serializ
 
 ## Outcome
 
-Proposal only. No runtime code changed, no experiment launched, no GPU allocated, no implementation tests or performance qualification claimed. The worktree starts from the public framework snapshot; integration of private experiment improvements and publication are later steps.
+Implemented in the isolated `codex/universal-adapter-state` worktree, based on the public snapshot. CONTEXT entry 98 records the result; `docs/adapter-publication.md` describes the supported interfaces and remaining costs.
+
+- Shared submission-time `WeightTransfer` selects base64 or NCCL for initial and per-update live publication, with no adapter-type switch in the transfer backend. Every built-in compute-side state supplies tensors and metadata through the same state contract. NCCL sends coalesced tensor buffers directly between residents, with persistent bounded peer groups; neither base64 nor a checkpoint archive is used for tensor carriage. Current inference lowerings retain local conversion where required by their consumer.
+- Adapter-only export, optimizer export, initial version binding and resident-side policy fingerprinting are separate learner operations. Optimizer serialization occurs at checkpoints. Replay-only SFT does not ship an adapter archive each step, but still hashes state on the resident so saved historical policies remain verifiable. Warm-start and resume preserve the offset between a probabilistic adapter's saved draw counter and a child's logical update number.
+- Content IDs for tensor publications use `bundle:tensor:`. Their manifests reconstruct from the existing saved payload formats, without rewriting historical artifacts or changing scientific spec fields. Existing fake-run identity and checkpoint/rewind regression tests are preserved. Host journals separately record publication and checkpoint measurements; the existing update-event shape is unchanged.
+- Failure handling includes content verification before installation, acknowledgement of every replica, immutable old-version pins, abort/release of partial work, resident-owned communication cleanup, and no automatic replay of uncertain tensor sends. Shared pin/eviction state is synchronized against receiver-thread installation. NCCL is refused on unsupported/alternating endpoints and with store delivery.
+- The full lightweight suite ran **1,900 tests: OK, 263 skipped**. Selected PyTorch adapter/protocol suites ran **243 tests: OK, one skipped**. CPU tensor integration used real Gloo process groups and tests that prohibit base64/checkpoint encoding in the data path. The two-device NCCL smoke test was skipped because the local machine has no suitable CUDA devices. A stale pre-existing deployment test's expected CLI wheel was corrected from 0.8.1 to the unchanged deployment's 0.8.12 pin.
+- **Remaining work, explicitly:** supported-hardware NCCL smoke test, native inference/model installation qualification, multi-node and dp/fsdp live drills, staging-memory sizing, and representative throughput measurements. No GPU was rented and no scientific experiment or deployment was run. The legacy FitJob/Fitter remains a compatibility path; migration of its callers and removal of its Dreamer assumptions are not claimed here. Consolidating private experiment runtime patches remains a separate integration step.

@@ -53,6 +53,14 @@ class BoundTest(unittest.TestCase):
 
 
 class ImmunityTest(unittest.TestCase):
+    def test_an_evicted_version_is_refused_before_it_can_serve_as_base(self):
+        held, _ = residency(1)
+        held.hold("old", {"lora": "old"})
+        held.hold("new", {"lora": "new"})
+        with self.assertRaisesRegex(RuntimeError, "evicted"):
+            with held.pinned("old"):
+                self.fail("a missing adapter version became a request")
+
     def test_a_pinned_bundle_is_never_evicted(self) -> None:
         """I8: a request's policy is immune once submitted, however old."""
         held, detached = residency(1)

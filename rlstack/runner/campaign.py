@@ -24,6 +24,7 @@ import json
 from collections.abc import Mapping, Sequence
 
 from rlstack.runner.checkpointing import Checkpointing
+from rlstack.runner.weight_transfer import WeightTransfer
 from rlstack.runner.desk import Demand, Desk, DeskError, demand_rows
 from rlstack.runner.host import LEARNER_ROUTE
 from rlstack.spec.specs import ExperimentSpec, PoolMember
@@ -121,7 +122,8 @@ def anchor_demand(demands: Sequence[Demand], asked: str | None) -> Demand:
 
 def frame_for(spec: ExperimentSpec, subdir: str | None = None,
               resume: bool = False, *,
-              checkpointing: Checkpointing) -> dict:
+              checkpointing: Checkpointing,
+              weight_transfer: WeightTransfer = WeightTransfer()) -> dict:
     """The opaque frame a submission delivers: the canonical row, the
     client's code claim (the hashes the anchor host diffs against its own
     registry — the skew check's evidence), the filing hint, and the
@@ -137,6 +139,8 @@ def frame_for(spec: ExperimentSpec, subdir: str | None = None,
              "checkpointing": checkpointing.row()}
     if resume:
         frame["resume"] = True
+    if weight_transfer != WeightTransfer():
+        frame["weight_transfer"] = weight_transfer.row()
     return frame
 
 
@@ -152,13 +156,15 @@ class Campaigns:
                      subdir: str | None = None,
                      anchor: str | None = None, solo: bool = False,
                      resume: bool = False, *,
-                     checkpointing: Checkpointing) -> dict:
+                     checkpointing: Checkpointing,
+                     weight_transfer: WeightTransfer = WeightTransfer()) -> dict:
         """A spec through the blind door: shaped here, delivered there.
         `anchor` names the member the frame lands on (demands_of's rule);
         `checkpointing` is the submission's own decision (ADR 0014)."""
         return await self.desk.submit(
             demand_rows(demands_of(spec, anchor)),
-            frame_for(spec, subdir, resume, checkpointing=checkpointing),
+            frame_for(spec, subdir, resume, checkpointing=checkpointing,
+                      weight_transfer=weight_transfer),
             solo=solo)
 
     async def serve(self, verb: str, payload: dict) -> dict:
@@ -231,7 +237,8 @@ class Campaigns:
                 archived = self.desk.placements().get(rid, {}).get("frame", {})
                 cadence = (checkpointing if checkpointing is not None
                            else Checkpointing.from_row(archived.get("checkpointing")))
-                reply = await self.submit(child, checkpointing=cadence)
+                reply = await self.submit(child, checkpointing=cadence,
+                    weight_transfer=WeightTransfer.from_row(archived.get("weight_transfer")))
                 if reply.get("accepted"):
                     self.store.append_fleet_event({
                         "event": "migrate", "t": time.time(), "parent": rid,

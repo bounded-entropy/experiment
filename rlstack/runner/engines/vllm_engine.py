@@ -42,6 +42,7 @@ import contextlib
 import os
 import tempfile
 import time
+import threading
 from collections.abc import AsyncIterator, Mapping, Sequence
 from pathlib import Path
 
@@ -65,7 +66,8 @@ class VllmEngine:
                  max_rank: int = 32, max_members: int = 0,
                  max_library: int = 32, cas_get=None, enforce_eager: bool | None = None,
                  tp: int = 1, serves: Sequence[str] = ("lora",),
-                 enable_sleep_mode: bool = False, log_stats: bool = False) -> None:
+                 enable_sleep_mode: bool = False, log_stats: bool = False,
+                 weight_transfer_host: str | None = None) -> None:
         from transformers import AutoConfig, AutoTokenizer
 
         self.base = base
@@ -130,6 +132,9 @@ class VllmEngine:
         # least-recently-used first, never a bundle a request is pinning.
         self._residency = BundleResidency(max_bundles, self._detach_all)
         self._request_count = 0
+        self._weight_receiver = None
+        self._publication_lock = threading.RLock()
+        self.weight_transfer_host = weight_transfer_host
 
     def _serving_adapter_types(self) -> dict[str, RolloutLowering]:
         """One rollout lowering per adapter type this build was asked to serve,
@@ -214,6 +219,10 @@ class VllmEngine:
         return {meta.name: reach(meta) for meta in sites}
 
     def add_bundle(self, bundle: Bundle) -> None:
+        with self._publication_lock:
+            self._add_bundle(bundle)
+
+    def _add_bundle(self, bundle: Bundle) -> None:
         """THE bus loop: every adapter type in the bundle, made resident through
         its own lowering.
 
@@ -240,6 +249,56 @@ class VllmEngine:
         (`Library.pinned`); what a lowering built from an evicted name goes
         with it (`_forget_library`)."""
         self._library.add(name, payload)
+
+    def install_tensor_state(self, manifest, states) -> None:
+        with self._publication_lock:
+            self._install_tensor_state(manifest, states)
+
+    def _install_tensor_state(self, manifest, states) -> None:
+        """Adapter-neutral bus; lowerings own installation, not carriage."""
+        bundle_id = manifest["bundle_id"]
+        if self._residency.knows(bundle_id):
+            return
+        grouped: dict[str, dict] = {}
+        for name, state in states.items():
+            grouped.setdefault(manifest["adapter_types"][name], {})[name] = state
+        lowerings = [self._lowering_for(bundle_id, kind) for kind in grouped]
+        check_levers_compose(bundle_id, lowerings)
+        attached = {}
+        try:
+            for lowering in lowerings:
+                attached[lowering.adapter_type] = lowering.attach_state(
+                    bundle_id, grouped[lowering.adapter_type])
+        except BaseException:
+            self._detach_all(attached)
+            raise
+        self._residency.hold(bundle_id, attached)
+
+    def prepare_transfer(self, manifest, transfer) -> dict:
+        from rlstack.runner.transports.tensor import TensorReceiver
+        from dataclasses import replace
+        if self._asleep:
+            raise ValueError("NCCL publication requires an awake dedicated inference resident")
+        if set(manifest["states"]) != set(manifest["adapter_types"]):
+            raise ValueError("tensor publication must label every adapter state")
+        check_levers_compose(manifest["bundle_id"], [
+            self._lowering_for(manifest["bundle_id"], kind)
+            for kind in sorted(set(manifest["adapter_types"].values()))])
+        if self.weight_transfer_host is not None:
+            transfer = replace(transfer, rendezvous_host=self.weight_transfer_host)
+        with self._publication_lock:
+            if self._weight_receiver is None:
+                self._weight_receiver = TensorReceiver(self.install_tensor_state)
+            return self._weight_receiver.prepare(manifest, transfer)
+
+    def finish_transfer(self, source: str, token: str) -> dict:
+        if self._weight_receiver is None:
+            raise ValueError("no tensor transfer was prepared")
+        return self._weight_receiver.finish(source, token)
+
+    def abort_transfer(self, source: str, token: str) -> None:
+        if self._weight_receiver is not None:
+            self._weight_receiver.abort(source, token)
 
     def holds_library(self, name: str, digest: str) -> bool:
         return self._library.holds(name, digest)
@@ -477,6 +536,9 @@ class VllmEngine:
         reason sleep() is: the vLLM build is lazy, so a host may be told to
         shut down before it ever served a request.
         """
+        if self._weight_receiver is not None:
+            self._weight_receiver.close()
+            self._weight_receiver = None
         if self._llm is None:
             return
         if self._stats_task is not None:

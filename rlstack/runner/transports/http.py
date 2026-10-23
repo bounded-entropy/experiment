@@ -149,6 +149,8 @@ class HttpTransport:
             try:
                 return await self.frame("ask", verb, payload, deadline_s)
             except Unreachable as error:
+                if verb in ("prepare_transfer", "send_transfer", "emit_initial", "emit"):
+                    raise   # completion is unknown; never repeat a send or advance a draw twice
                 if not getattr(error, "transient", False) or time.monotonic() - started >= ASK_RETRY_S:
                     raise
                 await asyncio.sleep(pause)

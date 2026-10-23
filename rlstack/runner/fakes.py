@@ -208,6 +208,15 @@ class FakeEngine:
         exactly "was it ever registered here"."""
         return bundle_id in self._known
 
+    def prepare_transfer(self, manifest, transfer):
+        raise ValueError("fake metal has no CUDA tensors; select base64")
+
+    def finish_transfer(self, source, token):
+        raise ValueError("fake metal has no CUDA tensor transfers")
+
+    def abort_transfer(self, source, token):
+        pass
+
     async def score_tokens(self, messages: Sequence[Message],
                            token_ids: Sequence[int],
                            bundle_id: str,
@@ -743,15 +752,45 @@ class FakeLearner:
         return content_hash({"init": state.set_inits[entry], "route": route})
 
     def emit(self, tenant: str) -> Emitted:
+        return Emitted(adapters=self.emit_adapters(tenant), optim=self.emit_optim(tenant))
+
+    def emit_initial(self, tenant: str, versions: Mapping[str, int]) -> Emitted:
+        return self.emit(tenant)
+
+    def emit_adapters(self, tenant: str, versions: Mapping[str, int] | None = None) -> Mapping[str, bytes]:
         state = self._tenant(tenant)
-        adapters = {
+        return self._adapter_payloads(state)
+
+    @staticmethod
+    def _adapter_payloads(state) -> dict[str, bytes]:
+        return {
             name: (f"fake-delta:{name}:{state.state}".encode()
                    if name in state.trainable else state.frozen[name])
             for name in state.all_names
         }
-        optim = {name: f"fake-optim:{name}:{state.steps}:{state.state}".encode()
-                 for name in state.trainable}
-        return Emitted(adapters=adapters, optim=optim)
+
+    def policy_pin(self, tenant, versions, names, adapter_types):
+        from rlstack.policy.compile import compile_bundle
+        bundle = compile_bundle(self._adapter_payloads(self._tenant(tenant)),
+                                versions, names, adapter_types)
+        return Bundle.pin(bundle.bundle_id, bundle.policy_version)
+
+    def emit_optim(self, tenant: str) -> Mapping[str, bytes]:
+        state = self._tenant(tenant)
+        return {name: f"fake-optim:{name}:{state.steps}:{state.state}".encode()
+                for name in state.trainable}
+
+    def export_state(self, tenant, versions, names):
+        raise ValueError("fake metal has no CUDA tensors; select base64")
+
+    def prepare_transfer(self, tenant, versions, names, adapter_types):
+        raise ValueError("fake metal has no CUDA tensors; select base64")
+
+    def send_transfer(self, token, endpoint, timeout_s):
+        raise ValueError("fake metal has no CUDA tensor transfers")
+
+    def release_transfer(self, token):
+        pass
 
     def first_contact(self) -> dict:
         """The fake learner's own measurement (ADR 0008, F5): empty until it

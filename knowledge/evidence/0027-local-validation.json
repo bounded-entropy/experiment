@@ -1,0 +1,59 @@
+{
+  "date": "2026-10-23",
+  "scope": "Universal checkpoint/publication implementation in this commit",
+  "base_commit": "9ffaf5c5dcbbb0bb252e0c04e73eaa82015e2fe5",
+  "adr_acceptance_commit": "98ffd09",
+  "lightweight_suite": {
+    "command": "python3.13 -m unittest discover -s tests",
+    "tests_run": 1900,
+    "passed": 1637,
+    "skipped": 263,
+    "failures": 0,
+    "errors": 0,
+    "elapsed_seconds": 69.379
+  },
+  "selected_torch_suites": {
+    "python": "3.12.12",
+    "torch": "2.14.0",
+    "suites": [
+      "test_batched_replay",
+      "test_dream_bank",
+      "test_soft_prompt",
+      "test_spectral",
+      "test_spectral_latent",
+      "test_steer",
+      "test_plora",
+      "test_weight_transfer",
+      "test_learned_tasks"
+    ],
+    "tests_run": 243,
+    "passed": 242,
+    "skipped": 1,
+    "failures": 0,
+    "errors": 0,
+    "elapsed_seconds": 1.925,
+    "skip": "LiveNcclTransport requires two CUDA devices with working NCCL",
+    "data_channel_exercised": "Dedicated real CPU Gloo groups using the tensor protocol; not NCCL"
+  },
+  "additional_checks": [
+    "Six test_task_posteriors cases passed with torch, covering spectral_tasks checkpoint state",
+    "Trainer-only value-head tensor layout and checkpoint load round trip passed",
+    "git diff --check passed",
+    "python3.13 -m compileall -q rlstack passed"
+  ],
+  "counts_overlap": true,
+  "gpu_allocated": false,
+  "experiment_launched": false,
+  "deployed": false,
+  "legacy_fitter_migrated": false,
+  "checkpoint_codecs_changed": false,
+  "baseline_test_repair": "Hosted deployment already pins CLI 0.8.12; updated its stale 0.8.1 assertion without changing the deployment pin",
+  "remaining_qualification": [
+    "NCCL on supported CUDA hardware under the pinned deployment image (torch 2.13.0, vLLM 0.28.0)",
+    "Inference-worker installation and staging-memory sizing",
+    "End-to-end model correctness, asynchronous version pins and recovery on GPUs",
+    "Multi-node and dp/fsdp live publication",
+    "Representative end-to-end throughput and phase timings"
+  ],
+  "performance_claim": null
+}

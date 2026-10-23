@@ -11,6 +11,9 @@ row gets is read from the forward's row plan. torch is imported at module scope
 
 from __future__ import annotations
 
+from rlstack.policy.adapters.state_torch import TensorState
+from rlstack.policy.state import AdapterState
+
 import hashlib
 import io
 import json
@@ -31,7 +34,7 @@ PEFT_PREFIX = "base_model.model."
 
 
 @dataclass
-class LoraState:
+class LoraState(AdapterState):
     """One bank entry's trainable state: (A, B) per site path, rank r."""
 
     r: int
@@ -40,6 +43,9 @@ class LoraState:
 
     def parameters(self) -> list[torch.nn.Parameter]:
         return [*self.a.values(), *self.b.values()]
+
+    def export_state(self, version: int) -> TensorState:
+        return export_state(self, version)
 
 
 class LoraSite(SiteWrapper):
@@ -159,15 +165,20 @@ def uninstall(model: torch.nn.Module, state: LoraState) -> None:
         leave_site(model, path, LoraSite, state)
 
 
-def emit(state: LoraState) -> bytes:
+def export_state(state: LoraState, version: int | None = None) -> TensorState:
     """peft-format safetensors: keys are module paths — the site knowledge
     crosses the membrane INSIDE the payload, in the consumer's native format."""
     tensors = {}
     for path in state.a:
-        tensors[f"{PEFT_PREFIX}{path}.lora_A.weight"] = state.a[path].data.cpu()
-        tensors[f"{PEFT_PREFIX}{path}.lora_B.weight"] = state.b[path].data.cpu()
-    return st_save(tensors)
+        tensors[f"{PEFT_PREFIX}{path}.lora_A.weight"] = state.a[path].data
+        tensors[f"{PEFT_PREFIX}{path}.lora_B.weight"] = state.b[path].data
+    return TensorState(tensors)
 
+
+def emit(state: LoraState) -> bytes:
+    """Encode the existing checkpoint format; publication can use tensors directly."""
+    snapshot = export_state(state)
+    return snapshot.encode()
 
 def load(state: LoraState, payload: bytes) -> None:
     """emit's inverse: restore (A, B) in place from a peft payload."""

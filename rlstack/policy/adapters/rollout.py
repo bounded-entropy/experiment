@@ -406,6 +406,15 @@ class RolloutLowering:
     def __init__(self, build: ServingBuild) -> None:
         self.build = build
 
+    def attach_state(self, bundle_id: str, states: Mapping[str, Any]) -> Any:
+        """Install transported tensors using this engine's existing consumer.
+
+        File-based consumers encode locally on receipt; this never puts an
+        archive or base64 onto NCCL. A lowering may override this conversion
+        with its native tensor loader, independently of the transfer backend.
+        """
+        return self.attach(bundle_id, {name: state.encode() for name, state in states.items()})
+
     def demands(self) -> BuildDemands:
         """What this build must pay to serve the adapter type (engine args,
         plugins)."""

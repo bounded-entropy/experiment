@@ -9,6 +9,9 @@ from dataclasses import dataclass, field
 import json
 
 import torch
+
+from rlstack.policy.adapters.state_torch import TensorState
+from rlstack.policy.state import AdapterState
 from torch.nn.functional import normalize
 from safetensors.torch import save as st_save
 
@@ -20,7 +23,7 @@ from rlstack.policy.adapters.spectral_tasks import EPS_RECORD, TASK_RECORD
 
 
 @dataclass
-class LearnedTaskState:
+class LearnedTaskState(AdapterState):
     rank: int
     latent: int
     hidden: int
@@ -43,6 +46,9 @@ class LearnedTaskState:
 
     def parameters(self):
         return [p for group in param_groups(self).values() for p in group]
+
+    def export_state(self, version: int) -> TensorState:
+        return export_state(self, version)
 
 
 def build(sites, init) -> LearnedTaskState:
@@ -171,16 +177,20 @@ def shared_tensors(state):
     return tensors
 
 
-def emit(state):
+def export_state(state, version: int | None = None) -> TensorState:
     """Learned bases are durable parameters, not reconstructed from the base."""
     header = json.dumps({"format": "learned_tasks_v1", "scope": state.scope,
                          "rank": state.rank, "latent": state.latent,
                          "hidden": state.hidden, "paths": list(state.heads)}, sort_keys=True).encode()
     tensors = {"posterior.mu": state.mu, "posterior.log_std": state.log_std,
                **shared_tensors(state)}
-    body = st_save({key: value.detach().cpu().contiguous() for key, value in tensors.items()})
-    return len(header).to_bytes(8, "big") + header + body
+    return TensorState(tensors, len(header).to_bytes(8, "big") + header)
 
+
+def emit(state):
+    """Encode the existing checkpoint format; publication can use tensors directly."""
+    snapshot = export_state(state)
+    return snapshot.encode()
 
 def load(state, payload):
     """Same scope resumes q; a new scope inherits the frozen decoder only."""

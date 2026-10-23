@@ -20,6 +20,9 @@ type's methods (STYLE rule 7).
 
 from __future__ import annotations
 
+from rlstack.policy.adapters.state_torch import TensorState
+from rlstack.policy.state import AdapterState
+
 import json
 from dataclasses import dataclass, field
 
@@ -41,7 +44,7 @@ FROZEN_DTYPE = torch.bfloat16      # U and V, held for the replay delta: the
 
 
 @dataclass
-class SpectralState:
+class SpectralState(AdapterState):
     """One bank entry's spectral state: dense gains per site, and the frozen
     spectrum they steer (filled at install, from the weight itself)."""
 
@@ -55,6 +58,9 @@ class SpectralState:
 
     def parameters(self) -> list[torch.nn.Parameter]:
         return list(self.delta.values())
+
+    def export_state(self, version: int) -> TensorState:
+        return export_state(self, version)
 
 
 def build(sites: tuple[SiteMeta, ...], init: dict) -> SpectralState:
@@ -203,14 +209,14 @@ def uninstall(model: torch.nn.Module, state: SpectralState) -> None:
 # the payload: dense gains for resume, materialized top-k for the engine
 # ---------------------------------------------------------------------------
 
-def emit(state: SpectralState) -> bytes:
+def export_state(state: SpectralState, version: int | None = None) -> TensorState:
     """One container, two consumers: `delta.<path>` (dense, fp32 — what load
     restores, so resume keeps every direction's accumulated movement) and the
     peft-format top-k pair (bf16 — what the engine serves). Pure function of
     the parameters; the selection is recomputed, not stored."""
     tensors: dict[str, torch.Tensor] = {}
     for path in state.paths:
-        tensors[f"delta.{path}"] = state.delta[path].data.cpu()
+        tensors[f"delta.{path}"] = state.delta[path].data
         picked = served_indices(state, path)
         with torch.no_grad():
             eff = (state.sigma[path] * state.delta[path])[picked]
@@ -218,13 +224,18 @@ def emit(state: SpectralState) -> bytes:
             lora_b = (state.u[path][:, picked].to(torch.float32)
                       * eff[None, :])                               # [out, k]
         tensors[f"peft.{PEFT_PREFIX}{path}.lora_A.weight"] = \
-            lora_a.to(FROZEN_DTYPE).contiguous().cpu()
+            lora_a.to(FROZEN_DTYPE).contiguous()
         tensors[f"peft.{PEFT_PREFIX}{path}.lora_B.weight"] = \
-            lora_b.to(FROZEN_DTYPE).contiguous().cpu()
+            lora_b.to(FROZEN_DTYPE).contiguous()
     head = json.dumps({"k": state.k, "paths": list(state.paths)},
                       sort_keys=True, separators=(",", ":")).encode("utf-8")
-    return len(head).to_bytes(8, "big") + head + st_save(tensors)
+    return TensorState(tensors, len(head).to_bytes(8, "big") + head)
 
+
+def emit(state: SpectralState) -> bytes:
+    """Encode the existing checkpoint format; publication can use tensors directly."""
+    snapshot = export_state(state)
+    return snapshot.encode()
 
 def unpack(payload: bytes) -> tuple[dict, dict[str, torch.Tensor]]:
     """emit's container, opened: (head, tensors)."""

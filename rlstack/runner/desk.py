@@ -1667,7 +1667,8 @@ class Desk:
             reply = await anchor_listing.host.adopt(
                 frame.get("spec"), routes, frame.get("code"),
                 frame.get("subdir"), resume=bool(frame.get("resume", False)),
-                checkpointing=frame.get("checkpointing"))
+                checkpointing=frame.get("checkpointing"),
+                weight_transfer=frame.get("weight_transfer"))
         except Exception as down:
             # the probe passed and the container died between it and the
             # knock — or the adopt outlived its deadline: the reply says so

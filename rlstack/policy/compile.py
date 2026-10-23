@@ -18,6 +18,7 @@ from dataclasses import dataclass, field
 from rlstack.policy.adapters.base import Mechanism
 from rlstack.registry import ADAPTER_TYPES
 from rlstack.spec.canonical import content_hash
+from rlstack.policy.state import StateLayout, payload_layout, tensor_bundle_id
 
 
 @dataclass(frozen=True)
@@ -70,6 +71,13 @@ def compile_bundle(
 ReadBlob = Callable[[str, str, int], bytes]     # (section, name, version) -> bytes
 
 
+def compile_tensor_pin(layouts: Mapping[str, StateLayout],
+                       policy_version: Mapping[str, int],
+                       adapter_types: Mapping[str, str]) -> Bundle:
+    return Bundle(tensor_bundle_id(policy_version, layouts), dict(policy_version),
+                  adapter_types=dict(adapter_types))
+
+
 def restore_bundle(policy_version: Mapping[str, int], bundle_id: str,
                    read_blob: ReadBlob, servable: Iterable[str],
                    adapter_types: Mapping[str, str] | None = None) -> Bundle:
@@ -90,7 +98,12 @@ def restore_bundle(policy_version: Mapping[str, int], bundle_id: str,
     """
     payloads = {name: read_blob("adapters", name, policy_version[name])
                 for name in sorted(servable)}
-    rebuilt = compile_bundle(payloads, policy_version, servable, adapter_types)
+    if bundle_id.startswith("bundle:tensor:"):
+        layouts = {name: payload_layout(payload) for name, payload in payloads.items()}
+        rebuilt = Bundle(tensor_bundle_id(policy_version, layouts), dict(policy_version),
+                         payloads, dict(adapter_types or {}))
+    else:
+        rebuilt = compile_bundle(payloads, policy_version, servable, adapter_types)
     if rebuilt.bundle_id != bundle_id:
         raise ValueError(
             f"restored bundle {rebuilt.bundle_id} is not the committed "

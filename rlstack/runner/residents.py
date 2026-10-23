@@ -93,6 +93,7 @@ class EngineBuild:
     # vLLM's own periodic stats line (running / waiting requests, KV-cache
     # use, throughput) in the resident's log: an operator's diagnosis knob
     log_stats: bool = False
+    weight_transfer_host: str | None = None
 
 
 @dataclass(frozen=True)
@@ -253,7 +254,8 @@ def build_engine(regime: Regime, partition: Partition, build: Build,
             max_rank=build.max_rank, max_members=build.max_members,
             max_library=build.max_library, cas_get=store.cas_get, serves=build.serves,
             enable_sleep_mode=build.enable_sleep_mode,
-            enforce_eager=build.enforce_eager, log_stats=build.log_stats)
+            enforce_eager=build.enforce_eager, log_stats=build.log_stats,
+            weight_transfer_host=build.weight_transfer_host)
     raise ResidentError(
         f"{type(build).__name__} is not an engine build; regime "
         f"{regime.name!r} is inference")

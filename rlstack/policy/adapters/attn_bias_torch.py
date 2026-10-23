@@ -17,6 +17,9 @@ type's methods (STYLE rule 7).
 
 from __future__ import annotations
 
+from rlstack.policy.adapters.state_torch import TensorState
+from rlstack.policy.state import AdapterState
+
 import re
 from dataclasses import dataclass
 
@@ -68,7 +71,7 @@ PARAMETERIZATIONS = {"free": free, "bounded_sigmoid": bounded_sigmoid}
 
 
 @dataclass
-class AttnBiasState:
+class AttnBiasState(AdapterState):
     """One bank entry's trainable state: theta per (head, prompt row)."""
 
     n: int
@@ -84,6 +87,9 @@ class AttnBiasState:
     def value(self) -> torch.Tensor:
         """The bias itself: theta through this entry's parameterization."""
         return PARAMETERIZATIONS[self.param](self.theta, self.cap)
+
+    def export_state(self, version: int) -> TensorState:
+        return export_state(self, version)
 
 
 # ---------------------------------------------------------------------------
@@ -195,11 +201,16 @@ def uninstall(model: torch.nn.Module, state: AttnBiasState) -> None:
     the learner dropping the slot."""
 
 
-def emit(state: AttnBiasState) -> bytes:
+def export_state(state: AttnBiasState, version: int | None = None) -> TensorState:
     """safetensors with ONE key: theta. The parameterization is spec (it hashes
     into run identity), so the payload carries numbers, never behavior."""
-    return st_save({BIAS_KEY: state.theta.data.cpu()})
+    return TensorState({BIAS_KEY: state.theta.data})
 
+
+def emit(state: AttnBiasState) -> bytes:
+    """Encode the existing checkpoint format; publication can use tensors directly."""
+    snapshot = export_state(state)
+    return snapshot.encode()
 
 def load(state: AttnBiasState, payload: bytes) -> None:
     state.theta.data.copy_(st_load(payload)[BIAS_KEY])

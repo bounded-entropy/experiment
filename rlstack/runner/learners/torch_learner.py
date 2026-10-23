@@ -25,6 +25,7 @@ from collections.abc import Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from typing import Any
+import time
 
 import torch
 import torch.utils.checkpoint
@@ -180,6 +181,7 @@ class TorchLearner:
         self._base: str | None = None
         self._model: torch.nn.Module | None = None
         self._tenants: dict[str, _Tenant] = {}
+        self._weight_sender = None
 
     # ---- Learner protocol ---------------------------------------------------
 
@@ -258,6 +260,8 @@ class TorchLearner:
         the module tree goes back to the way install found it. Idempotent — a
         tenant nobody installed is already uninstalled, which is what lets a
         host uninstall in a `finally` without knowing how far its run got."""
+        if self._weight_sender is not None:
+            self._weight_sender.release_owner(tenant)
         if tenant in self._tenants:
             self._remove(tenant)
 
@@ -443,12 +447,59 @@ class TorchLearner:
         return state.adapter_types[entry]
 
     def emit(self, tenant: str) -> Emitted:
+        return Emitted(adapters=self.emit_adapters(tenant), optim=self.emit_optim(tenant))
+
+    def emit_initial(self, tenant: str, versions: Mapping[str, int]) -> Emitted:
         state = self._tenant(tenant)
-        adapters = {entry: state.adapter_types[entry].emit(state.params[entry])
+        for entry, params in state.params.items():
+            params.bind_version(versions[entry])
+        return self.emit(tenant)
+
+    def emit_adapters(self, tenant: str, versions: Mapping[str, int] | None = None) -> Mapping[str, bytes]:
+        state = self._tenant(tenant)
+        if versions is None:       # legacy initial export, including its draw counter
+            return {entry: state.adapter_types[entry].emit(state.params[entry])
                     for entry in state.params}
-        optim = {entry: _state_bytes(state.optimizers[entry])
-                 for entry in state.trainable}
-        return Emitted(adapters=adapters, optim=optim)
+        return {entry: state.adapter_types[entry].export_state(
+                    state.params[entry], versions[entry]).encode()
+                for entry in state.params}
+
+    def export_state(self, tenant: str, versions: Mapping[str, int], names: Sequence[str]):
+        state = self._tenant(tenant)
+        return {entry: state.adapter_types[entry].export_state(
+                    state.params[entry], versions[entry])
+                for entry in names}
+
+    def policy_pin(self, tenant, versions, names, adapter_types):
+        """Content identity without shipping weights or an optimizer archive."""
+        from rlstack.policy.compile import compile_tensor_pin
+        states = self.export_state(tenant, versions, names)
+        return compile_tensor_pin({name: snapshot.layout() for name, snapshot in states.items()},
+                                  versions, adapter_types)
+
+    def prepare_transfer(self, tenant, versions, names, adapter_types) -> dict:
+        from rlstack.runner.transports.tensor import TensorSender
+        if self._weight_sender is None:
+            self._weight_sender = TensorSender(self.device)
+        started = time.monotonic()
+        states = self.export_state(tenant, versions, names)
+        materialized = time.monotonic()
+        manifest = self._weight_sender.capture(states, versions, adapter_types, owner=tenant)
+        manifest["materialize_s"] = materialized - started
+        return manifest
+
+    def send_transfer(self, token, endpoint, timeout_s) -> dict:
+        if self._weight_sender is None:
+            raise ValueError("no tensor snapshot was captured")
+        return self._weight_sender.send(token, endpoint, timeout_s)
+
+    def release_transfer(self, token) -> None:
+        if self._weight_sender is not None:
+            self._weight_sender.release(token)
+
+    def emit_optim(self, tenant: str) -> Mapping[str, bytes]:
+        state = self._tenant(tenant)
+        return {entry: _state_bytes(state.optimizers[entry]) for entry in state.trainable}
 
     def load(self, tenant: str, adapters: Mapping[str, bytes],
              optim: Mapping[str, bytes] | None) -> None:
@@ -505,8 +556,10 @@ class TorchLearner:
         self._asleep = False
 
     def shutdown(self) -> None:
-        """A resident's last verb. An unsharded learner holds no process of
-        its own, so there is nothing to end; the sharded build overrides."""
+        """Close publication groups; the sharded build also ends its rank chorus."""
+        if self._weight_sender is not None:
+            self._weight_sender.close()
+            self._weight_sender = None
 
     def _move_everything(self, device: str) -> None:
         self.move_the_base(device)

@@ -57,6 +57,7 @@ import asyncio
 from collections.abc import Mapping, Sequence
 import math
 from functools import lru_cache, partial
+import time
 
 from rlstack.data.flatten import broadcast, flatten, pack
 from rlstack.data.plan import EVAL, RunPlan
@@ -78,10 +79,13 @@ from rlstack.runner.names import (
 from rlstack.runner.fit import FitClient                  # ADR 0019 fit client
 from rlstack.runner.post import NamesReader, run_pipeline
 from rlstack.runner.checkpointing import Checkpointing
+from rlstack.runner.weight_transfer import WeightTransfer
+from rlstack.runner.publication import publish_tensors
 from rlstack.runner.roles.base import Runner, StopRequest
 from rlstack.runner.roles.scorer import SCORER
 from rlstack.runner.signals import RunSignals, store_work
 from rlstack.spec.flow import split_pipeline
+from rlstack.spec.validate import serving_pools
 from rlstack.spec.specs import ExperimentSpec, SamplingSpec
 
 
@@ -91,6 +95,7 @@ class Trainer(Runner):
                  learner: Learner, tenant: str,
                  initial_version: dict[str, int],
                  checkpointing: Checkpointing,
+                 weight_transfer: WeightTransfer = WeightTransfer(),
                  pools: Mapping[str, Pool] | None = None,
                  stop: StopRequest | None = None,
                  journal: HostJournal | None = None,
@@ -106,10 +111,16 @@ class Trainer(Runner):
         # each committed bundle to — empty under `store` delivery, and empty
         # for a run that declares no serving pool at all
         self.pools = dict(pools or {})
+        self.has_serving = bool(serving_pools(spec))
         self.stop = stop
         # the last committed update's payload, held until it is checkpointed
         # — what a drained stop writes
-        self.emitted: Emitted | None = None
+        self.adapters: Mapping[str, bytes] | None = None
+        self.dirty = False
+        self.weight_transfer = weight_transfer
+        self.publication_stats = None
+        self.checkpoint_stats = None
+        self.pin_s = None
         self.last_update = 0
         self.journal = journal
         self.retention = retention
@@ -261,18 +272,47 @@ class Trainer(Runner):
                     self.learner.accumulate, self.tenant,
                     list(pack(docs, self.schedule.microbatch_tokens))))
                 await asyncio.to_thread(self.learner.optim_step, self.tenant)
-                emitted = await asyncio.to_thread(self.learner.emit, self.tenant)
+                self.version = bump(self.version, self.trainable)
+                due = self.checkpointing.due(update, len(self.plan))
+                tensor_pin = None
+                export_started = time.monotonic()
+                self.publication_stats, self.checkpoint_stats = None, None
+                self.pin_s = None
+                if self.pools and self.weight_transfer.backend == "nccl":
+                    tensor_pin = await publish_tensors(self.learner, self.tenant,
+                        self.version, self.servable, self.adapter_types, self.pools,
+                        self.weight_transfer, self.journal, update)
+                    self.adapters = None
+                else:
+                    self.adapters = (await asyncio.to_thread(
+                        self.learner.emit_adapters, self.tenant, self.version)
+                        if self.has_serving or due else None)
+                    self.publication_stats = {
+                        "backend": "base64" if self.has_serving else None,
+                        "adapter_export_s": (time.monotonic() - export_started
+                                             if self.adapters is not None else None),
+                        "adapter_bytes": (sum(map(len, self.adapters.values()))
+                                          if self.adapters is not None else None)}
+                    if not self.has_serving:
+                        pin_started = time.monotonic()
+                        tensor_pin = await asyncio.to_thread(self.learner.policy_pin,
+                            self.tenant, self.version, self.servable, self.adapter_types)
+                        self.pin_s = time.monotonic() - pin_started
                 if self.loaded_libraries:
                     await self.drop_libraries(keep=self.next_libraries(update))
             clock.trained()
 
-            self.version = bump(self.version, self.trainable)
-            bundle = compile_bundle(emitted.adapters, self.version,
-                                    self.servable, self.adapter_types)
+            bundle = tensor_pin or compile_bundle(self.adapters or {}, self.version,
+                                    self.servable if self.has_serving else (),
+                                    self.adapter_types)
+            delivery_started = time.monotonic()
             await self.deliver(bundle)
+            if self.publication_stats is not None:
+                self.publication_stats["transfer_install_s"] = (
+                    time.monotonic() - delivery_started if self.pools else None)
             await self.commit(update, bundle, wave, postdata, stats)
-            self.emitted, self.last_update = emitted, update
-            if self.checkpointing.due(update, len(self.plan)):
+            self.dirty, self.last_update = True, update
+            if due:
                 await self.checkpoint(update)
             clock.sealed()
             await store_work(self.journal_update, clock, update)
@@ -332,6 +372,7 @@ class Trainer(Runner):
 
     # ---- the three steps, named (ADR 0014) ----------------------------------
 
+
     async def deliver(self, bundle) -> None:
         """THE WIRE: the new bundle on every pool that serves the policy,
         BEFORE the ledger line — so any runner reading the commit can pin it
@@ -366,16 +407,35 @@ class Trainer(Runner):
         them, then the sweep of what that line moved past. At the declared
         cadence, at the extent's last update, and on a drained stop — the
         only times bytes of policy state reach the store."""
-        emitted = self.emitted
-        if emitted is None:
+        if not self.dirty:
             return                      # nothing committed since the last checkpoint
+        started = time.monotonic()
+        adapters = self.adapters
+        if adapters is None:
+            async with self.arbiter.admit(self.learner):
+                adapters = await asyncio.to_thread(
+                    self.learner.emit_adapters, self.tenant, self.version)
+        # This read cannot require waking a learner: on an alternating host
+        # its own Generator may be waiting under engine admission during a
+        # drained stop. The resident serializes the read with all mutations.
+        optim = await asyncio.to_thread(self.learner.emit_optim, self.tenant)
+        exported = time.monotonic()
         for name in self.trainable:
             await store_work(self.run.write_blob, "adapters", name,
-                             self.version[name], emitted.adapters[name])
+                             self.version[name], adapters[name])
             await store_work(self.run.write_blob, "optim", name,
-                             self.version[name], emitted.optim[name])
+                             self.version[name], optim[name])
         await store_work(self.run.append_checkpoint, update, dict(self.version))
-        self.emitted = None
+        self.adapters, self.dirty = None, False
+        self.checkpoint_stats = {"export_s": exported - started,
+            "store_s": time.monotonic() - exported,
+            "adapter_bytes": sum(len(adapters[name]) for name in self.trainable),
+            "optimizer_bytes": sum(map(len, optim.values())),
+            "every": self.checkpointing.every, "update": update}
+        if self.journal is not None:
+            await store_work(self.journal.append, {"event": "checkpoint",
+                "run_id": self.tenant, "versions": dict(self.version),
+                **self.checkpoint_stats})
         await store_work(self.sweep_stale)
 
     async def drain(self) -> None:
@@ -429,6 +489,12 @@ class Trainer(Runner):
         nothing."""
         if self.journal is not None:
             self.journal.append(clock.row(self.tenant, update))
+            if self.publication_stats is not None and self.publication_stats["backend"] is not None:
+                self.journal.append({"event": "weight-transfer", "run_id": self.tenant,
+                    "update": update, "versions": dict(self.version), **self.publication_stats})
+            if self.pin_s is not None:
+                self.journal.append({"event": "policy-pin", "run_id": self.tenant,
+                    "update": update, "versions": dict(self.version), "hash_s": self.pin_s})
 
 
 def trained_rows(wave, postdata: Mapping[str, Sequence]) -> tuple[list, dict[str, list]]:

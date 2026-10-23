@@ -20,6 +20,9 @@ type's methods (STYLE rule 7).
 
 from __future__ import annotations
 
+from rlstack.policy.adapters.state_torch import TensorState
+from rlstack.policy.state import AdapterState
+
 import hashlib
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -37,7 +40,7 @@ VIRTUAL_TOKEN = 0        # the placeholder id a virtual position wears on the wi
 
 
 @dataclass
-class SoftPromptState:
+class SoftPromptState(AdapterState):
     """One bank entry's trainable state: n rows of width d at one boundary."""
 
     n: int
@@ -47,6 +50,9 @@ class SoftPromptState:
 
     def parameters(self) -> list[torch.nn.Parameter]:
         return [self.rows]
+
+    def export_state(self, version: int) -> TensorState:
+        return export_state(self, version)
 
 
 class PromptBoundary:
@@ -277,12 +283,17 @@ def uninstall(model: torch.nn.Module, state: SoftPromptState) -> None:
         delattr(model, BOUNDARY)
 
 
-def emit(state: SoftPromptState) -> bytes:
+def export_state(state: SoftPromptState, version: int | None = None) -> TensorState:
     """safetensors with ONE key: the rows, exactly as the engine prepends them.
     n and d are the tensor's own shape, so the payload is self-describing and
     the engine-side consumer needs nothing else."""
-    return st_save({ROWS_KEY: state.rows.data.cpu()})
+    return TensorState({ROWS_KEY: state.rows.data})
 
+
+def emit(state: SoftPromptState) -> bytes:
+    """Encode the existing checkpoint format; publication can use tensors directly."""
+    snapshot = export_state(state)
+    return snapshot.encode()
 
 def load(state: SoftPromptState, payload: bytes) -> None:
     """emit's inverse: restore the rows in place."""

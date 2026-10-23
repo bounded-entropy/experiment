@@ -72,6 +72,7 @@ from rlstack.runner.interfaces import (
     Parameterization, TokenEvent, TrainStats,
 )
 from rlstack.runner.meters import TrafficMeter
+from rlstack.runner.weight_transfer import WeightTransfer
 from rlstack.spec.canonical import TYPE_KEY
 from rlstack.spec.specs import SamplingSpec
 
@@ -626,7 +627,8 @@ def check_epoch(payload: Mapping, mine: str, who: str) -> None:
 
 LEARNER_VERBS = ("install", "uninstall", "forward_backward", "accumulate",
                  "optim_step",
-                 "emit", "load", "learner_tokenize",
+                 "emit", "emit_initial", "emit_adapters", "emit_optim", "policy_pin", "load", "learner_tokenize",
+                 "prepare_transfer", "send_transfer", "release_transfer",
                  "forward", "load_set", "drop_set", "emit_set")
 """The Learner protocol as frames — the whole of what crosses a host door to
 a learner. Host-addressed: a host wears at most one learner, so unlike an
@@ -735,7 +737,8 @@ class HostService:
                                          payload.get("code"),
                                          payload.get("subdir"),
                                          resume=bool(payload.get("resume", False)),
-                                         checkpointing=payload.get("checkpointing"))
+                                         checkpointing=payload.get("checkpointing"),
+                                         weight_transfer=payload.get("weight_transfer"))
         if verb == "stop":
             # the host's wait for a drain must end before the wire's deadline
             # does, so the reply — not a timeout — says what happened
@@ -809,6 +812,13 @@ class HostService:
         """
         async with self._learner_lock:
             self.check_open()
+            if verb == "emit_optim":
+                # Read existing moments, wherever they reside (including
+                # asleep in host RAM). No model forward, mutation or wake.
+                # Waking here deadlocks a drained stop against its Generator.
+                started.set()
+                return await asyncio.to_thread(
+                    self.learner_service(learner).answer, verb, payload)
             async with self.host.arbiter.admit(learner):
                 self.check_open()
                 started.set()
@@ -921,6 +931,14 @@ class EngineService:
         if verb == "add_bundle":
             self.engine.add_bundle(decode_bundle(payload["bundle"]))
             return {}
+        if verb == "prepare_transfer":
+            return self.engine.prepare_transfer(payload["manifest"],
+                                                 WeightTransfer.from_row(payload["transfer"]))
+        if verb == "finish_transfer":
+            return self.engine.finish_transfer(payload["source"], payload["token"])
+        if verb == "abort_transfer":
+            self.engine.abort_transfer(payload["source"], payload["token"])
+            return {}
         if verb == "add_library":
             if payload.get("payload") is None:
                 # the digest alone (RemotePool.add_library): held, or missing
@@ -998,6 +1016,25 @@ class LearnerService:
             return {}
         if verb == "emit":
             return encode_emitted(self.learner.emit(tenant))
+        if verb == "emit_initial":
+            return encode_emitted(self.learner.emit_initial(tenant, payload["versions"]))
+        if verb == "emit_adapters":
+            return {"adapters": encode_payloads(self.learner.emit_adapters(
+                tenant, payload.get("versions")))}
+        if verb == "emit_optim":
+            return {"optim": encode_payloads(self.learner.emit_optim(tenant))}
+        if verb == "policy_pin":
+            return encode_bundle(self.learner.policy_pin(tenant, payload["versions"],
+                payload["names"], payload["adapter_types"]))
+        if verb == "prepare_transfer":
+            return self.learner.prepare_transfer(tenant, payload["versions"],
+                                                 payload["names"], payload["adapter_types"])
+        if verb == "send_transfer":
+            return self.learner.send_transfer(payload["token"], payload["endpoint"],
+                                              payload["timeout_s"])
+        if verb == "release_transfer":
+            self.learner.release_transfer(payload["token"])
+            return {}
         if verb == "load":
             self.learner.load(tenant, decode_payloads(payload["adapters"]) or {},
                               decode_payloads(payload["optim"]))
@@ -1326,6 +1363,17 @@ class RemotePool:
         self._asked("add_bundle", {
             **self._address(), "bundle": encode_bundle(bundle)})
 
+    def prepare_transfer(self, manifest, transfer: WeightTransfer) -> dict:
+        return self._asked("prepare_transfer", {**self._address(),
+                           "manifest": manifest, "transfer": transfer.row()})
+
+    def finish_transfer(self, source, token) -> dict:
+        return self._asked("finish_transfer", {**self._address(),
+                           "source": source, "token": token})
+
+    def abort_transfer(self, source, token) -> None:
+        self._asked("abort_transfer", {**self._address(), "source": source, "token": token})
+
     def add_library(self, name: str, payload: bytes) -> None:
         """Admission-free and additive, as add_bundle is, and the bytes cross
         the same way (base64): the role read the store, the engine never
@@ -1504,6 +1552,31 @@ class RemoteLearner:
     def emit(self, tenant: str) -> Emitted:
         return decode_emitted(self.frame("emit", {"tenant": tenant}))
 
+    def emit_initial(self, tenant: str, versions: Mapping[str, int]) -> Emitted:
+        return decode_emitted(self.frame("emit_initial", {"tenant": tenant, "versions": dict(versions)}))
+
+    def emit_adapters(self, tenant: str, versions: Mapping[str, int] | None = None) -> Mapping[str, bytes]:
+        return decode_payloads(self.frame("emit_adapters", {
+            "tenant": tenant, "versions": versions})["adapters"]) or {}
+
+    def emit_optim(self, tenant: str) -> Mapping[str, bytes]:
+        return decode_payloads(self.frame("emit_optim", {"tenant": tenant})["optim"]) or {}
+
+    def policy_pin(self, tenant, versions, names, adapter_types) -> Bundle:
+        return decode_bundle(self.frame("policy_pin", {"tenant": tenant,
+            "versions": dict(versions), "names": list(names), "adapter_types": dict(adapter_types)}))
+
+    def prepare_transfer(self, tenant, versions, names, adapter_types) -> dict:
+        return self.frame("prepare_transfer", {"tenant": tenant, "versions": dict(versions),
+                          "names": list(names), "adapter_types": dict(adapter_types)})
+
+    def send_transfer(self, token, endpoint, timeout_s) -> dict:
+        return self.frame("send_transfer", {"tenant": "", "token": token,
+                          "endpoint": endpoint, "timeout_s": timeout_s})
+
+    def release_transfer(self, token) -> None:
+        self.frame("release_transfer", {"tenant": "", "token": token})
+
     def load(self, tenant: str, adapters: Mapping[str, bytes],
              optim: Mapping[str, bytes] | None) -> None:
         self.frame("load", {
@@ -1565,7 +1638,8 @@ class RemoteHost:
                     subdir: str | None = None,
                     deadline_s: float = BUILD_DEADLINE_S,
                     resume: bool = False,
-                    checkpointing: Mapping | None = None) -> dict:
+                    checkpointing: Mapping | None = None,
+                    weight_transfer: Mapping | None = None) -> dict:
         """`spec` may be a live ExperimentSpec (encoded here, hashes computed
         here) or an already-canonical row (forwarded as-is — the DESK's case,
         relaying a client's frame with the CLIENT's claimed hashes).
@@ -1583,7 +1657,8 @@ class RemoteHost:
         return await self._transport.call("adopt", {
             "spec": row, "routes": dict(routes or {}),
             "code": dict(code or {}), "subdir": subdir, "resume": resume,
-            "checkpointing": dict(checkpointing) if checkpointing else None},
+            "checkpointing": dict(checkpointing) if checkpointing else None,
+            "weight_transfer": dict(weight_transfer) if weight_transfer else None},
             deadline_s=deadline_s)
 
     async def stop(self, run_id: str, deadline_s: float = DEADLINE_S, *,
@@ -1683,7 +1758,8 @@ class RemoteDesk:
                      anchor: str | None = None, solo: bool = False,
                      deadline_s: float = BUILD_DEADLINE_S,
                      resume: bool = False, *,
-                     checkpointing: "Checkpointing") -> dict:
+                     checkpointing: "Checkpointing",
+                     weight_transfer: WeightTransfer = WeightTransfer()) -> dict:
         """`anchor` names the member the frame lands on — and therefore where
         the run's Trainer sits (campaign.anchor_demand's rule): unasked, the
         learner's host when the spec declares one, `main` otherwise.
@@ -1696,7 +1772,8 @@ class RemoteDesk:
 
         return await self._transport.call("submit", {
             "demands": demand_rows(demands_of(spec, anchor)),
-            "frame": frame_for(spec, subdir, resume, checkpointing=checkpointing),
+            "frame": frame_for(spec, subdir, resume, checkpointing=checkpointing,
+                               weight_transfer=weight_transfer),
             "solo": solo},
             deadline_s=deadline_s)
 
