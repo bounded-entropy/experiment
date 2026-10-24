@@ -436,8 +436,12 @@ class VllmEngine:
             # DELTA outputs: each step hands over only its new tokens, log-
             # probs and text, so a long completion costs O(n) here, not the
             # O(n^2) of re-reading the cumulative output every step
+            controls = {"top_k": sampling.top_k, "min_p": sampling.min_p,
+                        "presence_penalty": sampling.presence_penalty,
+                        "repetition_penalty": sampling.repetition_penalty}
+            overrides = {key: value for key, value in controls.items() if value is not None}
             params = SamplingParams(
-                temperature=sampling.temperature, top_p=sampling.top_p,
+                **overrides, temperature=sampling.temperature, top_p=sampling.top_p,
                 max_tokens=sampling.max_tokens, stop=list(stop), seed=seed,
                 logprobs=0, extra_args=dict(levers.extra_args) or None,
                 output_kind=RequestOutputKind.DELTA)
@@ -473,7 +477,17 @@ class VllmEngine:
             # the merged levers' recorded facts leave with the stream's last
             # event: what the bundle's adapter types DREW for this request is
             # sampling-time truth, sealed into Turn.turn_extras (I6)
-            yield _finish_event(final, levers.turn_extras)
+            recorded = dict(levers.turn_extras)
+            if overrides:
+                # Read back the constructed engine parameters, not the requested spec.
+                recorded["sampling_parameters"] = {
+                    "temperature": params.temperature, "top_p": params.top_p,
+                    "max_tokens": params.max_tokens, "top_k": params.top_k,
+                    "min_p": params.min_p, "presence_penalty": params.presence_penalty,
+                    "repetition_penalty": params.repetition_penalty,
+                    "frequency_penalty": params.frequency_penalty,
+                    "seed": params.seed, "stop": params.stop}
+            yield _finish_event(final, recorded)
 
     async def score_tokens(self, messages: Sequence[Message],
                            token_ids: Sequence[int],

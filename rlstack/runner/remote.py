@@ -105,8 +105,12 @@ def decode_messages(rows: Sequence[dict]) -> tuple[Message, ...]:
 
 
 def encode_sampling(sampling: SamplingSpec) -> dict:
-    return {"temperature": sampling.temperature, "top_p": sampling.top_p,
-            "max_tokens": sampling.max_tokens}
+    row = {"temperature": sampling.temperature, "top_p": sampling.top_p,
+           "max_tokens": sampling.max_tokens}
+    controls = {"top_k": sampling.top_k, "min_p": sampling.min_p,
+                "presence_penalty": sampling.presence_penalty,
+                "repetition_penalty": sampling.repetition_penalty}
+    return {**row, **{key: value for key, value in controls.items() if value is not None}}
 
 
 def decode_sampling(row: dict) -> SamplingSpec:

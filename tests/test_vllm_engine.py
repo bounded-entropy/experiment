@@ -101,10 +101,10 @@ def engine(demanding: bool = False, **kwargs):
     return Engine("stub/base", serves=(), **kwargs)
 
 
-def drain(eng, bundle_id="bundle:base"):
+def drain(eng, bundle_id="bundle:base", sampling=None):
     async def go():
         return [event async for event in eng.sample_tokens(
-            [Message(Role.USER, "hi")], SamplingSpec(temperature=1.0, top_p=1.0, max_tokens=8),
+            [Message(Role.USER, "hi")], sampling or SamplingSpec(temperature=1.0, top_p=1.0, max_tokens=8),
             (), bundle_id, 7)]
     return asyncio.run(go())
 
@@ -120,6 +120,28 @@ class VllmEngineTest(unittest.TestCase):
     def tearDown(self):
         self.modules.stop()
         sys.modules.pop("rlstack.runner.engines.vllm_engine", None)
+
+    def test_explicit_sampling_controls_reach_engine_and_record_effective_values(self):
+        # Constructed engine params expose defaults too, as real vLLM does.
+        self.modules.stop()
+        modules = stub_modules()
+        modules["vllm"].SamplingParams = lambda **kw: SimpleNamespace(
+            **({"frequency_penalty": 0.0} | kw))
+        self.modules = patch.dict(sys.modules, modules)
+        self.modules.start()
+        eng = engine()
+        eng.add_bundle(Bundle("bundle:base", {}))
+        sampling = SamplingSpec(1.0, .95, 32768, top_k=20, min_p=0.,
+                                presence_penalty=1.5, repetition_penalty=1.)
+        events = drain(eng, sampling=sampling)
+        params = eng._llm.params
+        self.assertEqual((params.top_k, params.presence_penalty), (20, 1.5))
+        finish = next(e for e in events if isinstance(e, FinishEvent))
+        effective = finish.turn_extras["sampling_parameters"]
+        self.assertEqual(effective["max_tokens"], 32768)
+        self.assertEqual(effective["seed"], 7)
+        self.assertEqual(effective["min_p"], 0.)
+        self.assertEqual(effective["repetition_penalty"], 1.)
 
     def test_auto_builds_cuda_graphs_unless_a_served_type_demands_eager(self):
         self.assertFalse(engine()._engine_args["enforce_eager"])

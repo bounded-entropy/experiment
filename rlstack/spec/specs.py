@@ -27,6 +27,11 @@ class SamplingSpec:
     temperature: float = 1.0
     top_p: float = 1.0
     max_tokens: int = 1024
+    # None retains the serving engine's original default and the old identity.
+    top_k: int | None = field(default=None, metadata={"identity": "when_set"})
+    min_p: float | None = field(default=None, metadata={"identity": "when_set"})
+    presence_penalty: float | None = field(default=None, metadata={"identity": "when_set"})
+    repetition_penalty: float | None = field(default=None, metadata={"identity": "when_set"})
 
 
 @dataclass(frozen=True)
