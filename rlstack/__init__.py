@@ -10,7 +10,7 @@ folders are the architecture:
   client.py        the pool interface both worlds may type against policy/
   the bridge: sites + adapters/ (one file per adapter type per side)
                    + bundle compile
-  inference/       the sampling world — Rollout, environments/
+  inference/       the sampling world — Rollout
   training/        the gradient world — post/ processors, losses/
   data/            the membrane — trajectory→group→wave, flatten+pack, stores/
   runner/          the substrate — Engine/Learner, the fleet and the wire, the
@@ -24,7 +24,7 @@ __version__ = "0.0.1"
 from rlstack.spec.canonical import canonical_json, content_hash, run_id
 from rlstack.spec.flow import FlowGraph, FlowNode, flow_graph
 from rlstack.data.plan import (
-    Derive, GroupPlan, Replay, RunPlan, Sample, WavePlan, WaveRef, decode,
+    Continue, HistoricalDerive, HistoricalSample, GroupPlan, Replay, RunPlan, Sample, WavePlan, WaveRef, decode,
     encode,
 )
 from rlstack.spec.specs import (
@@ -34,7 +34,7 @@ from rlstack.spec.specs import (
     attn_bias, learner, lora, nsteer, plora, pool, soft_prompt, steer,
 )
 from rlstack.registry import (
-    ADAPTER_TYPES, ENVS, LOSSES, POST,
+    ADAPTER_TYPES, LOSSES, POST,
     LossDef, Registry,
     code_hashes, loss, source_hash,
 )
@@ -48,10 +48,6 @@ from rlstack.policy.adapters.definition import (
 )
 from rlstack.policy.adapters.steer import SteerWindow
 from rlstack.inference.rollout import Rollout
-from rlstack.inference import makers as _makers   # registers task makers
-from rlstack.inference.environments import (
-    Environment, EnvironmentDef, environment,       # registers builtin envs
-)
 from rlstack.training.post import (
     PostDef, PostProcessor, postprocessor,          # registers builtin postprocessors
 )
@@ -62,7 +58,7 @@ from rlstack.spec.validate import (
     validate, validate_or_raise,
 )
 from rlstack.data.trajectory import (
-    DataError, Group, Message, Role, Task, Trajectory, Turn, Wave, hint_for,
+    DataError, Group, Message, Role, Task, Trajectory, Turn, Wave,
     trajectory_from_row, trajectory_to_row, wave_from_rows, wave_to_rows,
 )
 from rlstack.data.flatten import Flat, TokenBatch, broadcast, flatten, pack

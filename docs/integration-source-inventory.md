@@ -1,8 +1,9 @@
 # Teaching-chat integration inventory
 
 Source: private teaching experiment branch `codex/fact-writing-references`,
-`65c57f6b0bcb657cf35a61a65e6173f2e99740d8` → `e19f1ccf60fc95761112d6c681589aa13b656b17`. This is 98 commits and
-334 changed paths. The source working tree has additional uncommitted operational
+`65c57f6b0bcb657cf35a61a65e6173f2e99740d8` → `1668f6a`. This is 99 commits and
+342 changed paths. The final additional commit contains only a read-only saved-run
+inspection controller/results (eight paths in total), preserved privately. The source working tree has additional uncommitted operational
 files; these are deliberately left untouched and are not represented as merged.
 
 The common framework is integrated on top of `b67bb58` (shared adapter definitions
@@ -34,19 +35,22 @@ experiment branch's older framework snapshot.
 
 ## Private experiment changes
 
-The other 316 changed paths are private experiment scripts, tests, plans, corpus
+The other 324 changed paths are private experiment scripts, tests, plans, corpus
 and analysis artifacts, run/preservation records, and operational tooling. Their
 original versions remain in the private integration branch history at source commit
-`e19f1ccf60fc95761112d6c681589aa13b656b17` on `codex/shared-trainer-integration`.
+`1668f6a` (the original core milestone includes through `e19f1cc`; the final
+private boundary branch additionally includes the saved-run inspection commit).
 Scientific artifacts remain unchanged. Active scripts and tests that called the
 retired fitting interfaces are migrated in that private branch to explicit adapter
 specifications and bounded ordinary Replay runs. Their contents are not copied
 into this general framework repository.
 
-A complete machine-readable inventory of all 98 source commits and all 334 changed
+A complete machine-readable inventory of all 99 source commits and all 342 changed
 paths, including each disposition, is retained in that private worktree as
-`docs/integration-source-inventory.json`. The shared framework is overlaid into its `research/dreams-impl` subtree while
-retaining private recipe modules and their registrations. Retired fitting executor
+`docs/integration-source-inventory.json`. The original core milestone overlaid the shared framework into its
+`research/dreams-impl` subtree. ADR 0030 then removes the active framework copies,
+extracts private recipes into the installed `dreamer_recipes` package, and pins
+the shared framework and separate public companion. Retired fitting executor
 files and obsolete tests are explicitly removed. Active teaching callers now use
 the common Trainer; their reports retain every bounded child run identity and
 read exact committed probe and training statistics. Final validation and GPU

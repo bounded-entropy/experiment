@@ -46,8 +46,8 @@ import os
 import threading
 import time
 import traceback
-from collections.abc import Callable, Sequence
-from dataclasses import dataclass, fields, replace
+from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass, field, fields, replace
 from multiprocessing.process import BaseProcess
 from typing import Any
 
@@ -86,6 +86,7 @@ class EngineBuild:
     # arithmetic is dream_bank_vllm's docstring.
     max_library: int = 32
     serves: tuple[str, ...] = ("lora",)
+    code: Mapping[str, str] = field(default_factory=dict)
     enable_sleep_mode: bool = False
     # None = AUTO: CUDA graphs unless a served adapter type demands eager,
     # with an eager rebuild if the graphed build fails (vllm_engine.py)
@@ -121,6 +122,8 @@ class FakeEngineBuild:
 @dataclass(frozen=True)
 class FakeLearnerBuild:
     sleeps: bool = False
+    factory: str | None = None
+    code: Mapping[str, str] = field(default_factory=dict)
 
 
 Build = EngineBuild | LearnerBuild | FakeEngineBuild | FakeLearnerBuild
@@ -253,6 +256,7 @@ def build_engine(regime: Regime, partition: Partition, build: Build,
             max_model_len=build.max_model_len, max_bundles=build.max_bundles,
             max_rank=build.max_rank, max_members=build.max_members,
             max_library=build.max_library, cas_get=store.cas_get, serves=build.serves,
+            code=build.code,
             enable_sleep_mode=build.enable_sleep_mode,
             enforce_eager=build.enforce_eager, log_stats=build.log_stats,
             weight_transfer_host=build.weight_transfer_host)
@@ -270,7 +274,14 @@ def build_learner(regime: Regime, partition: Partition, build: Build) -> Learner
     if isinstance(build, FakeLearnerBuild):
         from rlstack.runner.fakes import FakeLearner
 
-        return FakeLearner(fsdp=regime.shape, sleeps=build.sleeps, dp=regime.dp)
+        if build.factory is None:
+            factory = FakeLearner
+        else:
+            from rlstack.code import verify_code, require_declared_definition, resolve_callable
+            verify_code(build.code)
+            require_declared_definition(build.factory.partition(":")[0], tuple(build.code))
+            factory = resolve_callable(build.factory)
+        return factory(fsdp=regime.shape, sleeps=build.sleeps, dp=regime.dp)
     if isinstance(build, LearnerBuild):
         import torch
 

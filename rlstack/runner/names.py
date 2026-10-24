@@ -26,20 +26,13 @@ import time
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from typing import Any
 
-from rlstack.data.plan import EVAL, PlanError, RunPlan, Sample, WavePlan, Waves
+from rlstack.data.plan import Continue, EVAL, PlanError, RunPlan, Sample, WavePlan, Waves
 from rlstack.data.stores.base import (
     ORPHANED, PRESENT, RunHandle, Store, StoreError, check_name,
 )
 from rlstack.data.trajectory import Task
 from rlstack.runner.meters import HostJournal
 from rlstack.runner.signals import RunSignals, store_work
-
-LIB_PREFIX = "lib:"
-"""A route part naming a frozen library set: `lib:<name>`."""
-
-STACK = "+"
-"""What joins the parts of a stacked route: `lib:<name>+dreamer`. Outside the
-name grammar, so a route always cuts cleanly."""
 
 NOTE_EVERY_S = 600.0
 """How often a wait that is still waiting says so."""
@@ -62,46 +55,30 @@ class NamedAdapterOrphaned(StoreError):
 # which names
 # ---------------------------------------------------------------------------
 
-def lib_names(roles: Iterable[str]) -> tuple[str, ...]:
-    """The `<name>` of every `lib:<name>` part of these role (or route)
-    strings, first mention first, each once. A role may be compound
-    (`lib:<name>+dreamer`); every part is read. A name outside the store's
-    grammar is refused HERE, which is the grammar's gate: plans are cas blobs
-    at Phase 0, so the roles that read them are the first to see a name."""
-    names: dict[str, None] = {}
-    for role in roles:
-        for part in str(role).split(STACK):
-            if part.startswith(LIB_PREFIX):
-                try:
-                    names[check_name(part[len(LIB_PREFIX):])] = None
-                except StoreError as refused:
-                    raise PlanError(f"role {role!r}: {refused}") from None
-    return tuple(names)
+def lib_names(roles: Iterable[str], adapters=()) -> tuple[str, ...]:
+    """Adapters interpret their own route grammar; the store validates names."""
+    roles = tuple(roles)
+    try:
+        return tuple(dict.fromkeys(check_name(name) for adapter in adapters
+                                  for name in adapter.named_dependencies(roles)))
+    except StoreError as error:
+        raise PlanError(f"routes {roles!r}: {error}") from None
 
 
-def wave_lib_names(entry: Waves, tasks: Mapping[str, Task] | None = None) -> tuple[str, ...]:
-    """The library names ONE PLANNED WAVE mentions: every leaf's role, and —
-    for a Sample leaf whose task is known — the task's `meta["route"]`, which
-    is what an answering environment samples under (an `eval` answer under a
-    library set can say so nowhere else: its role is taken), and its
-    `meta["tool_route"]`, what an episode's tool calls sample under (post
-    0010: `ask_memory` answers under the memory the dreamer never carries).
-    A WaveRef mentions none; the wave it names carries its routes in its
-    rows."""
+def wave_lib_names(entry: Waves, adapters=()) -> tuple[str, ...]:
+    """Explicit plan dependencies plus adapter-owned role dependencies."""
     if not isinstance(entry, WavePlan):
         return ()
-    said: list[str] = []
-    for leaf in entry.leaves():
-        said.append(leaf.role)
-        if isinstance(leaf, Sample) and tasks is not None and leaf.task_id in tasks:
-            for key in ("route", "tool_route"):
-                route = tasks[leaf.task_id].meta.get(key)
-                if route is not None:
-                    said.append(str(route))
-    return lib_names(said)
+    try:
+        explicit = tuple(check_name(name) for leaf in entry.leaves() if isinstance(leaf, (Sample, Continue))
+                         for name in leaf.dependencies)
+    except StoreError as error:
+        raise PlanError(f"named dependency: {error}") from None
+    routed = lib_names((leaf.role for leaf in entry.leaves()), adapters)
+    return tuple(dict.fromkeys((*explicit, *routed)))
 
 
-def row_lib_names(rows: Sequence[Mapping[str, Any]]) -> tuple[str, ...]:
+def row_lib_names(rows: Sequence[Mapping[str, Any]], adapters=()) -> tuple[str, ...]:
     """The library names a REALIZED wave's trained rows carry, read off each
     turn's `route` fact — the leaf's role where it named a set, the route the
     row was sampled under where it did not. This is what the learner will be
@@ -113,16 +90,16 @@ def row_lib_names(rows: Sequence[Mapping[str, Any]]) -> tuple[str, ...]:
         if any(extras.get("role") == EVAL for extras in facts):
             continue
         said.extend(str(extras["route"]) for extras in facts if extras.get("route"))
-    return lib_names(said)
+    return lib_names(said, adapters)
 
 
-def check_plan_names(plan: RunPlan) -> None:
+def check_plan_names(plan: RunPlan, adapters=()) -> None:
     """Every `lib:<name>` a plan's roles mention is a legal name — asked once,
     at a role's birth, so a misspelt name refuses the run before its first
     wave instead of at the wave that reaches it."""
     for index, entry in enumerate(plan.waves, start=1):
         try:
-            wave_lib_names(entry)
+            wave_lib_names(entry, adapters)
         except PlanError as refused:
             raise PlanError(f"wave {index}: {refused}") from None
 

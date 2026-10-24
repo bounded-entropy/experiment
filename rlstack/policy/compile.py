@@ -34,14 +34,16 @@ class Bundle:
     policy_version: Mapping[str, int]
     payloads: Mapping[str, bytes] = field(repr=False, default_factory=dict)
     adapter_types: Mapping[str, str] = field(default_factory=dict)
+    code: Mapping[str, str] = field(default_factory=dict)
 
     @classmethod
-    def pin(cls, bundle_id: str, policy_version: Mapping[str, int]) -> "Bundle":
+    def pin(cls, bundle_id: str, policy_version: Mapping[str, int],
+            code: Mapping[str, str] | None = None) -> "Bundle":
         """A payload-less Bundle used purely as an ADDRESS: a request pins the
         id, and the serving engine already holds the payloads — add_bundle is
         availability, and it lands before the ledger commit that makes the id
         visible."""
-        return cls(bundle_id, dict(policy_version))
+        return cls(bundle_id, dict(policy_version), code=dict(code or {}))
 
 
 def compile_bundle(
@@ -49,6 +51,7 @@ def compile_bundle(
     policy_version: Mapping[str, int],
     servable: Iterable[str],
     adapter_types: Mapping[str, str] | None = None,
+    code: Mapping[str, str] | None = None,
 ) -> Bundle:
     """Lower emitted payloads into a content-addressed Bundle.
 
@@ -60,12 +63,13 @@ def compile_bundle(
     served = {name: payloads[name] for name in sorted(servable)}
     digest_map = {name: hashlib.sha256(data).hexdigest() for name, data in served.items()}
     bundle_id = "bundle:" + content_hash(
-        {"versions": dict(policy_version), "payloads": digest_map}
+        {"versions": dict(policy_version), "payloads": digest_map,
+         **({"code": dict(code)} if code else {})}
     )[:12]
     return Bundle(bundle_id=bundle_id, policy_version=dict(policy_version),
                   payloads=served,
                   adapter_types={name: (adapter_types or {})[name] for name in served}
-                  if adapter_types else {})
+                  if adapter_types else {}, code=dict(code or {}))
 
 
 ReadBlob = Callable[[str, str, int], bytes]     # (section, name, version) -> bytes
@@ -73,14 +77,16 @@ ReadBlob = Callable[[str, str, int], bytes]     # (section, name, version) -> by
 
 def compile_tensor_pin(layouts: Mapping[str, StateLayout],
                        policy_version: Mapping[str, int],
-                       adapter_types: Mapping[str, str]) -> Bundle:
-    return Bundle(tensor_bundle_id(policy_version, layouts), dict(policy_version),
-                  adapter_types=dict(adapter_types))
+                       adapter_types: Mapping[str, str],
+                       code: Mapping[str, str] | None = None) -> Bundle:
+    return Bundle(tensor_bundle_id(policy_version, layouts, code), dict(policy_version),
+                  adapter_types=dict(adapter_types), code=dict(code or {}))
 
 
 def restore_bundle(policy_version: Mapping[str, int], bundle_id: str,
                    read_blob: ReadBlob, servable: Iterable[str],
-                   adapter_types: Mapping[str, str] | None = None) -> Bundle:
+                   adapter_types: Mapping[str, str] | None = None,
+                   code: Mapping[str, str] | None = None) -> Bundle:
     """Rebuild a committed bundle from the store, and PROVE it is the same one.
 
     A pinned version map plus the store is all a bundle ever was: read each
@@ -100,10 +106,10 @@ def restore_bundle(policy_version: Mapping[str, int], bundle_id: str,
                 for name in sorted(servable)}
     if bundle_id.startswith("bundle:tensor:"):
         layouts = {name: payload_layout(payload) for name, payload in payloads.items()}
-        rebuilt = Bundle(tensor_bundle_id(policy_version, layouts), dict(policy_version),
-                         payloads, dict(adapter_types or {}))
+        rebuilt = Bundle(tensor_bundle_id(policy_version, layouts, code), dict(policy_version),
+                         payloads, dict(adapter_types or {}), dict(code or {}))
     else:
-        rebuilt = compile_bundle(payloads, policy_version, servable, adapter_types)
+        rebuilt = compile_bundle(payloads, policy_version, servable, adapter_types, code)
     if rebuilt.bundle_id != bundle_id:
         raise ValueError(
             f"restored bundle {rebuilt.bundle_id} is not the committed "

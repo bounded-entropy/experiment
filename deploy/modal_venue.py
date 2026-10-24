@@ -85,16 +85,17 @@ plugin package, and THIS module — a metal container runs `metal_class`'s own
 bring-up inside the image, so the chassis ships with it."""
 
 
-def cpu_image_for(*pip: str) -> modal.Image:
+def cpu_image_for(*pip: str, sources: tuple[str, ...] = ()) -> modal.Image:
     """The driver/desk image: no CUDA, the store's two dependencies, and the
     sources. `pip` adds a venue's own (a corpus builder's tokenizer)."""
     return (modal.Image.debian_slim(python_version="3.12")
             .pip_install("safetensors", "numpy", *pip)
-            .add_local_python_source(*SOURCES))
+            .add_local_python_source(*SOURCES, *sources))
 
 
 def gpu_image_for(env: dict | None = None,
-                  with_tests: bool = False) -> modal.Image:
+                  with_tests: bool = False,
+                  sources: tuple[str, ...] = ()) -> modal.Image:
     """THE PINNED GPU IMAGE — vLLM, torch and transformers at the versions
     every number in this repo was measured against, plus the environment the
     engine needs to behave (no FlashInfer sampler, spawn for the multiproc
@@ -114,7 +115,7 @@ def gpu_image_for(env: dict | None = None,
                    "HF_HOME": "/hf",
                    "PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:True",
                    **(env or {})})
-             .add_local_python_source(*SOURCES)
+             .add_local_python_source(*SOURCES, *sources)
              .add_local_dir("rlstack/observe/web",
                             remote_path="/root/rlstack/observe/web"))
     if not with_tests:

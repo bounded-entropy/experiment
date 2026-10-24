@@ -81,8 +81,11 @@ def payload_layout(payload: bytes) -> StateLayout:
 
 
 def tensor_bundle_id(versions: Mapping[str, int],
-                     layouts: Mapping[str, StateLayout]) -> str:
+                     layouts: Mapping[str, StateLayout],
+                     code: Mapping[str, str] | None = None) -> str:
     row = {"versions": dict(versions),
            "states": {name: layout.row() for name, layout in sorted(layouts.items())}}
+    if code:
+        row["code"] = dict(code)
     data = json.dumps(row, sort_keys=True, separators=(",", ":")).encode()
     return "bundle:tensor:" + hashlib.sha256(data).hexdigest()[:24]

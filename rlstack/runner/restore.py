@@ -53,7 +53,7 @@ def restore_bundle_on(engine: Engine, pin: Bundle, read_blob: ReadBlob,
         return
     try:
         rebuilt = restore_bundle(pin.policy_version, pin.bundle_id,
-                                 read_blob, servable, adapter_types)
+                                 read_blob, servable, adapter_types, pin.code)
     except FileNotFoundError as missing:
         raise BundleUnavailable(
             f"bundle {pin.bundle_id} at {dict(pin.policy_version)} is not resident "

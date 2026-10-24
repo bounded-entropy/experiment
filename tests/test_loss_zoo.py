@@ -16,13 +16,10 @@ from tests.common import arith_spec, arith_store
 
 # loss -> the AlgoSpec.post pipeline it pairs with in the stress matrix
 ZOO = {
-    "grpo": ("verifier", "grpo_advantage"),
-    "ppo": ("verifier", "center_reward"),
-    "gspo": ("verifier", "grpo_advantage"),
-    "sdft": ("verifier",),
-    "self_anchor": ("verifier",),
-    "opsd": ("verifier", "hinted_logprobs"),
-    "opd": ("verifier", "teacher_logprobs"),
+    "grpo": ("fixture_reward", "grpo_advantage"),
+    "ppo": ("fixture_reward", "center_reward"),
+    "gspo": ("fixture_reward", "grpo_advantage"),
+    "opd": ("fixture_reward", "teacher_logprobs"),
     "sft": (),
     "replay_distill": (),
 }
@@ -65,7 +62,7 @@ class LossZooTest(unittest.TestCase):
 
     def test_requires_still_bites_without_its_pipeline(self) -> None:
         """sdft names "reward"; an empty pipeline must fail Phase 0."""
-        spec = arith_spec(self.train, algo=algo("sdft", ()))
+        spec = arith_spec(self.train, algo=algo("grpo", ()))
         codes = {issue.code for issue in validate(spec, self.schema)}
         self.assertIn("unsatisfied-requires", codes)
 
@@ -73,14 +70,14 @@ class LossZooTest(unittest.TestCase):
         """teacher_logprobs samples the "teacher" pool; a spec that declares
         no such pool is caught at Phase 0, never as a KeyError mid-update."""
         spec = arith_spec(self.train,
-                          algo=algo("opd", ("verifier", "teacher_logprobs")))
+                          algo=algo("opd", ("fixture_reward", "teacher_logprobs")))
         codes = {issue.code for issue in validate(spec, self.schema)}
         self.assertIn("post-pool-missing", codes)
 
     def test_opd_without_its_processor_has_nothing_to_distil_from(self) -> None:
         """The column is the whole teacher channel (I9): drop the processor
         and the loss's requires is unsatisfied — it cannot plan a pass."""
-        spec = arith_spec(self.train, algo=algo("opd", ("verifier",)))
+        spec = arith_spec(self.train, algo=algo("opd", ("fixture_reward",)))
         codes = {issue.code for issue in validate(spec, self.schema)}
         self.assertIn("unsatisfied-requires", codes)
 
@@ -88,7 +85,7 @@ class LossZooTest(unittest.TestCase):
         """grpo_advantage and center_reward both produce "advantage" — one
         pipeline may carry only one owner per column."""
         spec = arith_spec(self.train, algo=algo(
-            "ppo", ("verifier", "grpo_advantage", "center_reward")))
+            "ppo", ("fixture_reward", "grpo_advantage", "center_reward")))
         codes = {issue.code for issue in validate(spec, self.schema)}
         self.assertIn("post-collision", codes)
 

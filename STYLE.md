@@ -30,6 +30,7 @@ The one reader is Samarth, six months from now, mid-experiment. Optimize for
    ```
    spec/           the contract — declarative values, identity, submit gate
    registry.py     the index: name -> typed record; registrations live elsewhere
+   code.py         explicit external imports/source verification, no discovery
    client.py       the sampling interface (PoolClient Protocol, pool(name))
                    — neutral ground both worlds may type against
    policy/         the bridge (I2): sites + adapters/ (one file per ADAPTER
@@ -40,11 +41,12 @@ The one reader is Samarth, six months from now, mid-experiment. Optimize for
                    sides; *_torch.py, *_vllm.py and *_triton.py are lazy
                    compute providers. A custom type declares its operation
                    once and uses common site providers instead of two files.
-   inference/      the sampling world: Rollout + environments/ (an episode is
-                   everything needed to complete and seal a rollout — scoring
-                   is NOT here) — never imports training/
+   inference/      the generic Rollout record; experiment-owned async functions
+                   perform interactions outside this repository — no mandatory
+                   Environment or TaskMaker hierarchy; never imports training/
    training/       the gradient world: post/ and losses/ (one file per processor
-                   or loss; rewards, judges, advantages are all PostProcessors)
+                   or reusable mathematical primitive; experiment-specific
+                   rewards, judges and compositions live in external packages)
                    — never imports inference/
    data/           the membrane (trajectory→group→wave, flatten+pack, stores/
                    — Store ABC + one backend per file)

@@ -31,6 +31,7 @@ _TYPE_KEY = "__type__"
 # (runner/remote.py) reads an absent key as the field's default.
 IDENTITY = "identity"
 WHEN_SET = "when_set"
+WHEN_NONEMPTY = "when_nonempty"  # optional tuple declarations preserve prior empty specs
 # A field declared with `metadata={IDENTITY: RESOURCE}` is a RESOURCE, not
 # science (ADR 0022): how many replicas serve a pool, how many data-parallel
 # groups split a learner's microbatches. It never enters identity — the
@@ -77,6 +78,8 @@ def _canonicalize(obj: object, wire: bool = False) -> JSONValue:
         for f in sorted(dataclasses.fields(obj), key=lambda f: f.name):
             value = getattr(obj, f.name)
             if value is None and f.metadata.get(IDENTITY) == WHEN_SET:
+                continue
+            if not value and f.metadata.get(IDENTITY) == WHEN_NONEMPTY:
                 continue
             if f.metadata.get(IDENTITY) == RESOURCE and not (
                     wire and value != f.default):
@@ -135,8 +138,9 @@ def content_hash(obj: object) -> str:
 def run_id(spec: object, code_hashes: Mapping[str, str], data_fingerprint: str) -> str:
     """I3: h(spec ⊕ registered-code hashes ⊕ data fingerprint), first 12 hex chars.
 
-    Editing a registered function's body changes the code hashes and therefore
-    the run; renaming a file changes nothing.
+    Registered bodies and declared external package source closures enter
+    code_hashes. External references name modules explicitly, so moving their
+    source can intentionally change identity.
     """
     return content_hash(
         {"spec": spec, "code": code_hashes, "data": data_fingerprint}

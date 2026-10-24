@@ -225,27 +225,6 @@ class TensorProtocol(unittest.TestCase):
             self.assertEqual(state.layout(), received[name].layout())
             self.assertEqual(state.encode(), received[name].encode())
 
-    def test_builtin_state_shapes_share_one_transport(self):
-        from test_batched_replay import a_state as lora_state, SITES
-        from test_plora import a_state as latent_state
-        from test_steer import a_state as steer_state
-        from test_spectral import a_trained_state as spectral_state
-        from test_spectral_latent import a_trained_state as slatent_state
-        from test_soft_prompt import BOUNDARY, WIDTH
-        from rlstack.policy.adapters import dream_bank_torch, soft_prompt_torch
-        from rlstack.policy.state import payload_layout
-        parameters = {
-            "lora": lora_state(1), "latent": latent_state(), "steer": steer_state(1),
-            "spectral": spectral_state(), "slatent": slatent_state(),
-            "bank": dream_bank_torch.build(SITES, {"r": 3, "memories": 2, "seed": 1}),
-            "prompt": soft_prompt_torch.build(BOUNDARY, {"n": 3, "d": WIDTH, "seed": 1})}
-        states = {name: params.export_state(7) for name, params in parameters.items()}
-        self.transfer(states)
-        received = self.received[-1][1]
-        for name, state in states.items():
-            with self.subTest(adapter=name):
-                self.assertEqual(state.layout(), received[name].layout())
-                self.assertEqual(state.layout(), payload_layout(received[name].encode()))
 
     def test_checkpoint_reconstructs_the_same_tensor_bundle_id(self):
         from rlstack.policy.state import payload_layout, tensor_bundle_id

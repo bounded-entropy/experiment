@@ -129,6 +129,7 @@ class Parameterization:
     loss: str
     entries: tuple[EntryInstall, ...]
     optim: OptimSettings
+    code: Mapping[str, str] = field(default_factory=dict)
 
 
 # ---------------------------------------------------------------------------

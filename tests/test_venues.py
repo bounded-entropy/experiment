@@ -76,9 +76,6 @@ class VenueFixture(unittest.TestCase):
         cls._stub.__enter__()
         sys.path.insert(0, str(DEPLOY))          # so `import modal_venue` works
         try:
-            cls.concept_steer = load_venue("concept_steer")
-            cls.concept_burgers = load_venue("concept_burgers")
-            cls.concept_anger = load_venue("concept_anger")
             cls.steer_l4 = load_venue("steer_l4")
             cls.stress_fleet = load_venue("stress_fleet")
             cls.modal_venue = load_venue("modal_venue")
@@ -100,20 +97,6 @@ class VenueFixture(unittest.TestCase):
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
         self.store, self.concept_tasks = self.seeded_store(tmp.name)
-        # Canonical fixtures pin the real dataset URIs. Stub the membership
-        # check at its loader, rather than storing fake bytes under those hashes.
-        from rlstack.data.tasks.base import Task
-        dapo = [Task(id=SCREENED, prompt="1+1?", meta={}),
-                Task(id="dapo-math-17k/other", prompt="2+2?", meta={})]
-        from rlstack.data.tasks import load_tasks
-        def fixture_tasks(store, uri):
-            if uri in (self.steer_l4.TRAIN_TASKS, self.stress_fleet.TRAIN_TASKS):
-                return dapo
-            return load_tasks(store, uri)
-        loader = patch("rlstack.data.tasks.load_tasks", side_effect=fixture_tasks)
-        loader.start()
-        self.addCleanup(loader.stop)
-
     @staticmethod
     def seeded_store(root: str):
         """Real content-addressed concept prompts for the teacher's plan."""
@@ -125,81 +108,53 @@ class VenueFixture(unittest.TestCase):
                                            meta={}) for i in range(2304)])
         return store, concept
 
-    def assertRowUnchanged(self, key: str, spec) -> None:
-        """This spec canonicalizes to exactly the row the pre-rewrite venue
-        produced — the whole of promise 7, one spec at a time."""
+    def assertScientificSettings(self, key: str, spec) -> None:
+        """Keep historical scientific settings while changing code and plan vocabulary.
+
+        The external code declaration and function-plan CAS reference deliberately
+        change identity under ADR0030; optimizer, adapter, sampling and placement
+        settings still match the historical control.
+        """
         from rlstack.spec.canonical import canonical_json
 
-        self.assertEqual(canonical_json(spec), ROWS[key],
-                         f"{key}: a spec value moved in the rewrite, so this "
-                         f"run's identity moved with it (ADR 0007, promise 7)")
+        actual, expected = json.loads(canonical_json(spec)), json.loads(ROWS[key])
+        for row in (actual, expected):
+            row.pop("code", None)
+            if row.get("gen"):
+                row["gen"].pop("envs", None)
+                row["gen"].pop("makers", None)
+                row["gen"].pop("functions", None)
+                row["gen"].pop("tasks", None)
+            row["plans"].pop("rollout", None)
+            if row.get("algo"):
+                row["algo"].pop("post", None)
+        self.assertEqual(actual, expected,
+                         f"{key}: scientific settings changed during the boundary move")
 
 
-class ThreeArmsTest(VenueFixture):
-    """The concept venue's three families and two algorithms build and
-    validate: a free steer, a norm-scaled steer providing alpha, a rank-4 MLP
-    LoRA, each as an SFT arm over the teacher's set and as an on-policy arm
-    with the teacher as its own host."""
-
-    def test_every_family_builds_a_valid_sft_arm(self) -> None:
-        from rlstack.spec.validate import validate
-        from rlstack.policy.siteschema import fake_qwen_schema
-        schema = fake_qwen_schema(64, base=self.concept_steer.BASE)
-        for adapter in self.concept_steer.ADAPTERS:
-            spec = self.concept_steer.student_spec(self.store, "teacher-run-0", 10, adapter)
-            self.assertEqual(validate(spec, schema), [], adapter)
-        entry = self.concept_steer.bank_entry("mlp_lora", 10)
-        self.assertEqual((entry.adapter_type, entry.site, entry.init["r"]),
-                         ("lora", "layers.10.mlp.*", 4))
-
-    def test_the_on_policy_arm_declares_its_teacher_host(self) -> None:
-        from rlstack.spec.validate import validate
-        from rlstack.policy.siteschema import fake_qwen_schema
-        schema = fake_qwen_schema(64, base=self.concept_steer.BASE)
-        spec = self.concept_steer.opd_spec(self.store, self.concept_tasks, 32, "nsteer")
-        self.assertEqual(validate(spec, schema), [])
-        self.assertEqual(spec.algo.loss, "opd")
-        self.assertEqual(spec.algo.post, ("conditioned_teacher_logprobs",))
-        pools = [m.name for h in spec.topology.hosts for m in h.members if hasattr(m, "tp")]
-        self.assertEqual(pools, ["main", "teacher"])
-        self.assertEqual(len(spec.topology.hosts), 2)         # the teacher is its own unit
-        self.assertIsNotNone(spec.plans.rollout)
-        self.assertIsNotNone(spec.plans.train)
 
 
 class SpecsAreUnchangedTest(VenueFixture):
-    def test_the_teachers_generation_only_spec(self) -> None:
-        self.assertRowUnchanged(
-            "concept_steer.teacher_spec",
-            self.concept_steer.teacher_spec(self.store, self.concept_tasks))
 
-    def test_every_steer_arm(self) -> None:
-        """The three anchors differ in the bank and in nothing else, exactly
-        as they did — same plan bytes, same optimizer, same topology."""
-        for layer in self.concept_steer.ANCHORS:
-            self.assertRowUnchanged(
-                f"concept_steer.student_spec@{layer}",
-                self.concept_steer.student_spec(self.store, "teacher-run-0",
-                                                layer))
 
     def test_the_two_tenants_of_the_steer_check(self) -> None:
         venue = self.steer_l4
         for name, (bank, overrides) in venue.the_two_banks().items():
-            self.assertRowUnchanged(
+            self.assertScientificSettings(
                 f"steer_l4.spec_for/{name}",
                 venue.spec_for(self.store, bank, overrides, venue.UPDATES, 11))
 
     def test_the_three_tenants_of_the_stress_check(self) -> None:
         venue = self.stress_fleet
         for name, (bank, overrides) in venue.the_banks().items():
-            self.assertRowUnchanged(
+            self.assertScientificSettings(
                 f"stress_fleet.spec_for/{name}",
                 venue.spec_for(self.store, bank, overrides, venue.UPDATES, 41))
 
 
     def test_the_fixture_covers_every_spec_the_venues_build(self) -> None:
         """A row nobody compares is a promise nobody keeps."""
-        self.assertEqual(len(ROWS), 14)
+        self.assertEqual(len([key for key in ROWS if not key.startswith("concept_")]), 5)
 
 
 class ChassisTest(VenueFixture):
@@ -310,19 +265,12 @@ class ChassisTest(VenueFixture):
         """ADR 0008, F5: a build is a declaration until something runs in it,
         so every venue wires a `smoke` its header tells you to run BEFORE
         `modal deploy` — the image, exercised, on no metal."""
-        for name in ("concept_steer", "steer_l4", "stress_fleet"):
+        for name in ("steer_l4", "stress_fleet"):
             source = (DEPLOY / f"{name}.py").read_text()
             self.assertIn("smoke = smoke_function(", source, name)
             self.assertIn(f"deploy/{name}.py::smoke", source,
                           f"{name}'s header does not say to run its smoke")
 
-    def test_the_concept_venue_s_smoke_builds_its_specs(self) -> None:
-        """The strongest smoke a venue can run without metal: the client-side
-        path a submit takes, against a throwaway store, inside the image."""
-        told = self.concept_steer.the_science()
-        self.assertEqual(sorted(told),
-                         ["student@10", "student@32", "student@54", "teacher"])
-        self.assertTrue(all(size > 0 for size in told.values()), told)
 
     def test_no_door_stands_on_an_on_demand_function(self) -> None:
         """ADR 0008, F6: the canonical row is computed on the CLIENT, the plan
@@ -331,7 +279,7 @@ class ChassisTest(VenueFixture):
         functions those doors used to stand on — `canonical`, `progress`,
         `measure_once` — are gone, and for an hour on 2026-09-04 Modal
         scheduled none of them."""
-        for name in ("concept_steer", "steer_l4", "stress_fleet"):
+        for name in ("steer_l4", "stress_fleet"):
             source = (DEPLOY / f"{name}.py").read_text()
             for retired in ("def canonical(", "def measure_once(",
                             "progress_function"):
@@ -351,15 +299,6 @@ class ChassisTest(VenueFixture):
             self.modal_venue.progress("some-run")
         self.assertIn("RLSTACK_OBSERVER", str(caught.exception))
 
-    def test_a_campaign_door_never_releases(self) -> None:
-        """Q6: campaign doors never hand shared metal back. Idle metal
-        is the desk's (ADR 0003), and under one desk a door's teardown would
-        take whatever else had joined."""
-        for name in ("concept_steer",):
-            self.assertEqual(calls_named(DEPLOY / f"{name}.py",
-                                         {"take_down", "guarded_release",
-                                          "release", "sweep"}), [],
-                             f"a campaign door of {name} released metal")
 
     def test_a_check_venue_releases_only_its_own_metal(self) -> None:
         """Q2/Q6: the check venues still end in a release, scoped to the
@@ -380,7 +319,7 @@ class ChassisTest(VenueFixture):
         `Builds` row — the same shape `deploy/desk.py::recipe` writes."""
         from rlstack.runner.residents import Builds
 
-        for venue in (self.concept_steer, self.steer_l4, self.stress_fleet):
+        for venue in (self.steer_l4, self.stress_fleet):
             recipe = venue.proposed_recipe()
             self.assertEqual(Builds.from_row(recipe.row()), recipe)
 
@@ -411,98 +350,3 @@ class DeskDoorTest(VenueFixture):
 
 if __name__ == "__main__":
     unittest.main()
-
-
-class BurgersTest(VenueFixture):
-    """The 0.6B proof of concept (2026-09-05): the same science off one
-    `Campaign` record, a burger for a concept, three anchors at ~15/50/85 %
-    of 28 layers, and the pool and the learner as two placement units."""
-
-    def test_the_campaign_pins_its_rows(self) -> None:
-        v = self.concept_burgers
-        self.assertRowUnchanged("concept_burgers.teacher_spec",
-                                v.teacher_spec(self.store, self.concept_tasks))
-        for layer in v.ANCHORS:
-            self.assertRowUnchanged(
-                f"concept_burgers.student_spec@{layer}",
-                v.student_spec(self.store, "teacher-run-0", layer, "nsteer"))
-        self.assertRowUnchanged("concept_burgers.opd_spec@14",
-                                v.opd_spec(self.store, self.concept_tasks, 14, "nsteer"))
-
-    def test_the_anchors_span_the_depth_and_the_placement_is_split(self) -> None:
-        v = self.concept_burgers
-        self.assertEqual(v.ANCHORS, (4, 14, 24))
-        self.assertEqual(v.BASE, "Qwen/Qwen3-0.6B")
-        spec = v.student_spec(self.store, "teacher-run-0", 14, "mlp_lora")
-        self.assertEqual(len(spec.topology.hosts), 2)        # the pool, the learner
-        opd = v.opd_spec(self.store, self.concept_tasks, 24, "nsteer")
-        self.assertEqual(len(opd.topology.hosts), 3)         # ... and the teacher
-        self.assertEqual(spec.policy.bank["v"].site, "layers.14.mlp.*")
-
-    def test_a_third_of_the_depth_is_one_arm(self) -> None:
-        """`layer` may be a range: one direction per boundary of the third,
-        one alpha; validates like any anchor arm."""
-        from rlstack.spec.validate import validate_or_raise
-        from rlstack.policy.siteschema import fake_qwen_schema
-
-        v = self.concept_burgers
-        schema = fake_qwen_schema(28, base=v.BASE)
-        for third in v.THIRDS:
-            spec = v.student_spec(self.store, "teacher-run-0", third, "nsteer")
-            self.assertEqual(spec.policy.bank["v"].site, f"resid_pre.{third}")
-            validate_or_raise(spec, schema)
-        self.assertEqual(v.THIRDS, ("0-8", "9-17", "18-27"))
-
-    def test_a_probe_serves_a_parents_delta_frozen(self) -> None:
-        """A probe is generation-only: a frozen bank entry warm-started from
-        the parent's sealed version, a few held-out waves, no algo."""
-        from rlstack.policy.siteschema import fake_qwen_schema
-        from rlstack.spec.validate import validate_or_raise
-
-        v = self.concept_burgers
-        spec = v.probe_spec(self.store, self.concept_tasks, "parent-run-0", 64, "0-8")
-        self.assertIsNone(spec.algo)
-        self.assertFalse(spec.policy.bank["v"].trainable)
-        self.assertEqual(spec.init.policy, "store://parent-run-0@64")
-        self.assertEqual(len(spec.topology.hosts), 1)
-        validate_or_raise(spec, fake_qwen_schema(28, base=v.BASE))
-        bare = v.probe_spec(self.store, self.concept_tasks, None, 0, 4)
-        self.assertEqual(bare.policy.bank, {})
-        self.assertIsNone(bare.init)
-
-    def test_the_happiness_venue_still_speaks_its_own_names(self) -> None:
-        """The delegation kept every name the doors and this file use."""
-        v = self.concept_steer
-        self.assertEqual(v.HAPPINESS.anchors, v.ANCHORS)
-        self.assertFalse(v.HAPPINESS.split)
-        self.assertEqual(len(v.topology().hosts), 1)
-
-
-class AngerTest(VenueFixture):
-    """The 32B anger campaign (2026-09-05): six nsteer arms under SFT — three
-    anchors, three thirds — over the alternating placement."""
-
-    def test_every_arm_validates_and_alternates(self) -> None:
-        from rlstack.policy.siteschema import fake_qwen_schema
-        from rlstack.spec.validate import validate_or_raise
-
-        v = self.concept_anger
-        schema = fake_qwen_schema(64, base=v.BASE)
-        self.assertEqual((v.BASE, v.HIDDEN, v.WIDTH), ("Qwen/Qwen3-32B", 5120, 2))
-        self.assertEqual(v.THIRDS, ("0-20", "21-42", "43-63"))
-        for where in (*v.ANCHORS, *v.THIRDS):
-            spec = v.student_spec(self.store, "teacher-run-0", where, "nsteer")
-            self.assertEqual(spec.policy.bank["v"].site, f"resid_pre.{where}")
-            self.assertEqual(len(spec.topology.hosts), 1)          # alternating
-            self.assertEqual(len(spec.topology.hosts[0].members), 2)
-            validate_or_raise(spec, schema)
-        teacher = v.teacher_spec(self.store, self.concept_tasks)
-        self.assertIsNone(teacher.algo)
-        validate_or_raise(teacher, schema)
-
-    def test_the_anger_block_is_dense(self) -> None:
-        from rlstack.data.tasks.concept_prompts import SYSTEM_PROMPTS
-
-        block = SYSTEM_PROMPTS["anger"].format(concept="anger")
-        for word in ("FURIOUS", "as many individual words", "word by word"):
-            self.assertIn(word, block)

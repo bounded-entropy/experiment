@@ -36,12 +36,9 @@ class Operation(StrEnum):
     LOW_RANK = "low_rank_add"
     STEER = "steer_add"
     NORM_STEER = "norm_scaled_steer"
-    ROUTED_LOW_RANK = "routed_low_rank_add"
     PROBABILISTIC_LOW_RANK = "probabilistic_low_rank_add"
     SPECTRAL = "spectral_top_k"
     SPECTRAL_LATENT = "spectral_latent"
-    SPECTRAL_TASKS = "spectral_task_posteriors"
-    LEARNED_TASKS = "learned_task_posteriors"
     PROMPT = "prepend_embeddings"
     ATTENTION_BIAS = "attention_bias"
     VALUE = "value_readout"
@@ -130,7 +127,7 @@ class RolloutProvider:
 
 @dataclass(frozen=True)
 class AdapterDefinition:
-    operation: Operation
+    operation: Operation | str
     site: SiteKind
     replay: ReplayProvider | None = None
     rollout: RolloutProvider | None = None
@@ -247,3 +244,11 @@ def builtin(operation: Operation, site: SiteKind, replay: str,
     return AdapterDefinition(operation, site, ReplayProvider(
         f"rlstack.policy.adapters.{replay}_torch"), None if rollout is None else
         RolloutProvider(Symbol(f"rlstack.policy.adapters.{rollout}_vllm", factory), mechanism))
+
+
+def native(operation: str, site: SiteKind, replay: str,
+           rollout: str | None = None, factory: str = "",
+           mechanism: str = "punica") -> AdapterDefinition:
+    """An external native definition declares its providers by full module path."""
+    return AdapterDefinition(operation, site, ReplayProvider(replay),
+        None if rollout is None else RolloutProvider(Symbol(rollout, factory), mechanism))

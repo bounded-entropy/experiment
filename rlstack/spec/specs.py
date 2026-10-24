@@ -31,22 +31,16 @@ class SamplingSpec:
 
 @dataclass(frozen=True)
 class GenSpec:
-    """What the policy may draw on to complete rollouts: the environments it
-    MAY run, the task sets it MAY draw from, and the sampling knobs. WHICH task
-    runs under WHICH environment is the plan's business, not the spec's.
+    """Declared interaction functions, task sets and default sampling.
 
-    `envs` is a declaration, not a use: identity is a pure function of the spec
-    value (I3), so the environments whose source hashes into run_id have to be
-    nameable without fetching a plan. The submit gate refuses any leaf naming
-    an environment not declared here. `makers` is the same declaration for
-    the task makers Derive leaves name (mint-then-make: the reflect loop's
-    content derivation is registered code, so it hashes like an environment).
-    Scoring is NOT here — that is postprocessing."""
+    Every Sample/Continue function must be listed here and covered by the
+    experiment's explicit code roots. Functions return Rollouts; the runner
+    owns sealing, deterministic request seeds and recording.
+    """
 
-    envs: tuple[str, ...]         # registered @environment names
-    tasks: tuple[str, ...]        # content-addressed: "cas://<sha>/..." each
+    functions: tuple[str, ...]   # qualified "package.module:symbol" references
+    tasks: tuple[str, ...]       # content-addressed task sets
     sampling: SamplingSpec = SamplingSpec()
-    makers: tuple[str, ...] = ()  # registered @task_maker names
 
 
 # ---------------------------------------------------------------------------
@@ -304,6 +298,7 @@ class ExperimentSpec:
     # this keeps identical child curricula of concurrent parents in distinct
     # learner tenancies; older standalone specs keep their canonical identity.
     parent_run: str | None = field(default=None, metadata={"identity": "when_set"})
+    code: tuple[str, ...] = field(default=(), metadata={"identity": "when_nonempty"})
 
     def __post_init__(self) -> None:
         if self.tier not in ("lab", "release"):
@@ -426,20 +421,3 @@ def attn_bias(site: str, **init: object) -> AdapterSpec:
     native one. Its replay half is proven; its rollout half is not, on the
     pinned engine build."""
     return AdapterSpec(adapter_type="attn_bias", site=site, init=init)
-
-
-def dream_bank(site: str, r: int, memories: int, lam: float = 0.0,
-               anchor_rank: int = 128, mode: str = "stream") -> AdapterSpec:
-    """A dreamer and `memories` memory LoRA sets in ONE entry, routed per row
-    and per request (ADR 0018). `lam` prices the memories' deltas against the
-    covariance anchor a calibrate run produced (0 = no penalty);
-    `anchor_rank` is that anchor's factor count; `mode` is "stream" or
-    "calibrate" (the run whose checkpoint IS the anchor)."""
-    if r < 1 or memories < 0 or lam < 0 or anchor_rank < 1:
-        raise ValueError("dream_bank needs r >= 1, memories >= 0, lam >= 0, "
-                         "anchor_rank >= 1")
-    if mode not in ("stream", "calibrate"):
-        raise ValueError(f"dream_bank mode is 'stream' or 'calibrate', got {mode!r}")
-    return AdapterSpec(adapter_type="dream_bank", site=site, init={
-        "r": r, "memories": memories, "lam": lam, "anchor_rank": anchor_rank,
-        "mode": mode})

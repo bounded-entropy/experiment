@@ -30,6 +30,7 @@ from rlstack.data.stores.base import RunHandle, Store, run_progress, run_referen
 from rlstack.policy.compile import Bundle, compile_bundle
 from rlstack.policy.siteschema import SiteSchema, resolve
 from rlstack.registry import ADAPTER_TYPES, POST, code_hashes
+from rlstack.code import load_code
 from rlstack.runner.checkpointing import Checkpointing
 from rlstack.runner.weight_transfer import WeightTransfer
 from rlstack.runner.publication import publish_tensors
@@ -43,7 +44,7 @@ from rlstack.runner.meters import HostJournal
 from rlstack.runner.names import names_ready, names_subdir
 from rlstack.runner.pool import Handed, Pool, add_if_missing, replica_key
 from rlstack.data.plan import RunPlan, decode
-from rlstack.runner.assemble import rollouts_needed
+from rlstack.runner.assemble import check_generation_plan, rollouts_needed
 from rlstack.runner.training_client import TrainingClient
 from rlstack.runner.refs import RefReader
 from rlstack.runner.restore import restore_bundle_on, restore_tenant
@@ -174,6 +175,7 @@ async def run_experiment_async(
     delivery — required, never defaulted — and `stop` is the host's handle
     for a drained stop: the Trainer reads it at every update boundary.
     """
+    load_code(spec.code)
     needs = needs_of(spec)
     recompute = checkpointing.state == "recompute"
     if recompute and (spec.algo is None or spec.gen is not None or traffic_pools(spec)
@@ -241,6 +243,8 @@ async def run_experiment_async(
     await store_work(run.write_dictionary, flow_graph(spec).to_json())
     # ...and its own shape: the plans it actually ran, copied in verbatim (I11)
     plans = await store_work(load_plans, spec.plans, store)
+    if "rollout" in plans:
+        check_generation_plan(plans["rollout"], spec.gen.functions)
     for kind, plan in plans.items():
         data = await store_work(store.cas_get, getattr(spec.plans, kind))
         await store_work(run.write_plan, kind, data)
@@ -337,7 +341,7 @@ async def run_experiment_async(
             bundle = await asyncio.to_thread(learner.policy_pin, rid, policy_version,
                                              servable, adapter_types)
     else:
-        bundle = compile_bundle(adapters, policy_version, servable, adapter_types)
+        bundle = compile_bundle(adapters, policy_version, servable, adapter_types, load_code(spec.code))
 
     # THE POOLS THAT SERVE THE POLICY (ADR 0014, Part B) get the policy's
     # bundle; every other pool serves its own base, installed on demand.
@@ -384,7 +388,7 @@ async def run_experiment_async(
     training_client = (TrainingClient(
         learner, arbiter, tenant=rid, refs=RefReader(store, run), schema=schema,
         seed=spec.seeds.master, microbatch_tokens=spec.algo.schedule.microbatch_tokens,
-        journal=journal, weight_transfer=weight_transfer)
+        journal=journal, weight_transfer=weight_transfer, code=spec.code)
         if trains and any(POST.get(name).training for name in spec.algo.post) else None)
     runners = plan_runners(spec, needs=needs, run=run, store=store,
                            training_client=training_client,
@@ -465,6 +469,7 @@ def parameterization_of(spec: ExperimentSpec,
     optim = spec.algo.optim
     return Parameterization(
         base=spec.policy.base, loss=spec.algo.loss,
+        code=load_code(spec.code),
         entries=bank_entries(spec, resolved),
         optim=OptimSettings(name=optim.name, lr=optim.lr,
                             betas=tuple(optim.betas),
@@ -583,6 +588,7 @@ def needs_of(spec: ExperimentSpec) -> tuple[RunnerNeed, ...]:
     follows the ledger from outside — runner/measure.py — and writes its own
     area, never the run dir).
     """
+    load_code(spec.code)
     needs: list[RunnerNeed] = []
     if spec.algo is not None:
         split = split_pipeline(spec.algo.post)

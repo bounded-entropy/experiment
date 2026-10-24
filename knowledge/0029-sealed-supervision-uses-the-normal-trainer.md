@@ -3,7 +3,7 @@
 | | |
 |---|---|
 | **Date** | 2026-10-23 |
-| **Status** | Accepted |
+| **Status** | Implemented |
 | **Author** | Codex integration subagent |
 | **Touches** | `spec/`, `runner/`, `policy/adapters/`, `training/post/`, recipes in the private experiment repository |
 | **Invariants** | I1, I2, I3, I5, I8, I9, I10, I11 |

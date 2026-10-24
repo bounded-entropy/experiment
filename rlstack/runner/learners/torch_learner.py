@@ -41,12 +41,13 @@ from rlstack.data.flatten import TokenBatch
 from rlstack.policy.adapters.replay import ReplayRows, SiteWrapper, row_plan
 from rlstack.policy.siteschema import SiteMeta
 from rlstack.registry import ADAPTER_TYPES, LOSSES
+from rlstack.code import verify_code, require_declared_definition
 from rlstack.runner.learners.gradient_cache import GradientCache
 from rlstack.runner.interfaces import (
     Emitted, Parameterization, TrainStats, check_lr_scales, lr_scale_of,
 )
 from rlstack.training.losses import PolicyOutputs
-from rlstack.training.losses.factual_sft import sequence_sft
+from rlstack.training.losses.sequence_sft import sequence_sft
 
 
 LOGPROB_CHUNK = 1024
@@ -177,6 +178,7 @@ class _Tenant:
     # `optim_step(lr_scales=...)` scales from, fixed at optimizer build so a
     # scaled step can never compound into the next one
     base_lrs: dict[str, tuple[tuple[str, float], ...]] = field(default_factory=dict)
+    code: dict[str, str] = field(default_factory=dict)
     slot: dict[str, Any] = field(default_factory=dict)
     routed_slots: dict[str, dict[str, Any]] = field(default_factory=dict)
 
@@ -233,12 +235,18 @@ class TorchLearner:
         the loss and every adapter type are resolved BY KEY against this
         process's own registries, the seeds arrive derived, and the sites
         arrive resolved (ADR 0002, Q2)."""
+        verify_code(parameterization.code)
+        require_declared_definition(LOSSES.get(parameterization.loss).fn.__module__, tuple(parameterization.code))
+        for entry in parameterization.entries:
+            for module in ADAPTER_TYPES.get(entry.adapter_type).instance.code_modules():
+                require_declared_definition(module, tuple(parameterization.code))
         self._ensure_base(parameterization.base)
         if tenant in self._tenants:            # Phase 1 re-runs on attach
             self._remove(tenant)
 
         state = _Tenant(
             loss_fn=LOSSES.get(parameterization.loss).fn,
+            code=dict(parameterization.code),
             trainable=sorted(e.name for e in parameterization.entries
                              if e.trainable),
             entries=[e.name for e in parameterization.entries],
@@ -683,7 +691,7 @@ class TorchLearner:
         from rlstack.policy.compile import compile_tensor_pin
         states = self.export_state(tenant, versions, names)
         return compile_tensor_pin({name: snapshot.layout() for name, snapshot in states.items()},
-                                  versions, adapter_types)
+                                  versions, adapter_types, self._tenant(tenant).code)
 
     @serialized_learner_operation
     def prepare_transfer(self, tenant, versions, names, adapter_types) -> dict:
@@ -693,7 +701,7 @@ class TorchLearner:
         started = time.monotonic()
         states = self.export_state(tenant, versions, names)
         materialized = time.monotonic()
-        manifest = self._weight_sender.capture(states, versions, adapter_types, owner=tenant)
+        manifest = self._weight_sender.capture(states, versions, adapter_types, owner=tenant, code=self._tenant(tenant).code)
         manifest["materialize_s"] = materialized - started
         return manifest
 

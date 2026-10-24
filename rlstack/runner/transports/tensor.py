@@ -116,7 +116,7 @@ class TensorSender:
         self.buffers: dict[str, dict] = {}
         self.groups: OrderedDict[str, tuple] = OrderedDict()
 
-    def capture(self, states: Mapping[str, TensorState], versions, adapter_types, owner="") -> dict:
+    def capture(self, states: Mapping[str, TensorState], versions, adapter_types, owner="", code=None) -> dict:
         if len(self.snapshots) >= 2:
             raise RuntimeError("unacknowledged tensor snapshots must be released before capture")
         started = time.monotonic()
@@ -131,7 +131,8 @@ class TensorSender:
         return {"token": token, "source": self.identity,
                 "versions": dict(versions), "adapter_types": dict(adapter_types),
                 "states": {name: layout.row() for name, layout in layouts.items()},
-                "bundle_id": tensor_bundle_id(versions, layouts),
+                "bundle_id": tensor_bundle_id(versions, layouts, code),
+                **({"code": dict(code)} if code else {}),
                 "capture_s": frozen_at - started,
                 "hash_s": time.monotonic() - frozen_at}
 
@@ -227,7 +228,7 @@ class _ReceiverPeer:
                                      layout.metadata) for entry, layout in layouts.items()}
         if content_layouts(layouts, buffers) != layouts:
             raise ValueError("tensor publication content mismatch")
-        if tensor_bundle_id(manifest["versions"], layouts) != manifest["bundle_id"]:
+        if tensor_bundle_id(manifest["versions"], layouts, manifest.get("code")) != manifest["bundle_id"]:
             raise ValueError("tensor publication bundle id does not match its state")
         checked = time.monotonic()
         if self.cancelled:

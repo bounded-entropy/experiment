@@ -55,6 +55,8 @@ def demands_of(spec: ExperimentSpec,
     the desk's. A pool declared on ANOTHER base (a judge pool) can hold none
     of this bank's deltas, so its demand names nothing: it is a FROZEN pool,
     which is what lets a solo submission share one standing judge (2026-09-17)."""
+    from rlstack.code import load_code
+    load_code(spec.code)
     serves = adapter_types_of(spec)
     out: list[Demand] = []
     for hi, host in enumerate(spec.topology.hosts):

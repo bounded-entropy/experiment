@@ -25,14 +25,11 @@ from rlstack.data.trajectory import Message
 from rlstack.policy.adapters.base import (
     AdapterType, Directive, Mechanism, Reachability, adapter_type,
 )
-from rlstack.policy.adapters.dream_bank import (
-    BASE, Route, check_route, check_trains_at_most_one, is_library,
-    library_names_of, parts_of, route_of,
-)
 from rlstack.policy.adapters.rollout import Library, Request
 from rlstack.policy.compile import Bundle
 from rlstack.policy.siteschema import SiteMeta
-from rlstack.registry import ADAPTER_TYPES
+from rlstack.registry import ADAPTER_TYPES, LOSSES
+from rlstack.code import verify_code, require_declared_definition
 from rlstack.runner.interfaces import (
     Emitted, FinishEvent, Parameterization, TokenEvent, TrainStats, lr_scale_of,
 )
@@ -44,12 +41,8 @@ from rlstack.spec.specs import SamplingSpec
 _ARITH = re.compile(r"(\d+)\s*\+\s*(\d+)")
 
 def library_names(directives: Sequence[Directive]) -> tuple[str, ...]:
-    """The library adapters a request's route reads (ADR 0019): the `lib:`
-    parts of its dream_bank Route, stacked or alone — read by the one route
-    grammar (`dream_bank.library_names_of`)."""
-    return tuple(name
-                 for directive in directives if isinstance(directive, Route)
-                 for name in library_names_of(directive.name))
+    return tuple(dict.fromkeys(name for directive in directives
+        for name in ADAPTER_TYPES.get(directive.adapter_type).instance.directive_dependencies(directive)))
 
 
 class FakeEngine:
@@ -170,6 +163,10 @@ class FakeEngine:
         return {meta.name: reach(meta) for meta in sites}
 
     def add_bundle(self, bundle: Bundle) -> None:
+        verify_code(bundle.code)
+        for kind in bundle.adapter_types.values():
+            for module in ADAPTER_TYPES.get(kind).instance.code_modules():
+                require_declared_definition(module, tuple(bundle.code))
         if bundle.bundle_id in self._known:
             return  # additive AND idempotent (the invariant)
         self.bundle_log.append(bundle.bundle_id)
@@ -344,14 +341,6 @@ def fake_initial_payload(sites: Sequence[SiteMeta],
     })[:16]).encode()
 
 
-def fake_set_digest(payload: bytes) -> str:
-    """The digest a named payload carries. The fake's own payloads carry
-    theirs verbatim — so emit_set -> load_set -> emit_set is exact — and any
-    other bytes (a test's stand-in library) are their sha256."""
-    if payload.startswith(FAKE_SET):
-        return payload[len(FAKE_SET):].decode()
-    return hashlib.sha256(payload).hexdigest()
-
 
 def _doc_spans(batch: TokenBatch) -> list[tuple[int, int]]:
     starts = list(batch.doc_starts)
@@ -394,14 +383,6 @@ class FakeAdapter(AdapterType):
         params.payload = payload
 
 
-FAKE_SET = b"fake-set:"
-"""The fake world's NAMED PAYLOAD (ADR 0019): this prefix and one set's digest
-— what `FakeLearner.emit_set` writes and `load_set` reads back exactly."""
-
-FAKE_MEMORIES = 100
-"""The memory bound a fake entry whose init names none is checked against:
-every two-digit `memory:NN` — the fake checks a route's GRAMMAR, as the torch
-side does, without needing a dream_bank to have been declared."""
 
 
 @dataclass
@@ -427,13 +408,11 @@ class _FakeTenant:
     frozen: dict[str, bytes]            # v0 payloads, by the fake init function
     init: str
     state: str
+    code: dict[str, str] = field(default_factory=dict)
     steps: int = 0
     # ---- named sets (ADR 0019), beside the digest and never inside it: a run
     # that never says load_set emits exactly the bytes it always did
     set_inits: dict[str, str] = field(default_factory=dict)      # entry -> init digest
-    memories: dict[str, int] = field(default_factory=dict)       # entry -> its bound
-    sets: dict[tuple[str, str], _FakeSet] = field(default_factory=dict)
-    libraries: dict[tuple[str, str], str] = field(default_factory=dict)
     lr_scales: list[dict[str, float]] = field(default_factory=list)  # one per step
     routes: dict[str, str | None] = field(default_factory=dict)
     entry_states: dict[str, _FakeSet] = field(default_factory=dict)
@@ -488,6 +467,11 @@ class FakeLearner:
     # ---- Learner protocol ---------------------------------------------------
 
     def install(self, tenant: str, parameterization: Parameterization) -> None:
+        verify_code(parameterization.code)
+        require_declared_definition(LOSSES.get(parameterization.loss).fn.__module__, tuple(parameterization.code))
+        for entry in parameterization.entries:
+            for module in ADAPTER_TYPES.get(entry.adapter_type).instance.code_modules():
+                require_declared_definition(module, tuple(parameterization.code))
         entries = {entry.name: entry for entry in parameterization.entries}
         all_names = sorted(entries)
         # the init digest folds the DERIVED per-entry seeds: a different
@@ -510,13 +494,11 @@ class FakeLearner:
             # no learner builds for it (ADR 0006 Part B)
             frozen={name: fake_initial_payload(entry.sites, entry.init)
                     for name, entry in entries.items() if not entry.trainable},
-            init=init, state=init,
+            init=init, state=init, code=dict(parameterization.code),
             set_inits={name: content_hash({
                 "seed": entry.init.get("seed"), "adapter_type": entry.adapter_type,
                 "sites": [m.name for m in entry.sites]})
-                for name, entry in entries.items()},
-            memories={name: int(entry.init.get("memories", FAKE_MEMORIES))
-                      for name, entry in entries.items()})
+                for name, entry in entries.items()})
         state = self._tenants[tenant]
         if any(entry.route is not None for entry in entries.values()):
             state.routes = {name: entry.route for name, entry in entries.items()}
@@ -579,7 +561,6 @@ class FakeLearner:
             self.fold_routed_documents(state, batch)
         else:
             state.state = content_hash({"state": state.state, **gradient})
-            self.fold_documents_into_their_sets(state, batch)
         return TrainStats(
             loss=int(state.state[:8], 16) / 16 ** 8,
             mean_ratio=1.0,
@@ -677,14 +658,6 @@ class FakeLearner:
         if scales:
             fold["lr_scales"] = scales
         state.state = content_hash(fold)
-        for (entry, route), held in state.sets.items():
-            if held.pending is None:
-                continue
-            held.steps += 1
-            held.state = content_hash({
-                "state": held.pending, "step": held.steps,
-                "scale": lr_scale_of(scales, entry, route)})
-            held.pending = None
 
     def lr_scales_of(self, tenant: str) -> list[dict[str, float]]:
         """What every `optim_step` of this tenant was told, in order ({} for
@@ -693,47 +666,8 @@ class FakeLearner:
 
     # ---- named sets and the no-grad forward (ADR 0019) ----------------------
 
-    def load_set(self, tenant: str, entry: str, route: str,
-                 payload: bytes | None) -> None:
-        """Start one set over: from a named payload, or from its deterministic
-        init (entry and route) when None; its accumulated documents and its
-        step count — the fake's moments — are reset either way. A `lib:<name>`
-        route installs a frozen library set, which needs its payload."""
-        state = self._tenant(tenant)
-        self.check_set_route(state, entry, route)
-        if is_library(route):
-            if payload is None:
-                raise ValueError(f"library set {route!r} has no init of its "
-                                 f"own: load_set needs its named payload")
-            state.libraries[(entry, route)] = fake_set_digest(payload)
-            return
-        digest = (self.set_init(state, entry, route) if payload is None
-                  else fake_set_digest(payload))
-        state.sets[(entry, route)] = _FakeSet(state=digest)
 
-    def drop_set(self, tenant: str, entry: str, route: str) -> None:
-        """Library sets only; one nobody holds is already dropped."""
-        state = self._tenant(tenant)
-        self.check_set_route(state, entry, route)
-        if not is_library(route):
-            raise ValueError(f"{route!r} is a set this entry owns; only a "
-                             f"library set (lib:<name>) can be dropped")
-        state.libraries.pop((entry, route), None)
 
-    def emit_set(self, tenant: str, entry: str, route: str) -> bytes:
-        """One set as the fake named payload. A set `load_set` started is its
-        own digest; one it never touched has trained (if at all) inside the
-        tenant's digest, so its payload is derived from that."""
-        state = self._tenant(tenant)
-        self.check_set_route(state, entry, route)
-        if is_library(route):
-            return FAKE_SET + self.library(state, route).encode()
-        held = state.sets.get((entry, route))
-        if held is not None:
-            return FAKE_SET + held.state.encode()
-        return FAKE_SET + content_hash({
-            "init": self.set_init(state, entry, route),
-            "state": state.state}).encode()
 
     def forward(self, tenant: str, batch: TokenBatch) -> tuple[float, ...]:
         """One deterministic float per document: a pure function of the
@@ -748,10 +682,9 @@ class FakeLearner:
             int(content_hash({
                 "ids": batch.token_ids[start:stop],
                 "mask": batch.loss_mask[start:stop],
-                "under": [self.part_state(state, part) for part in parts],
+                "under": [[state.state]],
             })[:8], 16) / 16 ** 8
-            for (start, stop), parts in zip(_doc_spans(batch),
-                                            self.doc_parts(state, batch)))
+            for start, stop in _doc_spans(batch))
 
     def gradient_cosines(
         self, tenant: str, entry: str,
@@ -819,83 +752,11 @@ class FakeLearner:
         return (tuple(math.fsum(vector[k] for vector in vectors) / documents for k in range(8)),
                 tuple(statistics))
 
-    def fold_documents_into_their_sets(self, state: _FakeTenant,
-                                       batch: TokenBatch) -> None:
-        """forward_backward's named-set half: each document folds into the
-        trainable part of its route, IF `load_set` started that set — one
-        document at a time and in order, so how a lane's documents were packed
-        into microbatches (alone, or beside K−1 other lanes) cannot matter.
-        The library parts it ran under enter the fold; they are never folded
-        into."""
-        for (start, stop), parts in zip(_doc_spans(batch),
-                                        self.doc_parts(state, batch)):
-            under = [self.library(state, part) for part in parts if is_library(part)]
-            for part in parts:
-                for entry in state.trainable:
-                    held = state.sets.get((entry, part))
-                    if held is None:
-                        continue
-                    held.pending = content_hash({
-                        "state": held.pending or held.state,
-                        "ids": batch.token_ids[start:stop],
-                        "mask": batch.loss_mask[start:stop],
-                        "blp": batch.behavior_logprobs[start:stop],
-                        "post": {k: batch.postdata[k][start:stop]
-                                 for k in sorted(batch.postdata)},
-                        "under": under})
 
-    def doc_parts(self, state: _FakeTenant,
-                  batch: TokenBatch) -> list[tuple[str, ...]]:
-        """Each document's route parts, read off its turn facts exactly as the
-        replay lowering reads them (`route_of`: a document with no fact is the
-        dreamer's; `base` has no parts). A library part nobody loaded is
-        refused, as the torch forward refuses it."""
-        docs = batch.doc_turn_extras or ((),) * len(batch.doc_starts)
-        routed = []
-        for turns in docs:
-            route = route_of(turns)
-            check_trains_at_most_one(route)
-            parts = () if route == BASE else parts_of(route)
-            for part in parts:
-                if is_library(part):
-                    self.library(state, part)
-            routed.append(parts)
-        return routed
 
-    def part_state(self, state: _FakeTenant, part: str) -> list[str]:
-        """What a forward under `part` reads: a library's digest, the named
-        set's where `load_set` started one, else the tenant's own digest."""
-        if is_library(part):
-            return [self.library(state, part)]
-        held = [state.sets[key].state for key in sorted(state.sets) if key[1] == part]
-        return held or [state.state]
 
-    def library(self, state: _FakeTenant, part: str) -> str:
-        found = [digest for (_, route), digest in sorted(state.libraries.items())
-                 if route == part]
-        if not found:
-            raise ValueError(
-                f"route part {part!r} names a library set this tenant does "
-                f"not hold (loaded: "
-                f"{sorted({route for _, route in state.libraries}) or 'none'}); "
-                f"load_set installs one")
-        return found[0]
 
-    def check_set_route(self, state: _FakeTenant, entry: str, route: str) -> None:
-        """The named-set verbs address ONE set of a known entry: an entry set
-        or a library part — never `base`, never a stack."""
-        if entry not in state.all_names:
-            raise KeyError(f"this tenant has no bank entry {entry!r} "
-                           f"(entries: {state.all_names})")
-        check_route(route, state.memories[entry])
-        if route == BASE or len(parts_of(route)) != 1:
-            raise ValueError(f"{route!r} is not one set: the named-set verbs "
-                             f"take `dreamer`, `memory:NN` or `lib:<name>`")
 
-    def set_init(self, state: _FakeTenant, entry: str, route: str) -> str:
-        """A set's deterministic init: the entry's derived seed and the route,
-        as the torch side seeds each set off both."""
-        return content_hash({"init": state.set_inits[entry], "route": route})
 
     def emit(self, tenant: str) -> Emitted:
         return Emitted(adapters=self.emit_adapters(tenant), optim=self.emit_optim(tenant))
@@ -921,8 +782,8 @@ class FakeLearner:
     def policy_pin(self, tenant, versions, names, adapter_types):
         from rlstack.policy.compile import compile_bundle
         bundle = compile_bundle(self._adapter_payloads(self._tenant(tenant)),
-                                versions, names, adapter_types)
-        return Bundle.pin(bundle.bundle_id, bundle.policy_version)
+                                versions, names, adapter_types, self._tenant(tenant).code)
+        return Bundle.pin(bundle.bundle_id, bundle.policy_version, bundle.code)
 
     def emit_optim(self, tenant: str) -> Mapping[str, bytes]:
         state = self._tenant(tenant)

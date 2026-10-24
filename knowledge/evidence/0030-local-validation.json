@@ -1,0 +1,129 @@
+{
+  "date": "2026-10-23",
+  "scope": "ADR0030 external recipe ownership, plain interaction functions, source-verified workers; stacked after ADR0029 coherent core",
+  "base_commit": "b01102adf95c97bee6d7b31856c197836ae7fc75",
+  "source_chat_framework_base": "b67bb58",
+  "private_source_through": "1668f6a",
+  "framework_stdlib": {
+    "python": "3.13.12",
+    "command": "python3.13 -m unittest discover -s tests",
+    "tests_run": 1752,
+    "passed": 1522,
+    "skipped": 230,
+    "failures": 0,
+    "errors": 0,
+    "elapsed_seconds": 128.914,
+    "log": "/tmp/rlstack-boundary-framework-final-verified.log"
+  },
+  "framework_cpu": {
+    "python": "3.12.12",
+    "torch": "2.14.0",
+    "device": "CPU",
+    "status": "passed",
+    "log": "/tmp/rlstack-boundary-framework-torch-final-verified.log",
+    "tests_run": 280,
+    "passed": 278,
+    "skipped": 2,
+    "failures": 0,
+    "errors": 0,
+    "elapsed_seconds": 5.116
+  },
+  "companion_stdlib": {
+    "tests_run": 318,
+    "passed": 165,
+    "skipped": 153,
+    "failures": 0,
+    "errors": 0,
+    "elapsed_seconds": 6.396,
+    "log": "/tmp/rlstack-recipes-final-stdlib-verified.log"
+  },
+  "companion_cpu": {
+    "tests_run": 318,
+    "passed": 318,
+    "skipped": 0,
+    "failures": 0,
+    "errors": 0,
+    "elapsed_seconds": 8.458,
+    "log": "/tmp/rlstack-recipes-final-cpu-verified.log"
+  },
+  "private_recipes_stdlib": {
+    "tests_run": 195,
+    "passed": 191,
+    "skipped": 4,
+    "failures": 0,
+    "errors": 0,
+    "elapsed_seconds": 24.418,
+    "log": "/tmp/rlstack-private-recipes-stdlib-final.log"
+  },
+  "private_recipes_cpu": {
+    "tests_run": 195,
+    "passed": 195,
+    "skipped": 0,
+    "failures": 0,
+    "errors": 0,
+    "elapsed_seconds": 30.433,
+    "log": "/tmp/rlstack-private-recipes-cpu-final.log"
+  },
+  "private_caller_cpu": {
+    "writer": {
+      "tests_run": 71,
+      "skipped": 0,
+      "elapsed_seconds": 1.619
+    },
+    "masked": {
+      "tests_run": 34,
+      "skipped": 0,
+      "elapsed_seconds": 0.262
+    },
+    "wide": {
+      "tests_run": 6,
+      "skipped": 0,
+      "elapsed_seconds": 0.027
+    },
+    "selection": {
+      "tests_run": 34,
+      "skipped": 0,
+      "elapsed_seconds": 0.476
+    },
+    "failures": 0,
+    "errors": 0
+  },
+  "source_checks": [
+    "Explicit generation declaration gate, including already imported but undeclared code",
+    "Continue task derivation + generation-only and normal-Trainer crash/resume equivalence",
+    "Historical class-plan exact round-trip and execution refusal",
+    "Full package/helper/constant/parent-initializer hashes; changed loaded source refuses until restart",
+    "Missing/partial/mismatched host and measurement claims refused before work",
+    "Learner/bundle/tensor identity and wire code propagation; missing worker packages fail before install",
+    "Adapter-owned named-state grammar + explicit inference dependencies; no task metadata parsing",
+    "Greedy/stochastic per-call sampling, stop/seed provenance and deterministic ordering",
+    "External fake constructor through existing resident build door; private real process custody retained",
+    "Public imports/test suite do not depend on companion/private packages",
+    "Private workers resolve with only installed package roots, no research driver/sys.path dependency",
+    "New source analysis1668f6a compiled and all8paths retained byte-exact; no runtime changes",
+    "Scientific source/data preservation audited privately; original dirty source checkout untouched"
+  ],
+  "counts_overlap": true,
+  "legacy_fitter_present": false,
+  "mandatory_environment_or_maker_classes_present": false,
+  "new_optimizer_runner": false,
+  "active_private_framework_copy": false,
+  "public_companion_remote_created": false,
+  "related_hardware_core": {
+    "commit": "b01102adf95c97bee6d7b31856c197836ae7fc75",
+    "reported_by": "parent agent running separately authorized user pod qualification",
+    "evidence_directory": "/Users/samarth/Coding/experiment/research/a40-qualification",
+    "scope": "18 tensor publication tests including actual CUDA NCCL; short8update ordinary Qwen3.5-4B LoRA SFT loops through desk/observer",
+    "required_environment": {
+      "NCCL_P2P_DISABLE": "1"
+    },
+    "limitation": "Default PCIe P2P stalled; successful shared-memory NCCL does not prove that default P2P is fixed. No online RL/vLLM model serving qualification."
+  },
+  "performance_claim_for_boundary_migration": null,
+  "remaining_hardware_qualification": [
+    "New external native/custom provider deployment with pinned packages",
+    "Full online RL and exact-version serving/recovery under migrated recipes",
+    "Live vLLM model serving and custom Triton/graph parity",
+    "Multi-GPU/multi-node/DP/FSDP model behavior on migrated recipes"
+  ]
+}

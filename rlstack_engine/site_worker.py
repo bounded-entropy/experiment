@@ -57,6 +57,8 @@ class SiteWorker(Worker):
             raise ValueError("custom site worker speculative decoding is not qualified")
         if self.vllm_config.parallel_config.use_ubatching:
             raise ValueError("custom site worker requires one serialized forward lane")
+        from rlstack.code import verify_code
+        verify_code(json.loads(os.environ.get("RLSTACK_SITE_CODE", "{}")))
         for module in json.loads(os.environ["RLSTACK_SITE_MODULES"]):
             importlib.import_module(module)
         runner = self.model_runner

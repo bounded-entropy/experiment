@@ -67,7 +67,14 @@ class VllmEngine:
                  max_library: int = 32, cas_get=None, enforce_eager: bool | None = None,
                  tp: int = 1, serves: Sequence[str] = ("lora",),
                  enable_sleep_mode: bool = False, log_stats: bool = False,
-                 weight_transfer_host: str | None = None) -> None:
+                 weight_transfer_host: str | None = None,
+                 code: Mapping[str, str] | None = None) -> None:
+        from rlstack.code import verify_code, require_declared_definition
+        code = dict(code or {})
+        verify_code(code)
+        for kind in serves:
+            for module in ADAPTER_TYPES.get(kind).instance.code_modules():
+                require_declared_definition(module, tuple(code))
         from transformers import AutoConfig, AutoTokenizer
 
         self.base = base
@@ -99,6 +106,7 @@ class VllmEngine:
                                    max_bundles=max_bundles, max_rank=max_rank,
                                    max_members=max_members, cas=cas_get,
                                    library=self._library,
+                                   code=code,
                                    site_types=tuple(name for name in serves
                                        if ADAPTER_TYPES.get(name).instance.serving == Mechanism.SITE))
         self._lowerings = self._serving_adapter_types()
@@ -133,6 +141,7 @@ class VllmEngine:
         # what this engine is holding, and the rule for letting go: bounded,
         # least-recently-used first, never a bundle a request is pinning.
         self._residency = BundleResidency(max_bundles, self._detach_all)
+        self._verified_code: set[tuple] = set()
         self._request_count = 0
         self._weight_receiver = None
         self._publication_lock = threading.RLock()
@@ -233,6 +242,7 @@ class VllmEngine:
         (I8), and a bundle whose adapter types cannot compose into one request is
         refused here, before any request can pin it.
         """
+        self.verify_bundle_code(bundle.code, bundle.adapter_types)
         if self._residency.knows(bundle.bundle_id):
             return
         payloads = group_by_adapter_type(bundle)
@@ -243,6 +253,18 @@ class VllmEngine:
             lowering.adapter_type: lowering.attach(
                 bundle.bundle_id, payloads[lowering.adapter_type])
             for lowering in lowerings})       # no payloads: serve the bare base
+
+    def verify_bundle_code(self, code, adapter_types) -> None:
+        from rlstack.code import verify_code, require_declared_definition
+        # Source files are immutable for this resident's lifetime. Verify once
+        # per manifest; repeated publication must not rescan a recipe tree.
+        key = tuple(sorted(code.items()))
+        if key not in self._verified_code:
+            verify_code(code)
+            self._verified_code.add(key)
+        for kind in adapter_types.values():
+            for module in ADAPTER_TYPES.get(kind).instance.code_modules():
+                require_declared_definition(module, tuple(code))
 
     def add_library(self, name: str, payload: bytes) -> None:
         """Hold one named payload for routes to read (ADR 0019): idempotent,
@@ -258,6 +280,7 @@ class VllmEngine:
 
     def _install_tensor_state(self, manifest, states) -> None:
         """Adapter-neutral bus; lowerings own installation, not carriage."""
+        self.verify_bundle_code(manifest.get("code", {}), manifest["adapter_types"])
         bundle_id = manifest["bundle_id"]
         if self._residency.knows(bundle_id):
             return
@@ -277,6 +300,7 @@ class VllmEngine:
         self._residency.hold(bundle_id, attached)
 
     def prepare_transfer(self, manifest, transfer) -> dict:
+        self.verify_bundle_code(manifest.get("code", {}), manifest["adapter_types"])
         from rlstack.runner.transports.tensor import TensorReceiver
         from dataclasses import replace
         if self._asleep:

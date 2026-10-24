@@ -2,8 +2,7 @@
 
 ADR 0028 builds on ADR 0027's checkpoint and tensor-transfer services. An
 `AdapterType.definition` is consumed by both `compile_replay` and
-`compile_rollout`. All twelve existing registered adapter types now enter
-through that interface. Their existing native compute, stochastic draws,
+`compile_rollout`. All retained shared adapters and external recipe adapters enter through that interface. Their existing native compute, stochastic draws,
 recorded context, parameter groups and checkpoint codecs remain providers
 underneath it. Native vLLM LoRA still uses its native multi-LoRA path.
 
@@ -71,9 +70,11 @@ training executes the forward and recomputes the reference for backward;
 CPU training uses reference autograd directly. A forward-only declaration is
 serving-only and is refused for a trainable bank entry.
 
-Import registration modules on the submitting process and install them in the
-worker image. The custom worker imports the declared class modules before
-loading implementations. No code is dynamically downloaded or embedded in a
+Declare `ExperimentSpec.code=("my_package",)` and install that package in
+the worker image. A serving build declares the same full source manifest with
+`EngineBuild(code=load_code(("my_package",)), serves=("my_steer",))`. The custom
+worker verifies that manifest and imports declared class modules before loading
+implementations. Every explicit provider module must be covered by the roots. No code is dynamically downloaded or embedded in a
 request. Importing `rlstack` itself remains free of torch, vLLM and Triton.
 
 Two complete declaration-only examples ship in
@@ -150,3 +151,8 @@ A site can advertise multiple supported mechanisms, so native and custom
 providers can coexist without failing Phase 0. RPC preserves scalar mechanism
 rows for old single-provider cases and uses sorted lists for multiple providers.
 The fake engine models `SITE` only when explicitly enabled in its plugins.
+
+Recipe-specific native providers use `definition.native` with fully qualified
+provider module names. DreamBank and task-indexed factual adapter variants now
+live in the separate recipe repository; their state and transport contracts are
+the same shared services. See [experiment ownership](experiment-boundary.md).

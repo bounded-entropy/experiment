@@ -25,9 +25,7 @@ from rlstack.policy.adapters.plora import FIXED_PRIOR, PRIORS
 from rlstack.policy.siteschema import SiteMeta, SiteSchema, resolve
 from rlstack.registry import (
     ADAPTER_TYPES,
-    ENVS,
     LOSSES,
-    MAKERS,
     POST,
 )
 from rlstack.spec.specs import PoolMember, ExperimentSpec, LearnerMember
@@ -90,7 +88,13 @@ def check_names_are_registered(spec: ExperimentSpec, schema: SiteSchema) -> list
     This check owns all the unknown-* codes; later checks silently skip names
     it has already reported.
     """
+    from rlstack.code import load_code, require_declared_definition
+    from rlstack.registry import LossDef
     issues = []
+    try:
+        load_code(spec.code)
+    except (ValueError, ImportError, OSError) as exc:
+        return [_issue("experiment-code-unavailable", "code", str(exc))]
 
     def look(registry, name: str, code: str, path: str) -> None:
         if name not in registry:
@@ -98,16 +102,29 @@ def check_names_are_registered(spec: ExperimentSpec, schema: SiteSchema) -> list
                 registry.get(name)  # raises with the helpful "registered: ..." message
             except KeyError as exc:
                 issues.append(_issue(code, path, str(exc.args[0])))
+        else:
+            definition = registry.get(name)
+            body = definition.fn if isinstance(definition, LossDef) else definition.cls
+            try:
+                require_declared_definition(body.__module__, spec.code)
+                if registry is ADAPTER_TYPES:
+                    for module in definition.instance.code_modules():
+                        require_declared_definition(module, spec.code)
+            except ValueError as exc:
+                issues.append(_issue("undeclared-experiment-code", path, str(exc)))
 
     if spec.algo is not None:
         look(LOSSES, spec.algo.loss, "unknown-loss", "algo.loss")
         for i, name in enumerate(spec.algo.post):
             look(POST, name, "unknown-post", f"algo.post[{i}]")
     if spec.gen is not None:
-        for index, name in enumerate(spec.gen.envs):
-            look(ENVS, name, "unknown-env", f"gen.envs[{index}]")
-        for index, name in enumerate(spec.gen.makers):
-            look(MAKERS, name, "unknown-maker", f"gen.makers[{index}]")
+        from rlstack.code import require_declared_function
+
+        for index, reference in enumerate(spec.gen.functions):
+            try:
+                require_declared_function(reference, spec.code)
+            except (ValueError, TypeError, ImportError, AttributeError) as exc:
+                issues.append(_issue("unknown-function", f"gen.functions[{index}]", str(exc)))
     for entry_name, adapter in spec.policy.bank.items():
         look(ADAPTER_TYPES, adapter.adapter_type, "unknown-adapter",
              f"policy.bank.{entry_name}.adapter_type")

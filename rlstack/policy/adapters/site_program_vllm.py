@@ -77,6 +77,7 @@ class SiteRollout(RolloutLowering):
             env={"VLLM_USE_V2_MODEL_RUNNER": "0",
                  "RLSTACK_SITE_TYPES": json.dumps(types),
                  "RLSTACK_SITE_MODULES": json.dumps(modules),
+                 "RLSTACK_SITE_CODE": json.dumps(dict(self.build.code), sort_keys=True),
                  "RLSTACK_SITE_SLOTS": str(self.build.max_bundles)})
 
     def reaches(self, meta):

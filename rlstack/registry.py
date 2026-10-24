@@ -81,16 +81,11 @@ class Registry:
         return f"Registry({self.kind!r}, {len(self._entries)} entries)"
 
 
-ENVS = Registry("environment")      # EnvironmentDef (inference/environments/base.py)
 POST = Registry("postprocessor")    # PostDef (training/post/base.py)
 LOSSES = Registry("loss")           # LossDef (below)
 ADAPTER_TYPES = Registry("adapter_type")  # AdapterTypeDef (policy/adapters/base.py):
                                     # one registered ADAPTER TYPE per entry,
                                     # which an AdapterSpec names by string
-MAKERS = Registry("task_maker")     # MakerDef (inference/makers/base.py): a
-                                    # Derive leaf names one; gen.makers
-                                    # declares them, so their source hashes
-                                    # into run identity like an environment's
 
 
 # ---------------------------------------------------------------------------
@@ -139,10 +134,17 @@ def code_hashes(spec: ExperimentSpec) -> dict[str, str]:
     Keys are "<registry kind>:<name>". An unknown name raises the registry's
     KeyError — run the submit gate first to report those as issues instead.
     """
-    out: dict[str, str] = {}
+    from rlstack.code import load_code, require_declared_definition
+    out: dict[str, str] = {f"module:{name}": digest for name, digest in load_code(spec.code).items()}
 
     def add(registry: Registry, name: str) -> None:
-        out[f"{registry.kind}:{name}"] = registry.get(name).source_hash
+        definition = registry.get(name)
+        body = definition.fn if isinstance(definition, LossDef) else definition.cls
+        require_declared_definition(body.__module__, spec.code)
+        if registry is ADAPTER_TYPES:
+            for module in definition.instance.code_modules():
+                require_declared_definition(module, spec.code)
+        out[f"{registry.kind}:{name}"] = definition.source_hash
 
     if spec.algo is not None:
         add(LOSSES, spec.algo.loss)
@@ -150,10 +152,11 @@ def code_hashes(spec: ExperimentSpec) -> dict[str, str]:
             add(POST, name)
 
     if spec.gen is not None:
-        for name in spec.gen.envs:
-            add(ENVS, name)
-        for name in spec.gen.makers:
-            add(MAKERS, name)
+        from rlstack.code import require_declared_function
+
+        for reference in spec.gen.functions:
+            function = require_declared_function(reference, spec.code)
+            out[f"function:{reference}"] = source_hash(function)
 
     for adapter in spec.policy.bank.values():
         add(ADAPTER_TYPES, adapter.adapter_type)

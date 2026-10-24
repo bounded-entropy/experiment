@@ -1,13 +1,6 @@
-"""Supervised sequence means with an optional task posterior penalty.
-
-Each sequence has equal weight after averaging its scored tokens. Packing
-can divide an update, but cannot change its objective or KL coefficient.
-"""
-
-from dataclasses import replace
+"""Equal document means of selected-token supervised NLL."""
 from rlstack.registry import loss
 from rlstack.training.losses.base import LossResult, rails, token_tensors
-
 
 @loss("sequence_sft")
 def sequence_sft(out, batch):
@@ -30,14 +23,3 @@ def sequence_sft(out, batch):
         components[f"document_{i}_tokens"] = count
     return LossResult(objective, ratio, gap, components)
 
-
-@loss("factual_sft", requires=("latent_kl", "factual_beta"))
-def factual_sft(out, batch):
-    result = sequence_sft(out, batch)
-    fraction = len(batch.doc_starts) / batch.documents_in_update
-    penalty = fraction * out.provided["factual_beta"] * out.provided["latent_kl"]
-    objective = result.loss + penalty
-    return replace(result, loss=objective, components={**result.components,
-        "nll_term": float(result.loss.detach()), "latent_kl": float(out.provided["latent_kl"].detach()),
-        "beta": float(out.provided["factual_beta"]), "document_fraction": fraction,
-        "kl_term": float(penalty.detach()), "objective": float(objective.detach())})

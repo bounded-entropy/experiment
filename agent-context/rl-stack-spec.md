@@ -1,5 +1,13 @@
 # The Thin Wrapper: Primitives
 
+> Current boundary (ADR 0030 / CONTEXT 101): interaction and task derivation
+> are ordinary experiment-owned async functions outside this repository.
+> `Sample(task_id, function)` and `Continue(sealed_source, function)` use explicit
+> `GenSpec.functions` / `ExperimentSpec.code`, with worker source verification.
+> Environment/TaskMaker classes and their registries are removed; older text
+> below records the earlier folded vocabulary and is superseded on those points.
+> The shared runner still seals trajectories and owns recovery.
+
 *Working spec v3, August 2026. Folded in the deltas of CONTEXT #21–#38 (v2 froze
 before Phase B ran on metal). Organized around the contract: two worlds, one
 membrane. Long-form rationale archived (see footer).*

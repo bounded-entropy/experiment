@@ -1,0 +1,451 @@
+{
+  "framework_base": "b01102adf95c97bee6d7b31856c197836ae7fc75",
+  "moved": [
+    {
+      "source": "rlstack/training/post/conditioned_teacher_logprobs.py",
+      "target": "rlstack_recipes/distillation/conditioned_teacher_logprobs.py",
+      "disposition": "moved composition/behavior"
+    },
+    {
+      "source": "rlstack/training/post/hinted_logprobs.py",
+      "target": "rlstack_recipes/distillation/hinted_logprobs.py",
+      "disposition": "moved composition/behavior"
+    },
+    {
+      "source": "rlstack/training/post/dream_advantage.py",
+      "target": "rlstack_recipes/dreamer/dream_advantage.py",
+      "disposition": "moved composition/behavior"
+    },
+    {
+      "source": "rlstack/training/post/dream_diagnostics.py",
+      "target": "rlstack_recipes/dreamer/dream_diagnostics.py",
+      "disposition": "moved composition/behavior"
+    },
+    {
+      "source": "rlstack/training/post/dream_effect.py",
+      "target": "rlstack_recipes/dreamer/dream_effect.py",
+      "disposition": "moved composition/behavior"
+    },
+    {
+      "source": "rlstack/training/post/gold_logprob.py",
+      "target": "rlstack_recipes/dreamer/gold_logprob.py",
+      "disposition": "moved composition/behavior"
+    },
+    {
+      "source": "rlstack/training/post/final_answer.py",
+      "target": "rlstack_recipes/math/final_answer.py",
+      "disposition": "moved composition/behavior"
+    },
+    {
+      "source": "rlstack/training/post/group_accuracy.py",
+      "target": "rlstack_recipes/math/group_accuracy.py",
+      "disposition": "moved composition/behavior"
+    },
+    {
+      "source": "rlstack/training/post/llm_judge.py",
+      "target": "rlstack_recipes/math/llm_judge.py",
+      "disposition": "moved composition/behavior"
+    },
+    {
+      "source": "rlstack/training/post/verifier.py",
+      "target": "rlstack_recipes/math/verifier.py",
+      "disposition": "moved composition/behavior"
+    },
+    {
+      "source": "rlstack/training/post/program_correctness.py",
+      "target": "rlstack_recipes/evaluation/program_correctness.py",
+      "disposition": "moved composition/behavior"
+    },
+    {
+      "source": "rlstack/training/post/program_diagnostics.py",
+      "target": "rlstack_recipes/evaluation/program_diagnostics.py",
+      "disposition": "moved composition/behavior"
+    },
+    {
+      "source": "rlstack/training/losses/grpo_elbo.py",
+      "target": "rlstack_recipes/variational/grpo_elbo.py",
+      "disposition": "moved composition/behavior"
+    },
+    {
+      "source": "rlstack/training/losses/grpo_latent_kl.py",
+      "target": "rlstack_recipes/variational/grpo_latent_kl.py",
+      "disposition": "moved composition/behavior"
+    },
+    {
+      "source": "rlstack/training/losses/grpo_latent_kl_gated.py",
+      "target": "rlstack_recipes/variational/grpo_latent_kl_gated.py",
+      "disposition": "moved composition/behavior"
+    },
+    {
+      "source": "rlstack/training/losses/grpo_latent_kl_gated_priced.py",
+      "target": "rlstack_recipes/variational/grpo_latent_kl_gated_priced.py",
+      "disposition": "moved composition/behavior"
+    },
+    {
+      "source": "rlstack/training/losses/grpo_reference_kl.py",
+      "target": "rlstack_recipes/distillation/grpo_reference_kl.py",
+      "disposition": "moved composition/behavior"
+    },
+    {
+      "source": "rlstack/training/losses/self_anchor.py",
+      "target": "rlstack_recipes/distillation/self_anchor.py",
+      "disposition": "moved composition/behavior"
+    },
+    {
+      "source": "rlstack/training/losses/opsd.py",
+      "target": "rlstack_recipes/distillation/opsd.py",
+      "disposition": "moved composition/behavior"
+    },
+    {
+      "source": "rlstack/training/losses/sdft.py",
+      "target": "rlstack_recipes/distillation/sdft.py",
+      "disposition": "moved composition/behavior"
+    },
+    {
+      "source": "rlstack/training/losses/sdpo.py",
+      "target": "rlstack_recipes/distillation/sdpo.py",
+      "disposition": "moved composition/behavior"
+    },
+    {
+      "source": "rlstack/training/losses/anchor_calibrate.py",
+      "target": "rlstack_recipes/dreamer/anchor_calibrate.py",
+      "disposition": "moved composition/behavior"
+    },
+    {
+      "source": "rlstack/training/losses/dream_stream.py",
+      "target": "rlstack_recipes/dreamer/dream_stream.py",
+      "disposition": "moved composition/behavior"
+    },
+    {
+      "source": "rlstack/training/losses/factual_sft.py",
+      "target": "rlstack_recipes/factual/factual_sft.py",
+      "disposition": "moved composition/behavior"
+    },
+    {
+      "source": "rlstack/data/tasks/concept_prompts.py",
+      "target": "rlstack_recipes/concept/tasks.py",
+      "disposition": "moved prompt/dataset choices"
+    },
+    {
+      "source": "rlstack/data/tasks/dapo_math.py",
+      "target": "rlstack_recipes/math/tasks.py",
+      "disposition": "moved prompt/dataset choices"
+    },
+    {
+      "source": "rlstack/inference/environments/answer.py",
+      "target": "rlstack_recipes/dreamer/answer.py",
+      "disposition": "ported class body to a plain async function; advertised entrypoint in interactions.py; preserves sampling overrides"
+    },
+    {
+      "source": "rlstack/inference/environments/ask_memory.py",
+      "target": "rlstack_recipes/dreamer/ask_memory.py",
+      "disposition": "ported class body to a plain async function; advertised entrypoint in interactions.py; preserves sampling overrides"
+    },
+    {
+      "source": "rlstack/inference/environments/closed_book.py",
+      "target": "rlstack_recipes/dreamer/closed_book.py",
+      "disposition": "ported class body to a plain async function; advertised entrypoint in interactions.py; preserves sampling overrides"
+    },
+    {
+      "source": "rlstack/inference/environments/routed_turn.py",
+      "target": "rlstack_recipes/dreamer/routed_turn.py",
+      "disposition": "ported class body to a plain async function; advertised entrypoint in interactions.py; preserves sampling overrides"
+    },
+    {
+      "source": "rlstack/inference/environments/conditioned_teacher.py",
+      "target": "rlstack_recipes/distillation/conditioned_teacher.py",
+      "disposition": "ported class body to a plain async function; advertised entrypoint in interactions.py; preserves sampling overrides"
+    },
+    {
+      "source": "rlstack/inference/environments/reflect_retry.py",
+      "target": "rlstack_recipes/distillation/reflect_retry.py",
+      "disposition": "ported class body to a plain async function; advertised entrypoint in interactions.py; preserves sampling overrides"
+    },
+    {
+      "source": "rlstack/inference/environments/single_turn.py",
+      "target": "rlstack_recipes/concept/single_turn.py",
+      "disposition": "ported class body to a plain async function; advertised entrypoint in interactions.py; preserves sampling overrides"
+    },
+    {
+      "source": "rlstack/inference/environments/dapo_math.py",
+      "target": "rlstack_recipes/math/dapo_math.py",
+      "disposition": "ported class body to a plain async function; advertised entrypoint in interactions.py; preserves sampling overrides"
+    },
+    {
+      "source": "rlstack/inference/environments/math_single_turn.py",
+      "target": "rlstack_recipes/math/math_single_turn.py",
+      "disposition": "ported class body to a plain async function; advertised entrypoint in interactions.py; preserves sampling overrides"
+    },
+    {
+      "source": "rlstack/inference/makers/reflect.py",
+      "target": "rlstack_recipes/distillation/reflect.py",
+      "disposition": "plain source-to-follow-up interaction composition; no task-maker base class"
+    },
+    {
+      "source": "rlstack/policy/adapters/dream_bank.py",
+      "target": "rlstack_recipes/dreamer/adapters/dream_bank.py",
+      "disposition": "external native adapter declaration/provider using shared state, lowerings, optimizer and publication services"
+    },
+    {
+      "source": "rlstack/policy/adapters/dream_bank_torch.py",
+      "target": "rlstack_recipes/dreamer/adapters/dream_bank_torch.py",
+      "disposition": "external native adapter declaration/provider using shared state, lowerings, optimizer and publication services"
+    },
+    {
+      "source": "rlstack/policy/adapters/dream_bank_vllm.py",
+      "target": "rlstack_recipes/dreamer/adapters/dream_bank_vllm.py",
+      "disposition": "external native adapter declaration/provider using shared state, lowerings, optimizer and publication services"
+    },
+    {
+      "source": "rlstack/policy/adapters/learned_tasks.py",
+      "target": "rlstack_recipes/factual/adapters/learned_tasks.py",
+      "disposition": "external native adapter declaration/provider using shared state, lowerings, optimizer and publication services"
+    },
+    {
+      "source": "rlstack/policy/adapters/learned_tasks_torch.py",
+      "target": "rlstack_recipes/factual/adapters/learned_tasks_torch.py",
+      "disposition": "external native adapter declaration/provider using shared state, lowerings, optimizer and publication services"
+    },
+    {
+      "source": "rlstack/policy/adapters/spectral_tasks.py",
+      "target": "rlstack_recipes/factual/adapters/spectral_tasks.py",
+      "disposition": "external native adapter declaration/provider using shared state, lowerings, optimizer and publication services"
+    },
+    {
+      "source": "rlstack/policy/adapters/spectral_tasks_torch.py",
+      "target": "rlstack_recipes/factual/adapters/spectral_tasks_torch.py",
+      "disposition": "external native adapter declaration/provider using shared state, lowerings, optimizer and publication services"
+    },
+    {
+      "source": "deploy/anger_measure.py",
+      "target": "rlstack_recipes/concept/deploy/anger_measure.py",
+      "disposition": "ported research entrypoint with explicit function/package declarations and thin shared venue wiring"
+    },
+    {
+      "source": "deploy/anger_metal_b.py",
+      "target": "rlstack_recipes/concept/deploy/anger_metal_b.py",
+      "disposition": "ported research entrypoint with explicit function/package declarations and thin shared venue wiring"
+    },
+    {
+      "source": "deploy/burgers_metal_b.py",
+      "target": "rlstack_recipes/concept/deploy/burgers_metal_b.py",
+      "disposition": "ported research entrypoint with explicit function/package declarations and thin shared venue wiring"
+    },
+    {
+      "source": "deploy/concept_anger.py",
+      "target": "rlstack_recipes/concept/deploy/concept_anger.py",
+      "disposition": "ported research entrypoint with explicit function/package declarations and thin shared venue wiring"
+    },
+    {
+      "source": "deploy/concept_burgers.py",
+      "target": "rlstack_recipes/concept/deploy/concept_burgers.py",
+      "disposition": "ported research entrypoint with explicit function/package declarations and thin shared venue wiring"
+    },
+    {
+      "source": "deploy/concept_campaign.py",
+      "target": "rlstack_recipes/concept/deploy/concept_campaign.py",
+      "disposition": "ported research entrypoint with explicit function/package declarations and thin shared venue wiring"
+    },
+    {
+      "source": "deploy/concept_metal_b.py",
+      "target": "rlstack_recipes/concept/deploy/concept_metal_b.py",
+      "disposition": "ported research entrypoint with explicit function/package declarations and thin shared venue wiring"
+    },
+    {
+      "source": "deploy/concept_steer.py",
+      "target": "rlstack_recipes/concept/deploy/concept_steer.py",
+      "disposition": "ported research entrypoint with explicit function/package declarations and thin shared venue wiring"
+    },
+    {
+      "source": "deploy/tasks_dapo.py",
+      "target": "rlstack_recipes/math/deploy/tasks_dapo.py",
+      "disposition": "dataset-specific preparation entrypoint"
+    },
+    {
+      "source": "deploy/steer_l4.py (math recipe)",
+      "target": "rlstack_recipes/math/deploy/steer_l4.py",
+      "disposition": "research recipe retained externally; framework file now only a generic infrastructure qualification demo"
+    },
+    {
+      "source": "deploy/stress_fleet.py (math recipe)",
+      "target": "rlstack_recipes/math/deploy/stress_fleet.py",
+      "disposition": "research recipe retained externally; framework file now only a generic infrastructure qualification demo"
+    },
+    {
+      "source": "rlstack/data/trajectory.py:hint_for",
+      "target": "rlstack_recipes/distillation/hints.py",
+      "disposition": "privileged conditioning prompt construction is experiment-owned"
+    },
+    {
+      "source": "rlstack/spec/specs.py:dream_bank",
+      "target": "rlstack_recipes/dreamer/adapters/spec.py",
+      "disposition": "experiment-specific adapter sugar"
+    },
+    {
+      "source": "rlstack/runner/fakes.py:named-set route semantics",
+      "target": "rlstack_recipes/dreamer/fakes.py",
+      "disposition": "external fake subclass owns Dreamer defaults/grammar; generic fake keeps ordinary routing/state behavior"
+    },
+    {
+      "source": "rlstack/training/losses/factual_sft.py:sequence_sft",
+      "target": "rlstack/training/losses/sequence_sft.py (framework)",
+      "disposition": "generic equal-document NLL primitive retained without factual KL composition; body and sufficient statistics preserved"
+    },
+    {
+      "source": "rlstack/__main__.py:tasks CLI",
+      "target": "rlstack_recipes/task_sets.py",
+      "disposition": "dataset choices and preparation entrypoint ported; defaults/split semantics preserved using shared task IO/splitting"
+    }
+  ],
+  "retained_math": [
+    "training/losses/{sft,sequence_sft,independent_sft,ppo,grpo,gspo,opd,replay_distill}.py"
+  ],
+  "retained_scoring": [
+    "training/post/{constant,center_reward,grpo_advantage,policy_logprobs,reverse_kl,teacher_logprobs,sft_document_weights}.py"
+  ],
+  "removed_hierarchy": [
+    {
+      "source": "rlstack/inference/environments/base.py",
+      "disposition": "mandatory class/registry/import mechanism deleted; plain functions use explicit qualified references"
+    },
+    {
+      "source": "rlstack/inference/environments/__init__.py",
+      "disposition": "mandatory class/registry/import mechanism deleted; plain functions use explicit qualified references"
+    },
+    {
+      "source": "rlstack/inference/makers/base.py",
+      "disposition": "mandatory class/registry/import mechanism deleted; plain functions use explicit qualified references"
+    },
+    {
+      "source": "rlstack/inference/makers/__init__.py",
+      "disposition": "mandatory class/registry/import mechanism deleted; plain functions use explicit qualified references"
+    },
+    {
+      "source": "rlstack/inference/environments/noop.py",
+      "disposition": "declaration-only test class whose run always raised NotImplementedError; replaced by test-owned ordinary function declarations, no active experiment caller"
+    }
+  ],
+  "moved_tests": [
+    {
+      "source": "tests/test_ask_memory.py",
+      "target": "tests/test_ask_memory.py",
+      "scope": "external companion"
+    },
+    {
+      "source": "tests/test_conditioned_teacher.py",
+      "target": "tests/test_conditioned_teacher.py",
+      "scope": "external companion"
+    },
+    {
+      "source": "tests/test_dream_bank.py",
+      "target": "tests/test_dream_bank.py",
+      "scope": "external companion"
+    },
+    {
+      "source": "tests/test_learned_tasks.py",
+      "target": "tests/test_learned_tasks.py",
+      "scope": "external companion"
+    },
+    {
+      "source": "tests/test_named_sets.py",
+      "target": "tests/test_named_sets.py",
+      "scope": "external companion"
+    },
+    {
+      "source": "tests/test_program_correctness.py",
+      "target": "tests/test_program_correctness.py",
+      "scope": "external companion"
+    },
+    {
+      "source": "tests/test_program_diagnostics.py",
+      "target": "tests/test_program_diagnostics.py",
+      "scope": "external companion"
+    },
+    {
+      "source": "tests/test_short_calibration.py",
+      "target": "tests/test_short_calibration.py",
+      "scope": "external companion"
+    }
+  ],
+  "split_tests": [
+    {
+      "source": "tests/test_dreams.py",
+      "target": "tests/test_dreams.py",
+      "scope": "recipe assertions move externally; generic service/math assertions remain in framework"
+    },
+    {
+      "source": "tests/test_library.py",
+      "target": "tests/test_dreamer_library.py",
+      "scope": "recipe assertions move externally; generic service/math assertions remain in framework"
+    },
+    {
+      "source": "tests/test_names_wait.py",
+      "target": "tests/test_dreamer_names.py",
+      "scope": "recipe assertions move externally; generic service/math assertions remain in framework"
+    },
+    {
+      "source": "tests/test_task_posteriors.py",
+      "target": "tests/test_factual_posteriors.py",
+      "scope": "recipe assertions move externally; generic service/math assertions remain in framework"
+    },
+    {
+      "source": "tests/test_batched_replay.py",
+      "target": "tests/test_external_replay.py",
+      "scope": "recipe assertions move externally; generic service/math assertions remain in framework"
+    },
+    {
+      "source": "tests/test_weight_transfer.py",
+      "target": "tests/test_external_weight_transfer.py",
+      "scope": "recipe assertions move externally; generic service/math assertions remain in framework"
+    },
+    {
+      "source": "tests/test_post.py",
+      "target": "tests/test_recipe_post.py",
+      "scope": "recipe assertions move externally; generic service/math assertions remain in framework"
+    },
+    {
+      "source": "tests/test_loss_zoo.py",
+      "target": "tests/test_recipe_loss_zoo.py",
+      "scope": "recipe assertions move externally; generic service/math assertions remain in framework"
+    },
+    {
+      "source": "tests/test_spectral_latent.py",
+      "target": "tests/test_variational_spectral.py",
+      "scope": "recipe assertions move externally; generic service/math assertions remain in framework"
+    },
+    {
+      "source": "tests/test_plora.py",
+      "target": "tests/test_variational_plora.py",
+      "scope": "recipe assertions move externally; generic service/math assertions remain in framework"
+    },
+    {
+      "source": "tests/test_venues.py",
+      "target": "tests/test_concept_deploy.py",
+      "scope": "recipe assertions move externally; generic service/math assertions remain in framework"
+    },
+    {
+      "source": "tests/test_tasks.py",
+      "target": "tests/test_concept_tasks.py",
+      "scope": "recipe assertions move externally; generic service/math assertions remain in framework"
+    },
+    {
+      "source": "tests/test_provider_identity_compat.py",
+      "target": "tests/test_adapter_source_identity.py",
+      "scope": "recipe assertions move externally; generic service/math assertions remain in framework"
+    }
+  ],
+  "retained_rationale": {
+    "loss_primitives": "NLL, sequence/document reductions, independent SFT, standard clipped policy gradients, generic teacher reverse KL and behavior distillation; no task/prompt/reward choices",
+    "post_primitives": "column arithmetic, generic group normalization and recorded-policy/teacher token scoring; no answer parsing or semantic judging",
+    "adapter_primitives": "generic matrix/site perturbations and execution math: LoRA, probabilistic/spectral variants, steering, prompts, attention bias, value readout and custom site services; no task IDs or dreamer/memory roles",
+    "data_services": "Task/Trajectory records, CAS task IO and deterministic generic splitting",
+    "generic_demos": "synthetic arithmetic fixtures used only to demonstrate/qualify shared host, routing, checkpoint and serving services; original research launch recipes preserved externally"
+  },
+  "execution_migration": {
+    "sample": "Sample(task_id, qualified_async_function, role, dependencies)",
+    "continue": "Continue(sealed_source_ref, qualified_async_function, role, dependencies)",
+    "code": "GenSpec.functions plus ExperimentSpec.code; installed package source verified on host/learner/engine/custom worker",
+    "historical": "old sample/derive records remain exact read-only codecs; old class execution refused; new function plans have new identities",
+    "private": "No private research corpus, result or controller copied into this repository"
+  }
+}

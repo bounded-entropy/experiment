@@ -33,10 +33,6 @@ if torch is not None:
     from rlstack.policy.adapters import spectral_latent_torch
     from rlstack.policy.adapters.replay import ReplayRows, row_plan
     from rlstack.training.losses import PolicyOutputs
-    from rlstack.training.losses.grpo_latent_kl_gated import grpo_latent_kl_gated
-    from rlstack.training.losses.grpo_latent_kl_gated_priced import (
-        GAMMA, grpo_latent_kl_gated_priced,
-    )
 
 needs_torch = unittest.skipUnless(
     torch is not None, "torch is trainer metal: this suite runs in the image")
@@ -179,26 +175,6 @@ class FixedBasisTest(unittest.TestCase):
                     torch.testing.assert_close(provided[ENERGY_PROVIDED], energy)
 
 
-@needs_torch
-class ReferenceKlControlTest(unittest.TestCase):
-    def test_all_tie_rewards_still_pull_toward_the_reference(self):
-        from rlstack import TokenBatch
-        from rlstack.training.losses.grpo_reference_kl import grpo_reference_kl
-        logits = torch.tensor([math.log(0.8), math.log(0.2)], requires_grad=True)
-        actions = torch.tensor([0] * 8 + [1] * 2)
-        logprobs = torch.log_softmax(logits, 0)[actions]
-        batch = TokenBatch(
-            token_ids=(1,) * 10, loss_mask=(1,) * 10,
-            behavior_logprobs=tuple(logprobs.detach().tolist()),
-            segment_ids=(0,) * 10, doc_starts=(0,),
-            postdata={"advantage": (0.,) * 10,
-                      "teacher_logprobs": (math.log(0.5),) * 10},
-            microbatches_in_update=1)
-        result = grpo_reference_kl(PolicyOutputs(logprobs=logprobs), batch)
-        result.loss.backward()
-        self.assertGreater(logits.grad[0].item(), 0)
-        self.assertLess(logits.grad[1].item(), 0)
-        self.assertAlmostEqual(logits.grad[0].item(), 0.04 * 0.8 * 0.2 * math.log(4), places=6)
 
 
 class DeclarationTest(unittest.TestCase):
@@ -224,14 +200,6 @@ class DeclarationTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             spectral_latent("x", bound=0.0)
 
-    def test_the_priced_loss_requires_what_the_adapter_provides(self) -> None:
-        """The loss names the energy by the adapter's string; a rename on
-        either side must break here, not on the metal."""
-        from rlstack.registry import LOSSES
-
-        required = LOSSES.get("grpo_latent_kl_gated_priced").requires
-        self.assertIn(ENERGY_PROVIDED, required)
-        self.assertIn(KL_PROVIDED, required)
 
 
 def a_model():
@@ -564,30 +532,3 @@ class ServedSummaryTest(unittest.TestCase):
                 self.assertNotEqual(grad, 0.0)
             else:
                 self.assertEqual(grad, 0.0)
-
-    def test_the_priced_loss_is_the_gated_loss_plus_gamma_energy(self) -> None:
-        """The priced loss preserves the gated objective,
-        plus GAMMA times the provided energy, nothing else."""
-        from rlstack import TokenBatch
-
-        state = a_trained_state()
-        self.forward(state, torch.randn(2, state.latent))
-        provided = spectral_latent_torch.provide(state)
-        self.assertGreater(float(provided[ENERGY_PROVIDED]), 0.0)
-        logprobs = torch.full((4,), -0.5)
-        batch = TokenBatch(
-            token_ids=(1, 2, 3, 4), loss_mask=(1, 1, 1, 1),
-            behavior_logprobs=(-0.5,) * 4, segment_ids=(0, 0, 0, 0),
-            doc_starts=(0,),
-            postdata={"advantage": (1.0, 1.0, -1.0, -1.0),
-                      "accuracy": (1.0,) * 4},
-            microbatches_in_update=1)
-        gated = grpo_latent_kl_gated(
-            PolicyOutputs(logprobs=logprobs, provided=provided), batch)
-        priced = grpo_latent_kl_gated_priced(
-            PolicyOutputs(logprobs=logprobs, provided=provided), batch)
-        self.assertAlmostEqual(
-            float(priced.loss),
-            float(gated.loss) + GAMMA * float(provided[ENERGY_PROVIDED]),
-            places=6)
-        self.assertEqual(priced.mean_ratio, gated.mean_ratio)

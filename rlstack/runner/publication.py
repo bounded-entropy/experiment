@@ -44,7 +44,7 @@ async def publish_tensors(learner, tenant, versions, servable, adapter_types,
                 receipts.append({"pool": pool.name, "replica": replica.index, **receipt})
         pin = compile_tensor_pin(
             {name: StateLayout.from_row(row) for name, row in manifest["states"].items()},
-            versions, adapter_types)
+            versions, adapter_types, manifest.get("code"))
         if journal is not None:
             await store_work(journal.append, {"event": "weight-transfer",
                 "run_id": tenant, "update": update, "backend": "nccl",

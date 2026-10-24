@@ -50,13 +50,16 @@ class Generator(Runner):
                  buffer: int | None,
                  refs=None, journal: HostJournal | None = None) -> None:
         super().__init__(signals, arbiter, run)
-        check_plan_names(plan)
         # where a names wait says it is waiting, beside the log (ADR 0019)
         self.journal = journal
         # the policy pool — every replica of `main` (ADR 0022): what a wave
         # is admitted onto, and whose window each rollout row journals
         self.pool = pool
         self.gen = spec.gen
+        self.code = spec.code
+        from rlstack.registry import ADAPTER_TYPES
+        self.named_adapters = tuple(ADAPTER_TYPES.get(a.adapter_type).instance for a in spec.policy.bank.values())
+        check_plan_names(plan, self.named_adapters)
         self.master = spec.seeds.master
         self.buffer = buffer
         self.plan = plan
@@ -65,7 +68,7 @@ class Generator(Runner):
         self.routes_at = routes_at
         self.initial_bundle = initial_bundle
         self.max_inflight = max_inflight
-        # the ref reader Derive leaves mint through (assemble.sample_wave);
+        # the ref reader Continue leaves mint through (assemble.sample_wave);
         # a plan without them never touches it
         self.refs = refs
 
@@ -74,7 +77,7 @@ class Generator(Runner):
     def consumed_by(self, index: int) -> int:
         """The update that first trains on rollout `index` — or, for a rollout
         no update names, the first update consuming any LATER rollout: a
-        Derive chain's intermediate waves are un-referenced by construction
+        Continue chain's intermediate waves are un-referenced by construction
         (training reads only the loop-final wave), and an intermediate is due
         exactly when the wave it feeds is due. Only a rollout past EVERY
         reference is dead weight, paced as its own update."""
@@ -116,7 +119,7 @@ class Generator(Runner):
                     f"rollout {index} is a WaveRef: a rollout plan MAKES "
                     f"trajectories, so it names them leaf by leaf")
             await self.signals.wait_for(lambda: self.may_generate(index))
-            libraries = wave_lib_names(entry, self.tasks)
+            libraries = wave_lib_names(entry, self.named_adapters)
             if libraries:
                 await names_ready(self.run.store, names_subdir(self.run),
                                   libraries, self.signals, journal=self.journal)
@@ -133,6 +136,7 @@ class Generator(Runner):
                 wave = await sample_wave(
                     entry, index=index, tasks=self.tasks,
                     sampling=self.gen.sampling, routes=routes,
+                    functions=self.gen.functions, code=self.code,
                     master=self.master, max_inflight=self.inflight_bound(),
                     reader=self.refs, trace=trace)
             sampled = time.time()
@@ -176,7 +180,7 @@ class Generator(Runner):
         tail = self.run.ledger_tail()
         if tail is None:
             return self.initial_bundle
-        return Bundle.pin(tail["bundle_id"], tail["versions"])
+        return Bundle.pin(tail["bundle_id"], tail["versions"], self.initial_bundle.code)
 
 
 def rollout_row(run_id: str, index: int, episodes: list[dict], *, asked: float,

@@ -32,6 +32,7 @@ from rlstack.policy.siteschema import SiteMeta
 from rlstack.runner.loop import attach_residents
 from rlstack.runner.remote import LearnerService
 from rlstack.spec.canonical import canonical_json
+from rlstack.registry import code_hashes
 
 try:
     import torch
@@ -250,7 +251,7 @@ class AnchorTest(unittest.TestCase):
                         else (serving, {"learner": "fleet://train"}))
 
         async def drive():
-            reply = await host.adopt(json.loads(canonical_json(spec)), routes, checkpointing=EVERY_UPDATE.row())
+            reply = await host.adopt(json.loads(canonical_json(spec)), routes, code=code_hashes(spec), checkpointing=EVERY_UPDATE.row())
             self.assertTrue(reply.get("accepted"), reply)
             await host._adoptions[reply["run_id"]]
             return reply["run_id"]

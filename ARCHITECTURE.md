@@ -16,7 +16,7 @@ finding.
 ## The system in two paragraphs
 
 An **experiment** is one value — an `ExperimentSpec` — and its identity is a
-hash of that value plus the source of every registered thing it names. It is
+hash of that value plus the source of every referenced definition and declared external package closure. It is
 **submitted** to a **host**, which owns a slice of GPU. Many experiments share
 one host: each is a **tenant**, all of them served by the same resident engine
 and the same resident learner, none of them able to disturb another (I8). What
@@ -24,7 +24,7 @@ runs where is decided at submit time and changes wall-clock, never results
 (I5).
 
 Inside a run there are two worlds and one membrane (I1). The **inference
-world** is interactive: an environment drives an episode against a **pool**,
+world** is interactive: an experiment-owned async function drives an episode against a **pool**,
 producing a mutable **Rollout**, which the runner **seals** into a frozen
 **Trajectory**. The **training world** consumes only sealed data: a
 **postprocessor** pipeline scores it into **postdata** columns, and a **loss**
@@ -42,7 +42,7 @@ the commit bit, and runners synchronize through it and nothing else.
 **Spec** — a frozen dataclass of declarative values. A spec never does setup
 and never touches a GPU; it *is* identity (I3). `ExperimentSpec` is the whole
 experiment as one value, composed of `PolicySpec` / `GenSpec` /
-`TrajectorySource` / `AlgoSpec` / `Topology` / `Seeds` / `WarmStart`.
+`Plans` / `AlgoSpec` / `Topology` / `Seeds` / `WarmStart`, plus explicit external `code` roots.
 A run's identity is its TRAINING loop: measurement is not in the spec (#70).
 `rlstack/spec/specs.py`
 
@@ -218,17 +218,23 @@ prices either — and both carry plora's prior recipes, fixed or learned
 (`spectral_prior_std` is the watched twin).
 `rlstack/policy/adapters/{spectral,spectral_torch,spectral_vllm,spectral_latent,spectral_latent_torch,spectral_latent_vllm}.py`
 
-**TaskMaker / Derive** — mint-then-make, the third leaf: a plan may name an
-episode whose task does not exist yet — `Derive(source, maker, env)` resolves
-`source` (Replay's ref grammar) to a sealed trajectory and a registered
-`@task_maker` derives the new task, PURELY, so resume re-mints to the byte.
-Declared in `GenSpec.makers`, hashed like an environment. The reflect loop is
-its first use: the maker re-serves the whole transcript plus "what went
-wrong", the `reflect_retry` env samples the critique and the retry, and the
-`sdpo` loss clones each document's final turn (read off `segment_ids` — no
-new masking primitive). An un-referenced rollout is due when the first later
-referenced one is — the generator's intermediate-wave pacing rule.
-`rlstack/data/plan.py`, `rlstack/inference/makers/`, `rlstack/inference/environments/reflect_retry.py`, `rlstack/training/losses/sdpo.py`
+**Interaction function / Continue** — ordinary experiment-owned async Python,
+with no Environment or TaskMaker hierarchy. `Sample(task_id, function)` passes
+a Task; `Continue(source, function)` passes an already sealed Trajectory. The
+function constructs any follow-up task and performs the interaction, returning
+a Rollout that the runner seals. Every qualified `module:symbol` reference must
+appear in `GenSpec.functions` and be covered by `ExperimentSpec.code`. Continue
+retains its durable source dependency; a self source must precede the current
+rollout. Explicit `dependencies` names stored frozen state needed by an
+interaction, awaited before admission. Historical environment/maker plan rows
+are readable data, refused for execution.
+`rlstack/data/plan.py`, `rlstack/code.py`, `rlstack/runner/assemble.py`
+
+**Experiment code** — explicit module/package roots installed separately from
+rlstack. Whole Python source trees, including helper constants, enter the run
+identity and are verified on workers. Loss/PostProcessor/AdapterType contracts
+remain reusable interfaces; recipe implementations live outside the framework.
+`docs/experiment-boundary.md` describes ownership and migration.
 
 **Site** — a canonical attachment point named by the checkpoint's own module
 path, resolved at Phase 0 against `site_space` = the schema ∪ every bank
@@ -342,12 +348,12 @@ and metadata a verifier or a hint reads.
 `rlstack/data/trajectory.py`
 
 **Rollout** — one episode *in progress*: mutable, inference-world, built by an
-environment driving sample calls. Nothing on the training side ever sees one.
+experiment function driving sample calls. Nothing on the training side ever sees one.
 `rlstack/inference/rollout.py`
 
 **Seal** — `Rollout.seal() -> Trajectory`. The membrane, enforced by the type
 system: mutable inference record in, frozen training record out (I1). The
-runner seals; environments never do.
+runner seals the function's returned Rollout.
 `rlstack/inference/rollout.py`, `rlstack/runner/traffic.py` (`run_episode`)
 
 **Trajectory** — one sealed episode: frozen training data. Recording is
@@ -643,7 +649,7 @@ up to every bundle the pool serves before it takes a request.
 `rlstack/runner/pool.py` (`Replica`, `Replicas`, `DeskReviver`)
 
 **Affinity key** — the routing key a sample or score call carries
-(`affinity=`), the episode's id unless the environment names one: a seen key
+(`affinity=`), the episode's id unless the calling function names one: a seen key
 returns to the replica that holds its prefix cache, a new one goes to the
 least-loaded replica, and a key moves only when its replica dies. Never in
 the sealed bytes.
@@ -973,10 +979,11 @@ prefill pass). A request is traffic, addressed to a POOL, served by whichever
 ENGINE backs that name, under a pinned BUNDLE.
 `rlstack/runner/traffic.py`, `rlstack/client.py`
 
-**PoolClient** — the neutral interface both worlds type against: environments
+**PoolClient** — the neutral interface both worlds type against: interaction functions
 sample during rollouts, postprocessors sample or score after the seal, and
 `pool(name)` reaches any declared pool. Every client for one episode shares one
-seed sequence. Both verbs take `directives`.
+seed sequence. Both verbs take `directives`; sample also accepts an explicit
+per-call `sampling` override, recorded with the actual seed and stop strings.
 `rlstack/client.py` (protocol), `rlstack/runner/traffic.py` (`EnginePoolClient`)
 
 **Directive** — a per-request instruction to ONE adapter type, passed by the
@@ -1038,7 +1045,7 @@ The declaration half is class attributes (`serving`, `engine_plugin`,
 - **param_groups** — named optimizer groups for one bank entry; `""` is the
   whole entry (the default), and `OptimSpec.overrides` addresses them by
   `entry` or `entry.group`, the dotted form winning. A group named
-  `family:member` (dream_bank's one group per route, `memory:03`) is also
+  `family:member` is also
   reached by `entry.family`, between the two. `optim_step`'s `lr_scales`
   addresses the same names (`interfaces.lr_scale_of`).
 - **install_replay** — wire the replay lowering into the trainer forward.
@@ -1259,10 +1266,10 @@ submit, status and reap behind it for an hour.
   verbs: additive registration and build facts, which by the tenancy invariant
   never disturb traffic (`ask` on the wire; `sample`/`score` ride `call`).
   `add_library(name, payload)` hands an engine one named payload as BYTES (a
-  role read the store; an engine never does): a route `lib:<name>` is served
-  as that adapter, `lib:<name>+dreamer` as ONE adapter whose weights are the
-  two parts concatenated, and a route naming a library adapter the engine does
-  not hold is refused at the request.
+  role read the store; an engine never does). The adapter owns how a request
+  selects or composes named state. The framework keeps bounded storage,
+  explicit planned dependencies, write-once provenance and universal transfer.
+
 
 ### The store (`rlstack/data/stores/base.py`)
 

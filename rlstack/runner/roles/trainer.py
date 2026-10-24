@@ -70,13 +70,14 @@ from rlstack.data.stores.base import RunHandle, bump
 from rlstack.data.stores.retention import DEFAULT_RETENTION, RetentionPolicy
 from rlstack.data.trajectory import trajectory_from_row, wave_from_rows
 from rlstack.policy.compile import compile_bundle
+from rlstack.code import load_code
 from rlstack.registry import ADAPTER_TYPES
 from rlstack.runner.arbiter import Arbiter
 from rlstack.runner.interfaces import Emitted, Learner, TrainStats
 from rlstack.runner.pool import Pool
 from rlstack.runner.meters import HostJournal, UpdateClock
 from rlstack.runner.names import (
-    LIB_PREFIX, check_plan_names, names_ready, names_subdir, row_lib_names,
+    check_plan_names, names_ready, names_subdir, row_lib_names,
     wave_lib_names,
 )
 from rlstack.runner.training_client import TrainingClient
@@ -144,13 +145,15 @@ class Trainer(Runner):
         self.servable = sorted(n for n, a in bank.items()
                                if ADAPTER_TYPES.get(a.adapter_type).instance.serving is not None)
         self.adapter_types = {n: bank[n].adapter_type for n in self.servable}
-        # THE LIBRARY (ADR 0019): the bank entries that can hold a frozen
-        # `lib:<name>` set — the `dream_bank` ones — and the names this
-        # runner has loaded into them and not yet dropped
-        check_plan_names(plan)
+        self.code = load_code(spec.code)
+        # Named frozen states are interpreted by each adapter, never by a
+        # recipe name or route grammar in the Trainer.
+        self.named_adapters = tuple(ADAPTER_TYPES.get(a.adapter_type).instance for a in bank.values())
+        check_plan_names(plan, self.named_adapters)
         self.library_entries = sorted(n for n, a in bank.items()
-                                      if a.adapter_type == "dream_bank")
-        self.loaded_libraries: tuple[str, ...] = ()
+                                      if ADAPTER_TYPES.get(a.adapter_type).instance.named_states)
+        self.loaded_libraries: tuple[tuple[str, str], ...] = ()
+        self.library_requirements: dict[str, tuple[str, ...]] = {}
 
     # ---- the acquisition condition (override to change the alternation) -----
 
@@ -226,7 +229,10 @@ class Trainer(Runner):
             # the library sets these rows train under, awaited like the rows
             # themselves (and counted in `collect`): a missing name blocks,
             # an orphaned one refuses, a stop drains
-            libraries = row_lib_names(rows)
+            self.library_requirements = {entry: row_lib_names(rows, (
+                ADAPTER_TYPES.get(self.spec.policy.bank[entry].adapter_type).instance,))
+                for entry in self.library_entries}
+            libraries = tuple(dict.fromkeys(name for names in self.library_requirements.values() for name in names))
             if libraries and not await self.libraries_ready(libraries):
                 await self.drain()
                 return
@@ -319,7 +325,7 @@ class Trainer(Runner):
 
             bundle = tensor_pin or compile_bundle(self.adapters or {}, self.version,
                                     self.servable if self.has_serving else (),
-                                    self.adapter_types)
+                                    self.adapter_types, self.code)
             delivery_started = time.monotonic()
             await self.deliver(bundle)
             if self.publication_stats is not None:
@@ -375,7 +381,7 @@ class Trainer(Runner):
         if not self.library_entries:
             raise RuntimeError(
                 f"this wave's rows train under library sets {list(names)} but "
-                f"the bank holds no dream_bank entry to load them into")
+                f"the bank holds no adapter with named state slots")
         await names_ready(self.run.store, names_subdir(self.run), names,
                           self.signals, journal=self.journal,
                           stopped=lambda: self.stop is not None and self.stop.requested)
@@ -383,19 +389,21 @@ class Trainer(Runner):
 
     async def load_libraries(self, names: tuple[str, ...]) -> None:
         """Hand the learner each name's bytes as the frozen set
-        `lib:<name>` of every dream_bank entry — the ones it does not already
-        hold. This runner reads the store; the learner is handed a payload,
+        in each declared adapter-owned state slot it does not already hold. This runner reads the store; the learner is handed a payload,
         as `Learner.load` already works (ADR 0019, Q2). Called inside the
         gradient's admission, each verb from a thread like the rest."""
         subdir = names_subdir(self.run)
-        for name in names:
-            if name in self.loaded_libraries:
-                continue
-            payload = await store_work(self.run.store.read_named, subdir, name)
-            for entry in self.library_entries:
+        payloads = {}
+        for entry, needed in self.library_requirements.items():
+            adapter = ADAPTER_TYPES.get(self.spec.policy.bank[entry].adapter_type).instance
+            for name in needed:
+                if (entry, name) in self.loaded_libraries:
+                    continue
+                if name not in payloads:
+                    payloads[name] = await store_work(self.run.store.read_named, subdir, name)
                 await asyncio.to_thread(self.learner.load_set, self.tenant, entry,
-                                        LIB_PREFIX + name, payload)
-            self.loaded_libraries += (name,)
+                                        adapter.named_state_route(name), payloads[name])
+                self.loaded_libraries += ((entry, name),)
 
     def next_libraries(self, update: int) -> tuple[str, ...]:
         """The names the NEXT wave's plan mentions — what is worth keeping
@@ -403,19 +411,19 @@ class Trainer(Runner):
         its names are dropped now and loaded again if its rows carry them."""
         if update >= len(self.plan):
             return ()
-        return wave_lib_names(self.plan.wave(update + 1))
+        return wave_lib_names(self.plan.wave(update + 1), self.named_adapters)
 
     async def drop_libraries(self, keep: tuple[str, ...]) -> None:
         """After the step, free every loaded library set the next wave does
         not name: a stream of hundreds of memories must not accumulate on the
         learner."""
-        for name in self.loaded_libraries:
+        for entry, name in self.loaded_libraries:
             if name in keep:
                 continue
-            for entry in self.library_entries:
-                await asyncio.to_thread(self.learner.drop_set, self.tenant, entry,
-                                        LIB_PREFIX + name)
-        self.loaded_libraries = tuple(n for n in self.loaded_libraries if n in keep)
+            adapter = ADAPTER_TYPES.get(self.spec.policy.bank[entry].adapter_type).instance
+            await asyncio.to_thread(self.learner.drop_set, self.tenant, entry,
+                                    adapter.named_state_route(name))
+        self.loaded_libraries = tuple(pair for pair in self.loaded_libraries if pair[1] in keep)
 
     # ---- the three steps, named (ADR 0014) ----------------------------------
 

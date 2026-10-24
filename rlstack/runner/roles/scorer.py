@@ -145,7 +145,7 @@ class Scorer(Runner):
         pinned = self.votes(wave)
         if len(pinned) == 1:
             bundle_id, versions = next(iter(pinned.items()))
-            return Bundle.pin(bundle_id, {name: int(v) for name, v in versions.items()})
+            return Bundle.pin(bundle_id, {name: int(v) for name, v in versions.items()}, self.initial_bundle.code)
         return self.committed_bundle(update - 1)
 
     def votes(self, wave: Wave) -> dict[str, Mapping[str, int]]:
@@ -166,7 +166,7 @@ class Scorer(Runner):
         for line in self.run.read_ledger():
             if int(line["update"]) == update:
                 return Bundle.pin(line["bundle_id"],
-                                  {name: int(v) for name, v in line["versions"].items()})
+                                  {name: int(v) for name, v in line["versions"].items()}, self.initial_bundle.code)
         raise RuntimeError(f"update {update} is not on the ledger yet")
 
     def needs_previous_commit(self, wave: Wave) -> bool:

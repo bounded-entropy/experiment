@@ -98,6 +98,35 @@ class AdapterType:
     directive: type[Directive] | None = None  # the per-request record it accepts
 
     provides: frozenset[str] = frozenset()
+    def code_modules(self) -> tuple[str, ...]:
+        """The declaration and every explicitly selected compute provider."""
+        modules = [type(self).__module__]
+        definition = self.definition
+        if definition is not None:
+            if definition.replay is not None:
+                modules.append(definition.replay.module)
+            if definition.rollout is not None:
+                modules.append(definition.rollout.factory.module)
+            if definition.program is not None:
+                for symbol in (definition.program.forward, definition.program.reference, *definition.program.helpers):
+                    if symbol is not None:
+                        modules.append(symbol.module)
+        return tuple(dict.fromkeys(modules))
+
+    named_states: bool = False
+    """Whether this adapter can attach separately named frozen state slots."""
+
+    def named_dependencies(self, routes: Sequence[str]) -> tuple[str, ...]:
+        """Named frozen states referenced by this adapter's own route grammar."""
+        return ()
+
+    def named_state_route(self, name: str) -> str:
+        """The adapter-owned slot address corresponding to one stored name."""
+        raise NotImplementedError("this adapter has no named state slots")
+
+    def directive_dependencies(self, directive: Directive) -> tuple[str, ...]:
+        return ()
+
     clips_by_group: bool = False
     """WHOSE GRADIENT NORM IS ONE NORM (ADR 0019): False clips an entry's
     parameters together, as one model; True clips each optimizer group by

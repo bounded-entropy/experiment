@@ -92,24 +92,18 @@ class PipelineTest(unittest.TestCase):
                                master=17, update=1))
 
     def test_verifier_then_advantage_chains_per_group(self) -> None:
-        columns = self.run_pipe(("verifier", "grpo_advantage"))
+        columns = self.run_pipe(("fixture_reward", "grpo_advantage"))
         self.assertEqual(columns["reward"], [1.0, 0.0, 0.0, 0.0])
         self.assertEqual(columns["advantage"], [1.0, -1.0, 0.0, 0.0])
 
-    def test_group_accuracy_is_the_groups_mean_broadcast(self) -> None:
-        """Each row carries ITS group's accuracy: the column is the gate
-        grpo_latent_kl_gated reads, so a half-right group must not look
-        solved from any of its rows."""
-        columns = self.run_pipe(("verifier", "group_accuracy"))
-        self.assertEqual(columns["accuracy"], [0.5, 0.5, 0.0, 0.0])
 
     def test_columns_align_to_wave_order(self) -> None:
-        columns = self.run_pipe(("verifier",))
+        columns = self.run_pipe(("fixture_reward",))
         self.assertEqual(len(columns["reward"]), 4)
 
     def test_deterministic(self) -> None:
-        self.assertEqual(self.run_pipe(("verifier", "grpo_advantage")),
-                         self.run_pipe(("verifier", "grpo_advantage")))
+        self.assertEqual(self.run_pipe(("fixture_reward", "grpo_advantage")),
+                         self.run_pipe(("fixture_reward", "grpo_advantage")))
 
     def test_a_judge_samples_deterministically(self) -> None:
         first = self.run_pipe(("post_sampling_judge",))
@@ -129,15 +123,12 @@ class PipelineTest(unittest.TestCase):
 
 class RegistrationTest(unittest.TestCase):
     def test_builtins_declare_their_wiring(self) -> None:
-        verifier = POST.get("verifier")
+        verifier = POST.get("fixture_reward")
         self.assertEqual(verifier.produces, ("reward",))
         self.assertEqual(verifier.consumes, ())
         grpo = POST.get("grpo_advantage")
         self.assertEqual(grpo.consumes, ("reward",))
         self.assertEqual(grpo.produces, ("advantage",))
-        accuracy = POST.get("group_accuracy")
-        self.assertEqual(accuracy.consumes, ("reward",))
-        self.assertEqual(accuracy.produces, ("accuracy",))
 
 
 if __name__ == "__main__":
@@ -167,21 +158,7 @@ class PoolDeclarationTest(unittest.TestCase):
                                   SamplingSpec(max_tokens=64), 7, 1))
         self.assertEqual(columns["length"], [1.0])
 
-    def test_llm_judge_rewards_agreement_with_the_judge_pool(self) -> None:
-        main_engine, judge_engine = FakeEngine(), FakeEngine(p_correct=1.0)
-        main_engine.add_bundle(BUNDLE)
-        judge_engine.add_bundle(BUNDLE)
-        both = {"main": (main_engine, BUNDLE), "judge": (judge_engine, BUNDLE)}
-        wave = Wave([Group("t", [sealed("t", content="4", answer=4),
-                                 sealed("t", content="5", answer=4)])])
-        columns = go(run_pipeline(("llm_judge",), wave, both,
-                                  SamplingSpec(), 7, 1))
-        self.assertEqual(columns["reward"], [1.0, 0.0])
 
-    def test_llm_judge_declares_its_pool(self) -> None:
-        pdef = POST.get("llm_judge")
-        self.assertEqual(pdef.pools, ("judge",))
-        self.assertEqual(pdef.instance.sampling.temperature, 0.0)
 
 
 @postprocessor("post_token_teacher")
@@ -268,40 +245,6 @@ class ScoringAndHintedTest(unittest.TestCase):
         self.assertEqual(second_a.token_ids, second_b.token_ids)
         self.assertEqual(second_a.seed, second_b.seed)
 
-    def test_hinted_pipeline_feeds_opsd_end_to_end(self) -> None:
-        import tempfile
-
-        from common import arith_spec, arith_store
-        from dataclasses import replace
-        from rlstack import (
-            FakeEngine, FakeLearner, fake_qwen_schema, run_experiment,
-        )
-
-        tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(tmp.cleanup)
-        store, train, heldout = arith_store(tmp.name)
-        base = arith_spec(train, heldout)
-        spec = replace(base, algo=replace(
-            base.algo, loss="opsd", post=("verifier", "hinted_logprobs")))
-
-        report = run_experiment(spec, fake_qwen_schema(4, base="Qwen/Qwen3-0.6B"),
-                                store, FakeEngine(), FakeLearner(), checkpointing=EVERY_UPDATE)
-        run = store.open_run(report.run_id)
-        self.assertEqual(len(run.read_ledger()), 4)
-
-        postdata = run.read_postdata(1)
-        rows = run.read_wave(1)
-        for vector, row in zip(postdata["hinted_logprobs"], rows):
-            generated = sum(len(t["token_ids"]) for t in row["turns"])
-            self.assertEqual(len(vector), generated)      # token-aligned
-            self.assertTrue(all(v < 0 for v in vector))
-
-        dictionary = store.peek_dictionary(report.run_id)
-        by_name = {(c["name"], c["phase"]): c for c in dictionary["columns"]}
-        hinted = by_name[("hinted_logprobs", "post")]
-        self.assertEqual(hinted["granularity"], "token")
-        self.assertTrue(hinted["feeds_loss"])
-        self.assertIn("loss:opsd", hinted["consumers"])
 
 
 def two_turn(task_id: str = "t0"):
@@ -418,7 +361,7 @@ class TeacherDistillationTest(unittest.TestCase):
         spec = replace(
             base,
             algo=replace(base.algo, loss="opd",
-                         post=("verifier", "teacher_logprobs")),
+                         post=("fixture_reward", "teacher_logprobs")),
             # the teacher is a DECLARED pool on another base — placement then
             # decides it lives on other metal; the spec never says where (#43)
             topology=Topology(hosts=(

@@ -63,9 +63,11 @@ class TrainingPoolsClient:
     async def sample(self, messages: Sequence[Message], stop: tuple[str, ...] = (), *,
                      directives: Sequence[Directive] = (),
                      max_tokens: int | None = None,
+                     sampling: SamplingSpec | None = None,
                      affinity: str | None = None) -> Turn:
         return await self.pools.sample(messages, stop, directives=directives,
-                                       max_tokens=max_tokens, affinity=affinity)
+                                       max_tokens=max_tokens, affinity=affinity,
+                                       **({"sampling": sampling} if sampling is not None else {}))
 
     async def score(self, messages: Sequence[Message], token_ids: Sequence[int], *,
                     directives: Sequence[Directive] = (),

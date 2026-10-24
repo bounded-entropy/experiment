@@ -15,7 +15,7 @@ are maintained separately.
 | --- | --- |
 | **Spec** | Declares the base model, adapters, generation settings, loss, plans, seeds, and host topology. |
 | **Plan** | Says which sealed trajectories to replay or tasks to sample for each update. |
-| **Environment** | Turns a task into a rollout, recording the generated tokens and their sampling probabilities. |
+| **Interaction function** | Experiment-owned Python calls generation services and returns a rollout; the framework checks and seals it. |
 | **Postprocessor** | Scores completed trajectories and produces columns such as rewards or advantages. |
 | **Loss** | Computes the training objective from recorded data and the learner's model outputs. |
 | **Engine / learner** | Serve inference and perform training behind common protocols. |
@@ -36,11 +36,11 @@ run, without searching other folders.
 Adapter authors use [shared definitions](docs/adapter-definitions.md) for both
 learner and inference implementations, with native or custom GPU providers.
 
-- Adapter implementations include LoRA, learned task bases, spectral adapters,
-  steering, soft prompts, and a routed adapter bank (`dream_bank`).
-- Named adapters can be saved, reused by other runs, and stacked with a trainable
-  adapter. Fit jobs can share a learner while keeping separate adapter state,
-  optimizer schedules, and document normalization.
+- Adapter implementations include LoRA, steering, soft prompts, spectral adapters and declared custom site programs.
+  Experiment-specific adapter compositions live in external recipe packages.
+- Named adapters can be saved and reused by other runs. Independently routed
+  sealed curricula can share a learner forward while keeping separate state,
+  optimizer schedules and document normalization.
 - Postprocessors can compose normal supervised child runs to evaluate training a
   copy of an adapter. The API does not prescribe an experiment's reward.
 - Checkpoints support resume and configurable durability cadence. Deliberate
@@ -132,7 +132,7 @@ See [sealed supervision](docs/sealed-supervision.md) for migration and probes.
 Set credentials and provider-specific paths in your own configuration, choose a
 GPU ceiling, and keep finite idle release enabled. The deployment files build
 images and wire shared APIs; experiment logic belongs in the caller's specs,
-plans, environments, and postprocessors.
+plans, interaction functions and postprocessors in external experiment packages.
 
 ## Repository map
 
@@ -141,7 +141,7 @@ plans, environments, and postprocessors.
 | `rlstack/spec/` | Specs, validation, identity, and execution flow. |
 | `rlstack/data/` | Trajectories, packing, task files, and storage backends. |
 | `rlstack/policy/` | Adapter definitions and their training/inference implementations. |
-| `rlstack/inference/` | Rollouts and environments. |
+| `rlstack/inference/` | Generic rollout records. |
 | `rlstack/training/` | Losses and postprocessors. |
 | `rlstack/runner/` | Run roles, training composition, engines, learners, scheduling, transports, and exporters. |
 | `rlstack/observe/` | Read-only metrics and the browser UI. |
@@ -154,3 +154,8 @@ Before changing the stack, read [AGENTS.md](AGENTS.md), [STYLE.md](STYLE.md),
 and [ARCHITECTURE.md](ARCHITECTURE.md). The [decision log](agent-context/CONTEXT.md)
 records implementation history; some historical entries describe experiments
 whose recipe code is intentionally outside this repository.
+
+Experiment behavior and plain-function execution are described in
+[the boundary guide](docs/experiment-boundary.md). Public recipe ports are
+versioned in the separate `rlstack-recipes` checkout; private teaching recipes
+remain private. The framework does not import either package automatically.

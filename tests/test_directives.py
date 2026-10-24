@@ -61,8 +61,10 @@ def go(coro):
     return asyncio.run(coro)
 
 
+from rlstack.code import load_code
+
 BUNDLE = Bundle("bundle:d", {"pi": 0}, payloads={"pi": b"\x00"},
-                adapter_types={"pi": "val_directed"})
+                adapter_types={"pi": "val_directed"}, code=load_code((__name__,)))
 PROMPT = (Message(Role.USER, "2+2"),)
 
 

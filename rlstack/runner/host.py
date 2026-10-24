@@ -778,15 +778,17 @@ class Host:
         ITS body under YOUR name — a different experiment than you meant,
         detectable only by noticing an unexpected run_id. Code never crosses
         the wire (identity is computed where the code runs, I3); agreement
-        about WHICH code does. A frame carrying no hashes skips the check —
-        the caller chose not to claim anything."""
-        if not claimed:
+        about WHICH code does. External code requires the complete claimed
+        manifest. Legacy built-in-only frames without claims retain their
+        original read/execution compatibility."""
+        if not claimed and not spec.code:
             return
         from rlstack.registry import code_hashes
 
         mine = code_hashes(spec)
-        stale = sorted(name for name, theirs in claimed.items()
-                       if name in mine and mine[name] != theirs)
+        claimed = dict(claimed or {})
+        stale = sorted(name for name in set(mine) | set(claimed)
+                       if mine.get(name) != claimed.get(name))
         if stale:
             raise HostError(
                 f"code skew: this host's image runs different source for "

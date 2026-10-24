@@ -83,6 +83,7 @@ class DeskConfig:
     idle_s: float = 90.0
     gpu_ceiling: int = 1
     automatic_recovery: bool = False
+    source_packages: tuple[str, ...] = ()
     operator_endpoint: str = ""
     """Where the operator's verbs reach a desk that is NOT on this machine
     (a hosted container's public URL). Empty means the laptop-run desk: the
@@ -137,6 +138,7 @@ class DeskConfig:
             metals.append(MetalConfig(**raw))
         row["state_dir"] = (state_dir if state_dir is not None
                             else Path(row["state_dir"]).expanduser().resolve())
+        row["source_packages"] = tuple(row.get("source_packages", ()))
         return cls(metals=tuple(metals), **row)
 
 
@@ -259,14 +261,27 @@ class Gateway:
                                           member, token=self.token))
 
 
-def source_bundle(root: Path) -> bytes:
-    """Ship the exact working Python and engine plugin, including uncommitted work."""
+def source_bundle(root: Path, packages: tuple[str, ...] = ()) -> bytes:
+    """Ship framework sources and only explicitly selected external packages."""
+    from importlib.util import find_spec
+    locations = [(name, root / name) for name in ("rlstack", "rlstack_engine")]
+    for name in dict.fromkeys(packages):
+        if "." in name:
+            raise ValueError("source_packages names top-level Python packages")
+        spec = find_spec(name)
+        if spec is None or spec.origin is None:
+            raise ValueError(f"source package {name!r} is not installed locally")
+        origin = Path(spec.origin)
+        locations.append((name, origin.parent if spec.submodule_search_locations is not None else origin))
     buffer = io.BytesIO()
     with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as bundle:
-        for package in ("rlstack", "rlstack_engine"):
-            for path in sorted((root / package).rglob("*")):
+        for name, source in locations:
+            paths = sorted(source.rglob("*")) if source.is_dir() else (source,)
+            for path in paths:
                 if path.is_file() and "__pycache__" not in path.parts and path.suffix != ".pyc":
-                    bundle.write(path, str(path.relative_to(root)))
+                    relative = (Path(name) / path.relative_to(source) if source.is_dir()
+                                else Path(name + ".py"))
+                    bundle.write(path, str(relative))
     return buffer.getvalue()
 
 
@@ -479,7 +494,7 @@ class StrangeLoopVenue:
 
         http_limits = HttpLimits.from_environment()
         client = ScratchClient.from_locator(self.config.store)
-        bundle = source_bundle(self.source_root)
+        bundle = source_bundle(self.source_root, self.config.source_packages)
         digest = hashlib.sha256(bundle).hexdigest()
         prefix = "/tmp/rlstack-" + state.lease_id
         upload_over_ssh(forward, prefix + ".zip", bundle)

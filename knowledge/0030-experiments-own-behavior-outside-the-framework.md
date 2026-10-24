@@ -3,7 +3,7 @@
 | | |
 |---|---|
 | **Date** | 2026-10-23 |
-| **Status** | Accepted |
+| **Status** | Implemented |
 | **Author** | Codex integration subagent |
 | **Touches** | `spec/`, `registry.py`, `data/plan.py`, `inference/`, `training/`, `policy/adapters/`, `runner/`, worker code loading, external recipe repositories |
 | **Invariants** | I1, I2, I3, I4, I5, I8, I9, I10, I11 |
@@ -52,9 +52,9 @@ Keep general services, typed records and reusable numerical primitives in rlstac
 
 ### Interfaces
 
-`GenSpec.functions` lists qualified `module:symbol` references. `Sample(task_id, function)` invokes `await function(client, task)`; `Continue(source, function)` invokes `await function(client, sealed_source)`. Both return the existing Rollout; the shared runner seals it. Experiment functions may construct Tasks, call tools, choose pools, retry semantically and choose stop conditions. The framework owns pool services, deterministic request seeds, accurate recording and durable dependencies. No registered maker or environment object is involved.
+`GenSpec.functions` lists qualified `module:symbol` references. `Sample(task_id, function)` invokes `await function(client, task)`; `Continue(source, function)` invokes `await function(client, sealed_source)`. Both can declare explicit named-state `dependencies` awaited before GPU admission, and return the existing Rollout; the shared runner seals it. Experiment functions may construct Tasks, call tools, choose pools, retry semantically and choose stop conditions. The framework owns pool services, deterministic request seeds, accurate recording and durable dependencies. No registered maker or environment object is involved.
 
-`ExperimentSpec.code` declares external import roots. Package-source hashes include helper modules and constants, and travel with compiled learner/serving state. Existing PostProcessor/Loss/AdapterType interfaces remain useful contracts; their experiment implementations are loaded only from declared code roots, and references must be covered by those declarations.
+`ExperimentSpec.code` declares external import roots. Package-source hashes include helper modules and constants, and travel with compiled learner/serving state. An optional explicit, source-verified `FakeLearnerBuild.factory` lets external recipe tests retain real spawned-process custody without placing their fake state semantics back in rlstack. It uses the existing learner protocol and is not another runner. Existing PostProcessor/Loss/AdapterType interfaces remain useful contracts; their experiment implementations are loaded only from declared code roots, and references must be covered by those declarations.
 
 ```python
 GenSpec(functions=("my_experiment.interaction:answer",), tasks=(tasks_uri,))
@@ -81,4 +81,8 @@ These answers record the user's explicit direction and its ordinary implementati
 
 ## Outcome
 
-Implementation pending on a branch stacked after the validated core milestone `b01102adf95c97bee6d7b31856c197836ae7fc75`. Core experiment launches can pin that milestone while the broader migration is validated independently. Final inventories, exact repository refs, local checks and separate hardware limits will be recorded here.
+Implemented on a branch stacked after the validated core milestone `b01102adf95c97bee6d7b31856c197836ae7fc75`. The framework has no mandatory Environment/TaskMaker hierarchy or experiment implementations; public recipes are versioned separately, and private recipes/workers import the exact shared dependency instead of a framework copy. Public migration inventory records 59 moved/extracted behavior paths, five deleted hierarchy/declaration wrappers, eight moved test modules and thirteen split test modules, with explicit retained-math rationales. Private inventory records its additional builders/posts/teaching/selection paths and preserved scientific artifacts.
+
+Validation: the framework passes 1,752 stdlib tests (230 dependency/hardware skips) and 280 selected actual CPU Torch tests (two CUDA skips); the separate companion passes 318 tests under both stdlib (153 skips) and actual CPU Torch (no skips). Private recipe suites pass 195 tests under stdlib (four skips) and actual CPU Torch (no skips), with additional caller/process/configuration checks. Final selected Torch counts and exact logs are in `knowledge/evidence/0030-local-validation.json`; counts overlap. Code source closures, named-state ownership, per-call sampling provenance, strict worker claims, read-only historical codecs and normal-Trainer Continue recovery have regression coverage.
+
+The original core can still be pinned independently. Separately obtained hardware evidence applies to b01102a, with `NCCL_P2P_DISABLE=1` required on that six-A40 pod. It qualifies short ordinary SFT and the tensor protocol, not this full external recipe migration or online RL/vLLM model serving. No new hardware claim is inferred from local tests. CONTEXT entry 101 records the final ownership and execution boundaries.

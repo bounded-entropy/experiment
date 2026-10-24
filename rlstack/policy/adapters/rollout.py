@@ -189,6 +189,7 @@ class ServingBuild:
     # `add_library` writes and every lowering reads at request time.
     library: Library = field(default_factory=Library, repr=False, compare=False)
     site_types: tuple[str, ...] = ()
+    code: Mapping[str, str] = field(default_factory=dict)
 
     def next_lora_id(self) -> int:
         """Allocate a unique LoRA slot across every lowering on this engine.

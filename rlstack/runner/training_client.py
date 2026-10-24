@@ -15,6 +15,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import asdict, replace
 from functools import lru_cache
 
+from rlstack.code import load_code
 from rlstack.client import GradientRow, TrainingResult, TrainingSnapshot
 from rlstack.data.flatten import flatten, pack
 from rlstack.data.stores.base import NamedAdapterConflict, RunHandle
@@ -39,10 +40,12 @@ class TrainingClient:
     def __init__(self, learner: Learner, arbiter: Arbiter, *, tenant: str,
                  refs: RefReader, schema: SiteSchema, seed: int,
                  microbatch_tokens: int, journal: HostJournal | None = None,
-                 weight_transfer: WeightTransfer = WeightTransfer()) -> None:
+                 weight_transfer: WeightTransfer = WeightTransfer(),
+                 code: tuple[str, ...] = ()) -> None:
         self.learner, self.arbiter = learner, arbiter
         self.tenant, self.refs, self.schema = tenant, refs, schema
         self.base, self.seed = schema.base, seed
+        self.code = load_code(code)
         self.microbatch_tokens = microbatch_tokens
         self.journal, self.weight_transfer = journal, weight_transfer
         self.update = 0
@@ -153,7 +156,7 @@ class TrainingClient:
         if not sites:
             raise ValueError(f"measurement adapter site {configured.site!r} matches nothing")
         self.learner.install(self.measurement_tenant, Parameterization(
-            base=self.base, loss="sequence_sft",
+            base=self.base, loss="sequence_sft", code=self.code,
             entries=(EntryInstall(name="adapter", adapter_type=configured.adapter_type,
                                   sites=tuple(sites), init=dict(configured.init), trainable=True),),
             optim=OptimSettings("adamw", 1e-4, (0.9, 0.95), 0.0, {})))

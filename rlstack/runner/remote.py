@@ -168,7 +168,8 @@ def encode_bundle(bundle: Bundle) -> dict:
             "policy_version": dict(bundle.policy_version),
             "payloads": {name: _b64(data)
                          for name, data in bundle.payloads.items()},
-            "adapter_types": dict(bundle.adapter_types)}
+            "adapter_types": dict(bundle.adapter_types),
+            **({"code": dict(bundle.code)} if bundle.code else {})}
 
 
 def decode_bundle(row: dict) -> Bundle:
@@ -176,7 +177,7 @@ def decode_bundle(row: dict) -> Bundle:
                   policy_version=row["policy_version"],
                   payloads={name: _unb64(text)
                             for name, text in row["payloads"].items()},
-                  adapter_types=row["adapter_types"])
+                  adapter_types=row["adapter_types"], code=row.get("code", {}))
 
 
 def _spec_classes() -> dict[str, type]:
@@ -235,6 +236,8 @@ def _decode_dataclass(tree: dict) -> object:
 
     classes = _spec_classes()
     tag = tree[TYPE_KEY]
+    if tag == "GenSpec" and ("envs" in tree or "makers" in tree):
+        raise ValueError("legacy environment/maker specs are read-only; migrate to declared plain functions")
     if tag == "Plans" and tree.get("fit") is not None:
         raise ValueError("legacy fit plans have no executor; compile sealed Replay training waves")
     if tag not in classes:
@@ -433,6 +436,7 @@ class HeldPayloads:
 
 def encode_parameterization(p: Parameterization) -> dict:
     return {"base": p.base, "loss": p.loss,
+            **({"code": dict(p.code)} if p.code else {}),
             "entries": [{"name": e.name, "adapter_type": e.adapter_type,
                          "init": dict(e.init), "trainable": e.trainable,
                          "sites": encode_sites(e.sites),
@@ -448,7 +452,7 @@ def encode_parameterization(p: Parameterization) -> dict:
 def decode_parameterization(row: Mapping) -> Parameterization:
     optim = row["optim"]
     return Parameterization(
-        base=row["base"], loss=row["loss"],
+        base=row["base"], loss=row["loss"], code=row.get("code", {}),
         entries=tuple(EntryInstall(
             name=e["name"], adapter_type=e["adapter_type"], init=dict(e["init"]),
             trainable=bool(e["trainable"]), sites=decode_sites(e["sites"]),

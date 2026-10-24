@@ -1,15 +1,6 @@
-"""Postprocessors: one class per file, all inheriting PostProcessor (base.py).
-
-Each declares produces / consumes / token_level / pools / sampling and
-implements `async process(group, data, client) -> {column: vector}` — per group,
-after the seal, before the loss. Importing this package registers the builtins.
-"""
-
-from rlstack.training.post.base import PostDef, PostProcessor, postprocessor  # noqa: F401
-from rlstack.training.post import (  # noqa: F401  (registers builtins)
-    center_reward, conditioned_teacher_logprobs, constant, dream_advantage,
-    dream_diagnostics, dream_effect, final_answer, gold_logprob, group_accuracy,
-    grpo_advantage, hinted_logprobs, llm_judge, policy_logprobs, program_correctness,
-    program_diagnostics, reverse_kl, teacher_logprobs,
-    verifier, sft_document_weights,
+"""General numerical and scoring postprocessors; recipes load explicitly."""
+from rlstack.training.post.base import PostDef, PostProcessor, postprocessor
+from rlstack.training.post import (
+    center_reward, constant, grpo_advantage, policy_logprobs, reverse_kl,
+    teacher_logprobs, sft_document_weights,
 )
