@@ -17,6 +17,7 @@ from rlstack import (
     fake_qwen_schema, learner, pool, run_experiment, trajectory_to_row,
 )
 from rlstack.policy.compile import Bundle, restore_bundle
+from rlstack.code import load_code
 from rlstack.runner.campaign import demands_of
 from rlstack.runner.roles.generator import Generator
 from rlstack.runner.loop import experiment_identity, needs_of
@@ -92,7 +93,7 @@ class TrainingBoundaryTest(unittest.TestCase):
             self.assertEqual(tail["update"], 4)
             self.assertEqual(bundle.bundle_id, tail["bundle_id"])
             expected = restore_bundle(tail["versions"], tail["bundle_id"],
-                                      run.read_blob, ("pi",), {"pi": "lora"})
+                                      run.read_blob, ("pi",), {"pi": "lora"}, load_code(spec.code))
             self.assertEqual(bundle, expected)
             installed.append(bundle)
             original_install(bundle)
@@ -179,10 +180,10 @@ class TrainingBoundaryTest(unittest.TestCase):
         report = run_experiment(self.spec, SCHEMA, self.store, {}, FakeLearner(), checkpointing=EVERY_UPDATE)
         run = self.store.open_run(report.run_id)
         entry = run.read_ledger()[0]
-        pin = Bundle.pin(entry["bundle_id"], entry["versions"])
+        pin = Bundle.pin(entry["bundle_id"], entry["versions"], load_code(self.spec.code))
         engine = FakeEngine()
         expected = restore_bundle(pin.policy_version, pin.bundle_id,
-                                  run.read_blob, ("pi",), {"pi": "lora"})
+                                  run.read_blob, ("pi",), {"pi": "lora"}, pin.code)
         with patch.object(engine, "add_bundle", wraps=engine.add_bundle) as install:
             for _ in range(2):
                 engine._known.clear()

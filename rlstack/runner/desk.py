@@ -3117,9 +3117,16 @@ class MetalService:
         from rlstack.runner.measure import Measurement, measure_run
         from rlstack.data.tasks.base import load_tasks
 
+        from rlstack.code import verify_code
+
         row = dict(payload["measurement"])
+        roots = tuple(row.get("code", ()))
+        claimed = dict(row.get("source", {}))
+        if set(claimed) != set(roots):
+            raise ValueError("measurement source claims must cover every declared code root")
+        verify_code(claimed)
         measurement = Measurement(
-            name=row["name"], env=row["env"],
+            name=row["name"], function=row["function"], code=roots,
             task_ids=tuple(row["task_ids"]), samples=int(row["samples"]),
             every=int(row["every"]), post=tuple(row["post"]),
             seed=int(row["seed"]),

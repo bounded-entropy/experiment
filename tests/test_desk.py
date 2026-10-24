@@ -472,7 +472,8 @@ class CodeSkewTest(DeskFixture):
         self.assertTrue(agreed["accepted"], agreed)
         unclaimed = go(host.adopt(_row(arith_spec(self.train,
                                                   seeds=Seeds(master=31))), checkpointing=EVERY_UPDATE.row()))
-        self.assertTrue(unclaimed["accepted"])
+        self.assertFalse(unclaimed["accepted"])
+        self.assertIn("code", unclaimed["error"])
 
     def test_the_desk_relays_the_clients_claim(self) -> None:
         host = self.stand_up("h", "fleet://h", serves_pool=True, trains=True)
@@ -3222,6 +3223,17 @@ class CloseAtHandTest(DeskFixture):
         self.assertTrue(told["measured"], told)
         self.assertEqual(
             sorted(self.store.read_measurements(reply["run_id"])), ["probe"])
+
+    def test_measurement_code_claims_are_verified_before_pool_access(self) -> None:
+        from rlstack.runner.measure import Measurement
+
+        service = self.metal_service(devices=1)
+        measurement = Measurement("probe", "boundary_fixtures:single_turn", (),
+                                  1, 1, (), 7, code=("boundary_fixtures",))
+        manifest = measurement.manifest()
+        for claimed in ({}, {"boundary_fixtures": "wrong"}):
+            with self.subTest(source=claimed), self.assertRaises(ValueError):
+                go(service.measure_the_run({"measurement": dict(manifest, source=claimed)}))
 
     def test_a_measurement_on_the_wrong_metal_is_refused_by_name(self) -> None:
         """A placement bug, and it says so: this metal serves no such pool."""
