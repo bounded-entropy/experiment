@@ -123,6 +123,11 @@ forwards and keep their own optimizer state, learning rates and loss means.
 The separate fitting runner, fit-job plan and fit client have been removed.
 See [sealed supervision](docs/sealed-supervision.md) for migration and probes.
 
+Optional [sampling controls](docs/sampling-controls.md) cross the shared
+inference interface and record effective engine settings. Evaluation support
+does not by itself qualify policy-gradient importance ratios under transformed
+sampling.
+
 - **Modal:** [desk deployment](deploy/desk.py) and [venue wiring](deploy/modal_venue.py).
 - **Strange Loop:** [setup and operations](examples/strangeloop-desk.md),
   [local desk configuration](examples/strangeloop-config.json), and

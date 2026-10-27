@@ -75,4 +75,3 @@ async def finish_thread_call(verb: Callable[[], Any]) -> Any:
         if not operation.cancelled():
             operation.exception()  # Retrieve a failed worker's exception as well.
         raise
-

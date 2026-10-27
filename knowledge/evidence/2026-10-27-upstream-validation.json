@@ -1,0 +1,47 @@
+{
+  "date": "2026-10-27",
+  "scope": "Framework-only upstream publication: ADR 0030 external-code boundary plus optional shared sampling controls",
+  "upstream_base": "d9b9999",
+  "framework_boundary": "f7f779b",
+  "sampling_source": "547934438ce626bf9208a3722ffe4898fa078768",
+  "integrated_sampling_commit": "429c7dd",
+  "lightweight_suite": {
+    "python": "3.13.12",
+    "command": "python3.13 -m unittest discover -s tests",
+    "tests_run": 1755,
+    "passed": 1525,
+    "skipped": 230,
+    "failures": 0,
+    "errors": 0,
+    "elapsed_seconds": 131.899
+  },
+  "selected_cpu_suite": {
+    "python": "3.11.14",
+    "torch": "2.14.0",
+    "safetensors": "0.8.0",
+    "suites": [
+      "test_weight_transfer", "test_gradient_alignment", "test_gradient_documents",
+      "test_gradient_measurement_remote", "test_independent_sft", "test_initial_payload",
+      "test_nsteer", "test_dp_torch", "test_local_learner_custody", "test_batched_replay",
+      "test_site_programs", "test_routed_bank", "test_soft_prompt", "test_spectral",
+      "test_spectral_latent", "test_steer", "test_plora", "test_named_supervision",
+      "test_sampling_controls", "test_vllm_engine"
+    ],
+    "tests_run": 292,
+    "passed": 290,
+    "skipped": 2,
+    "failures": 0,
+    "errors": 0,
+    "elapsed_seconds": 8.609,
+    "device": "CPU",
+    "limits": "CUDA/NCCL and custom Triton hardware cases skipped; vLLM engine tests use stubs."
+  },
+  "counts_overlap": true,
+  "private_experiment_code_or_data_added": false,
+  "live_experiment_or_deployment_performed": false,
+  "known_limits": [
+    "Concurrent NCCL publishers sharing a learner can fail with an unacknowledged source transfer; unresolved, with base64 available.",
+    "New sampling controls are supported for evaluation; transformed behavior/current-policy probabilities still require separate PPO/GRPO qualification.",
+    "Earlier hardware evidence qualifies its exact core; no new GPU, serving, multi-node or throughput qualification is inferred from local passes."
+  ]
+}

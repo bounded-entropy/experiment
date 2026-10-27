@@ -123,6 +123,16 @@ They fail if tensor carriage calls base64 or checkpoint serialization.
 
 The two-CUDA-device NCCL smoke test is skipped without suitable hardware. CPU
 passes do not qualify NCCL, inference-worker installation, multi-node networking,
-or dp/fsdp publication on real GPUs. No live GPU experiment or throughput
-benchmark has been run for this change. Keep that qualification and representative
-end-to-end timing explicit before relying on this backend for experiments.
+or dp/fsdp publication on real GPUs.
+
+Separate hardware checks qualified tensor publication and short ordinary SFT on
+core commit `b01102a`. The six-A40 pod required `NCCL_P2P_DISABLE=1`; its default
+PCIe peer-to-peer path stalled. That evidence does not qualify the subsequent
+external-code migration or full online serving behavior.
+
+Later concurrent publishers sharing one learner exposed `a source has an
+unacknowledged tensor transfer`. That concurrency failure remains unresolved;
+the completed retry used the existing base64 backend. The current implementation
+must not be described as qualified for concurrent NCCL publishers or as having
+an established end-to-end speedup. Keep live qualification and representative
+phase timings explicit before relying on this backend for experiments.

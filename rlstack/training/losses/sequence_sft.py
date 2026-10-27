@@ -22,4 +22,3 @@ def sequence_sft(out, batch):
         components[f"document_{i}_nll_sum"] = nll
         components[f"document_{i}_tokens"] = count
     return LossResult(objective, ratio, gap, components)
-
