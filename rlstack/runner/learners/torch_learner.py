@@ -152,6 +152,19 @@ def _head_chunk_logprob(head, piece: torch.Tensor, picked: torch.Tensor) -> torc
     return torch.log_softmax(head(piece).float(), dim=-1).gather(1, picked)[:, 0]
 
 
+def full_kl_chunk(head, student, teacher, targets):
+    """Full vocabulary KL(T||S) at T=1, plus separate diagnostic sums."""
+    with torch.no_grad():
+        teacher_logp = torch.log_softmax(head(teacher).float(), dim=-1)
+        teacher_p = teacher_logp.exp()
+        entropy = -(teacher_p * teacher_logp).sum()
+    student_logp = torch.log_softmax(head(student).float(), dim=-1)
+    cross_entropy = -(teacher_p * student_logp).sum()
+    kl = (teacher_p * (teacher_logp - student_logp)).sum()
+    nll = -student_logp.gather(-1, targets[:, None]).sum()
+    return torch.stack((kl, nll, entropy, cross_entropy))
+
+
 def trunk_and_head(model):
     """(trunk, head) for a Hugging Face causal LM — `model.model` returns the
     final hidden state and `get_output_embeddings()` is the plain vocabulary
@@ -475,6 +488,7 @@ class TorchLearner:
         self, tenant: str, entry: str,
         reference_batches: Sequence[TokenBatch],
         candidate_batches: Sequence[Sequence[TokenBatch]],
+        teacher_prefix_ids: tuple[int, ...] | None = None,
     ) -> tuple[GradientComparison, ...]:
         """Read ordinary SFT gradient alignment at one unchanged entry state.
 
@@ -501,6 +515,9 @@ class TorchLearner:
             raise ValueError("gradient_cosines needs at least one candidate group")
         for index, batches in enumerate(candidate_batches):
             check_gradient_documents(batches, f"candidate[{index}]")
+        if teacher_prefix_ids is not None and (not teacher_prefix_ids or
+                any(type(t) is not int or t < 0 for t in teacher_prefix_ids)):
+            raise ValueError("teacher prefix needs nonnegative token IDs")
         parameters, schema = self._gradient_parameters(state, entry)
         parameter_count = sum(parameter.numel() for parameter in parameters)
         comparisons = []
@@ -527,7 +544,7 @@ class TorchLearner:
             reference_seconds = time.perf_counter() - started
             for batches in candidate_batches:
                 started = time.perf_counter()
-                candidate_key = (reference_key, cache.key(batches))
+                candidate_key = (reference_key, cache.key(batches), teacher_prefix_ids)
                 saved_comparison = cache.comparison(candidate_key)
                 if saved_comparison is not None:
                     comparisons.append(replace(saved_comparison,
@@ -535,8 +552,12 @@ class TorchLearner:
                         candidate_seconds=time.perf_counter() - started,
                         reference_cache_hit=reference_hit, candidate_cache_hit=True))
                     continue
-                candidate, candidate_documents, candidate_loss_reason = self._document_gradients(
-                    state, parameters, batches)
+                if teacher_prefix_ids is None:
+                    candidate, candidate_documents, candidate_loss_reason = self._document_gradients(
+                        state, parameters, batches)
+                else:
+                    candidate, candidate_documents, candidate_loss_reason = self._kl_document_gradients(
+                        state, parameters, batches, teacher_prefix_ids)
                 candidate_norm, candidate_reason = measured_gradient_norm(candidate, "candidate")
                 reason = (reference_loss_reason or candidate_loss_reason
                           or reference_reason or candidate_reason)
@@ -618,6 +639,64 @@ class TorchLearner:
                         if gradient is not None:
                             accumulated.add_(gradient.detach().to(dtype=torch.float32))
         return tuple(gradients), tuple(documents), loss_reason
+
+    def _kl_document_gradients(self, state, parameters, batches, prefix):
+        """Detached fact-conditioned teacher KL; token mean then document mean.
+
+        Both passes replay the same immutable adapter. Exact document IDs are
+        appended to the teacher prefix, so position p predicts the same token
+        as student position p-len(prefix). No teacher tokens are sampled.
+        """
+        split = trunk_and_head(self._model)
+        if split is None:
+            raise NotImplementedError("full KL requires a model with a separable trunk/head")
+        trunk, head = split
+        count = sum(len(_doc_spans(batch)) for batch in batches)
+        gradients = [torch.zeros_like(p, dtype=torch.float32) for p in parameters]
+        documents = []
+        reason = None
+        for batch in batches:
+            for doc_index, (start, stop) in enumerate(_doc_spans(batch)):
+                tokens = batch.token_ids[start:stop]
+                mask = batch.loss_mask[start:stop]
+                facts = batch.doc_turn_extras[doc_index:doc_index+1] if batch.doc_turn_extras else ()
+                single = TokenBatch(token_ids=tokens, loss_mask=mask,
+                    behavior_logprobs=batch.behavior_logprobs[start:stop],
+                    segment_ids=batch.segment_ids[start:stop], doc_starts=(0,),
+                    doc_turn_extras=facts)
+                ids = torch.tensor([tokens], dtype=torch.long, device=self.device)
+                teacher_ids = torch.tensor([tuple(prefix)+tuple(tokens)], dtype=torch.long, device=self.device)
+                selected = torch.tensor([i-1 for i,v in enumerate(mask) if v], device=self.device)
+                with row_plan(self._model).route(self._rows_of(state, single, 1)):
+                    with torch.no_grad():
+                        teacher = trunk(input_ids=teacher_ids, attention_mask=torch.ones_like(teacher_ids),
+                                        use_cache=False).last_hidden_state[0]
+                        teacher = teacher.index_select(0, selected + len(prefix)).detach()
+                    student = trunk(input_ids=ids, attention_mask=torch.ones_like(ids),
+                                    use_cache=False).last_hidden_state[0].index_select(0, selected)
+                    self.forwards += 2
+                    targets = ids[0].index_select(0, selected+1)
+                    pieces = []
+                    # At most 64 x vocab logits per projection; checkpointing
+                    # retains hidden states, never all document vocabulary logits.
+                    for offset in range(0, len(selected), 64):
+                        pieces.append(torch.utils.checkpoint.checkpoint(
+                            full_kl_chunk, head, student[offset:offset+64],
+                            teacher[offset:offset+64], targets[offset:offset+64], use_reentrant=False))
+                    totals = torch.stack(pieces).sum(0)
+                    loss = totals[0] / len(selected) / count
+                    values = [float(v.detach()) for v in totals]
+                    if not all(math.isfinite(v) for v in values):
+                        reason = "non_finite_document_kl"
+                    values = [v if math.isfinite(v) else None for v in values]
+                    documents.append(GradientDocumentStats(nll_sum=values[1], scored_tokens=len(selected),
+                        kl_sum=values[0], teacher_entropy_sum=values[2],
+                        student_cross_entropy_sum=values[3], objective="teacher_kl"))
+                    local = torch.autograd.grad(loss, parameters, allow_unused=True)
+                    for total, grad in zip(gradients, local, strict=True):
+                        if grad is not None:
+                            total.add_(grad.detach().float())
+        return tuple(gradients), tuple(documents), reason
 
     # ---- named sets (ADR 0019): one route of one entry at a time ------------
 

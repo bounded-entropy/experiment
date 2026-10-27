@@ -690,6 +690,7 @@ class FakeLearner:
         self, tenant: str, entry: str,
         reference_batches: Sequence[TokenBatch],
         candidate_batches: Sequence[Sequence[TokenBatch]],
+        teacher_prefix_ids: tuple[int, ...] | None = None,
     ) -> tuple[GradientComparison, ...]:
         """Explicit synthetic scalar measurements, never evidence of real gradients.
 
@@ -704,6 +705,8 @@ class FakeLearner:
             raise ValueError("gradient_cosines requires a trainable entry")
         if not candidate_batches:
             raise ValueError("gradient_cosines needs candidates")
+        if teacher_prefix_ids is not None:
+            raise NotImplementedError("fake learner does not model full-distribution KL")
         reference, reference_documents = self._synthetic_gradient(tenant, entry, reference_batches)
         reference_norm = math.hypot(*reference)
         comparisons = []
