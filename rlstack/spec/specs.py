@@ -21,6 +21,24 @@ from dataclasses import dataclass, field
 # ---------------------------------------------------------------------------
 
 @dataclass(frozen=True)
+class MinTokensAfter:
+    """Suppress terminal tokens after the first naturally generated sequence.
+
+    Counts raw nonterminal output IDs, not parsed material or teaching tokens.
+    No constraint applies before the sequence; it is never forced into output.
+    """
+
+    sequence: tuple[int, ...]
+    min_tokens: int
+
+    def __post_init__(self) -> None:
+        if not self.sequence or any(type(t) is not int or t < 0 for t in self.sequence):
+            raise ValueError("MinTokensAfter.sequence requires nonnegative token IDs")
+        if type(self.min_tokens) is not int or self.min_tokens < 1:
+            raise ValueError("MinTokensAfter.min_tokens must be a positive integer")
+
+
+@dataclass(frozen=True)
 class SamplingSpec:
     """Behavior-policy knobs. Science, not config: it hashes into run_id."""
 
@@ -32,6 +50,13 @@ class SamplingSpec:
     min_p: float | None = field(default=None, metadata={"identity": "when_set"})
     presence_penalty: float | None = field(default=None, metadata={"identity": "when_set"})
     repetition_penalty: float | None = field(default=None, metadata={"identity": "when_set"})
+    min_tokens_after: MinTokensAfter | None = field(
+        default=None, metadata={"identity": "when_set"})
+
+    def __post_init__(self) -> None:
+        floor = self.min_tokens_after
+        if floor is not None and self.max_tokens < len(floor.sequence) + floor.min_tokens:
+            raise ValueError("max_tokens cannot accommodate the sequence and continuation floor")
 
 
 @dataclass(frozen=True)

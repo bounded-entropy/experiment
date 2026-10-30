@@ -188,3 +188,80 @@ class VllmEngineTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class MinTokensAfterEngineTest(unittest.TestCase):
+    setUp = VllmEngineTest.setUp
+    tearDown = VllmEngineTest.tearDown
+
+    def test_floor_requires_opt_in_and_refuses_string_stops(self):
+        from rlstack import MinTokensAfter
+        sampling = SamplingSpec(max_tokens=8, min_tokens_after=MinTokensAfter((67,), 2))
+        eng = engine()
+        eng.add_bundle(Bundle("bundle:base", {}))
+        with self.assertRaisesRegex(ValueError, 'opted-in'):
+            drain(eng, sampling=sampling)
+        eng = engine(enable_min_tokens_after=True)
+        eng.add_bundle(Bundle("bundle:base", {}))
+        async def go():
+            return [e async for e in eng.sample_tokens([], sampling, ('END',), 'bundle:base', 7)]
+        with self.assertRaisesRegex(ValueError, 'string stops'):
+            asyncio.run(go())
+
+    def test_default_engine_does_not_register_processor(self):
+        self.assertNotIn('logits_processors', engine()._engine_args)
+        opted = engine(enable_min_tokens_after=True)
+        self.assertEqual(opted._engine_args['logits_processors'],
+                         ['rlstack_engine.min_tokens_after:MinTokensAfterProcessor'])
+        self.assertEqual(opted._engine_args['logprobs_mode'], 'raw_logprobs')
+
+    def test_effective_terminals_request_config_and_final_evidence(self):
+        from rlstack import MinTokensAfter
+        from rlstack.sampling import CONTINUATION_KEY
+        class Params(SimpleNamespace):
+            def update_from_generation_config(self, fields, eos):
+                self.all_stop_token_ids = {eos, *fields['eos_token_id']}
+        self.modules.stop()
+        modules = stub_modules()
+        modules['vllm'].SamplingParams = lambda **kw: Params(**kw)
+        self.modules = patch.dict(sys.modules, modules)
+        self.modules.start()
+        eng = engine(enable_min_tokens_after=True)
+        eng.add_bundle(Bundle('bundle:base', {}))
+        llm = eng._ensure_llm()
+        llm.input_processor = SimpleNamespace(generation_config_fields={'eos_token_id': [0, 99]},
+            renderer=SimpleNamespace(get_eos_token_id=lambda: 0))
+        events = drain(eng, sampling=SamplingSpec(max_tokens=8,
+            min_tokens_after=MinTokensAfter((67,), 2)))
+        config = llm.params.extra_args[CONTINUATION_KEY]
+        self.assertEqual(config, {'sequence': [67], 'min_tokens': 2, 'terminal_token_ids': [0, 99]})
+        finish = next(e for e in events if isinstance(e, FinishEvent))
+        facts = finish.turn_extras['min_tokens_after']
+        self.assertTrue(facts['floor_met'])
+        self.assertEqual(facts['boundary_end_output_index'], 3)
+        self.assertEqual(facts['nonterminal_tokens_after_boundary'], 2)
+        self.assertEqual(facts['logprobs_mode'], 'raw_logprobs')
+        self.assertFalse(facts['behavior_logprobs'])
+        eng._engine_args['max_model_len'] = 4  # 2 prompt IDs leave only 2 output slots.
+        with self.assertRaisesRegex(ValueError, 'model window'):
+            drain(eng, sampling=SamplingSpec(max_tokens=8,
+                min_tokens_after=MinTokensAfter((67,), 2)))
+
+    def test_reserved_processor_key_cannot_bypass_explicit_sampling_spec(self):
+        from dataclasses import replace
+        from rlstack.sampling import CONTINUATION_KEY
+        eng = engine(enable_min_tokens_after=True)
+        eng.add_bundle(Bundle('bundle:base', {}))
+        original = eng._levers_for
+        eng._levers_for = lambda *args: replace(original(*args),
+            extra_args={CONTINUATION_KEY: {'sequence': [67], 'min_tokens': 2}})
+        with self.assertRaisesRegex(ValueError, 'reserved extra_args'):
+            drain(eng)
+
+    def test_opted_in_floor_off_request_still_labels_raw_likelihoods(self):
+        eng = engine(enable_min_tokens_after=True)
+        eng.add_bundle(Bundle('bundle:base', {}))
+        finish = next(e for e in drain(eng) if isinstance(e, FinishEvent))
+        self.assertNotIn('min_tokens_after', finish.turn_extras)
+        self.assertEqual(finish.turn_extras['sampling_logprobs']['mode'], 'raw_logprobs')
+        self.assertFalse(finish.turn_extras['sampling_logprobs']['behavior_logprobs'])

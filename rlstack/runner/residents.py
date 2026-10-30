@@ -95,6 +95,10 @@ class EngineBuild:
     # use, throughput) in the resident's log: an operator's diagnosis knob
     log_stats: bool = False
     weight_transfer_host: str | None = None
+    # Custom processor registration is opt-in: old builds keep their exact
+    # sampler configuration, even when every request leaves the floor unset.
+    enable_min_tokens_after: bool | None = field(
+        default=None, metadata={"identity": "when_set"})
 
 
 @dataclass(frozen=True)
@@ -137,6 +141,8 @@ def encode_build(build: Build) -> dict:
     row: dict[str, Any] = {"type": type(build).__name__}
     for f in fields(build):
         value = getattr(build, f.name)
+        if f.metadata.get("identity") == "when_set" and value is None:
+            continue
         row[f.name] = list(value) if isinstance(value, tuple) else value
     return row
 
@@ -259,7 +265,8 @@ def build_engine(regime: Regime, partition: Partition, build: Build,
             code=build.code,
             enable_sleep_mode=build.enable_sleep_mode,
             enforce_eager=build.enforce_eager, log_stats=build.log_stats,
-            weight_transfer_host=build.weight_transfer_host)
+            weight_transfer_host=build.weight_transfer_host,
+            enable_min_tokens_after=bool(build.enable_min_tokens_after))
     raise ResidentError(
         f"{type(build).__name__} is not an engine build; regime "
         f"{regime.name!r} is inference")

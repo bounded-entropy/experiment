@@ -30,7 +30,7 @@ from rlstack.data.plan import (
 from rlstack.spec.specs import (
     AdapterSpec, AlgoSpec, BackendProfile, PoolMember, ExperimentSpec,
     GenSpec, Topology, HostSpec, LearnerMember, OptimSpec, PolicySpec,
-    Plans, SamplingSpec, Schedule, Seeds, WarmStart,
+    Plans, SamplingSpec, MinTokensAfter, Schedule, Seeds, WarmStart,
     attn_bias, learner, lora, nsteer, plora, pool, soft_prompt, steer,
 )
 from rlstack.registry import (
