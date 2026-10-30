@@ -152,6 +152,46 @@ def _head_chunk_logprob(head, piece: torch.Tensor, picked: torch.Tensor) -> torc
     return torch.log_softmax(head(piece).float(), dim=-1).gather(1, picked)[:, 0]
 
 
+def _chunk_logprob_entropy(piece: torch.Tensor, picked: torch.Tensor):
+    """Selected logprob and exact vocabulary entropy, both differentiable."""
+    logp = torch.log_softmax(piece.float(), dim=-1)
+    entropy = -(logp.exp() * logp).sum(dim=-1)
+    return logp.gather(1, picked)[:, 0], entropy
+
+
+def _head_chunk_logprob_entropy(head, piece, picked):
+    return _chunk_logprob_entropy(head(piece), picked)
+
+
+def policy_token_statistics(values: torch.Tensor, targets: torch.Tensor,
+                            head=None, chunk: int = LOGPROB_CHUNK):
+    """Full-vocabulary entropy and selected logprobs, chunked under recompute.
+
+    `values` is [R,W,V] logits, or [R,W,H] hidden states when `head` is
+    supplied. The vocabulary is never truncated. Only these two [R,W]
+    outputs survive each chunk; no full sequence fp32 distribution is kept.
+    """
+    if chunk < 1:
+        raise ValueError("chunk must be positive")
+    rows, width, _ = values.shape
+    if rows == 0 or width == 0:
+        empty = values.new_zeros((rows, width), dtype=torch.float32)
+        return empty, empty
+    logprobs, entropies = [], []
+    for row in range(rows):
+        for start in range(0, width, chunk):
+            piece = values[row, start:start + chunk]
+            picked = targets[row, start:start + chunk, None]
+            args = ((_chunk_logprob_entropy, piece, picked) if head is None
+                    else (_head_chunk_logprob_entropy, head, piece, picked))
+            lp, entropy = torch.utils.checkpoint.checkpoint(
+                *args, use_reentrant=False)
+            logprobs.append(lp)
+            entropies.append(entropy)
+    return (torch.cat(logprobs).reshape(rows, width),
+            torch.cat(entropies).reshape(rows, width))
+
+
 def full_kl_chunk(head, student, teacher, targets):
     """Full vocabulary KL(T||S) at T=1, plus separate diagnostic sums."""
     with torch.no_grad():
@@ -183,6 +223,7 @@ class _Tenant:
     loss_fn: object
     trainable: list[str]
     entries: list[str]                                  # install order
+    needs_entropy: bool = False
     params: dict[str, object] = field(default_factory=dict)
     adapter_types: dict[str, object] = field(default_factory=dict)
     sites: dict[str, tuple[SiteMeta, ...]] = field(default_factory=dict)
@@ -259,6 +300,7 @@ class TorchLearner:
 
         state = _Tenant(
             loss_fn=LOSSES.get(parameterization.loss).fn,
+            needs_entropy=LOSSES.get(parameterization.loss).needs_entropy,
             code=dict(parameterization.code),
             trainable=sorted(e.name for e in parameterization.entries
                              if e.trainable),
@@ -377,10 +419,13 @@ class TorchLearner:
         # found no plan would be a forward with no deltas — the rows have to be
         # pinned for as long as the forward can RUN, not just until it returns
         with row_plan(self._model).route(self._rows_of(state, batch, len(spans))):
-            logprobs = self._batched_logprobs(batch, spans)
+            if state.needs_entropy:
+                out = self._batched_policy_outputs(batch, spans, entropy=True)
+            else:
+                out = PolicyOutputs(logprobs=self._batched_logprobs(batch, spans))
             provided = self._provided(state)
-            result = state.loss_fn(
-                PolicyOutputs(logprobs=logprobs, provided=provided), batch)
+            out.provided = provided
+            result = state.loss_fn(out, batch)
             # a microbatch may hold NO target at all — one-token documents,
             # which a dream cut at blank lines produces (a `---` line is one
             # token) and a fork at batch 1 steps alone: its loss is a constant
@@ -1032,8 +1077,14 @@ class TorchLearner:
 
     def _batched_logprobs(self, batch: TokenBatch,
                           spans: list[tuple[int, int]]) -> torch.Tensor:
-        """[len(batch)] logprobs from ONE padded forward: position t scores
-        token t given tokens < t.
+        """The selected-token-only path used by existing losses and measurements."""
+        return self._batched_policy_outputs(batch, spans).logprobs
+
+    def _batched_policy_outputs(self, batch: TokenBatch,
+                                spans: list[tuple[int, int]], *,
+                                entropy: bool = False) -> PolicyOutputs:
+        """Token-aligned policy outputs from ONE padded forward: position t
+        scores token t given tokens < t, optionally with vocabulary entropy.
 
         Row d is document d, LEFT-ALIGNED and right-padded, so causal
         attention over the padding mask scores each real position exactly as a
@@ -1068,19 +1119,31 @@ class TorchLearner:
             trunk, head = split
             hidden = trunk(input_ids=ids, attention_mask=attention,
                            use_cache=False).last_hidden_state
-            scored = head_logprobs(hidden[:, start:-1], head, ids[:, start + 1:],
-                                   chunk=LOGPROB_CHUNK)
+            if entropy:
+                scored, entropies = policy_token_statistics(
+                    hidden[:, start:-1], ids[:, start + 1:], head=head,
+                    chunk=LOGPROB_CHUNK)
+            else:
+                scored = head_logprobs(hidden[:, start:-1], head, ids[:, start + 1:],
+                                       chunk=LOGPROB_CHUNK)
         else:
             keep = {} if start == 0 else {"logits_to_keep": width - start}
             logits = self._model(input_ids=ids, attention_mask=attention,
                                  use_cache=False, **keep).logits
-            scored = chosen_logprobs(logits[:, :-1], ids[:, start + 1:])
-        chosen = torch.cat([                                         # [R, W-1]
-            torch.zeros((len(spans), start), dtype=torch.float32, device=self.device),
-            scored], dim=1)
-        zero = torch.zeros(1, dtype=chosen.dtype, device=self.device)
-        return torch.cat([torch.cat([zero, chosen[row, :stop - start - 1]])
-                          for row, (start, stop) in enumerate(spans)])
+            if entropy:
+                scored, entropies = policy_token_statistics(
+                    logits[:, :-1], ids[:, start + 1:], chunk=LOGPROB_CHUNK)
+            else:
+                scored = chosen_logprobs(logits[:, :-1], ids[:, start + 1:])
+        def flatten_scored(values):
+            chosen = torch.cat([
+                torch.zeros((len(spans), start), dtype=torch.float32, device=self.device),
+                values], dim=1)
+            zero = torch.zeros(1, dtype=chosen.dtype, device=self.device)
+            return torch.cat([torch.cat([zero, chosen[row, :stop - start - 1]])
+                              for row, (start, stop) in enumerate(spans)])
+        return PolicyOutputs(logprobs=flatten_scored(scored),
+                             entropies=flatten_scored(entropies) if entropy else None)
 
     def _grad_norm(self, state: _Tenant) -> float:
         total = 0.0

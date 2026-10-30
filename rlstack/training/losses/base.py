@@ -38,6 +38,11 @@ class PolicyOutputs:
 
     logprobs: Any                 # torch.Tensor [T], grad flows through it
     provided: Mapping[str, Any] = field(default_factory=dict)
+    # Exact H(pi(. | prefix)) in nats, over the full vocabulary at T=1.
+    # Present only for losses declaring needs_entropy=True. Token-aligned
+    # like logprobs, with zero placeholders at skipped prefix positions.
+    # This is the replay policy, before sampler temperature/top-p transforms.
+    entropies: Any | None = None
 
 
 @dataclass
