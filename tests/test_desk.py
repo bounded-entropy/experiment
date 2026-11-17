@@ -1318,6 +1318,39 @@ class StopTest(DeskFixture):
                     if e.get("event") == "detach"]
         self.assertEqual(detaches, ["stopped", "done"])
 
+    def test_the_desk_stops_a_run_named_by_its_run_ref(self) -> None:
+        """A submission replies with `run_ref` (subdir/run_id) and the desk
+        keys placements and rosters by the bare id. Found on the venue
+        (2026-11-16): `stop --run steer/<id>` replied `stopped` and journaled
+        a row under the qualified name while the run kept committing. The
+        ref now resolves to the run it names; a ref naming no placement, or
+        the wrong subdir, is refused and journals nothing."""
+        gate = asyncio.Event()
+        service = self.metal_service(devices=2, sample_gate=gate)
+        desk = self.desk_with_metal("fake-metal")
+        frame = frame_for(self.split_spec(), "drill", checkpointing=EVERY_UPDATE)
+
+        async def drive():
+            placed = await desk.submit(demand_rows(demands_of(self.split_spec())), frame)
+            rid = placed["run_id"]
+            refusals = []
+            for wrong in ("drill/not-a-run", f"other/{rid}"):
+                with self.assertRaises(DeskError) as caught:
+                    await desk.stop(wrong, "drill")
+                refusals.append(str(caught.exception))
+            stopped = await desk.stop(f"drill/{rid}", "drill")
+            gate.set()
+            return rid, refusals, stopped
+        rid, refusals, stopped = go(drive())
+        self.assertIn("nothing to stop", refusals[0])
+        self.assertIn("placed under subdir 'drill'", refusals[1])
+        self.assertEqual(stopped["run_id"], rid)
+        self.assertTrue(stopped["was_running"], stopped)
+        self.assertEqual(stopped["state"], "stopped")
+        rows = [e for e in self.store.read_fleet_log() if e["event"] == "stopped"]
+        self.assertEqual([(e["run_id"], e["subdir"]) for e in rows], [(rid, "drill")])
+        self.assertIn(rid, desk.dispositions()["stopped"])
+
 
 class RerouteTest(DeskFixture):
     def test_decommission_reroutes_running_work_to_fresh_metal(self) -> None:
