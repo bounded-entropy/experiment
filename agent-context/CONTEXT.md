@@ -5231,6 +5231,72 @@ specs; backends (local/modal/skypilot) and GPU topology are semantics-neutral.
     likelihoods and GRPO compatibility are unimplemented. CPU checks are not
     a live frozen-generation qualification. No new runner verb/store layout.
 
+103. **ONLINE RL ON MODAL THROUGH THE DESK, QUALIFIED ON THE POST-ADR-0030 CORE (2026-11-16).**
+    Samarth asked for rlstack as a working environment. Framework a7c5ac1 plus
+    this entry's fixes (branch `claude/qualify-modal`), recipes `rlstack-recipes`
+    9a98527 (local), Modal workspace `samarthmbhargav`, vLLM 0.28.0, torch
+    2.13.0, transformers 5.16.1, flash-linear-attention 0.6.0. Desk
+    `modal://rlstack-desk/Desk` deployed with `RLSTACK_BOOTABLE_METALS=steer-l4,qualify-pro6000`;
+    observer deployed beside the pre-existing `rlstack-ui` as `rlstack-observer`.
+    Every run was submitted with `Checkpointing(every=2, delivery="wire")`:
+    two updates is the most a drill should redo after a crash.
+    - **0.6B GRPO, two tenants (recipes `math/deploy/steer_l4.py`, DAPO
+      screened task, 8 updates, 2 groups x 8).** L4 capacity was unavailable
+      for 10 min, so the metal ran on one A10G (24 GB, same partition treaty).
+      LoRA `steer/0e9c81ca3cc0` and steer `steer/197639de098a`: accepted, run
+      identity and `run_ref` returned, desk placement, the learner host's
+      attach/detach journaled (custody), 8/8 committed each, checkpoints at
+      0/2/4/6/8. Deliberate stop of the steer run at update 4 through the desk
+      (drained, `completed: 4`, detach `stopped`), resubmission with
+      `resume=True` re-adopted the same run id and committed 5..8; ledger lines
+      1-4 are byte-identical before and after the resume. The observer lists
+      both runs with their waves, wave contents and per-phase timing. Served
+      vs learner `logprob_gap` 0.011-0.018 per update, `mean_ratio`
+      0.9992-1.0004, both tenants. Steady update wall 8-18 s (LoRA, graphed
+      engine) and 41-56 s (steer, eager engine).
+    - **Qwen3.5-4B LoRA GRPO (recipes `math/deploy/qwen35_lora.py`, `qualify/b78cef5c3275`).**
+      One RTX PRO 6000 (96 GB), serving and learner as two hosts side by side
+      (36 + 48 GB declared, max_policy_lag 1), LoRA r=16 on `layers.0-31.mlp.*`
+      served by punica with CUDA graphs, torch learner with FLA kernels; 4
+      updates of 4 unscreened DAPO tasks x 8, max_tokens 3072, native thinking
+      on. 4/4 committed. `logprob_gap` 0.0101 / 0.0112 / 0.0139 / 0.0125,
+      `mean_ratio` 1.00012 / 1.00002 / 0.99985 / 0.99999. Update wall 433 s cold
+      (collect 308 s includes the 8 GB download and engine build), then 69 /
+      59 / 38 s (train phase 49 / 48 / 18 s over 81k / 101k / 90k trained
+      tokens). Learner allocator peak 11.4 GiB (declared 48). 17-30 of 32
+      completions per wave hit max_tokens; reward 0.06-0.44.
+    - **Fixed in the shared path, each with a fakes test:** the Modal GPU image
+      lacked flash-linear-attention (`GPU_PACKAGES`); the desk image did not
+      carry `RLSTACK_BOOTABLE_METALS`, so a deployed desk's allowlist was
+      always unset; the observer's app name is `RLSTACK_OBSERVER_APP` (default
+      `rlstack-ui`); `Desk.stop` given a `run_ref` (`steer/<id>`) replied
+      `stopped` and journaled a row while the run kept committing — it now
+      resolves the ref and refuses names it never placed (`placed_run`);
+      `VllmEngine.first_contact` read `AsyncLLM.engine`, absent in 0.28;
+      `deploy/steer_l4.py::await_runs` polled bare ids under a subdir.
+    - **Observed, not changed:** (a) the carve rung keeps only FROZEN units
+      `beside` their run's metal, so with two live metals the LoRA tenant's
+      0.6B serving pool was carved on the PRO 6000 and its learner on the A10G
+      — a cross-metal run (it worked, through the relay) on another run's
+      card, and the two tenants did not join one serving host as the steer
+      check expects. Whether policy pools should also prefer their learner's
+      metal is Samarth's call. (b) `journal_bookings` is silent on Modal:
+      `nvidia-smi --query-compute-apps` reports no processes in the sandbox,
+      so per-resident measured bookings are absent; card-level `stats` work
+      (51.4 GB peak used on the PRO 6000 including the 0.6B engine). (c) the
+      phantom `stopped` row for `steer/197639de098a` stays in the append-only
+      fleet journal; no run is keyed by it. (d) the old 2026-09 journal on
+      this store held stale placements; `cf9a3ae798e0` (a 0.6B gsm run that
+      fit the new card) was stopped through the desk so recovery could not
+      revive it, after a `reap` lapsed the dead concept listing.
+    - **Unqualified still:** `prompt_logprobs` scoring (GRPO did not use it),
+      multi-GPU metal (TP/FSDP/dp), NCCL weight transfer, sleep-mode
+      alternation, crash (not stop) recovery, the other recipe venues'
+      `deploy.modal_venue` imports (only the two math venues were moved to the
+      shipped `modal_venue` name), and any scientific result: the tasks were
+      not screened for Qwen3.5-4B and four updates show plumbing, not
+      learning.
+
 ## Open threads (do NOT treat as settled; flag when your answer touches them)
 
 - TODO (Samarth, settled intent — future, nothing now): BUNDLE LRU EVICTION

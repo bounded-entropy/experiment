@@ -131,3 +131,10 @@ commit qualify that exact core: short ordinary SFT and tensor transport. They do
 not qualify the complete external recipe migration, online RL, live vLLM model
 serving or custom Triton parity. Final migration inventory and local validation
 are recorded alongside ADR 0030.
+
+On 2026-11-16 the post-migration core (a7c5ac1 plus the fixes recorded in
+CONTEXT entry 103) ran online GRPO end to end through the Modal desk: Qwen3-0.6B
+LoRA and steer tenants on one A10G with a deliberate stop and a byte-identical
+resume, and Qwen3.5-4B LoRA served by punica on one RTX PRO 6000. Live vLLM
+serving and online RL are qualified for those single-card shapes only; entry
+103 lists what remains unqualified.
