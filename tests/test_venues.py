@@ -308,6 +308,21 @@ class ChassisTest(VenueFixture):
             self.assertIn("MINE = ", source)
             self.assertIn("take_down(MINE", source)
 
+    def test_the_check_reads_its_runs_under_their_subdir(self) -> None:
+        """ADR 0010: reads use `subdir/run_id` and never search other
+        folders, so the steer check's ledger poll must name SUBDIR — a bare
+        id asked the observer for a root run and 404'd."""
+        asked: list[list[str]] = []
+
+        def ledgers(refs, folder="", tail=8):
+            asked.append(list(refs))
+            return {ref: {"committed": self.steer_l4.UPDATES, "train": []}
+                    for ref in refs}
+
+        with patch.object(self.steer_l4, "ledgers", ledgers):
+            self.steer_l4.await_runs({"lora": "abc123", "steer": "def456"})
+        self.assertEqual(asked, [["steer/abc123", "steer/def456"]])
+
     def test_the_retired_venues_are_gone(self) -> None:
         """Q8: the two hand-built venues bypassed the desk and built hosts in
         the driver's container. History keeps them; the tree does not."""

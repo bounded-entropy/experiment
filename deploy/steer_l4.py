@@ -468,9 +468,15 @@ def submit_two_tenants(master: int, *, every: int) -> tuple[dict[str, str], bool
 def await_runs(runs: dict[str, str], timeout_s: float = 3600.0) -> dict:
     """Promise 3's second half: both ledgers reach UPDATES; the rails per
     update, reported."""
+    from rlstack.data.stores.base import run_reference
+
     deadline = time.time() + timeout_s
     while time.time() < deadline:
-        told = ledgers(list(runs.values()))
+        # the runs were filed under SUBDIR, and the observer never searches
+        # other folders: a bare id is a lookup at the root, which 404s
+        refs = {rid: run_reference(rid, SUBDIR) for rid in runs.values()}
+        told = ledgers(list(refs.values()))
+        told = {rid: told[ref] for rid, ref in refs.items()}
         line = {name: told[rid]["committed"] for name, rid in runs.items()}
         print(f"[ledger] {json.dumps(line)}", flush=True)
         if all(n >= UPDATES for n in line.values()):
