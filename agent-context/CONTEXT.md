@@ -5297,6 +5297,28 @@ specs; backends (local/modal/skypilot) and GPU topology are semantics-neutral.
       not screened for Qwen3.5-4B and four updates show plumbing, not
       learning.
 
+104. **A RUN'S UNITS PREFER ONE METAL (2026-11-17).** This settles #103(a).
+    Samarth left the call open, then gave a standing "I trust your judgment"
+    for the cleanup. Before this entry only FROZEN units (a judge on another
+    base) placed `beside` their run's metal. A run whose pool had to carve on
+    a second metal therefore joined a standing learner on the first, and the
+    run then went through the desk's relay, which a desk restart cuts.
+    - **Change:** `Desk.place` passes `beside` to every unit after a run's
+      first. `beside` is the metal of the run's first non-frozen unit.
+      `decide` then joins on that metal, else carves on it, and only then
+      climbs the fleet's usual rungs. It is a preference: a full metal still
+      falls back.
+    - **Test:** `test_a_learner_prefers_its_own_pool_s_metal` reproduces the
+      #103 split on fakes. Run 1 fills metal a, then its pool is delisted, so
+      only its learner stands there. Run 2's pool carves on b, and its learner
+      used to join a; it now carves on b. All 1796 fakes tests pass.
+    - **What is not proven:** no metal run since this change. Joining fewer
+      standing hosts on other metals can carve more partitions, so it spends
+      card memory for locality.
+    - **Unchanged:** run identity, the resume-equivalence bytes, the solo and
+      replica rules (siblings still never share a host), and the frozen-judge
+      join in solo campaigns.
+
 ## Open threads (do NOT treat as settled; flag when your answer touches them)
 
 - TODO (Samarth, settled intent — future, nothing now): BUNDLE LRU EVICTION

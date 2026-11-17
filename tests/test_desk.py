@@ -2548,6 +2548,27 @@ class SoloPlacementTest(DeskFixture):
         self.assertNotEqual(first["pools"]["judge"], second["pools"]["judge"])     # a judge per metal
         self.assertEqual(len(desk.listings), 6)
 
+    def test_a_learner_prefers_its_own_pool_s_metal(self) -> None:
+        """CONTEXT #103(a): a run whose pool had to carve on a second metal
+        must not then JOIN a standing learner on the first — its learner is
+        carved BESIDE its pool where that metal has room, so the run is
+        dialed in-process, not across metals through the desk's relay."""
+        self.metal_service("a-metal", devices=2)
+        self.metal_service("b-metal", devices=2)
+        desk = self.desk_with_metal("a-metal", "b-metal")
+        first = go(Campaigns(desk).submit(self.split_spec(), checkpointing=EVERY_UPDATE))
+        self.assertTrue(first["accepted"], first)              # fills a-metal
+        # its pool leaves the fleet (its card stays booked): a-metal is full,
+        # and only its LEARNER still stands there to be joined
+        desk.delist(first["pools"]["main"], reason="test: pool retired")
+        second = go(Campaigns(desk).submit(
+            dataclasses.replace(self.split_spec(), seeds=Seeds(master=99)), checkpointing=EVERY_UPDATE))
+        self.assertTrue(second["accepted"], second)
+        metal_of = lambda host: desk.listings[host].metal
+        self.assertEqual(metal_of(second["pools"]["main"]), "b-metal")   # a-metal had no room
+        self.assertEqual(metal_of(second["host"]), "b-metal")            # its learner, beside it
+        self.assertNotEqual(second["host"], first["host"])
+
     def test_a_solo_submit_never_knocks_released_metal(self) -> None:
         """No live metal has room: a plain submit knocks a released metal
         back (ADR 0003 Q4); a solo one does not — a released 32B pair is

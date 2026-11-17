@@ -1179,15 +1179,17 @@ class Desk:
             # carved, and twelve arms dial one judge instead of twelve.
             frozen = frozen_unit(unit)
             shunned = (avoid | standing if solo and not frozen else avoid) | siblings
-            # ...and it prefers the metal its own arm landed on: a pool on
-            # the same metal is dialed in-process, one on another metal
-            # through the desk's relay, which is what a desk restart cuts.
+            # ...and EVERY unit after the first prefers the metal its run's
+            # first unit landed on (2026-11-17, CONTEXT #103(a)): a pool
+            # and learner on one metal dial in-process, on two metals
+            # through the desk's relay, which a desk restart cuts. A
+            # preference, not a rule: no room there falls back to the fleet.
             listing = await self.settle(unit, shunned, snapshot, solo=solo,
-                                        standing=standing, beside=beside if frozen else None)
+                                        standing=standing, beside=beside)
             if listing is None:
                 boot.append(wants_of_unit(unit))
                 continue
-            if not frozen:
+            if not frozen and beside is None:
                 beside = listing.metal
             for demand in unit:
                 placement[demand.name()] = listing
@@ -1265,10 +1267,11 @@ class Desk:
         if joined and (beside is None or self.listings[joined].metal == beside):
             return Decision(join=joined)
         if beside is not None:
-            # BESIDE (2026-09-17): a frozen pool's own metal first — a join
-            # there, else a carve there — and only then the fleet's usual
-            # rungs, since a pool on another metal is reached through the
-            # desk's relay, which a desk restart cuts under the run.
+            # BESIDE (2026-09-17; every unit after a run's first since
+            # 2026-11-17): the run's own metal first — a join there, else a
+            # carve there — and only then the fleet's usual rungs, since a
+            # unit on another metal is reached through the desk's relay,
+            # which a desk restart cuts under the run.
             own = self.carve_rung(unit, snapshot, tried, solo, standing, beside, only=beside)
             if own.carve:
                 return own
