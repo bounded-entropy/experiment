@@ -88,7 +88,10 @@ class GradientRow:
 
 @dataclass(frozen=True)
 class GradientDocumentStats:
-    """Selected-token NLL numerator and denominator for one measured document.
+    """Selected-token loss numerators and denominator for one measured document.
+
+    NLL is always the hard-token diagnostic. KL measurements additionally
+    report full-distribution KL(T||S), teacher entropy and cross-entropy.
 
     A nonfinite numerator is None, accompanied by an invalid comparison; it
     never becomes a serialized NaN or a fabricated zero loss.
@@ -96,13 +99,18 @@ class GradientDocumentStats:
 
     nll_sum: float | None
     scored_tokens: int
+    kl_sum: float | None = None
+    teacher_entropy_sum: float | None = None
+    student_cross_entropy_sum: float | None = None
+    objective: str = "sft"
 
 
 @dataclass(frozen=True)
 class GradientComparison:
     """Read-only loss-gradient alignment on identical student coordinates.
 
-    References and each candidate are means of per-document token-mean NLLs.
+    References use token-mean NLL; candidates use NLL or detached-teacher KL.
+    Each group averages its document means with equal document weight.
     Invalid comparisons have no cosine. Only scalars and document sufficient
     statistics cross the wire; no gradient or optimizer state is exposed.
     """
@@ -167,7 +175,8 @@ class Training(Protocol):
             self, start_payload: bytes | None,
             reference_rows: Sequence[GradientRow],
             candidate_rows: Sequence[Sequence[GradientRow]], *,
-            adapter: AdapterSpec) -> tuple[GradientComparison, ...]: ...
+            adapter: AdapterSpec, teacher_prefix_ids: tuple[int, ...] | None = None
+    ) -> tuple[GradientComparison, ...]: ...
 
     async def tokenize(self, text: str) -> tuple[int, ...]: ...
 

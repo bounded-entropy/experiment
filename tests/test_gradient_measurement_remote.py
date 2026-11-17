@@ -77,6 +77,22 @@ class GradientWireTest(unittest.TestCase):
         self.assertEqual(got[0].reference_documents[0].scored_tokens, 2)
         self.assertEqual(got[0].parameter_schema_sha256, "a" * 64)
 
+    def test_kl_prefix_and_separate_loss_statistics_cross_wire(self):
+        from rlstack.client import GradientDocumentStats
+        class KLLearner(RecordingLearner):
+            def gradient_cosines(self, tenant, entry, refs, candidates, teacher_prefix_ids=None):
+                self.prefix = teacher_prefix_ids
+                results = super().gradient_cosines(tenant, entry, refs, candidates)
+                return tuple(replace(r, candidate_documents=(GradientDocumentStats(
+                    nll_sum=4., scored_tokens=2, kl_sum=0.3, teacher_entropy_sum=2.,
+                    student_cross_entropy_sum=2.3, objective="teacher_kl"),)) for r in results)
+        served = KLLearner()
+        proxy = RemoteLearner(LocalTransport(LearnerService(served)))
+        result = proxy.gradient_cosines("student", "pi", REFERENCES, CANDIDATES, teacher_prefix_ids=(1, 2))
+        self.assertEqual(served.prefix, (1, 2))
+        self.assertEqual(result[0].candidate_documents[0].kl_sum, 0.3)
+        self.assertEqual(result[0].candidate_documents[0].nll_sum, 4.)
+
     def test_host_door_admits_and_releases_normal_learner_custody(self):
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)

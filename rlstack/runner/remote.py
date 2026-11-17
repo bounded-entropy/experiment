@@ -335,9 +335,15 @@ def encode_gradient_comparison(result: GradientComparison) -> dict:
         "cosine": result.cosine, "dot": result.dot,
         "reference_norm": result.reference_norm, "candidate_norm": result.candidate_norm,
         "valid": result.valid, "reason": result.reason,
-        "reference_documents": [{"nll_sum": d.nll_sum, "scored_tokens": d.scored_tokens}
+        "reference_documents": [{"nll_sum": d.nll_sum, "scored_tokens": d.scored_tokens,
+                                 "kl_sum": d.kl_sum, "teacher_entropy_sum": d.teacher_entropy_sum,
+                                 "student_cross_entropy_sum": d.student_cross_entropy_sum,
+                                 "objective": d.objective}
                                 for d in result.reference_documents],
-        "candidate_documents": [{"nll_sum": d.nll_sum, "scored_tokens": d.scored_tokens}
+        "candidate_documents": [{"nll_sum": d.nll_sum, "scored_tokens": d.scored_tokens,
+                                 "kl_sum": d.kl_sum, "teacher_entropy_sum": d.teacher_entropy_sum,
+                                 "student_cross_entropy_sum": d.student_cross_entropy_sum,
+                                 "objective": d.objective}
                                 for d in result.candidate_documents],
         "reference_seconds": result.reference_seconds,
         "candidate_seconds": result.candidate_seconds,
@@ -355,10 +361,16 @@ def decode_gradient_comparison(row: Mapping) -> GradientComparison:
         cosine=row["cosine"], dot=row["dot"], reference_norm=row["reference_norm"],
         candidate_norm=row["candidate_norm"], valid=bool(row["valid"]), reason=row["reason"],
         reference_documents=tuple(GradientDocumentStats(
-            nll_sum=d["nll_sum"], scored_tokens=int(d["scored_tokens"]))
+            nll_sum=d["nll_sum"], scored_tokens=int(d["scored_tokens"]),
+            kl_sum=d.get("kl_sum"), teacher_entropy_sum=d.get("teacher_entropy_sum"),
+            student_cross_entropy_sum=d.get("student_cross_entropy_sum"),
+            objective=d.get("objective", "sft"))
             for d in row["reference_documents"]),
         candidate_documents=tuple(GradientDocumentStats(
-            nll_sum=d["nll_sum"], scored_tokens=int(d["scored_tokens"]))
+            nll_sum=d["nll_sum"], scored_tokens=int(d["scored_tokens"]),
+            kl_sum=d.get("kl_sum"), teacher_entropy_sum=d.get("teacher_entropy_sum"),
+            student_cross_entropy_sum=d.get("student_cross_entropy_sum"),
+            objective=d.get("objective", "sft"))
             for d in row["candidate_documents"]),
         reference_seconds=float(row["reference_seconds"]),
         candidate_seconds=float(row["candidate_seconds"]),
@@ -1105,7 +1117,9 @@ class LearnerService:
                 tenant, payload["entry"],
                 tuple(decode_token_batch(batch) for batch in payload["reference_batches"]),
                 tuple(tuple(decode_token_batch(batch) for batch in group)
-                      for group in payload["candidate_batches"]))
+                      for group in payload["candidate_batches"]),
+                **({"teacher_prefix_ids": tuple(payload["teacher_prefix_ids"])}
+                   if payload.get("teacher_prefix_ids") is not None else {}))
             return {"comparisons": [encode_gradient_comparison(result) for result in comparisons]}
         if verb == "load_set":
             named = decode_named_payload(payload["payload"])
@@ -1662,6 +1676,7 @@ class RemoteLearner:
         self, tenant: str, entry: str,
         reference_batches: Sequence[TokenBatch],
         candidate_batches: Sequence[Sequence[TokenBatch]],
+        teacher_prefix_ids: tuple[int, ...] | None = None,
     ) -> tuple[GradientComparison, ...]:
         if self.fsdp != 1 or self.dp != 1:
             raise NotImplementedError("gradient_cosines requires fsdp=dp=1")
@@ -1669,7 +1684,8 @@ class RemoteLearner:
             "tenant": tenant, "entry": entry,
             "reference_batches": [encode_token_batch(batch) for batch in reference_batches],
             "candidate_batches": [[encode_token_batch(batch) for batch in group]
-                                  for group in candidate_batches]})
+                                  for group in candidate_batches],
+            "teacher_prefix_ids": teacher_prefix_ids})
         return tuple(decode_gradient_comparison(row) for row in reply["comparisons"])
 
     def load_set(self, tenant: str, entry: str, route: str,
