@@ -75,7 +75,10 @@ driver mid-call: the cancellation reaches the metal container and kills it.
 | Qwen3.5-4B LoRA r16, punica serving + torch learner, one RTX PRO 6000 | qualified for 4 updates: `logprob_gap` 0.010–0.014, `mean_ratio` ≈ 1.000 |
 | Multi-GPU metal (TP / FSDP / dp), NCCL weight transfer, sleep mode, crash recovery, `prompt_logprobs` scoring | not yet qualified |
 
-Two known quirks: per-process GPU memory bookings are empty on Modal, because
-`nvidia-smi` sees no processes in the sandbox (card-level stats work). And a
-run's serving pool can be carved on a different metal than its learner when
-two metals are live.
+One known quirk: per-process GPU memory bookings are empty on Modal, because
+`nvidia-smi` sees no processes in the sandbox (card-level stats work).
+
+Placement keeps a run on one metal where it can. Every unit after a run's
+first prefers the metal the first landed on, joining a listing there or carving
+there. It moves to another metal only when that one has no room, and the run is
+then reached through the desk's relay (CONTEXT #104).
