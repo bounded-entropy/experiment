@@ -43,7 +43,7 @@ import modal
 
 from modal_venue import desk
 
-# the one workspace rule, stated in the chassis and checked here too because
+# the named-workspace rule, stated in the chassis and checked here too because
 # this file stands alone (it ships no chassis into its image)
 from modal_venue import require_workspace   # noqa: E402
 

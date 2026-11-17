@@ -40,7 +40,11 @@ uncertainty and counterexamples.
   or hand-rolled pause/resume clients — extend the desk's verbs instead. Read
   `::dispositions` to tell `parked` (retried) from `stopped` and `failed`
   (never retried; the error is on the row).
-- Use only `MODAL_PROFILE=yu-masala-workspace` for Modal commands. Respect the
+- Name the project's Modal workspace on every Modal command
+  (`MODAL_PROFILE=<workspace>`; never `modal profile activate`). The chassis
+  refuses a command that leaves it to the machine default. Each workspace has
+  its own desk, store and observer; ask the user which one a project uses
+  rather than assuming. Respect the
   user's GPU ceiling across all apps, including old deployments and screens.
   Release and verify the old allocation before replacing it at that ceiling.
 - Automatic GPU idle shutdown must always remain enabled: the user's funds

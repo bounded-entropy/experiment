@@ -19,36 +19,46 @@ try:                      # a released container STOPS FETCHING where it can
 except ImportError:       # the idle scaledown is the backstop
     stop_fetching_inputs = None
 
-WORKSPACE = "yu-masala-workspace"
-"""THE ONE WORKSPACE (Samarth, 2026-09-05): every rlstack deploy, door and
-volume lives in this Modal profile and no other. The personal profile is
-retired for runs — a day's GPU went there by accident on 2026-09-04 and the
-store split across two volumes. Enforced at import, below, so a `modal
-deploy` or `modal run` under any other profile refuses BY NAME instead of
-quietly standing a second fleet up."""
+WORKSPACE_ENV = "MODAL_PROFILE"
+"""THE WORKSPACE IS NAMED ON EVERY COMMAND, never hard-coded and never left to
+the machine's default profile. On 2026-09-04 a day's GPU went to the wrong
+workspace by accident because a command ran under whatever profile the
+machine had active; the fix then pinned one workspace by name in this file.
+The workspace is now the project's choice (Samarth, 2026-11-16), so the rule
+kept is the one that prevents the accident: the command must say which
+workspace it means. Each workspace has its own desk, store volume and
+observer; nothing here moves data between them."""
 
 
-def require_workspace() -> None:
-    """Refuse to run against any Modal profile but WORKSPACE.
+def require_workspace() -> str:
+    """Refuse to run unless the command names its Modal workspace; return it.
 
-    Reads the active profile off the SDK's own config, ON THE CLIENT ONLY:
-    inside a container `modal.is_local()` is false and the SDK reports the
-    profile 'default', and a check there crash-looped every container of
+    The name must arrive as `MODAL_PROFILE=<workspace>` on the command (never
+    `modal profile activate`, which changes the machine's default silently)
+    and must be the profile the SDK actually resolved. Checked ON THE CLIENT
+    ONLY: inside a container `modal.is_local()` is false and the SDK reports
+    the profile 'default', and a check there crash-looped every container of
     the first deploy (found on the venue). Under the test stand-in
     (tests/venue_stub.py) the profile is not a string and the check stands
-    down — the fakes suite deploys nothing. Set
-    `MODAL_PROFILE=yu-masala-workspace` on the command; never `modal profile
-    activate`, which changes the machine's default silently."""
+    down — the fakes suite deploys nothing."""
     from modal import config as modal_config
 
     if not modal.is_local():
-        return                # inside a container the SDK reports no profile
+        return ""             # inside a container the SDK reports no profile
     profile = getattr(modal_config, "_profile", None)
-    if isinstance(profile, str) and profile != WORKSPACE:
+    if not isinstance(profile, str):
+        return ""             # the test stand-in
+    named = os.environ.get(WORKSPACE_ENV, "").strip()
+    if not named:
         raise SystemExit(
-            f"rlstack runs in the Modal workspace {WORKSPACE!r} only; this "
-            f"command is running under {profile!r}. Prefix it with "
-            f"MODAL_PROFILE={WORKSPACE}.")
+            f"rlstack needs the Modal workspace named on the command; this "
+            f"command would run under the machine default {profile!r}. "
+            f"Prefix it with {WORKSPACE_ENV}=<workspace>.")
+    if profile != named:
+        raise SystemExit(
+            f"{WORKSPACE_ENV}={named!r} but the Modal SDK resolved the "
+            f"profile {profile!r}; refusing to guess which workspace is meant.")
+    return named
 
 
 require_workspace()

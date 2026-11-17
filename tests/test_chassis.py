@@ -172,40 +172,60 @@ if __name__ == "__main__":
 DEPLOY = __import__('pathlib').Path(__file__).resolve().parents[1] / "deploy"
 
 
-class OneWorkspaceTest(unittest.TestCase):
-    """Every deploy and door runs in the yu-masala workspace and no other
-    (Samarth, 2026-09-05): the chassis refuses another profile by name and
-    stands down where the profile is not a string (the stub)."""
+class NamedWorkspaceTest(unittest.TestCase):
+    """Every deploy and door names its Modal workspace on the command
+    (Samarth, 2026-11-16: no hard-coded workspace): the chassis refuses a
+    command that leaves it to the machine default or names a different one
+    than the SDK resolved, accepts any named one, and stands down inside a
+    container and under the stub."""
 
-    def test_another_profile_is_refused_by_name(self) -> None:
-        import sys
+    def _load(self, profile, named):
+        import importlib
+        import os
         import types
+        import sys
+        config = types.ModuleType("modal.config")
+        config._profile = profile
+        sys.modules["modal"].config = config
+        sys.modules["modal"].is_local = lambda: True      # the client
+        sys.modules["modal.config"] = config
+        if named is None:
+            os.environ.pop("MODAL_PROFILE", None)
+        else:
+            os.environ["MODAL_PROFILE"] = named
+        spec = importlib.util.spec_from_file_location("venue_modal_venue_ws", DEPLOY / "modal_venue.py")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module, config
+
+    def test_workspace_must_be_named_and_match(self) -> None:
+        import os
+        import sys
 
         from venue_stub import modal_stubbed
+        saved = os.environ.get("MODAL_PROFILE")
         with modal_stubbed():
             sys.path.insert(0, str(DEPLOY))
             try:
-                config = types.ModuleType("modal.config")
-                config._profile = "samarthmbhargav"
-                sys.modules["modal"].config = config
-                sys.modules["modal"].is_local = lambda: True      # the client
-                sys.modules["modal.config"] = config
-                import importlib
-                spec = importlib.util.spec_from_file_location("venue_modal_venue_ws", DEPLOY / "modal_venue.py")
-                module = importlib.util.module_from_spec(spec)
-                with self.assertRaisesRegex(SystemExit, "yu-masala-workspace.*samarthmbhargav"):
-                    spec.loader.exec_module(module)
-                config._profile = "yu-masala-workspace"
-                spec.loader.exec_module(module)          # the right one passes
-                module.require_workspace()
+                with self.assertRaisesRegex(SystemExit, "MODAL_PROFILE=<workspace>"):
+                    self._load("some-default", None)
+                with self.assertRaisesRegex(SystemExit, "'ws-a'.*'ws-b'"):
+                    self._load("ws-b", "ws-a")
+                for name in ("yu-masala-workspace", "samarthmbhargav"):
+                    module, config = self._load(name, name)
+                    self.assertEqual(module.require_workspace(), name)
                 # inside a container the check stands down whatever the profile
                 config._profile = "default"
                 sys.modules["modal"].is_local = lambda: False
-                module.require_workspace()
+                self.assertEqual(module.require_workspace(), "")
             finally:
                 sys.path.remove(str(DEPLOY))
                 sys.modules.pop("modal.config", None)
                 sys.modules.pop("venue_modal_venue_ws", None)
+                if saved is None:
+                    os.environ.pop("MODAL_PROFILE", None)
+                else:
+                    os.environ["MODAL_PROFILE"] = saved
 
 class ChassisLeaseTest(ChassisFixture):
     """ADR 0008 through a venue-shaped fleet, with no Modal anywhere: the
