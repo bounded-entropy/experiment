@@ -163,6 +163,19 @@ class VllmEngineTest(unittest.TestCase):
         self.assertIn("graph capture failed", eng.eager_fallback)
         self.assertTrue(eng.first_contact()["enforce_eager"])
 
+    def test_first_contact_reads_the_async_engine_s_own_config(self):
+        """vLLM 0.28's AsyncLLM holds `vllm_config` directly and has no
+        `.engine`; the measured weights and KV tokens come from there."""
+        eng = engine()
+        eng.add_bundle(Bundle("bundle:base", {}))
+        drain(eng)
+        eng._llm.vllm_config = SimpleNamespace(
+            model_config=SimpleNamespace(get_weights_bytes=lambda: 3 * 2 ** 30),
+            cache_config=SimpleNamespace(num_gpu_blocks=100, block_size=16))
+        told = eng.first_contact()
+        self.assertNotIn("unreadable", told)
+        self.assertEqual((told["weights_gb"], told["kv_tokens"]), (3.0, 1600))
+
     def test_an_explicit_graphed_build_that_fails_is_not_changed(self):
         FAIL_GRAPHED[0] = True
         eng = engine(enforce_eager=False)
