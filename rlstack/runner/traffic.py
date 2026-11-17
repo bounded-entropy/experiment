@@ -186,8 +186,13 @@ def call_row(pool: str, directives: Sequence[Directive], started: float,
 
 def sampling_row(sampling: SamplingSpec, stop: tuple[str, ...]) -> dict:
     """The effective request configuration, persisted beside its sampled tokens."""
-    return {"temperature": sampling.temperature, "top_p": sampling.top_p,
-            "max_tokens": sampling.max_tokens, "stop": list(stop)}
+    row = {"temperature": sampling.temperature, "top_p": sampling.top_p,
+           "max_tokens": sampling.max_tokens, "stop": list(stop)}
+    if sampling.min_tokens_after is not None:
+        row["min_tokens_after"] = {
+            "sequence": list(sampling.min_tokens_after.sequence),
+            "min_tokens": sampling.min_tokens_after.min_tokens}
+    return row
 
 
 def load_task_sets(store: Store, uris: Sequence[str]) -> dict[str, Task]:

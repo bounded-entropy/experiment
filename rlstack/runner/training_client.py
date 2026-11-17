@@ -183,7 +183,7 @@ class TrainingClient:
     async def gradient_cosines(self, start_payload: bytes | None,
                                reference_rows: Sequence[GradientRow],
                                candidate_rows: Sequence[Sequence[GradientRow]], *,
-                               adapter: AdapterSpec):
+                               adapter: AdapterSpec, teacher_prefix_ids: tuple[int, ...] | None = None):
         """Compare exact masked documents at an explicitly declared adapter."""
         if not candidate_rows:
             return ()
@@ -197,7 +197,9 @@ class TrainingClient:
                 def measure():
                     self.ensure_measurement(adapter, start_payload)
                     return self.learner.gradient_cosines(
-                        self.measurement_tenant, "adapter", reference, candidates)
+                        self.measurement_tenant, "adapter", reference, candidates,
+                        **({"teacher_prefix_ids": teacher_prefix_ids}
+                           if teacher_prefix_ids is not None else {}))
                 results = tuple(await finish_thread_call(measure))
             if len(results) != len(candidate_rows):
                 raise RuntimeError("gradient result count differs from candidate group")
@@ -217,8 +219,9 @@ class TrainingClient:
                     "candidates": [[gradient_row_record(row) for row in rows]
                                    for rows in candidate_rows],
                     "results": [asdict(result) for result in results],
-                    "reduction": "mean selected-token NLL per document; mean documents "
-                                 "per group; global cosine on identical adapter parameters"})
+                    "candidate_objective": "sft" if teacher_prefix_ids is None else "teacher_kl",
+                    "teacher_prefix_ids": teacher_prefix_ids,
+                    "reduction": "reference NLL; candidate " + ("NLL" if teacher_prefix_ids is None else "KL(teacher||student)") + "; mean selected tokens then mean documents; global cosine"})
             return results
 
     async def tokenize(self, text: str) -> tuple[int, ...]:

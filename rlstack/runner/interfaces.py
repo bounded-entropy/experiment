@@ -333,11 +333,15 @@ class Learner(Protocol):
         self, tenant: str, entry: str,
         reference_batches: Sequence[TokenBatch],
         candidate_batches: Sequence[Sequence[TokenBatch]],
+        teacher_prefix_ids: tuple[int, ...] | None = None,
     ) -> tuple[GradientComparison, ...]:
         """Measure ordinary supervised gradients without changing learner state.
 
         Each group uses equal document weight after its own selected-token
-        mean NLL. Reference gradients are computed once; candidate gradients
+        mean loss. A teacher_prefix_ids argument selects full KL(T||S) for
+        candidates, with the same fixed adapter and detached teacher prefixed
+        by those exact IDs; references remain NLL. Reference gradients are
+        computed once; candidate gradients
         use the same entry parameters and never touch persistent `.grad`
         buffers, optimizer moments or parameter versions. Initially unsharded
         (fsdp=dp=1); distributed builds refuse this operation explicitly.
