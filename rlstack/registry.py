@@ -107,11 +107,16 @@ class LossDef:
     fn: Callable[..., Any]
     requires: tuple[str, ...]
     source_hash: str
+    needs_entropy: bool = False
 
 
-def loss(name: str, requires: tuple = ()) -> Callable:
+def loss(name: str, requires: tuple = (), *, needs_entropy: bool = False) -> Callable:
     """Register a loss under `name`; `requires` must name data columns, so a
-    non-string requirement is refused at registration."""
+    non-string requirement is refused at registration. `needs_entropy` asks the
+    existing policy forward to also return differentiable, full-vocabulary
+    token entropies; it is a forward output, not a postdata column."""
+    if not isinstance(needs_entropy, bool):
+        raise TypeError("needs_entropy must be a bool")
     def register(fn: Callable) -> Callable:
         bad = [r for r in requires if not isinstance(r, str)]
         if bad:
@@ -119,7 +124,7 @@ def loss(name: str, requires: tuple = ()) -> Callable:
                 f"loss {name!r} requires {bad!r}: requires names data columns "
                 f"only — anything needing metal to compute is a post "
                 f"processor's job (it lands in postdata before the loss runs)")
-        LOSSES.add(LossDef(name, fn, tuple(requires), source_hash(fn)))
+        LOSSES.add(LossDef(name, fn, tuple(requires), source_hash(fn), needs_entropy))
         return fn
     return register
 
