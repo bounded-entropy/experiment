@@ -1800,6 +1800,26 @@ class Desk:
                                              drain=drain, reason=reason)
         return {"stopped": False, "run_id": run_id, "state": "unlisted"}
 
+    def placed_run(self, run_ref: str) -> str:
+        """THE RUN A STOP NAMES, as the desk keys it: the bare run id its
+        placements and every roster carry. A submission replies with
+        `run_ref` (`subdir/run_id`, ADR 0010), so a qualified ref resolves to
+        its id when that run was placed under that subdir. A name with no
+        placement here is refused, never journaled: a `stopped` row for a
+        name nothing carries stops nothing (found on the venue 2026-11-16 —
+        `stop --run steer/<id>` replied stopped while the run kept
+        committing, and only the bare id drained it)."""
+        subdir, _, name = run_ref.rpartition("/")
+        placed = self.placements().get(name)
+        if placed is None:
+            raise DeskError(f"no run {run_ref!r} was placed by this desk; "
+                            "nothing to stop")
+        filed = placed.get("frame", {}).get("subdir") or ""
+        if subdir and filed != subdir:
+            raise DeskError(f"run {name} was placed under subdir {filed!r}, "
+                            f"not {subdir!r}; refusing to stop {run_ref!r}")
+        return name
+
     async def stop(self, run_id: str, reason: str = "stopped by hand", *,
                    drain: bool = True) -> dict:
         """A DELIBERATE STOP (ADR 0014, Part C): the tenancy ended wherever
@@ -1809,6 +1829,7 @@ class Desk:
         a knock; only a new submission moves it, and that delivery
         supersedes the stop on the record. A run nobody carries — parked,
         say — is stopped by exactly this too: the row is what stops it."""
+        run_id = self.placed_run(run_id)
         reply = await self.stop_anchored(run_id, drain=drain, reason=reason)
         frame = self.placements().get(run_id, {}).get("frame", {})
         row = {"event": "stopped", "t": self.now(), "run_id": run_id,

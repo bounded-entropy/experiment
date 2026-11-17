@@ -81,8 +81,9 @@ STORE_MOUNT = "/store"
 
 OBSERVER = os.environ.get("RLSTACK_OBSERVER", "")
 """THE OBSERVER'S BASE URL — where a campaign door reads its run's progress
-(ADR 0008, F6). `deploy/ui.py` deploys under the label `rlstack-ui`, so the
-URL is `https://<workspace>--rlstack-ui.modal.run`; the workspace is not
+(ADR 0008, F6). `deploy/ui.py` deploys under the label `rlstack-ui` unless
+`RLSTACK_OBSERVER_APP` names another, so the URL is
+`https://<workspace>--<label>.modal.run`; the workspace is not
 something this file can know, so it is an environment variable and an unset
 one is a loud refusal at the first poll rather than a silent fallback."""
 
@@ -95,12 +96,27 @@ plugin package, and THIS module — a metal container runs `metal_class`'s own
 bring-up inside the image, so the chassis ships with it."""
 
 
-def cpu_image_for(*pip: str, sources: tuple[str, ...] = ()) -> modal.Image:
+GPU_PACKAGES = ("vllm==0.28.0", "torch==2.13.0", "transformers==5.16.1",
+                "flash-linear-attention==0.6.0", "safetensors", "numpy")
+"""The GPU image's pins, resolved in ONE install so nothing upgrades torch
+behind vLLM's back. flash-linear-attention carries the learner's Triton
+kernels for Qwen3.5's gated-DeltaNet layers; without it transformers falls
+back to a Python loop over 64-token chunks. The RunPod and Strange Loop
+images already installed it (deploy/runpod.Dockerfile); the Modal image did
+not, so a Qwen3.5 learner on Modal ran the slow path."""
+
+
+def cpu_image_for(*pip: str, sources: tuple[str, ...] = (),
+                  env: dict | None = None) -> modal.Image:
     """The driver/desk image: no CUDA, the store's two dependencies, and the
-    sources. `pip` adds a venue's own (a corpus builder's tokenizer)."""
-    return (modal.Image.debian_slim(python_version="3.12")
-            .pip_install("safetensors", "numpy", *pip)
-            .add_local_python_source(*SOURCES, *sources))
+    sources. `pip` adds a venue's own (a corpus builder's tokenizer); `env`
+    carries a deploy-time setting into the container, which re-imports the
+    venue file and would otherwise read an empty environment."""
+    image = modal.Image.debian_slim(python_version="3.12").pip_install(
+        "safetensors", "numpy", *pip)
+    if env:
+        image = image.env(env)
+    return image.add_local_python_source(*SOURCES, *sources)
 
 
 def gpu_image_for(env: dict | None = None,
@@ -117,8 +133,7 @@ def gpu_image_for(env: dict | None = None,
     The observer's static assets are not Python sources and the suite in the
     image asserts they ship, so they always do."""
     image = (modal.Image.debian_slim(python_version="3.12")
-             .pip_install("vllm==0.28.0", "torch==2.13.0",
-                          "transformers==5.16.1", "safetensors", "numpy")
+             .pip_install(*GPU_PACKAGES)
              .env({"VLLM_USE_FLASHINFER_SAMPLER": "0",
                    "VLLM_WORKER_MULTIPROC_METHOD": "spawn",
                    "OMP_NUM_THREADS": "1",

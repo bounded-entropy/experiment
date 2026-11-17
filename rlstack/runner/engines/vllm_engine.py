@@ -400,7 +400,12 @@ class VllmEngine:
                         "enforce_eager": self._engine_args["enforce_eager"],
                         "eager_fallback": self.eager_fallback}
         try:
-            config = self._llm.engine.vllm_config
+            # vLLM 0.28's AsyncLLM carries `vllm_config` itself (the v0
+            # wrapper's `.engine` is gone), and its core client writes the
+            # core's KV block count back into it after the handshake. Found
+            # on Modal 2026-11-16: every first-contact read "'AsyncLLM'
+            # object has no attribute 'engine'".
+            config = self._llm.vllm_config
             report["weights_gb"] = round(
                 float(config.model_config.get_weights_bytes()) / 2 ** 30, 3)
             report["kv_tokens"] = (int(config.cache_config.num_gpu_blocks or 0)
