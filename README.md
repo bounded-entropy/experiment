@@ -128,7 +128,8 @@ inference interface and record effective engine settings. Evaluation support
 does not by itself qualify policy-gradient importance ratios under transformed
 sampling.
 
-- **Modal:** [desk deployment](deploy/desk.py) and [venue wiring](deploy/modal_venue.py).
+- **Modal:** [quickstart](docs/modal-quickstart.md) (workspace, desk, observer, submit, stop/resume, what is qualified),
+  [desk deployment](deploy/desk.py) and [venue wiring](deploy/modal_venue.py).
 - **Strange Loop:** [setup and operations](examples/strangeloop-desk.md),
   [local desk configuration](examples/strangeloop-config.json), and
   [hosted desk configuration](examples/strangeloop-hosted.json).
