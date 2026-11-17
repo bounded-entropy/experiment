@@ -240,6 +240,22 @@ class ResidentBirth:
 # building is universal
 # ---------------------------------------------------------------------------
 
+ENGINE_WHOLE_DEVICE_UTILIZATION = 0.92
+"""The most of one device a vLLM engine is asked for. vLLM refuses to start
+when the device's FREE memory at startup is below the fraction it is asked
+to take, and the process's own CUDA context already holds ~0.5 GiB of it, so
+a whole-device partition (memory 1.0, what a PoolMember without vram_gb
+gets) never starts: "Free memory on device cuda:0 (94.46/95.01 GiB) on
+startup is less than desired GPU memory utilization (1.0, 95.01 GiB)" on an
+RTX PRO 6000, 2026-11-17. vLLM's own default is 0.9."""
+
+
+def engine_memory_utilization(fraction: float) -> float:
+    """The gpu_memory_utilization an engine partition of `fraction` asks
+    vLLM for: the fraction itself, capped below the whole device."""
+    return min(fraction, ENGINE_WHOLE_DEVICE_UTILIZATION)
+
+
 def build_engine(regime: Regime, partition: Partition, build: Build,
                  store: Store) -> Engine:
     """THE engine builder: the class, base, width and fraction follow from
@@ -258,7 +274,7 @@ def build_engine(regime: Regime, partition: Partition, build: Build,
 
         return VllmEngine(
             regime.base, tp=regime.shape,
-            gpu_memory_utilization=partition.memory,
+            gpu_memory_utilization=engine_memory_utilization(partition.memory),
             max_model_len=build.max_model_len, max_bundles=build.max_bundles,
             max_rank=build.max_rank, max_members=build.max_members,
             max_library=build.max_library, cas_get=store.cas_get, serves=build.serves,
