@@ -47,16 +47,23 @@ from modal_venue import (
 
 app = modal.App(DESK_APP)
 
-cpu_image = cpu_image_for()
-
-BOOTABLE_METALS = (None if "RLSTACK_BOOTABLE_METALS" not in os.environ else
+BOOTABLE_ENV = "RLSTACK_BOOTABLE_METALS"
+BOOTABLE_METALS = (None if BOOTABLE_ENV not in os.environ else
                    frozenset(name.strip() for name in
-                             os.environ["RLSTACK_BOOTABLE_METALS"].split(",")
+                             os.environ[BOOTABLE_ENV].split(",")
                              if name.strip()))
 """Optional comma-separated allowlist for automatic acquisition.
 Unset uses the desk's inventory; an empty value disables automatic boots.
 Allocation choices belong to deployment configuration, not the framework.
-"""
+Read at deploy time AND inside the container, so the image carries it: the
+desk container re-imports this file, and before the image carried the value
+the deployed desk read an empty environment and booted from its whole
+inventory whatever the deploy command said."""
+
+IMAGE_ENV = ({BOOTABLE_ENV: os.environ[BOOTABLE_ENV]}
+             if BOOTABLE_ENV in os.environ else {})
+
+cpu_image = cpu_image_for(env=IMAGE_ENV)
 
 IDLE_S = 90.0
 """THE FLEET'S CLOCK (ADR 0003): metal nothing has been busy on for this long

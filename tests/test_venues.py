@@ -348,5 +348,62 @@ class DeskDoorTest(VenueFixture):
             self.steer_l4.proposed_recipe())
 
 
+class DeploySettingsReachTheContainerTest(VenueFixture):
+    """A Modal container re-imports its venue file with an empty environment,
+    so a deploy-time setting reaches it only through the image. Found on the
+    samarthmbhargav workspace qualification (2026-11-16)."""
+
+    def load_with(self, name: str, env: dict) -> tuple:
+        """The venue loaded afresh under `env`, with every `cpu_image_for`
+        call recorded."""
+        calls: list[dict] = []
+        chassis = sys.modules["modal_venue"]
+        original = chassis.cpu_image_for
+
+        def recording(*pip, sources=(), env=None):
+            calls.append({"pip": pip, "sources": sources, "env": env})
+            return original(*pip, sources=sources, env=env)
+
+        with patch.dict("os.environ", env), \
+                patch.object(chassis, "cpu_image_for", recording):
+            return load_venue(name), calls
+
+    def test_the_desk_image_carries_its_bootable_allowlist(self) -> None:
+        desk, calls = self.load_with(
+            "desk", {"RLSTACK_BOOTABLE_METALS": "steer-l4, qualify-pro6000"})
+        self.assertEqual(desk.BOOTABLE_METALS,
+                         frozenset({"steer-l4", "qualify-pro6000"}))
+        self.assertEqual([call["env"] for call in calls],
+                         [{"RLSTACK_BOOTABLE_METALS": "steer-l4, qualify-pro6000"}])
+
+    def test_an_unset_allowlist_adds_nothing_to_the_desk_image(self) -> None:
+        with patch.dict("os.environ"):
+            import os
+            os.environ.pop("RLSTACK_BOOTABLE_METALS", None)
+            desk, calls = self.load_with("desk", {})
+        self.assertIsNone(desk.BOOTABLE_METALS)
+        self.assertEqual([call["env"] for call in calls], [{}])
+
+    def test_the_observer_app_is_named_by_the_deploy(self) -> None:
+        observer, _ = self.load_with("ui", {"RLSTACK_OBSERVER_APP": "rlstack-observer"})
+        self.assertEqual(observer.APP, "rlstack-observer")
+        with patch.dict("os.environ"):
+            import os
+            os.environ.pop("RLSTACK_OBSERVER_APP", None)
+            default, _ = self.load_with("ui", {})
+        self.assertEqual(default.APP, "rlstack-ui")
+        self.assertIn('.env({APP_ENV: APP})', (DEPLOY / "ui.py").read_text())
+        self.assertIn("@modal.wsgi_app(label=APP)", (DEPLOY / "ui.py").read_text())
+
+    def test_the_gpu_image_installs_the_deltanet_kernels(self) -> None:
+        """Qwen3.5's gated-DeltaNet layers need flash-linear-attention in the
+        learner; it resolves in the same install as the torch/vLLM pins."""
+        self.assertIn("flash-linear-attention==0.6.0", self.modal_venue.GPU_PACKAGES)
+        for pin in ("vllm==0.28.0", "torch==2.13.0", "transformers==5.16.1"):
+            self.assertIn(pin, self.modal_venue.GPU_PACKAGES)
+        self.assertIn(".pip_install(*GPU_PACKAGES)",
+                      (DEPLOY / "modal_venue.py").read_text())
+
+
 if __name__ == "__main__":
     unittest.main()

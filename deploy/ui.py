@@ -1,6 +1,8 @@
 """The observer UI beside the store volume.
 
     modal deploy deploy/ui.py          # -> https://<workspace>--rlstack-ui.modal.run
+    RLSTACK_OBSERVER_APP=rlstack-observer modal deploy deploy/ui.py
+                                       # -> https://<workspace>--rlstack-observer.modal.run
 
 Deployment only (I5): an image, a volume MOUNT, and the SAME stdlib WSGI app
 `python -m rlstack ui <store-root>` serves locally, over the SAME `LocalStore`
@@ -38,6 +40,7 @@ the heartbeats stand.
 """
 
 import asyncio
+import os
 
 import modal
 
@@ -49,12 +52,20 @@ from modal_venue import require_workspace   # noqa: E402
 
 require_workspace()
 
-app = modal.App("rlstack-ui")
+APP_ENV = "RLSTACK_OBSERVER_APP"
+APP = os.environ.get(APP_ENV, "rlstack-ui")
+"""The observer's app name, which is also its URL label. A workspace may
+already hold an `rlstack-ui` that is someone else's to keep; naming another
+deploys beside it instead of over it. The image carries the name so the
+container, which re-imports this file, builds the same app."""
+
+app = modal.App(APP)
 
 store_volume = modal.Volume.from_name("rlstack-store", create_if_missing=True)
 
 image = (
     modal.Image.debian_slim(python_version="3.12")
+    .env({APP_ENV: APP})
     # copy=True on BOTH: add_local_python_source ships only .py files, so
     # the web assets ride as their own layer — and a runtime MOUNT of the
     # package tree would shadow any dir added under it, so both go in as
@@ -100,7 +111,7 @@ it for 20 to 74 s."""
 @app.function(image=image, volumes={STORE_MOUNT: store_volume},
               scaledown_window=300, timeout=600, max_containers=1)
 @modal.concurrent(max_inputs=32)
-@modal.wsgi_app(label="rlstack-ui")
+@modal.wsgi_app(label=APP)
 def ui():
     """The CLI's own app over the mount, behind a response cache."""
     import threading
