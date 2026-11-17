@@ -1,7 +1,7 @@
 """THE SLEEP EXAM (one A100 pair, ~10m): does a sharded learner's sleep hand
 the device back?
 
-    MODAL_PROFILE=yu-masala-workspace modal run deploy/sleep_exam_a100.py::run
+    MODAL_PROFILE=<workspace> modal run deploy/sleep_exam_a100.py::run
 
 ADR 0002's alternation — engine and learner taking turns on one partition —
 rests on the learner's `sleep` returning its shard's memory to the driver,
