@@ -5213,6 +5213,24 @@ specs; backends (local/modal/skypilot) and GPU topology are semantics-neutral.
     - Named inference state is an explicit Sample/Continue dependency, waited for before admission. The generator no longer parses task route/tool_route fields, and the Trainer has no DreamBank name check or lib/stack grammar. Each adapter interprets its own named-state route needs. Per-call sampling overrides preserve old greedy probes and are recorded with stop strings and seeds in sealed turn facts and bounded call telemetry.
     - Final local evidence is in `knowledge/evidence/0030-local-validation.json`. Hardware results on the earlier coherent core b01102a are separate: short ordinary SFT and tensor/NCCL transport, with NCCL_P2P_DISABLE=1 required on the user's six-A40 pod. Those results do not qualify the entire recipe migration, full online RL, live vLLM model serving, custom Triton parity or representative end-to-end throughput.
 
+102. **OPT-IN MINIMUM CONTINUATION AFTER A NATURAL TOKEN SEQUENCE (2026-10-30).**
+    `SamplingSpec.min_tokens_after=MinTokensAfter(sequence, min_tokens)` is a
+    general token-ID sampling control. It activates only after the first
+    naturally generated sequence; it never forces that sequence or closes
+    reasoning. It counts raw nonterminal output IDs after the boundary, not
+    parsed teaching material. An opted-in `EngineBuild` registers the vLLM
+    0.28 batch processor; default specs retain their canonical identities and
+    default engine arguments remain unchanged. All resolved EOS/stop-token IDs
+    are suppressed below the floor. String stops, repetition early stopping,
+    forced thinking budgets, grammars, speculative decoding and impossible
+    static budgets are refused. Late activation can still exhaust the output
+    budget: actual activation, counts, floor attainment, effective terminal
+    IDs, budget and termination leave in Turn extras. Evidence is reconstructed
+    from returned IDs rather than claiming GPU-side instrumentation. Returned
+    logprobs explicitly remain raw model logprobs; constrained behavior-policy
+    likelihoods and GRPO compatibility are unimplemented. CPU checks are not
+    a live frozen-generation qualification. No new runner verb/store layout.
+
 ## Open threads (do NOT treat as settled; flag when your answer touches them)
 
 - TODO (Samarth, settled intent — future, nothing now): BUNDLE LRU EVICTION

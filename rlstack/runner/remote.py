@@ -110,10 +110,19 @@ def encode_sampling(sampling: SamplingSpec) -> dict:
     controls = {"top_k": sampling.top_k, "min_p": sampling.min_p,
                 "presence_penalty": sampling.presence_penalty,
                 "repetition_penalty": sampling.repetition_penalty}
+    if sampling.min_tokens_after is not None:
+        controls["min_tokens_after"] = {
+            "sequence": list(sampling.min_tokens_after.sequence),
+            "min_tokens": sampling.min_tokens_after.min_tokens}
     return {**row, **{key: value for key, value in controls.items() if value is not None}}
 
 
 def decode_sampling(row: dict) -> SamplingSpec:
+    from rlstack.spec.specs import MinTokensAfter
+    row = dict(row)
+    if row.get("min_tokens_after") is not None:
+        floor = row["min_tokens_after"]
+        row["min_tokens_after"] = MinTokensAfter(tuple(floor["sequence"]), floor["min_tokens"])
     return SamplingSpec(**row)
 
 
@@ -197,7 +206,7 @@ def _spec_classes() -> dict[str, type]:
     from rlstack.spec import specs
 
     classes = (
-        specs.SamplingSpec, specs.GenSpec, specs.AdapterSpec,
+        specs.MinTokensAfter, specs.SamplingSpec, specs.GenSpec, specs.AdapterSpec,
         specs.PolicySpec, specs.Plans, specs.OptimSpec, specs.Schedule, specs.ProbeSpec,
         specs.AlgoSpec, specs.PoolMember, specs.LearnerMember,
         specs.HostSpec, specs.Topology, specs.Seeds, specs.WarmStart,

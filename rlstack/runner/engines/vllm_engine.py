@@ -68,7 +68,8 @@ class VllmEngine:
                  tp: int = 1, serves: Sequence[str] = ("lora",),
                  enable_sleep_mode: bool = False, log_stats: bool = False,
                  weight_transfer_host: str | None = None,
-                 code: Mapping[str, str] | None = None) -> None:
+                 code: Mapping[str, str] | None = None,
+                 enable_min_tokens_after: bool = False) -> None:
         from rlstack.code import verify_code, require_declared_definition
         code = dict(code or {})
         verify_code(code)
@@ -115,6 +116,11 @@ class VllmEngine:
             gpu_memory_utilization=gpu_memory_utilization,
             tensor_parallel_size=tp, enable_sleep_mode=enable_sleep_mode,
             disable_log_stats=not log_stats)
+        self.enable_min_tokens_after = enable_min_tokens_after
+        if enable_min_tokens_after:
+            self._engine_args["logits_processors"] = [
+                "rlstack_engine.min_tokens_after:MinTokensAfterProcessor"]
+            self._engine_args["logprobs_mode"] = "raw_logprobs"
         self.log_stats = log_stats
         self._stats_task: asyncio.Task | None = None
         if enforce_eager is not None:
@@ -423,6 +429,11 @@ class VllmEngine:
                 f"bundle {bundle_id!r} is not resident on this engine; a"
                 f" caller restores a committed version before pinning it"
                 f" (runner/restore.py)")
+        if sampling.min_tokens_after is not None:
+            if not self.enable_min_tokens_after:
+                raise ValueError("min_tokens_after requires an opted-in EngineBuild")
+            if stop:
+                raise ValueError("min_tokens_after is incompatible with string stops")
         from vllm import SamplingParams
         from vllm.sampling_params import RequestOutputKind
 
@@ -440,11 +451,44 @@ class VllmEngine:
                         "presence_penalty": sampling.presence_penalty,
                         "repetition_penalty": sampling.repetition_penalty}
             overrides = {key: value for key, value in controls.items() if value is not None}
+            if self.enable_min_tokens_after:
+                from rlstack.sampling import CONTINUATION_KEY
+                if CONTINUATION_KEY in levers.extra_args:
+                    raise ValueError("min_tokens_after reserved extra_args key collision")
             params = SamplingParams(
                 **overrides, temperature=sampling.temperature, top_p=sampling.top_p,
                 max_tokens=sampling.max_tokens, stop=list(stop), seed=seed,
                 logprobs=0, extra_args=dict(levers.extra_args) or None,
                 output_kind=RequestOutputKind.DELTA)
+            continuation = None
+            if sampling.min_tokens_after is not None:
+                from rlstack.sampling import CONTINUATION_KEY, ContinuationCounter
+                llm = self._ensure_llm()
+                # Resolve exactly as vLLM 0.28's InputProcessor does before
+                # cloning the request. The GPU processor verifies the resolved
+                # set again when the request enters the persistent batch.
+                ip = llm.input_processor
+                params.update_from_generation_config(
+                    ip.generation_config_fields, ip.renderer.get_eos_token_id())
+                terminal_ids = sorted(params.all_stop_token_ids)
+                if not terminal_ids:
+                    raise ValueError("min_tokens_after requires resolved terminal token IDs")
+                floor = sampling.min_tokens_after
+                available_output_budget = min(sampling.max_tokens,
+                    self._engine_args["max_model_len"] - len(prompt_ids) -
+                    self._occupied(bundle_id))
+                if available_output_budget < len(floor.sequence) + floor.min_tokens:
+                    raise ValueError("model window cannot accommodate min_tokens_after")
+                if set(floor.sequence) & set(terminal_ids):
+                    raise ValueError("activation sequence cannot contain terminal token IDs")
+                config = {"sequence": list(floor.sequence), "min_tokens": floor.min_tokens,
+                          "terminal_token_ids": terminal_ids}
+                extra_args = dict(params.extra_args or {})
+                if CONTINUATION_KEY in extra_args:
+                    raise ValueError("min_tokens_after reserved extra_args key collision")
+                extra_args[CONTINUATION_KEY] = config
+                params.extra_args = extra_args
+                continuation = ContinuationCounter(floor.sequence, tuple(terminal_ids))
             # the prefill is known BEFORE the request leaves, and the clock for
             # time-to-first-token starts on the same line
             self.meter.opened_request(len(prompt_ids))
@@ -462,6 +506,8 @@ class VllmEngine:
                     cached = True
                 completion = output.outputs[0]
                 new_ids = completion.token_ids
+                if continuation is not None:
+                    continuation.extend(new_ids)
                 if new_ids and not emitted:
                     self.meter.first_token_after(time.time() - submitted)
                 self.meter.decoded(len(new_ids))
@@ -478,6 +524,22 @@ class VllmEngine:
             # event: what the bundle's adapter types DREW for this request is
             # sampling-time truth, sealed into Turn.turn_extras (I6)
             recorded = dict(levers.turn_extras)
+            if self.enable_min_tokens_after:
+                recorded["sampling_logprobs"] = {
+                    "mode": "raw_logprobs", "behavior_logprobs": False,
+                    "note": "raw model likelihood before sampling constraints and transforms"}
+            if continuation is not None:
+                floor = sampling.min_tokens_after
+                recorded["min_tokens_after"] = {
+                    **config, **continuation.evidence(floor.min_tokens),
+                    "evidence_source": "returned_output_token_ids",
+                    "max_tokens": sampling.max_tokens,
+                    "available_output_budget": available_output_budget,
+                    "processor": "rlstack_engine.min_tokens_after:MinTokensAfterProcessor",
+                    "logprobs_mode": "raw_logprobs",
+                    "behavior_logprobs": False,
+                    "finish_reason": final.finish_reason if final is not None else None,
+                    "stop_reason": final.stop_reason if final is not None else None}
             if overrides:
                 # Read back the constructed engine parameters, not the requested spec.
                 recorded["sampling_parameters"] = {
