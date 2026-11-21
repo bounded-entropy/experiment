@@ -182,6 +182,33 @@ def unpacked(flat: torch.Tensor, present: torch.Tensor,
     return out
 
 
+def unshard_the_root(model: torch.nn.Module) -> None:
+    """Gather the parameters of `fully_shard(model)`'s OWN group (the ones no
+    decoder block owns: the input embedding, the final norm, the output head,
+    tied or not, and any other tower) as plain tensors, ready for a forward
+    that does not go through `model.forward`.
+
+    THE CHUNKED REPLAY BYPASSES THE ROOT. `trunk_and_head` calls `model.model`
+    and then the head CHUNK by chunk, so no [rows, width, vocab] logits block
+    ever exists; the root module's forward never runs, so its pre-forward
+    hook never unshards its group, and the first op on one of its parameters
+    meets a DTensor beside plain tensors ("aten.embedding.default got mixed
+    torch.Tensor and DTensor"). Every fsdp learner hits it at its first
+    forward, whatever dp and fsdp are.
+
+    TWO STEPS, both FSDP2's own: the root's lazy init (normally the first
+    thing the root's forward does; it marks this state the root and the
+    blocks' states not, so a block cannot claim the root on its own forward)
+    and the root's unshard. Frozen, so nothing is reduced; the root's group
+    is resharded by FSDP's post-backward final callback (its "inputs did not
+    require gradient" branch) at the end of the backward, so a training
+    forward unshards again each time — one gather of the root's share per
+    microbatch. A no-grad forward leaves it gathered until the next backward."""
+    state = model._get_fsdp_state()
+    state._lazy_init()
+    model.unshard()
+
+
 def fsdp_params_of(module: torch.nn.Module) -> list:
     """One wrapped module's FSDPParams — FSDP's own record of each sharded
     parameter, including the private flat view an all-gather reads.
@@ -218,6 +245,15 @@ class FsdpTorchLearner(TorchLearner):
         probe = probe_sharded_sleep()
         self.sleeps = probe.supported
         self.sleep_refusal = probe.reason
+
+    def trunk_and_head(self):
+        """The chunked replay's split, with the root's own group gathered
+        first (`unshard_the_root`): the replay calls the trunk and the head,
+        never the root's forward, so the root's hooks never would."""
+        split = super().trunk_and_head()
+        if split is not None:
+            unshard_the_root(self._model)
+        return split
 
     # ---- the verbs, each announced before it runs ---------------------------
 

@@ -692,7 +692,7 @@ class TorchLearner:
         appended to the teacher prefix, so position p predicts the same token
         as student position p-len(prefix). No teacher tokens are sampled.
         """
-        split = trunk_and_head(self._model)
+        split = self.trunk_and_head()
         if split is None:
             raise NotImplementedError("full KL requires a model with a separable trunk/head")
         trunk, head = split
@@ -973,6 +973,13 @@ class TorchLearner:
                 f"this learner holds base {self._base!r}; tenant wants "
                 f"{base!r} — one learner serves one base")
 
+    def trunk_and_head(self):
+        """(trunk, head) of this learner's model for the chunked replay, or
+        None (the replay then reads whole logits). A hook so a build whose
+        root holds state the trunk's own call would skip can ready it first
+        (FsdpTorchLearner unshards the root's parameters)."""
+        return trunk_and_head(self._model)
+
     def decoder_blocks(self) -> list[torch.nn.Module]:
         """The base's decoder blocks, named `model.layers` in an HF causal LM —
         the same path the site schema resolves against."""
@@ -1114,7 +1121,7 @@ class TorchLearner:
         # second copy on the recompute — the replay forward decodes nothing,
         # so there is no cache to want
         start = unscored_prefix(batch, spans)
-        split = trunk_and_head(self._model)
+        split = self.trunk_and_head()
         if split is not None:
             trunk, head = split
             hidden = trunk(input_ids=ids, attention_mask=attention,
